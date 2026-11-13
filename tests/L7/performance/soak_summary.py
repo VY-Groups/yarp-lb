@@ -12,7 +12,40 @@ assert len(values) >= 5, "Not enough memory samples for a soak report"
 end = json.loads((directory / "after.json").read_text(encoding="utf-8"))
 start = json.loads((directory / "before.json").read_text(encoding="utf-8"))
 summary = json.loads((directory / "k6-summary.json").read_text(encoding="utf-8"))["metrics"]
+# Custom five-minute k6 Trends are absent in older runs. Never infer p99
+# drift from a single aggregate value. A run without trends is marked unknown.
+five_minute = []
+for i in range(48):
+    measure = summary.get(f"soak_p99_5m_window_{i}")
+    if not measure:
+        continue
+    p99 = measure.get("p(99)")
+    if p99 is None:
+        continue
+    five_minute.append({"start_minute": i * 5, "p99_ms": round(p99, 3)})
+first = five_minute[:3]
+last = five_minute[-3:]
+early = (sum(x["p99_ms"] for x in first) / len(first)) if first else None
+late = (sum(x["p99_ms"] for x in last) / len(last)) if last else None
+p99_ratio = round(late / early, 3) if early and late else None
+# Five-minute windows are indicative percentiles; no automated leak diagnosis.
+memory_quarters = []
+chunk = max(1, len(values) // 4)
+for idx in range(0, len(values), chunk):
+    part = values[idx:idx + chunk]
+    if part:
+        memory_quarters.append({
+            "start_sample": idx,
+            "mean_working_set_bytes": round(sum(x["processWorkingSetBytes"] for x in part) / len(part)),
+            "gen2_collections_delta": part[-1]["gc2Collections"] - part[0]["gc2Collections"],
+        })
 report = {
+    "five_minute_p99_ms": five_minute,
+    "p99_drift_ratio_last_three_vs_first_three": p99_ratio,
+    "p99_drift_assessment": "insufficient-window-evidence" if len(five_minute) < 6
+        else ("elevated-late-p99-investigate" if p99_ratio is not None and p99_ratio > 1.5
+              else "no-large-late-p99-drift-observed"),
+    "working_set_quarter_trends": memory_quarters,
     "note": "Loopback/hosted runner only. Working-set trend alone cannot prove a leak.",
     "samples": len(values),
     "server_gc_enabled": end.get("serverGc"),
