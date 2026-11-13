@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Sockets;
@@ -70,7 +71,7 @@ async Task RunTcp(L4Listener cfg, CancellationToken token)
             var id = Interlocked.Increment(ref nextTcp);
             var task = ProxyTcp(client, cfg, Interlocked.Increment(ref cursor), token);
             activeTcp[id] = task;
-            _ = task.ContinueWith(_ => activeTcp.TryRemove(id, out _), TaskScheduler.Default);
+            _ = task.ContinueWith(completed => { activeTcp.TryRemove(id, out var removed); }, TaskScheduler.Default);
         }
     }
     finally { listener.Stop(); }
