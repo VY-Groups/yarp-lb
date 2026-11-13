@@ -40,11 +40,13 @@ export default function () {
   const target = direct ? backend : (__ENV.TARGET || 'http://127.0.0.1:18080');
   const path = payloadBytes > 0 ? '/api/payload/' + payloadBytes : '/api/identity';
   const response = http.get(target + path, { timeout: '10s' });
-  if (soakWindows.length && Number.isFinite(response.timings.duration)) {
+  if (soakWindows.length) {
     const bucket = Math.floor((Date.now() - soakOriginMs) / (soakWindowSeconds * 1000));
     if (bucket >= 0 && bucket < soakWindows.length) {
-      soakWindows[bucket].add(response.timings.duration);
-      soakFailures[bucket].add(response.status !== 200);
+      // Count every attempt, including network failures with no duration/body.
+      soakFailures[bucket].add(!response || response.status !== 200);
+      if (response && response.timings && Number.isFinite(response.timings.duration))
+        soakWindows[bucket].add(response.timings.duration);
     }
   }
   const needsTls = target.startsWith('https://');
