@@ -35,6 +35,54 @@ if [[ "$xss_code" != "403" ]]; then
   exit 1
 fi
 echo "PASS: XSS blocked by real ModSecurity/CRS rules (HTTP 403)"
+# A small, deliberately chosen corpus beyond the original XSS smoke test.
+# CRS rule IDs and severities are version-dependent; CI verifies actual blocking.
+for entry in \
+  "sqli|id=1' UNION SELECT password FROM users--" \
+  "traversal|file=../../../../etc/passwd"; do
+  name="${entry%%|*}"
+  payload="${entry#*|}"
+  code="$(curl --silent --show-error --max-time 8 --get --data-urlencode "$payload" \
+    -o "$DIR/$name-response.txt" -w '%{http_code}' "http://127.0.0.1:18888/")"
+  printf '%s\n' "$code" > "$DIR/$name-http-status.txt"
+  if [[ "$code" != "403" ]]; then
+    echo "FAIL: $name expected CRS 403, received $code" >&2; exit 1
+  fi
+  echo "PASS: CRS blocks $name payload"
+done
+# Ordinary parameterized URLs must not be blocked by the generic CRS rules.
+benign_code="$(curl --silent --show-error --max-time 8 --get \
+  --data-urlencode "q=books-and-cats" --data-urlencode "page=2" \
+  -o "$DIR/benign-query.txt" -w '%{http_code}' "http://127.0.0.1:18888/")"
+[[ "$benign_code" == "200" ]] || { echo "FAIL: false positive on benign query" >&2; exit 1; }
+# Reject bodies above the configured 128 KiB total body cap.
+head -c 180000 /dev/zero > "$DIR/oversized-request.bin"
+body_code="$(curl --silent --show-error --max-time 10 -X POST \
+  --data-binary "@$DIR/oversized-request.bin" -o "$DIR/body-response.txt" \
+  -w '%{http_code}' "http://127.0.0.1:18888/" || true)"
+printf '%s\n' "$body_code" > "$DIR/body-limit-status.txt"
+if [[ "$body_code" != "413" ]]; then
+  echo "FAIL: over-limit request expected HTTP 413; got $body_code" >&2; exit 1
+fi
+# Record initial blocking-mode audit before recreating the container.
+docker compose -f "$COMPOSE" logs --no-color waf > "$DIR/blocking-audit.log" 2>&1 || true
+# Detection-only deployment must allow the same attack to reach the backend;
+# this is not proof of useful alerts until its audit is reviewed and tuned.
+WAF_MODE=DetectionOnly docker compose -f "$COMPOSE" up -d --force-recreate --no-deps waf
+ready=0
+for i in $(seq 1 90); do
+  if [[ "$(curl --silent --max-time 2 -o /dev/null -w '%{http_code}' \
+      "http://127.0.0.1:18888/" || true)" == "200" ]]; then ready=1; break; fi
+  sleep 0.6
+done
+[[ "$ready" == 1 ]] || { echo "FAIL: WAF detection-only restart not ready" >&2; exit 1; }
+observe_code="$(curl --silent --show-error --max-time 8 --get \
+  --data-urlencode 'q=<script>alert(1)</script>' \
+  -o "$DIR/detection-only-response.txt" -w '%{http_code}' "http://127.0.0.1:18888/")"
+printf '%s\n' "$observe_code" > "$DIR/detection-only-status.txt"
+[[ "$observe_code" == 200 ]] || { echo "FAIL: detection-only did not forward payload" >&2; exit 1; }
+docker compose -f "$COMPOSE" logs --no-color waf > "$DIR/detection-only-audit.log" 2>&1 || true
+echo "PASS: CRS attack corpus, body cap, benign query and detection-only forwarding"
 # Compose 'port' output is not proof of a host port binding; inspect Docker's
 # actual NetworkSettings.Ports and reject any published HostIp/HostPort.
 app_id="$(docker compose -f "$COMPOSE" ps --quiet protected-app)"
