@@ -20,3 +20,6 @@ GitHub Actions test real HTTP draining, recovery, warmup distribution, active he
 
 ## Certificate readiness
 `GET /admin/api/tls/inventory` lists non-secret LocalMachine/My certificate metadata and currently declared Kestrel listeners for authenticated local administrators. It does not export private keys or alter bindings. Certificate renewal, backend client certificate deployment, trust policy validation, CT monitoring and ACME automation are not implemented.
+
+## Backend mTLS transport profile
+YARP clusters may set `Metadata.BackendClientCertificateThumbprint` to a 40-hex-character LocalMachine/My certificate thumbprint. The management API rejects invalid thumbprints and requires HTTPS destinations. YARP `ConfigureHttpClient` loads a trusted, valid client-auth EKU certificate with its private key in the local Windows certificate store; it does **not** alter or disable backend server-certificate trust. New cluster metadata triggers creation of a fresh outbound handler. **Production backend mTLS and managed certificate rotation remain unverified until two-sided CA trust and failure tests pass.**

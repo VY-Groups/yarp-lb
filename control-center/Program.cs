@@ -29,7 +29,9 @@ builder.Services.AddDataProtection()
     .PersistKeysToFileSystem(new DirectoryInfo(keyDir))
     .ProtectKeysWithDpapi(protectToLocalMachine: true);
 builder.Configuration.AddJsonFile("appsettings.json", optional: false, reloadOnChange: true);
-builder.Services.AddReverseProxy().LoadFromConfig(builder.Configuration.GetSection("ReverseProxy"));
+builder.Services.AddReverseProxy()
+    .LoadFromConfig(builder.Configuration.GetSection("ReverseProxy"))
+    .ConfigureHttpClient(BackendMutualTls.Configure);
 // Custom policies are registered on every serving YARP instance, never on the UI alone.
 builder.Services.AddSingleton<ILoadBalancingPolicy, WeightedRandomPolicy>();
 builder.Services.AddSingleton<ILoadBalancingPolicy, SourceIpHashPolicy>();
@@ -754,6 +756,13 @@ async Task<IResult> CommitReviewedChange(HttpContext ctx, JsonObject submitted)
                 !LoadBalancingCore.TrySlowStartSeconds(secondsNode.ToString(), out _))
                 return Results.BadRequest(new { error = $"Destination {destId} SlowStartSeconds must be 0..600" });
         }
+        if (c["Metadata"]?[BackendMutualTls.MetadataKey] is JsonNode clientCertificate)
+        {
+            if (!BackendMutualTls.TryNormalizeThumbprint(clientCertificate.ToString(), out _))
+                return Results.BadRequest(new { error = $"Cluster {key}: client certificate thumbprint must be 40 hex characters" });
+            if (dests.Any(d => !(d.Value?["Address"]?.ToString() ?? "").StartsWith("https://", StringComparison.OrdinalIgnoreCase)))
+                return Results.BadRequest(new { error = $"Cluster {key}: backend mTLS requires all HTTPS destinations" });
+        }
         var hc = c["HealthCheck"]?["Active"];
         if (hc is not null && hc["Path"] is not null && !ValidPath(hc["Path"]!.ToString())) return Results.BadRequest(new { error = "Invalid health-check path" });
     }
@@ -1032,6 +1041,9 @@ app.MapPost("/admin/api/fleet/rollout/{changeId}", async (HttpContext ctx, strin
         if (!File.Exists(signingKeyPath))
             throw new InvalidOperationException("Fleet signing key not provisioned. Signed deployment is required.");
         var signingKeyPem = await File.ReadAllTextAsync(signingKeyPath);
+        // Monotonic independent of application config revision or rollback.
+        // The rolloutGate serializes allocation for this single controller instance.
+        var sequence = FleetSequenceState.AllocateNext(Path.Combine(privateDir, "fleet-sequence.txt"));
         var prepared = new List<(FleetGateway Gateway,string Revision)>();
         foreach (var row in gateways)
         {
@@ -1042,9 +1054,10 @@ app.MapPost("/admin/api/fleet/rollout/{changeId}", async (HttpContext ctx, strin
             var revision=status?["revision"]?.ToString();
             if (string.IsNullOrWhiteSpace(revision)) throw new InvalidOperationException(row.Id+": no revision / deployment disabled");
             var expires = DateTimeOffset.UtcNow.AddMinutes(3).ToUnixTimeSeconds();
-            var signature = FleetConfigSignature.Sign(signingKeyPem, txId, revision, proxy, expires);
+            var signed = FleetConfigSignature.SignV2(signingKeyPem, txId, revision, proxy, expires, sequence);
             using var response=await client.PostAsJsonAsync(new Uri(new Uri(row.Url),"agent/v1/config/prepare"),
-                new {TransactionId=txId,ExpectedRevision=revision,ReverseProxy=proxy, ExpiresUnixSeconds=expires, Signature=signature});
+                new {TransactionId=txId,ExpectedRevision=revision,ReverseProxy=proxy,
+                    signed.ExpiresUnixSeconds, signed.Sequence, signed.KeyId, signed.Signature});
             if (!response.IsSuccessStatusCode) throw new InvalidOperationException(row.Id+": prepare HTTP "+(int)response.StatusCode);
             var staged=JsonNode.Parse(await response.Content.ReadAsStringAsync());
             var revisionStaged=staged?["preparedRevision"]?.ToString();

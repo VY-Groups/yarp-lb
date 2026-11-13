@@ -1,10 +1,47 @@
+using System.Net;
+using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
+using Microsoft.AspNetCore.Server.Kestrel.Https;
 using Yarp.ReverseProxy.Model;
 using Yarp.ReverseProxy.LoadBalancing;
 
 var builder = WebApplication.CreateBuilder(args);
-builder.WebHost.UseUrls("http://127.0.0.1:18080");
+// Ephemeral loopback-only TLS identity. Never deploy this certificate for real clients.
+using var tlsKey = RSA.Create(2048);
+var certRequest = new CertificateRequest(new X500DistinguishedName("CN=localhost"),
+    tlsKey, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+certRequest.CertificateExtensions.Add(new X509BasicConstraintsExtension(false, false, 0, true));
+certRequest.CertificateExtensions.Add(new X509KeyUsageExtension(
+    X509KeyUsageFlags.DigitalSignature | X509KeyUsageFlags.KeyEncipherment, true));
+certRequest.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension(
+    new OidCollection { new Oid("1.3.6.1.5.5.7.3.1") }, false));
+var san = new SubjectAlternativeNameBuilder();
+san.AddDnsName("localhost");
+san.AddIpAddress(IPAddress.Loopback);
+certRequest.CertificateExtensions.Add(san.Build());
+using var issuedCert = certRequest.CreateSelfSigned(
+    DateTimeOffset.UtcNow.AddMinutes(-10), DateTimeOffset.UtcNow.AddHours(6));
+// Windows Schannel needs private-key material imported into a key store that
+// the Kestrel process can access. The hosted CI machine is disposable.
+var pfxPassword = Convert.ToHexString(RandomNumberGenerator.GetBytes(16));
+var keyFlags = OperatingSystem.IsWindows()
+    ? X509KeyStorageFlags.UserKeySet | X509KeyStorageFlags.PersistKeySet | X509KeyStorageFlags.Exportable
+    : X509KeyStorageFlags.EphemeralKeySet;
+using var loopbackCert = new X509Certificate2(
+    issuedCert.Export(X509ContentType.Pfx, pfxPassword), pfxPassword, keyFlags);
+builder.Logging.AddFilter("Microsoft.AspNetCore.Server.Kestrel.Https", LogLevel.Debug);
+var httpPort = int.TryParse(Environment.GetEnvironmentVariable("YARP_LAB_HTTP_PORT"), out var h) ? h : 18080;
+var tlsPort = int.TryParse(Environment.GetEnvironmentVariable("YARP_LAB_TLS_PORT"), out var t) ? t : 18443;
+if (httpPort is < 1025 or > 65535 || tlsPort is < 1025 or > 65535 || httpPort == tlsPort)
+    throw new ArgumentException("Lab listener ports invalid.");
+builder.WebHost.ConfigureKestrel(k =>
+{
+    k.ListenLocalhost(httpPort);
+    k.ListenLocalhost(tlsPort, listen => listen.UseHttps(loopbackCert));
+});
 
-var configPath = Path.Combine(AppContext.BaseDirectory, "lab.json");
+var configPath = Environment.GetEnvironmentVariable("YARP_LAB_CONFIG_FILE")
+    ?? Path.Combine(AppContext.BaseDirectory, "lab.json");
 builder.Configuration.AddJsonFile(configPath, optional: false, reloadOnChange: true);
 builder.Services.AddReverseProxy()
     .LoadFromConfig(builder.Configuration.GetSection("ReverseProxy"));

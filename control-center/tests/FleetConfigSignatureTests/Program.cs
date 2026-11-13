@@ -28,4 +28,56 @@ Must(!FleetConfigSignature.Verify(publicPem,transaction,revision,p,now+120,"nons
 var tampered = p.DeepClone().AsObject();
 tampered["Clusters"]!["c"]!["Destinations"]!["a"]!["Address"] = "https://evil.example/";
 Must(!FleetConfigSignature.Verify(publicPem,transaction,revision,tampered,now+120,sig,now), "changed backend rejected");
+
+var keyId = FleetConfigSignature.KeyIdFromPublicKey(publicPem);
+var trusted = new Dictionary<string, string> { [keyId] = publicPem };
+var signed = FleetConfigSignature.SignV2(privatePem, transaction, revision, p, now + 120, 21);
+Must(signed.KeyId == keyId && signed.Sequence == 21, "v2 key ID and sequence bound");
+Must(FleetConfigSignature.VerifyV2(trusted, transaction, revision, reordered, signed, now),
+    "v2 signature survives canonical property reordering");
+Must(!FleetConfigSignature.VerifyV2(trusted, transaction, revision, tampered, signed, now),
+    "v2 tampering rejected");
+Must(!FleetConfigSignature.VerifyV2(trusted, transaction + "bad", revision, p, signed, now),
+    "v2 transaction altered rejected");
+Must(!FleetConfigSignature.VerifyV2(trusted, transaction, revision, p, signed with { Sequence = 20 }, now),
+    "v2 altered sequence rejected");
+Must(!FleetConfigSignature.VerifyV2(trusted, transaction, revision, p, signed with { KeyId = "UNKNOWN" }, now),
+    "v2 unknown signing key rejected");
+Must(!FleetConfigSignature.VerifyV2(trusted, transaction, revision, p, signed, now + 122),
+    "v2 expired signature rejected");
+using var nextKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+var nextPrivate = nextKey.ExportPkcs8PrivateKeyPem();
+var nextPublic = nextKey.ExportSubjectPublicKeyInfoPem();
+var rotated = new Dictionary<string, string>(trusted)
+{
+    [FleetConfigSignature.KeyIdFromPublicKey(nextPublic)] = nextPublic
+};
+var signedNew = FleetConfigSignature.SignV2(nextPrivate, transaction, revision, p, now + 120, 22);
+Must(FleetConfigSignature.VerifyV2(rotated, transaction, revision, p, signed, now) &&
+     FleetConfigSignature.VerifyV2(rotated, transaction, revision, p, signedNew, now),
+    "dual pinned key window validates old and new signatures");
+Must(!FleetConfigSignature.VerifyV2(trusted, transaction, revision, p, signedNew, now),
+    "old-only pinned agent rejects untrusted rotated signing key");
+var sequenceDirectory = Path.Combine(Path.GetTempPath(), "yarp-seq-" + Guid.NewGuid().ToString("N"));
+Directory.CreateDirectory(sequenceDirectory);
+try
+{
+    var state = Path.Combine(sequenceDirectory, "highwater.txt");
+    Must(FleetSequenceState.Read(state) == 0, "sequence starts at zero");
+    FleetSequenceState.Accept(state, 21);
+    Must(FleetSequenceState.Read(state) == 21, "persisted high-water survives new object");
+    var refusedOld = false;
+    try { FleetSequenceState.Accept(state, 20); } catch (InvalidOperationException) { refusedOld = true; }
+    Must(refusedOld && FleetSequenceState.Read(state) == 21, "old sequence rejected persistently");
+    var refusedDuplicate = false;
+    try { FleetSequenceState.Accept(state, 21); } catch (InvalidOperationException) { refusedDuplicate = true; }
+    Must(refusedDuplicate, "duplicate sequence rejected");
+    Must(FleetSequenceState.AllocateNext(state) == 22 && FleetSequenceState.Read(state) == 22,
+        "controller allocates monotonic persisted sequence");
+    File.WriteAllText(state, "CORRUPT");
+    var failedClosed = false;
+    try { FleetSequenceState.Read(state); } catch (InvalidDataException) { failedClosed = true; }
+    Must(failedClosed, "corrupt sequence state fails closed");
+}
+finally { Directory.Delete(sequenceDirectory, recursive: true); }
 Console.WriteLine("ALL fleet config signature acceptance tests passed.");
