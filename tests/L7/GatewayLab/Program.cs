@@ -56,6 +56,7 @@ builder.Services.AddSingleton<ILoadBalancingPolicy, SourceIpHashPolicy>();
 // Aggressive *test ingress only* transport-failure policy. Normal gateways
 // retain default policy behavior unless their cluster explicitly opts in.
 builder.Services.AddSingleton<IPassiveHealthCheckPolicy, ImmediateTransportFailureHealthPolicy>();
+builder.Services.AddSingleton<IPassiveHealthCheckPolicy, BoundedTransportFailureHealthPolicy>();
 
 var app = builder.Build();
 var gatewayId = Environment.GetEnvironmentVariable("YARP_LAB_GATEWAY_ID") ?? "";
