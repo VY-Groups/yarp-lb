@@ -1,0 +1,28 @@
+services:
+  protected-app:
+    image: python:3.12-alpine
+    command: >
+      sh -c "mkdir -p /srv/website &&
+             echo 'YARP-WAF-CI-BENIGN' > /srv/website/index.html &&
+             exec python -m http.server 8000 --bind 0.0.0.0 --directory /srv/website"
+    expose: ["8000"]
+    networks: ["waf-private"]
+  waf:
+    image: owasp/modsecurity-crs:nginx
+    environment:
+      BACKEND: http://protected-app:8000
+      SERVER_NAME: localhost
+      PORT: "8080"
+      MODSEC_RULE_ENGINE: "On"
+      BLOCKING_PARANOIA: "1"
+      DETECTION_PARANOIA: "1"
+      ANOMALY_INBOUND: "5"
+      MODSEC_AUDIT_ENGINE: "On"
+    ports:
+      - "127.0.0.1:18888:8080"
+    depends_on:
+      - protected-app
+    networks: ["waf-private"]
+networks:
+  waf-private:
+    internal: true
