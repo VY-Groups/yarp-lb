@@ -16,3 +16,5 @@ appsettings.*.local.json
 .env
 .env.*
 !*.example.env
+
+**/.local-dev-cert/
