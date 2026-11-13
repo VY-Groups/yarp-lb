@@ -53,7 +53,7 @@ try {
     if ($env:OS -ne 'Windows_NT') { throw 'Laptop script supports Windows only.' }
     if (-not (Get-Command dotnet -ErrorAction SilentlyContinue)) { throw 'Install the .NET 10 SDK first.' }
     $sdks = @(& dotnet --list-sdks)
-    Require ($sdks | Where-Object { $_ -match '^10\.' } | Measure-Object).Count -gt 0 'Expected .NET 10 SDK'
+    Require (@($sdks | Where-Object { $_ -match '^10\.' }).Count -gt 0) 'Expected .NET 10 SDK'
     foreach ($port in @(8080, 18081, 18082)) {
         $listener = @(Get-NetTCPConnection -State Listen -LocalPort $port -ErrorAction SilentlyContinue)
         Require ($listener.Count -eq 0) "Port $port is already in use. Stop the previous test process first."
@@ -83,8 +83,9 @@ try {
     $controlDll = Join-Path $root 'bin\Release\net10.0\SpeedSignYarp.dll'
     Require (Test-Path -LiteralPath $backendDll) 'Missing backend executable. Re-run without -SkipBuild.'
     Require (Test-Path -LiteralPath $controlDll) 'Missing control application. Re-run without -SkipBuild.'
-    StartDotnet 'backend-A' $backendDll $root '18081 A'
-    StartDotnet 'backend-B' $backendDll $root '18082 B'
+    $backendWorkingDir = Split-Path -Parent $backendDll
+    StartDotnet 'backend-A' $backendDll $backendWorkingDir '18081 A'
+    StartDotnet 'backend-B' $backendDll $backendWorkingDir '18082 B'
     WaitHttp 'http://127.0.0.1:18081/health/ready' 'backend A'
     WaitHttp 'http://127.0.0.1:18082/health/ready' 'backend B'
     StartDotnet 'control-center' $controlDll $root ''
