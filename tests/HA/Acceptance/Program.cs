@@ -24,7 +24,8 @@ void Require(bool ok, string description)
     Console.WriteLine("PASS: " + description);
     checks.Add(new { description, utc = DateTimeOffset.UtcNow });
 }
-void Config(string path, IEnumerable<(string Id, string Address)> destinations, string probe)
+void Config(string path, IEnumerable<(string Id, string Address)> destinations,
+    string probe, bool explicitPanic = false)
 {
     var dict = destinations.ToDictionary(d => d.Id, d => new
     {
@@ -41,7 +42,7 @@ void Config(string path, IEnumerable<(string Id, string Address)> destinations, 
                 ["api"] = new {
                     LoadBalancingPolicy = "RoundRobin",
                     HealthCheck = new {
-                        AvailableDestinationsPolicy = "HealthyAndUnknown", // fail-closed for CA-class services,
+                        AvailableDestinationsPolicy = explicitPanic ? "HealthyOrPanic" : "HealthyAndUnknown", // never implicit panic,
                         Active = new {
                             Enabled = true, Interval = probe == "/lab/ping" ? "00:00:00.500" : "00:00:01",
                             Timeout = probe == "/lab/ping" ? "00:00:00.500" : "00:00:01",
@@ -393,6 +394,27 @@ try
     await gateway2.WaitForExitAsync();
     await WaitFor("both down gives HTTP 503",()=>Responds("http://127.0.0.1:19080/api/identity",503));
     Require(true,"ingress refuses traffic rather than forwarding to known dead gateways");
+    // Opt-in panic is an explicitly different availability contract: on TOTAL
+    // loss YARP retries known dead candidate destinations once as NEW requests
+    // (not a replay of a previously forwarded non-idempotent operation).
+    // Never enable this for CA/RA signing or enrollment without risk approval.
+    Config(edgeConfig,new[] {("gateway-1","http://127.0.0.1:18080/"),
+        ("gateway-2","http://127.0.0.1:18083/")}, "/lab/ping", explicitPanic:true);
+    await WaitFor("explicit panic tries all-down destinations",async () =>
+    {
+        try
+        {
+            using var response=await client.GetAsync("http://127.0.0.1:19080/api/identity");
+            return (int)response.StatusCode==502;
+        }
+        catch {return false;}
+    },20);
+    checks.Add(new {description="all-down-explicit-panic",
+        evidence="opt-in YARP HealthyOrPanic attempts dead backends; default 503 remains safer"});
+    Config(edgeConfig,new[] {("gateway-1","http://127.0.0.1:18080/"),
+        ("gateway-2","http://127.0.0.1:18083/")}, "/lab/ping", explicitPanic:false);
+    await WaitFor("reverted all-down policy fails closed with HTTP 503",
+        ()=>Responds("http://127.0.0.1:19080/api/identity",503),20);
     success=true;
     Console.WriteLine("ALL HA LAB INTEGRATION CHECKS PASSED");
 }
