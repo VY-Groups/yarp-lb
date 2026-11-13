@@ -1032,6 +1032,9 @@ app.MapPost("/admin/api/fleet/rollout/{changeId}", async (HttpContext ctx, strin
         if (!File.Exists(signingKeyPath))
             throw new InvalidOperationException("Fleet signing key not provisioned. Signed deployment is required.");
         var signingKeyPem = await File.ReadAllTextAsync(signingKeyPath);
+        // Monotonic independent of application config revision or rollback.
+        // The rolloutGate serializes allocation for this single controller instance.
+        var sequence = FleetSequenceState.AllocateNext(Path.Combine(privateDir, "fleet-sequence.txt"));
         var prepared = new List<(FleetGateway Gateway,string Revision)>();
         foreach (var row in gateways)
         {
@@ -1042,9 +1045,10 @@ app.MapPost("/admin/api/fleet/rollout/{changeId}", async (HttpContext ctx, strin
             var revision=status?["revision"]?.ToString();
             if (string.IsNullOrWhiteSpace(revision)) throw new InvalidOperationException(row.Id+": no revision / deployment disabled");
             var expires = DateTimeOffset.UtcNow.AddMinutes(3).ToUnixTimeSeconds();
-            var signature = FleetConfigSignature.Sign(signingKeyPem, txId, revision, proxy, expires);
+            var signed = FleetConfigSignature.SignV2(signingKeyPem, txId, revision, proxy, expires, sequence);
             using var response=await client.PostAsJsonAsync(new Uri(new Uri(row.Url),"agent/v1/config/prepare"),
-                new {TransactionId=txId,ExpectedRevision=revision,ReverseProxy=proxy, ExpiresUnixSeconds=expires, Signature=signature});
+                new {TransactionId=txId,ExpectedRevision=revision,ReverseProxy=proxy,
+                    signed.ExpiresUnixSeconds, signed.Sequence, signed.KeyId, signed.Signature});
             if (!response.IsSuccessStatusCode) throw new InvalidOperationException(row.Id+": prepare HTTP "+(int)response.StatusCode);
             var staged=JsonNode.Parse(await response.Content.ReadAsStringAsync());
             var revisionStaged=staged?["preparedRevision"]?.ToString();

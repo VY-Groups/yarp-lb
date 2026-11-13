@@ -17,14 +17,27 @@ var allowActions = builder.Configuration.GetValue<bool>("Agent:EnableServiceActi
 var allowConfigChanges = builder.Configuration.GetValue<bool>("Agent:EnableConfigChanges");
 var gatewayConfigPath = builder.Configuration["Agent:GatewayConfigPath"] ?? "";
 var stageRoot = builder.Configuration["Agent:StageDirectory"] ?? "";
-var signingPublicKeyPath = builder.Configuration["Agent:ControllerSigningPublicKeyPath"] ?? "";
-if (allowConfigChanges && (!Path.IsPathFullyQualified(signingPublicKeyPath) || !File.Exists(signingPublicKeyPath)))
-    throw new InvalidOperationException("Signed config rollout requires an existing absolute ControllerSigningPublicKeyPath");
-var signingPublicKey = allowConfigChanges ? File.ReadAllText(signingPublicKeyPath) : "";
+var keyPaths = builder.Configuration.GetSection("Agent:TrustedSigningPublicKeyPaths").Get<string[]>() ?? [];
+// Legacy single-key path remains a migration input only. V1 signatures are rejected.
+if (keyPaths.Length == 0 && !string.IsNullOrWhiteSpace(builder.Configuration["Agent:ControllerSigningPublicKeyPath"]))
+    keyPaths = [builder.Configuration["Agent:ControllerSigningPublicKeyPath"]!];
+if (allowConfigChanges && (keyPaths.Length is < 1 or > 3 ||
+    keyPaths.Any(p => !Path.IsPathFullyQualified(p) || !File.Exists(p))))
+    throw new InvalidOperationException("Config rollout requires 1-3 existing absolute pinned public-key paths");
+var signingKeys = new Dictionary<string, string>(StringComparer.Ordinal);
+if (allowConfigChanges)
+foreach (var path in keyPaths)
+{
+    var pem = File.ReadAllText(path);
+    var keyId = FleetConfigSignature.KeyIdFromPublicKey(pem);
+    if (!signingKeys.TryAdd(keyId, pem))
+        throw new InvalidOperationException("Duplicate pinned controller signing identity");
+}
 if (allowConfigChanges && (!Path.IsPathFullyQualified(gatewayConfigPath) ||
     !Path.IsPathFullyQualified(stageRoot) || !File.Exists(gatewayConfigPath)))
     throw new InvalidOperationException("Config changes require an existing absolute gateway config path and absolute stage directory");
 if (allowConfigChanges) Directory.CreateDirectory(stageRoot);
+var sequencePath = Path.Combine(stageRoot, "last-accepted-sequence.txt");
 var revisionLock = new SemaphoreSlim(1,1);
 static string Sha(byte[] data) => Convert.ToHexString(SHA256.HashData(data));
 static bool ValidTx(string id) => Regex.IsMatch(id, "^[A-Za-z0-9_-]{12,80}$");
@@ -59,6 +72,7 @@ app.MapGet("/agent/v1/status", () => Results.Ok(new
     configDeploymentEnabled = allowConfigChanges,
     revision = allowConfigChanges ? Sha(File.ReadAllBytes(gatewayConfigPath)) : null,
     allowedServiceNames = allowedServices,
+    highestAcceptedSequence = allowConfigChanges ? FleetSequenceState.Read(sequencePath) : 0,
     // This reports agent responsiveness only. NOT YARP's internal destination health.
     kind = "authenticated-agent-status"
 }));
@@ -90,9 +104,11 @@ app.MapPost("/agent/v1/config/prepare", async (ConfigPrepare input) =>
         candidate["Routes"] is not JsonObject || candidate["Clusters"] is not JsonObject ||
         Encoding.UTF8.GetByteCount(candidate.ToJsonString()) > 524288)
         return Results.BadRequest(new { error = "Invalid transaction or proxy configuration" });
-    if (!FleetConfigSignature.Verify(signingPublicKey, input.TransactionId, input.ExpectedRevision,
-        candidate, input.ExpiresUnixSeconds, input.Signature, DateTimeOffset.UtcNow.ToUnixTimeSeconds()))
-        return Results.Problem("Missing, expired or invalid controller signature", statusCode: 403);
+    var signed = new FleetConfigSignature.SignedV2(input.KeyId, input.Sequence,
+        input.ExpiresUnixSeconds, input.Signature);
+    if (!FleetConfigSignature.VerifyV2(signingKeys, input.TransactionId, input.ExpectedRevision,
+        candidate, signed, DateTimeOffset.UtcNow.ToUnixTimeSeconds()))
+        return Results.Problem("Missing, expired, stale-version or invalid controller signature", statusCode: 403);
     await revisionLock.WaitAsync();
     try
     {
@@ -102,7 +118,13 @@ app.MapPost("/agent/v1/config/prepare", async (ConfigPrepare input) =>
             return Results.Conflict(new { error = "Gateway config drift detected", currentRevision = hash });
         var txDir = Path.Combine(stageRoot, input.TransactionId);
         if (Directory.Exists(txDir)) return Results.Conflict(new { error = "Transaction already exists" });
+        if (input.Sequence <= FleetSequenceState.Read(sequencePath))
+            return Results.Conflict(new { error = "Older or repeated signed configuration sequence" });
+        // Reserve the sequence BEFORE staging: a crash cannot make old signed configs eligible.
+        FleetSequenceState.Accept(sequencePath, input.Sequence);
         Directory.CreateDirectory(txDir);
+        await File.WriteAllTextAsync(Path.Combine(txDir, "sequence.txt"),
+            input.Sequence.ToString(System.Globalization.CultureInfo.InvariantCulture));
         await File.WriteAllBytesAsync(Path.Combine(txDir, "original.json"), current);
         var doc = JsonNode.Parse(current)!.AsObject();
         doc["ReverseProxy"] = candidate.DeepClone();
@@ -123,6 +145,11 @@ app.MapPost("/agent/v1/config/activate", async (ConfigActivate input) =>
         var tx = Path.Combine(stageRoot,input.TransactionId);
         var prepared = Path.Combine(tx,"prepared.json");
         if (!File.Exists(prepared)) return Results.NotFound();
+        var seqFile = Path.Combine(tx, "sequence.txt");
+        if (!File.Exists(seqFile) ||
+            !long.TryParse(await File.ReadAllTextAsync(seqFile), out var preparedSequence) ||
+            preparedSequence != FleetSequenceState.Read(sequencePath))
+            return Results.Conflict(new { error = "Prepared transaction superseded by newer sequence" });
         var proposed = await File.ReadAllBytesAsync(prepared);
         if (!Sha(proposed).Equals(input.PreparedRevision,StringComparison.OrdinalIgnoreCase)) return Results.Conflict();
         var original = await File.ReadAllBytesAsync(Path.Combine(tx,"original.json"));
@@ -146,6 +173,11 @@ app.MapPost("/agent/v1/config/rollback", async (ConfigRollback input) =>
         var originalPath = Path.Combine(tx,"original.json");
         var stagedPath = Path.Combine(tx,"prepared.json");
         if (!File.Exists(originalPath) || !File.Exists(stagedPath)) return Results.NotFound();
+        var seqFile = Path.Combine(tx, "sequence.txt");
+        if (!File.Exists(seqFile) ||
+            !long.TryParse(await File.ReadAllTextAsync(seqFile), out var preparedSequence) ||
+            preparedSequence != FleetSequenceState.Read(sequencePath))
+            return Results.Conflict(new { error = "Rollback of an obsolete transaction is prohibited" });
         var actual = await File.ReadAllBytesAsync(gatewayConfigPath);
         var original = await File.ReadAllBytesAsync(originalPath);
         var staged = await File.ReadAllBytesAsync(stagedPath);
@@ -176,6 +208,6 @@ static async Task<(int exitCode, string output)> RunSc(string command, string se
 record ServiceAction(string Action);
 
 record ConfigPrepare(string TransactionId, string ExpectedRevision, JsonObject ReverseProxy,
-    long ExpiresUnixSeconds, string Signature);
+    long ExpiresUnixSeconds, long Sequence, string KeyId, string Signature);
 record ConfigActivate(string TransactionId, string PreparedRevision);
 record ConfigRollback(string TransactionId);

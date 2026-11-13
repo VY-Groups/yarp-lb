@@ -5,6 +5,6 @@
     <ImplicitUsings>enable</ImplicitUsings>
   </PropertyGroup>
   <ItemGroup>
-    <Compile Include="../FleetConfigSignature.cs" Link="FleetConfigSignature.cs" />
+    <Compile Include="../FleetConfigSignature.cs" Link="FleetConfigSignature.cs" /><Compile Include="../FleetSequenceState.cs" Link="FleetSequenceState.cs" />
   </ItemGroup>
 </Project>
