@@ -199,7 +199,10 @@ try
         _ = Start(gateDll, "load-gateway");
         await WaitFor("load proxy", () => IsStatus(proxy + "/lab/ping", HttpStatusCode.OK));
         Console.WriteLine("LOAD_RIG_READY");
-        await Task.Delay(TimeSpan.FromMinutes(4));
+        var holdMinutes = args.Length >= 3 && int.TryParse(args[2], out var minutes)
+            ? Math.Clamp(minutes, 1, 320) : 4;
+        Console.WriteLine($"LOAD_RIG_HOLD_MINUTES={holdMinutes}");
+        await Task.Delay(TimeSpan.FromMinutes(holdMinutes));
         return 0;
     }
     Configure("WeightedRandom", 80, 20);

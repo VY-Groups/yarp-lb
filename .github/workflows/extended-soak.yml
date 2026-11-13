@@ -1,0 +1,92 @@
+name: Manually requested long-duration k6 soak (non-production)
+
+on:
+  workflow_dispatch:
+    inputs:
+      duration:
+        description: "Sustained load duration on disposable GitHub runner"
+        required: true
+        default: "1h"
+        type: choice
+        options: ["15m", "1h", "4h"]
+      vus:
+        description: "Virtual users (not capacity certification)"
+        required: true
+        default: "75"
+        type: choice
+        options: ["75", "500", "1000"]
+      payload_bytes:
+        description: "Response payload bytes"
+        required: true
+        default: "0"
+        type: choice
+        options: ["0", "1024", "65536"]
+      connection_reuse:
+        description: "Keep TCP connections open between requests"
+        required: true
+        default: "true"
+        type: choice
+        options: ["true", "false"]
+
+permissions:
+  contents: read
+
+jobs:
+  soak:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+      - name: Build disposable gateway and mock backends
+        run: |
+          dotnet build tests/L7/GatewayLab/GatewayLab.csproj -c Release
+          dotnet build tests/L7/BackendLab/BackendLab.csproj -c Release
+          dotnet build tests/L7/Acceptance/Acceptance.csproj -c Release
+      - name: Run soak, sample process working-set and GC collections
+        shell: bash
+        env:
+          DURATION: ${{ inputs.duration }}
+          VUS: ${{ inputs.vus }}
+          PAYLOAD_BYTES: ${{ inputs.payload_bytes }}
+          REUSE_CONNECTIONS: ${{ inputs.connection_reuse }}
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/soak
+          dotnet tests/L7/Acceptance/bin/Release/net10.0/Acceptance.dll "$GITHUB_WORKSPACE" --hold 310               >artifacts/soak/lab.log 2>&1 &
+          rig_pid=$!
+          load_pid=""
+          trap 'if [[ -n "$load_pid" ]]; then kill "$load_pid" 2>/dev/null || true; fi; kill "$rig_pid" 2>/dev/null || true' EXIT
+          ready=0
+          for attempt in $(seq 1 120); do
+            if curl -fsS http://127.0.0.1:18080/lab/stats >artifacts/soak/before.json; then ready=1; break; fi
+            sleep 0.3
+          done
+          if [[ "$ready" != 1 ]]; then cat artifacts/soak/lab.log; exit 1; fi
+          if [[ "$REUSE_CONNECTIONS" = true ]]; then noreuse=0; else noreuse=1; fi
+          docker run --rm --network host --user "$(id -u):$(id -g)" \
+            -e MODE=proxy -e TARGET=http://127.0.0.1:18080 -e DURATION="$DURATION" \
+            -e VUS="$VUS" -e PAYLOAD_BYTES="$PAYLOAD_BYTES" -e NO_REUSE="$noreuse" \
+            -v "$GITHUB_WORKSPACE:/workspace" -w /workspace \
+            grafana/k6:0.55.0 run \
+            --summary-export=/workspace/artifacts/soak/k6-summary.json \
+            /workspace/tests/L7/performance/load.js >artifacts/soak/k6-stdout.log 2>&1 &
+          load_pid=$!
+          while kill -0 "$load_pid" 2>/dev/null; do
+            curl -fsS http://127.0.0.1:18080/lab/stats >> artifacts/soak/process-samples.jsonl || true
+            printf '\n' >> artifacts/soak/process-samples.jsonl
+            sleep 30
+          done
+          wait "$load_pid"
+          load_pid=""
+          test -s artifacts/soak/k6-summary.json
+          curl -fsS http://127.0.0.1:18080/lab/stats >artifacts/soak/after.json
+          python tests/L7/performance/soak_summary.py artifacts/soak
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: long-soak-evidence
+          path: artifacts/soak/
+          retention-days: 30
