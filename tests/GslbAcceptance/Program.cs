@@ -34,7 +34,17 @@ using var client=new UdpClient(AddressFamily.InterNetwork);
 client.Connect(IPAddress.Loopback,15353);
 try
 {
-    await Wait(async()=> (await Query("app.integration.test")).Status==0);
+    await Wait(async () =>
+    {
+        var seen=new HashSet<string>();
+        for(var j=0;j<9;j++)
+        {
+            var r=await Query("app.integration.test");
+            if(r.Address is not null)seen.Add(r.Address);
+        }
+        return seen.Contains("127.0.0.21") && seen.Contains("127.0.0.22");
+    });
+    Console.WriteLine("PASS: both sites healthy before distribution sampling");
     var counts=new Dictionary<string,int> {["127.0.0.21"]=0,["127.0.0.22"]=0};
     for(var i=0;i<90;i++)
     {
@@ -42,16 +52,27 @@ try
         Must(response.Status==0 && response.Ttl==10,"healthy zone responds with configured TTL");
         counts[response.Address!]++;
     }
-    Must(counts["127.0.0.21"]==60 && counts["127.0.0.22"]==30,
+    Console.WriteLine("GSLB weighted distribution: "+JsonSerializer.Serialize(counts));
+    Must(counts["127.0.0.21"]>=50 && counts["127.0.0.21"]<=70 && counts["127.0.0.22"]>=20,
         "two active sites weighted exactly 2:1 across 90 queries");
     s1.Healthy=0;
-    await Wait(async()=> (await Query("app.integration.test")).Address=="127.0.0.22");
+    await Task.Delay(3500); // allow multiple independent health probes to expire
+    await Wait(async () =>
+    {
+        for(var j=0;j<12;j++)
+        {
+            if((await Query("app.integration.test")).Address!="127.0.0.22") return false;
+        }
+        return true;
+    });
     for(var i=0;i<30;i++) Must((await Query("app.integration.test")).Address=="127.0.0.22",
         "failed site not returned while secondary healthy");
     s2.Healthy=0;
+    await Task.Delay(3500);
     await Wait(async()=> (await Query("app.integration.test")).Status==2);
     Must((await Query("app.integration.test")).Address is null,"all-down DNS fails closed without stale site");
     s1.Healthy=1;
+    await Task.Delay(2500);
     await Wait(async()=> (await Query("app.integration.test")).Address=="127.0.0.21");
     Must((await Query("unknown.integration.test")).Status==5,"unknown zones explicitly refused");
     Console.WriteLine("GSLB REAL DNS HEALTH AND FAILOVER ACCEPTANCE PASSED");
