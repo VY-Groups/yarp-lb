@@ -1,5 +1,6 @@
 """Contract checks for the soak summary analyzer, no .NET/k6 required."""
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -45,6 +46,38 @@ with tempfile.TemporaryDirectory() as folder:
     assert report["gen2_collections_delta"] == vals[-1]["gc2Collections"]
     assert len(report["working_set_quarter_trends"]) >= 4
     assert "working_set_quarter_trends" in result.stdout
+
+    # Every five-minute slice must have traffic and satisfy availability.
+    for i in range(12):
+        metrics[f"soak_failure_rate_5m_window_{i}"] = {
+            "passes": 0, "fails": 2000, "value": 0.0,
+        }
+    (root / "k6-summary.json").write_text(json.dumps({"metrics": metrics}), encoding="utf-8")
+    strict_env = {**os.environ, "SOAK_EXPECTED_WINDOWS": "12"}
+    subprocess.run([sys.executable, str(script), str(root)], env=strict_env,
+                   capture_output=True, text=True, check=True)
+    strict = json.loads((root / "report.json").read_text(encoding="utf-8"))
+    assert strict["sustained_availability_pass"] is True
+    assert len(strict["five_minute_availability"]) == 12
+    metrics["soak_failure_rate_5m_window_7"] = {
+        "passes": 800, "fails": 1200, "value": 0.4,
+    }
+    (root / "k6-summary.json").write_text(json.dumps({"metrics": metrics}), encoding="utf-8")
+    failed = subprocess.run([sys.executable, str(script), str(root)], env=strict_env,
+                            capture_output=True, text=True)
+    assert failed.returncode != 0 and "SOAK_SLO_FAIL" in failed.stderr
+    failed_report = json.loads((root / "report.json").read_text(encoding="utf-8"))
+    assert failed_report["sustained_availability_pass"] is False
+    del metrics["soak_failure_rate_5m_window_7"]
+    (root / "k6-summary.json").write_text(json.dumps({"metrics": metrics}), encoding="utf-8")
+    missing = subprocess.run([sys.executable, str(script), str(root)], env=strict_env,
+                             capture_output=True, text=True)
+    assert missing.returncode != 0, "missing five-minute window must never pass"
+    (root / "after.json").unlink()
+    subprocess.run([sys.executable, str(script), str(root)],
+                   capture_output=True, text=True, check=True)
+    fallback_report = json.loads((root / "report.json").read_text(encoding="utf-8"))
+    assert fallback_report["final_process_metrics_source"] == "last-valid-sample"
 
     del metrics["soak_p99_5m_window_0"]
     for i in range(1, 12):
