@@ -61,11 +61,17 @@ body_code="$(curl --silent --show-error --max-time 10 -X POST \
   --data-binary "@$DIR/oversized-request.bin" -o "$DIR/body-response.txt" \
   -w '%{http_code}' "http://127.0.0.1:18888/" || true)"
 printf '%s\n' "$body_code" > "$DIR/body-limit-status.txt"
-if [[ "$body_code" != "413" ]]; then
-  echo "FAIL: over-limit request expected HTTP 413; got $body_code" >&2; exit 1
-fi
-# Record initial blocking-mode audit before recreating the container.
+# ModSecurity 3 nginx connector returns 403 for SecRequestBodyLimitAction
+# Reject (other frontends may use 413). Require the explicit engine diagnostic
+# to distinguish a real size-limit rejection from unrelated anomaly blocking.
 docker compose -f "$COMPOSE" logs --no-color waf > "$DIR/blocking-audit.log" 2>&1 || true
+if [[ "$body_code" != "403" && "$body_code" != "413" ]]; then
+  echo "FAIL: oversized request was not rejected; got $body_code" >&2; exit 1
+fi
+if ! grep -q 'Request body limit is marked to reject the request' "$DIR/blocking-audit.log"; then
+  echo "FAIL: expected ModSecurity body-limit rejection diagnostic absent" >&2; exit 1
+fi
+echo "PASS: oversized request rejected by configured ModSecurity body limit (HTTP $body_code)"
 # Detection-only deployment must allow the same attack to reach the backend;
 # this is not proof of useful alerts until its audit is reviewed and tuned.
 WAF_MODE=DetectionOnly docker compose -f "$COMPOSE" up -d --force-recreate --no-deps waf
