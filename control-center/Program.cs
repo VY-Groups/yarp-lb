@@ -29,7 +29,9 @@ builder.Services.AddDataProtection()
     .PersistKeysToFileSystem(new DirectoryInfo(keyDir))
     .ProtectKeysWithDpapi(protectToLocalMachine: true);
 builder.Configuration.AddJsonFile("appsettings.json", optional: false, reloadOnChange: true);
-builder.Services.AddReverseProxy().LoadFromConfig(builder.Configuration.GetSection("ReverseProxy"));
+builder.Services.AddReverseProxy()
+    .LoadFromConfig(builder.Configuration.GetSection("ReverseProxy"))
+    .ConfigureHttpClient(BackendMutualTls.Configure);
 // Custom policies are registered on every serving YARP instance, never on the UI alone.
 builder.Services.AddSingleton<ILoadBalancingPolicy, WeightedRandomPolicy>();
 builder.Services.AddSingleton<ILoadBalancingPolicy, SourceIpHashPolicy>();
@@ -753,6 +755,13 @@ async Task<IResult> CommitReviewedChange(HttpContext ctx, JsonObject submitted)
             if (node?["Metadata"]?["SlowStartSeconds"] is JsonNode secondsNode &&
                 !LoadBalancingCore.TrySlowStartSeconds(secondsNode.ToString(), out _))
                 return Results.BadRequest(new { error = $"Destination {destId} SlowStartSeconds must be 0..600" });
+        }
+        if (c["Metadata"]?[BackendMutualTls.MetadataKey] is JsonNode clientCertificate)
+        {
+            if (!BackendMutualTls.TryNormalizeThumbprint(clientCertificate.ToString(), out _))
+                return Results.BadRequest(new { error = $"Cluster {key}: client certificate thumbprint must be 40 hex characters" });
+            if (dests.Any(d => !d.Value?["Address"]!.ToString().StartsWith("https://", StringComparison.OrdinalIgnoreCase)))
+                return Results.BadRequest(new { error = $"Cluster {key}: backend mTLS requires all HTTPS destinations" });
         }
         var hc = c["HealthCheck"]?["Active"];
         if (hc is not null && hc["Path"] is not null && !ValidPath(hc["Path"]!.ToString())) return Results.BadRequest(new { error = "Invalid health-check path" });

@@ -49,6 +49,8 @@ jobs:
         run: dotnet run --project tests/LoadBalancingCoreTests/LoadBalancingCoreTests.csproj --configuration Release
       - name: Verify signed fleet configuration acceptance
         run: dotnet run --project tests/FleetConfigSignatureTests/FleetConfigSignatureTests.csproj --configuration Release
+      - name: Test backend mTLS certificate contract
+        run: dotnet run --project tests/BackendMtlsTests/BackendMtlsTests.csproj --configuration Release
       - name: Test TLS certificate inventory status logic
         run: dotnet run --project tests/TlsInventoryTests/TlsInventoryTests.csproj --configuration Release
       - name: Check frontend compile reproducibility
