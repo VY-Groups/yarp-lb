@@ -1,0 +1,28 @@
+name: L4 experimental engine socket acceptance
+on:
+  push:
+    branches: [main, "feature/**"]
+    paths: ["engines/L4/**", "tests/L4Acceptance/**", ".github/workflows/l4-acceptance.yml"]
+  pull_request:
+    paths: ["engines/L4/**", "tests/L4Acceptance/**", ".github/workflows/l4-acceptance.yml"]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  real-sockets:
+    runs-on: ${{ matrix.os }}
+    name: TCP/UDP transport - ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, ubuntu-24.04]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+      - name: Build independent L4 engine
+        run: dotnet build engines/L4/L4Proxy.csproj -c Release
+      - name: Test TCP+UDP real socket forwarding, stickiness, public-bind denial
+        run: dotnet run --project tests/L4Acceptance/L4Acceptance.csproj -c Release -- "${{ github.workspace }}"
