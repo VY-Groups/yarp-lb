@@ -4,6 +4,7 @@
   <EnableDefaultCompileItems>false</EnableDefaultCompileItems></PropertyGroup>
   <ItemGroup>
     <Compile Include="../../LoadBalancingCore.cs" Link="LoadBalancingCore.cs" />
+    <Compile Include="../../../src/TrafficPolicies/EjectionBudget.cs" Link="EjectionBudget.cs" />
     <Compile Include="Program.cs" />
   </ItemGroup>
 </Project>
