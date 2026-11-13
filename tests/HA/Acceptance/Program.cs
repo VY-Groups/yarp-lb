@@ -173,6 +173,11 @@ try
     }
     Require(initial.Ok==300,
         $"300 HTTP requests traverse ingress after bounded health warmup, ok={initial.Ok} fail={initial.Fail}");
+    using(var slow=await client.GetAsync("http://127.0.0.1:19080/api/slow"))
+        Require(slow.StatusCode==HttpStatusCode.OK,
+            "700ms slow but healthy upstream response is not misclassified as failed");
+    Require((await Sample(100)).Ok==100,
+        "healthy edge remains routable after slow upstream response");
 
     // A production-like MAINTENANCE stop is a two-step sequence: mark gateway
     // unready -> wait until ingress routes solely to the survivor -> gracefully
