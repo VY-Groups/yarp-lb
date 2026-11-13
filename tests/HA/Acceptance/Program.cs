@@ -340,6 +340,42 @@ try
     Require(failoverEvidence.lastFailureAfterKillUnder2s,
         "Windows/Ubuntu last observed gateway-kill failure ends within 2s of fault");
     Console.WriteLine("FAILOVER UNDER LOAD: "+JsonSerializer.Serialize(failoverEvidence));
+    // Non-idempotent requests have a strict ZERO automatic replay budget.
+    // A lost HTTP response may hide an applied operation, therefore count
+    // backend side effects rather than using status alone as an oracle.
+    var txStatuses=new List<int>();
+    var maxApplications=0;
+    for(var i=0;i<24;i++)
+    {
+        var txId="neverretry"+i.ToString("D6");
+        int status;
+        try
+        {
+            using var response=await client.PostAsync(
+                "http://127.0.0.1:19080/api/transaction/"+txId,
+                new StringContent("one-commit"));
+            status=(int)response.StatusCode;
+        }
+        catch(HttpRequestException) {status=0;}
+        txStatuses.Add(status);
+        async Task<int> Count(string host)
+        {
+            using var reply=await client.GetAsync(host+"/lab/transaction-count/"+txId);
+            reply.EnsureSuccessStatusCode();
+            using var doc=JsonDocument.Parse(await reply.Content.ReadAsStringAsync());
+            return doc.RootElement.GetProperty("count").GetInt32();
+        }
+        var applied=await Count(aUrl)+await Count(bUrl);
+        maxApplications=Math.Max(maxApplications,applied);
+        Require(applied<=1,
+            $"transaction {txId} delivered at most once after failover, applied={applied}");
+        if(status==200) Require(applied==1,
+            $"HTTP 200 transaction {txId} committed exactly once");
+    }
+    checks.Add(new {description="non-idempotent-post-no-replay",
+        evidence=new {attempts=txStatuses.Count,maxApplications,
+            successful=txStatuses.Count(x=>x==200),failed=txStatuses.Count(x=>x!=200),
+            retryBudget=0}});
     var afterFailure=await Sample(400);
     Require(afterFailure.Ok==400,
         "gateway 1 terminated: 400/400 NEW requests continue through remaining gateway");
