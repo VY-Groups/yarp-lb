@@ -1,0 +1,24 @@
+name: GSLB authoritative DNS health/failover acceptance
+on:
+  push:
+    branches: [main, "feature/**"]
+    paths: ["engines/GslbDns/**", "tests/GslbAcceptance/**", ".github/workflows/gslb-acceptance.yml"]
+  pull_request:
+    paths: ["engines/GslbDns/**", "tests/GslbAcceptance/**", ".github/workflows/gslb-acceptance.yml"]
+  workflow_dispatch:
+permissions: {contents: read}
+jobs:
+  authoritative-dns:
+    runs-on: ${{ matrix.os }}
+    name: DNS health/weight/DR - ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, ubuntu-24.04]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with: {dotnet-version: "10.0.x"}
+      - run: dotnet build engines/GslbDns/GslbDns.csproj -c Release
+      - run: dotnet run --project tests/GslbAcceptance/GslbAcceptance.csproj -c Release -- "${{ github.workspace }}"
