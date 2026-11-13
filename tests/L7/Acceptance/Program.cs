@@ -25,6 +25,30 @@ const string proxy = "http://127.0.0.1:18080";
 const string aUrl = "http://127.0.0.1:18081";
 const string bUrl = "http://127.0.0.1:18082";
 
+// Drain stdout/stderr as the child runs; ReadToEndAsync buffered potentially
+// gigabytes of per-request logs until the child exited. Keep the first 8 MiB
+// per stream as evidence while continuously draining anything after that.
+async Task DrainLog(Stream source, string destination)
+{
+    const long maxBytes = 8 * 1024 * 1024;
+    await using var file = new FileStream(destination, FileMode.Create, FileAccess.Write,
+        FileShare.Read, 65_536, FileOptions.Asynchronous);
+    var buffer = new byte[32_768];
+    long captured = 0;
+    int read;
+    while ((read = await source.ReadAsync(buffer.AsMemory())) > 0)
+    {
+        var keep = (int)Math.Min(read, Math.Max(0, maxBytes - captured));
+        if (keep > 0)
+        {
+            await file.WriteAsync(buffer.AsMemory(0, keep));
+            captured += keep;
+        }
+    }
+    if (captured >= maxBytes)
+        await file.WriteAsync(Encoding.UTF8.GetBytes("\n[LOG TRUNCATED AT 8 MiB; STREAM FULLY DRAINED]\n"));
+}
+
 Process Start(string dll, string label, params string[] extra)
 {
     var p = new Process();
@@ -39,12 +63,10 @@ Process Start(string dll, string label, params string[] extra)
     foreach (var arg in extra) p.StartInfo.ArgumentList.Add(arg);
     if (!p.Start()) throw new InvalidOperationException("Failed to start " + label);
     processes.Add(p);
-    logs.Add(Task.Run(async () =>
-        await File.WriteAllTextAsync(Path.Combine(output, label + ".stdout.log"),
-            await p.StandardOutput.ReadToEndAsync())));
-    logs.Add(Task.Run(async () =>
-        await File.WriteAllTextAsync(Path.Combine(output, label + ".stderr.log"),
-            await p.StandardError.ReadToEndAsync())));
+    logs.Add(DrainLog(p.StandardOutput.BaseStream,
+        Path.Combine(output, label + ".stdout.log")));
+    logs.Add(DrainLog(p.StandardError.BaseStream,
+        Path.Combine(output, label + ".stderr.log")));
     return p;
 }
 
