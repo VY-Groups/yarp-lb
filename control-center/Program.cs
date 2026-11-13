@@ -93,6 +93,8 @@ app.MapGet("/admin/api/logging-health", () => Results.Ok(new {
     enqueuedTotal = boundedConsole.EnqueuedMessages,
     writtenTotal = boundedConsole.WrittenMessages,
     droppedTotal = boundedConsole.DroppedMessages,
+    droppedLowPriorityTotal = boundedConsole.DroppedLowPriorityMessages,
+    droppedHighPriorityTotal = boundedConsole.DroppedHighPriorityMessages,
     writeErrorsTotal = boundedConsole.WriteErrors,
     guidance = "Alert on any rise in droppedTotal or writeErrorsTotal; audit is separate."
 })).RequireAuthorization();
