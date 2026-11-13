@@ -5,7 +5,7 @@ using Yarp.ReverseProxy.Model;
 /// <summary>Local health transition observation, new-request drain, and weighted warmup.</summary>
 public static class TrafficLifecycle
 {
-    private sealed class WarmupState { internal long FirstEligibleTick; }
+    private sealed class WarmupState { internal long FirstEligibleTick; internal int LastSlowStartSeconds; }
     private static readonly ConditionalWeakTable<DestinationState, WarmupState> Timers = new();
 
     public static bool IsDraining(DestinationState destination) =>
@@ -25,7 +25,14 @@ public static class TrafficLifecycle
                     if (ReferenceEquals(available[i], dest)) { ready = true; break; }
             }
             var state = Timers.GetValue(dest, _ => new WarmupState());
-            if (!ready) Interlocked.Exchange(ref state.FirstEligibleTick, 0);
+            var metadata = dest.Model.Config.Metadata;
+            var seconds = metadata is not null && metadata.TryGetValue("SlowStartSeconds", out var raw) &&
+                LoadBalancingCore.TrySlowStartSeconds(raw, out var configured) ? configured : 0;
+            // A config update that turns warmup on (or changes its window) must start
+            // a NEW ramp, even if YARP retains the same DestinationState instance.
+            var prior = Interlocked.Exchange(ref state.LastSlowStartSeconds, seconds);
+            if (prior != seconds || !ready)
+                Interlocked.Exchange(ref state.FirstEligibleTick, 0);
             else Interlocked.CompareExchange(ref state.FirstEligibleTick, Stopwatch.GetTimestamp(), 0);
         }
     }
