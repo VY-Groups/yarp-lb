@@ -1,6 +1,9 @@
 name: Manually requested long-duration k6 soak (non-production)
 
 on:
+  # Explicit gate PR for the P0 hang investigation; no general PR load runs.
+  pull_request:
+    paths: [".github/workflows/extended-soak.yml"]
   # Explicit, one-off branch trigger for the user-requested one-hour CI run.
   # Do not include main or all feature branches: this is a costly runner.
   push:
