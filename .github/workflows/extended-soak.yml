@@ -74,9 +74,11 @@ jobs:
           done
           if [[ "$ready" != 1 ]]; then cat artifacts/soak/lab.log; exit 1; fi
           if [[ "$REUSE_CONNECTIONS" = true ]]; then noreuse=0; else noreuse=1; fi
+          export SOAK_START_EPOCH_MS="$(($(date +%s) * 1000))"
           docker run --rm --network host --user "$(id -u):$(id -g)" \
             -e MODE=proxy -e TARGET=http://127.0.0.1:18080 -e DURATION="$DURATION" \
             -e VUS="$VUS" -e PAYLOAD_BYTES="$PAYLOAD_BYTES" -e NO_REUSE="$noreuse" \
+            -e SOAK_START_EPOCH_MS="$SOAK_START_EPOCH_MS" \
             -v "$GITHUB_WORKSPACE:/workspace" -w /workspace \
             grafana/k6:0.55.0 run \
             --summary-export=/workspace/artifacts/soak/k6-summary.json \

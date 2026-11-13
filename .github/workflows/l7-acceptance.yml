@@ -205,3 +205,12 @@ jobs:
           name: l7-runtime-counter-profile
           path: artifacts/profile/
           retention-days: 14
+
+  soak-report-contract:
+    name: Soak trend analyzer fixture tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate five-minute p99 and memory/GC trend reports
+        run: python tests/L7/performance/test_soak_summary.py
