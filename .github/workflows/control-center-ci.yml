@@ -56,6 +56,10 @@ jobs:
         run: |
           npx --yes --package typescript@5.9.3 tsc --project wwwroot/tsconfig.json
           git diff --exit-code -- wwwroot/app.js
+      - name: Laptop one-command localhost smoke test (Windows only)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./dev/laptop/Start-Laptop.ps1 -SmokeTest -SkipBuild
       - name: Run frontend UI regression tests
         run: node --test tests/test_onboarding_ui.mjs tests/test_setup_ui.mjs
       - name: Run backend source contract checks

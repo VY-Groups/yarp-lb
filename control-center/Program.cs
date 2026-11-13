@@ -19,7 +19,15 @@ using Microsoft.AspNetCore.RateLimiting;
 using System.Threading.RateLimiting;
 using Yarp.ReverseProxy.LoadBalancing;
 
-var privateDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "SpeedSignYarp", "ControlPlane");
+// Only an explicit Development process can redirect state to a user-owned laptop sandbox.
+// Production and existing server installations keep their original ProgramData path.
+var developmentStatePath = Environment.GetEnvironmentVariable("YARP_CC_DEV_STATE_DIR");
+var developmentSandbox = string.Equals(Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT"),
+    "Development", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(developmentStatePath);
+if (developmentSandbox && !Path.IsPathFullyQualified(developmentStatePath!))
+    throw new InvalidOperationException("YARP_CC_DEV_STATE_DIR must be an absolute path.");
+var privateDir = developmentSandbox ? Path.GetFullPath(developmentStatePath!)
+    : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "SpeedSignYarp", "ControlPlane");
 Directory.CreateDirectory(privateDir);
 var keyDir = Path.Combine(privateDir, "data-protection-keys");
 Directory.CreateDirectory(keyDir);
@@ -27,7 +35,7 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddDataProtection()
     .SetApplicationName("SpeedSignYarpControlCenter")
     .PersistKeysToFileSystem(new DirectoryInfo(keyDir))
-    .ProtectKeysWithDpapi(protectToLocalMachine: true);
+    .ProtectKeysWithDpapi(protectToLocalMachine: !developmentSandbox);
 builder.Configuration.AddJsonFile("appsettings.json", optional: false, reloadOnChange: true);
 builder.Services.AddReverseProxy().LoadFromConfig(builder.Configuration.GetSection("ReverseProxy"));
 // Custom policies are registered on every serving YARP instance, never on the UI alone.
@@ -46,7 +54,7 @@ builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationSc
         {
             try
             {
-                var path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "SpeedSignYarp", "ControlPlane", "admin-users.json");
+                var path = Path.Combine(privateDir, "admin-users.json");
                 var users = JsonSerializer.Deserialize<List<AdminUser>>(await File.ReadAllTextAsync(path)) ?? new();
                 var active = users.FirstOrDefault(u => u.Username.Equals(ctx.Principal?.Identity?.Name, StringComparison.OrdinalIgnoreCase));
                 var role = ctx.Principal?.FindFirst(ClaimTypes.Role)?.Value;

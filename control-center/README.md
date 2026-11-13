@@ -22,6 +22,18 @@ This release currently assumes ONE organization per controller. Different indust
 
 **Legacy migration compatibility:** the existing Windows project path `C:\YARP\SpeedSignYarp`, .NET assembly name, cookie name, ASP.NET Data Protection application name and `C:\ProgramData\SpeedSignYarp\ControlPlane` store remain unchanged. Renaming them without an explicit migration would break current accounts/cookies/encrypted SMTP settings. New installations will receive a separate path migration in a future validated release.
 
+## Run on a Windows 10/11 laptop (no elevated shell)
+
+On your laptop with .NET SDK 10 and Git installed:
+
+```powershell
+git clone https://github.com/VY-Groups/yarp-lb.git
+cd yarp-lb\control-center
+powershell -NoProfile -ExecutionPolicy Bypass -File .\dev\laptop\Start-Laptop.ps1
+```
+
+The script builds the project, generates a loopback-only **development** `appsettings.json` (only if missing), starts two mock backends and the full Control Center, prints the dashboard URL, and stops the processes it owns on Ctrl+C. Development login/OTP state is isolated under `%LOCALAPPDATA%\YarpControlCenterDev\state`; server state is untouched. For an automated check, run `Start-Laptop.ps1 -SmokeTest`. Read `dev/laptop/README.md`. It is **not** the Windows Server installer and must never be exposed on a public address.
+
 ## Install on offline test server
 
 1. Stop existing `SpeedSignYarp` process, obtain a separate verified backup of both the project and `C:\ProgramData\SpeedSignYarp\ControlPlane`.
