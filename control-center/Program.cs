@@ -17,6 +17,7 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.RateLimiting;
 using System.Threading.RateLimiting;
+using Microsoft.Extensions.Logging.Console;
 using Yarp.ReverseProxy.LoadBalancing;
 
 var privateDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "SpeedSignYarp", "ControlPlane");
@@ -24,6 +25,12 @@ Directory.CreateDirectory(privateDir);
 var keyDir = Path.Combine(privateDir, "data-protection-keys");
 Directory.CreateDirectory(keyDir);
 var builder = WebApplication.CreateBuilder(args);
+// Prevent a blocked console/stdout collector from waiting inside proxy requests.
+// Retain Debug/EventSource and other preexisting providers: filter ONLY the default
+// blocking console provider; replace it with a separate bounded background writer.
+var boundedConsole = new NonBlockingConsoleLoggerProvider(Console.Out, capacity: 1024);
+builder.Logging.AddFilter<ConsoleLoggerProvider>((_, _) => false);
+builder.Logging.AddProvider(boundedConsole);
 builder.Services.AddDataProtection()
     .SetApplicationName("SpeedSignYarpControlCenter")
     .PersistKeysToFileSystem(new DirectoryInfo(keyDir))
@@ -82,6 +89,18 @@ builder.Services.AddRateLimiter(options =>
 });
 builder.Services.AddHttpClient("probe").ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
 var app = builder.Build();
+// Strictly loopback/admin-only readout. A non-zero drop count is an ALERT,
+// never an alternative to the separately persisted security audit trail.
+app.MapGet("/admin/api/logging-health", () => Results.Ok(new {
+    mode = "bounded-drop-and-count",
+    capacity = boundedConsole.Capacity,
+    queued = boundedConsole.QueuedMessages,
+    enqueuedTotal = boundedConsole.EnqueuedMessages,
+    writtenTotal = boundedConsole.WrittenMessages,
+    droppedTotal = boundedConsole.DroppedMessages,
+    writeErrorsTotal = boundedConsole.WriteErrors,
+    guidance = "Alert on any rise in droppedTotal or writeErrorsTotal; audit is separate."
+})).RequireAuthorization();
 // Organization profile is a management-only API; existing CSRF, admin-role and loopback middleware apply.
 
 var directoryAuth = app.Services.GetRequiredService<DirectoryAuthService>();
