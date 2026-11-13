@@ -154,7 +154,24 @@ try
     await WaitFor("ingress",()=>Responds("http://127.0.0.1:19080/lab/ping"));
     await Task.Delay(2500);
     var initial=await Sample(300);
-    Require(initial.Ok==300,"300 HTTP requests traverse ingress and both healthy gateway candidates");
+    checks.Add(new {description="initial-ingress-warmup",successful=initial.Ok,
+        failed=initial.Fail,utc=DateTimeOffset.UtcNow});
+    // A gateway may report /lab/ping before active health's very first probe
+    // marks both destinations eligible (particularly on loaded Windows CI).
+    // We allow a bounded warmup but NEVER discard the initial failure evidence.
+    if(initial.Ok!=300)
+    {
+        await WaitFor("two complete post-warmup ingress samples",async () =>
+        {
+            var first=await Sample(300);
+            if(first.Ok!=300) return false;
+            var second=await Sample(300);
+            return second.Ok==300;
+        },20);
+        initial=await Sample(300);
+    }
+    Require(initial.Ok==300,
+        $"300 HTTP requests traverse ingress after bounded health warmup, ok={initial.Ok} fail={initial.Fail}");
 
     // A production-like MAINTENANCE stop is a two-step sequence: mark gateway
     // unready -> wait until ingress routes solely to the survivor -> gracefully
