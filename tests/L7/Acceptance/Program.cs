@@ -46,7 +46,7 @@ async Task DrainLog(Stream source, string destination)
         }
     }
     if (captured >= maxBytes)
-        await file.WriteAsync(Encoding.UTF8.GetBytes("\\n[LOG TRUNCATED AT 8 MiB; STREAM FULLY DRAINED]\\n"));
+        await file.WriteAsync(Encoding.UTF8.GetBytes("\n[LOG TRUNCATED AT 8 MiB; STREAM FULLY DRAINED]\n"));
 }
 
 Process Start(string dll, string label, params string[] extra)
