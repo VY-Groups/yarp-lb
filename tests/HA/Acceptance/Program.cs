@@ -146,9 +146,69 @@ try
     await Task.Delay(2500);
     var initial=await Sample(300);
     Require(initial.Ok==300,"300 HTTP requests traverse ingress and both healthy gateway candidates");
+    // Continuous in-flight HTTP traffic spans the exact moment the gateway dies.
+    // Every attempted request is counted, including exceptions and status >= 500.
+    var timeline = new ConcurrentQueue<(double StartMs, int Status, double LatencyMs)>();
+    using var trafficStop = new CancellationTokenSource();
+    var epoch = Stopwatch.GetTimestamp();
+    var trafficWorkers = Enumerable.Range(0,24).Select(async _ =>
+    {
+        while (!trafficStop.IsCancellationRequested)
+        {
+            var started = Stopwatch.GetTimestamp();
+            var status = 0;
+            try
+            {
+                using var response = await client.GetAsync(
+                    "http://127.0.0.1:19080/api/identity", trafficStop.Token);
+                status = (int)response.StatusCode;
+            }
+            catch (OperationCanceledException) when (trafficStop.IsCancellationRequested) { break; }
+            catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or IOException) { }
+            timeline.Enqueue((Stopwatch.GetElapsedTime(epoch,started).TotalMilliseconds,
+                status, Stopwatch.GetElapsedTime(started).TotalMilliseconds));
+            try { await Task.Delay(15,trafficStop.Token); }
+            catch (OperationCanceledException) { break; }
+        }
+    }).ToArray();
+    await Task.Delay(1500);
+    var killAtMs = Stopwatch.GetElapsedTime(epoch).TotalMilliseconds;
     gateway1.Kill(entireProcessTree:true);
     await gateway1.WaitForExitAsync();
-    await Task.Delay(3500);
+    await Task.Delay(6000);
+    trafficStop.Cancel();
+    await Task.WhenAll(trafficWorkers);
+    var measured = timeline.ToArray();
+    var preKill = measured.Where(x => x.StartMs < killAtMs).ToArray();
+    var postKill = measured.Where(x => x.StartMs >= killAtMs).ToArray();
+    var steadyState = measured.Where(x => x.StartMs > killAtMs + 4500).ToArray();
+    Require(preKill.Length >= 80 && postKill.Length >= 150,
+        "continuous load measured requests before and after gateway process death");
+    Require(steadyState.Length >= 30 && steadyState.All(x => x.Status == 200),
+        "surviving gateway provides error-free HTTP in final 1.5-second observation window");
+    var failuresAfter = postKill.Where(x => x.Status != 200).ToArray();
+    var latencies = measured.Select(x => x.LatencyMs).OrderBy(x=>x).ToArray();
+    static double Percentile(double[] sorted, double p) =>
+        sorted[Math.Clamp((int)Math.Ceiling(p * sorted.Length) - 1, 0, sorted.Length - 1)];
+    var failoverEvidence = new
+    {
+        faultType = "gateway-process-kill",
+        activeClients = trafficWorkers.Length,
+        sampleTimeMs = 7500,
+        beforeRequests = preKill.Length,
+        beforeFailures = preKill.Count(x => x.Status != 200),
+        afterRequests = postKill.Length,
+        afterFailures = failuresAfter.Length,
+        failuresByStatus = failuresAfter.GroupBy(x => x.Status)
+            .ToDictionary(x => x.Key.ToString(),x=>x.Count()),
+        lastObservedFailureOffsetMs = failuresAfter.Length == 0 ? 0 :
+            Math.Round(failuresAfter.Max(x => x.StartMs - killAtMs),1),
+        p95LatencyMs = Math.Round(Percentile(latencies,0.95),2),
+        p99LatencyMs = Math.Round(Percentile(latencies,0.99),2),
+        caveat = "Last observed failure offset is NOT a YARP health-detection timestamp; in-flight retries are not assumed."
+    };
+    checks.Add(new { description="continuous-load-failover", evidence=failoverEvidence });
+    Console.WriteLine("FAILOVER UNDER LOAD: "+JsonSerializer.Serialize(failoverEvidence));
     var afterFailure=await Sample(400);
     Require(afterFailure.Ok==400,
         "gateway 1 terminated: 400/400 NEW requests continue through remaining gateway");

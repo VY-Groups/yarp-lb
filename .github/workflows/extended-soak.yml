@@ -1,6 +1,10 @@
 name: Manually requested long-duration k6 soak (non-production)
 
 on:
+  # Explicit, one-off branch trigger for the user-requested one-hour CI run.
+  # Do not include main or all feature branches: this is a costly runner.
+  push:
+    branches: ["ci/soak-onehour-0.1"]
   workflow_dispatch:
     inputs:
       duration:
@@ -31,6 +35,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: extended-soak-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   soak:
     runs-on: ubuntu-24.04
@@ -48,10 +56,10 @@ jobs:
       - name: Run soak, sample process working-set and GC collections
         shell: bash
         env:
-          DURATION: ${{ inputs.duration }}
-          VUS: ${{ inputs.vus }}
-          PAYLOAD_BYTES: ${{ inputs.payload_bytes }}
-          REUSE_CONNECTIONS: ${{ inputs.connection_reuse }}
+          DURATION: ${{ inputs.duration || '1h' }}
+          VUS: ${{ inputs.vus || '75' }}
+          PAYLOAD_BYTES: ${{ inputs.payload_bytes || '0' }}
+          REUSE_CONNECTIONS: ${{ inputs.connection_reuse || 'true' }}
         run: |
           set -euo pipefail
           mkdir -p artifacts/soak
