@@ -1,5 +1,6 @@
 """Report process memory and GC trends without claiming a leak or lack of one."""
 import json
+import os
 import pathlib
 import sys
 
@@ -23,6 +24,25 @@ for i in range(48):
     if p99 is None:
         continue
     five_minute.append({"start_minute": i * 5, "p99_ms": round(p99, 3)})
+# Strict opt-in gate: the global error percentage can hide a 55-minute outage
+# after millions of early successes. Every expected five-minute slice must
+# contain requests and meet its own availability threshold.
+expected_windows = int(os.environ.get("SOAK_EXPECTED_WINDOWS", "0"))
+if expected_windows < 0 or expected_windows > 48:
+    raise ValueError("SOAK_EXPECTED_WINDOWS must be 0..48")
+availability_windows = []
+for i in range(expected_windows):
+    m = summary.get(f"soak_failure_rate_5m_window_{i}")
+    if m is None:
+        availability_windows.append({"start_minute": i * 5, "requests": 0,
+                                     "failure_rate": None, "passed": False})
+        continue
+    count = int(m.get("passes", 0)) + int(m.get("fails", 0))
+    rate = m.get("value")
+    passed = count > 0 and rate is not None and rate < 0.01
+    availability_windows.append({"start_minute": i * 5, "requests": count,
+                                 "failure_rate": rate, "passed": passed})
+soak_continuity_pass = all(x["passed"] for x in availability_windows) if expected_windows else None
 first = five_minute[:3]
 last = five_minute[-3:]
 early = (sum(x["p99_ms"] for x in first) / len(first)) if first else None
@@ -40,6 +60,9 @@ for idx in range(0, len(values), chunk):
             "gen2_collections_delta": part[-1]["gc2Collections"] - part[0]["gc2Collections"],
         })
 report = {
+    "expected_five_minute_availability_windows": expected_windows,
+    "five_minute_availability": availability_windows,
+    "sustained_availability_pass": soak_continuity_pass,
     "five_minute_p99_ms": five_minute,
     "p99_drift_ratio_last_three_vs_first_three": p99_ratio,
     "p99_drift_assessment": "insufficient-window-evidence" if len(five_minute) < 6
@@ -73,3 +96,6 @@ report = {
 }
 (directory / "report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
 print(json.dumps(report, indent=2))
+
+if expected_windows and not soak_continuity_pass:
+    raise SystemExit("SOAK_SLO_FAIL: missing or failed five-minute availability window")
