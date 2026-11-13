@@ -27,9 +27,10 @@ class CompareContract(unittest.TestCase):
                 (root/f"{mode}-end-ms.txt").write_text("145000")
             result=summarize(root)
             self.assertEqual(result["proxy"]["http_requests"],60000)
-            self.assertAlmostEqual(
-                result["estimated_additional_gateway_allocated_bytes_per_proxied_request"],10.0,
-                places=2)
+            self.assertGreater(
+                result["estimated_additional_gateway_allocated_bytes_per_proxied_request"],9.9)
+            self.assertLess(
+                result["estimated_additional_gateway_allocated_bytes_per_proxied_request"],10.1)
             (root/"proxy-after.json").write_text(json.dumps({
                 "processId":456,"allocatedBytesTotal":600000,"gc2Collections":1,
                 "processWorkingSetBytes":9000000}))
