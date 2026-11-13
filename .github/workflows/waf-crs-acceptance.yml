@@ -1,0 +1,26 @@
+name: ModSecurity OWASP CRS external WAF acceptance
+on:
+  push:
+    branches: [main, "feature/**"]
+    paths: ["integrations/WafCrs/**", "tests/WafCrs/**", ".github/workflows/waf-crs-acceptance.yml"]
+  pull_request:
+    paths: ["integrations/WafCrs/**", "tests/WafCrs/**", ".github/workflows/waf-crs-acceptance.yml"]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  waf-traffic:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run OWASP CRS and real HTTP allow/block checks in isolated Docker network
+        shell: bash
+        run: bash tests/WafCrs/verify.sh
+      - name: Upload WAF acceptance logs (lab only)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: waf-crs-http-evidence
+          path: artifacts/waf-crs/
+          retention-days: 14
