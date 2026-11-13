@@ -32,6 +32,8 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: "10.0.x"
+      - name: Verify allocation analyzer contract
+        run: python3 -m unittest discover -s tests/L7/performance/issue24 -p 'test_*.py' -v
       - name: Build exact pinned application version
         run: |
           dotnet build source/tests/L7/GatewayLab/GatewayLab.csproj -c Release
