@@ -365,7 +365,7 @@ try
             using var doc=JsonDocument.Parse(await reply.Content.ReadAsStringAsync());
             return doc.RootElement.GetProperty("count").GetInt32();
         }
-        var applied=await Count(aUrl)+await Count(bUrl);
+        var applied=await Count("http://127.0.0.1:18081")+await Count("http://127.0.0.1:18082");
         maxApplications=Math.Max(maxApplications,applied);
         Require(applied<=1,
             $"transaction {txId} delivered at most once after failover, applied={applied}");
