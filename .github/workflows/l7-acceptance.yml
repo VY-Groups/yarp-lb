@@ -1,0 +1,57 @@
+name: YARP 0.1 - L7 build and traffic acceptance
+
+on:
+  push:
+    branches: [main, "ci/**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: l7-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  l7-acceptance:
+    name: L7 real HTTP - ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, ubuntu-24.04]
+
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v4
+
+      - name: Install .NET 10 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Verify SDK version
+        run: dotnet --info
+
+      - name: Build YARP policy gateway
+        run: dotnet build tests/L7/GatewayLab/GatewayLab.csproj -c Release
+
+      - name: Build test backends
+        run: dotnet build tests/L7/BackendLab/BackendLab.csproj -c Release
+
+      - name: Build integration test runner
+        run: dotnet build tests/L7/Acceptance/Acceptance.csproj -c Release
+
+      - name: Send real requests through YARP and verify failover
+        run: dotnet run --project tests/L7/Acceptance/Acceptance.csproj -c Release --no-build -- "${{ github.workspace }}"
+
+      - name: Upload PASS/FAIL report and process logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: l7-evidence-${{ matrix.os }}
+          path: artifacts/l7/
+          if-no-files-found: warn
+          retention-days: 14
