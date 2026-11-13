@@ -10,6 +10,7 @@
     <Compile Include="../../../src/TrafficPolicies/LoadBalancingExtensions.cs" Link="LoadBalancingExtensions.cs" />
     <Compile Include="../../../control-center/TrafficLifecycle.cs" Link="TrafficLifecycle.cs" />
     <Compile Include="../../../src/TrafficPolicies/BoundedTransportFailureHealthPolicy.cs" Link="BoundedTransportFailureHealthPolicy.cs" />
+    <Compile Include="../../../src/TrafficPolicies/EjectionBudget.cs" Link="EjectionBudget.cs" />
     <Compile Include="../../../control-center/NonBlockingConsoleLogging.cs" Link="NonBlockingConsoleLogging.cs" />
     <Compile Include="../../../control-center/GatewayLoggingConfiguration.cs" Link="GatewayLoggingConfiguration.cs" />
   </ItemGroup>
