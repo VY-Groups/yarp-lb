@@ -19,6 +19,11 @@ bool IsLoopback(HttpContext ctx) =>
 app.MapGet("/health/ready", () =>
     state.Ready ? (IResult)Results.Ok(new { ready = true, node }) : Results.StatusCode(503));
 app.MapGet("/api/identity", () => Results.Ok(new { node }));
+app.MapGet("/api/slow", async (HttpContext ctx) =>
+{
+    await Task.Delay(700, ctx.RequestAborted);
+    return Results.Ok(new { node, slow=true });
+});
 var committed=new ConcurrentDictionary<string,int>(StringComparer.Ordinal);
 app.MapPost("/api/transaction/{id}",(string id) =>
 {
