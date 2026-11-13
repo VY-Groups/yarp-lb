@@ -1,6 +1,6 @@
 import http from 'k6/http';
 import { check } from 'k6';
-import { Counter, Trend } from 'k6/metrics';
+import { Counter, Trend, Rate } from 'k6/metrics';
 
 const negotiatedTls = new Counter('lab_tls_negotiated_responses');
 
@@ -10,6 +10,9 @@ const soakOriginMs = Number(__ENV.SOAK_START_EPOCH_MS || '0');
 const soakWindowSeconds = 300;
 const soakWindows = soakOriginMs > 0
   ? Array.from({length: 48}, (_, index) => new Trend('soak_p99_5m_window_' + index))
+  : [];
+const soakFailures = soakOriginMs > 0
+  ? Array.from({length: 48}, (_, index) => new Rate('soak_failure_rate_5m_window_' + index))
   : [];
 
 const duration = __ENV.DURATION || '20s';
@@ -37,16 +40,21 @@ export default function () {
   const target = direct ? backend : (__ENV.TARGET || 'http://127.0.0.1:18080');
   const path = payloadBytes > 0 ? '/api/payload/' + payloadBytes : '/api/identity';
   const response = http.get(target + path, { timeout: '10s' });
-  if (soakWindows.length && Number.isFinite(response.timings.duration)) {
+  if (soakWindows.length) {
     const bucket = Math.floor((Date.now() - soakOriginMs) / (soakWindowSeconds * 1000));
-    if (bucket >= 0 && bucket < soakWindows.length)
-      soakWindows[bucket].add(response.timings.duration);
+    if (bucket >= 0 && bucket < soakWindows.length) {
+      // Count every attempt, including network failures with no duration/body.
+      soakFailures[bucket].add(!response || response.status !== 200);
+      if (response && response.timings && Number.isFinite(response.timings.duration))
+        soakWindows[bucket].add(response.timings.duration);
+    }
   }
   const needsTls = target.startsWith('https://');
   if (needsTls && response.tls_version) negotiatedTls.add(1);
   check(response, {
     'status HTTP 200': r => r.status === 200,
-    'response valid': r => payloadBytes > 0 ? r.body.length === payloadBytes : r.body.includes('"node"'),
+    'response valid': r => typeof r.body === 'string' &&
+      (payloadBytes > 0 ? r.body.length === payloadBytes : r.body.includes('"node"')),
     'TLS negotiated on HTTPS': r => !needsTls || (r.tls_version && r.tls_version !== ''),
   });
 }
