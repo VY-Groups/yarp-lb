@@ -15,17 +15,21 @@ var allowedThumbprints = builder.Configuration.GetSection("Agent:TrustedClientTh
 var allowedServices = builder.Configuration.GetSection("Agent:AllowedServices").Get<string[]>() ?? [];
 var allowActions = builder.Configuration.GetValue<bool>("Agent:EnableServiceActions");
 var allowConfigChanges = builder.Configuration.GetValue<bool>("Agent:EnableConfigChanges");
+var allowEngineConfigChanges = builder.Configuration.GetValue<bool>("Agent:EnableEngineConfigChanges");
+var allowEnginePublicBind = builder.Configuration.GetValue<bool>("Agent:AllowEngineNonLoopbackListeners");
+var enginePaths = builder.Configuration.GetSection("Agent:EngineConfigPaths")
+    .Get<Dictionary<string,string>>() ?? new Dictionary<string,string>();
 var gatewayConfigPath = builder.Configuration["Agent:GatewayConfigPath"] ?? "";
 var stageRoot = builder.Configuration["Agent:StageDirectory"] ?? "";
 var keyPaths = builder.Configuration.GetSection("Agent:TrustedSigningPublicKeyPaths").Get<string[]>() ?? [];
 // Legacy single-key path remains a migration input only. V1 signatures are rejected.
 if (keyPaths.Length == 0 && !string.IsNullOrWhiteSpace(builder.Configuration["Agent:ControllerSigningPublicKeyPath"]))
     keyPaths = [builder.Configuration["Agent:ControllerSigningPublicKeyPath"]!];
-if (allowConfigChanges && (keyPaths.Length is < 1 or > 3 ||
+if ((allowConfigChanges || allowEngineConfigChanges) && (keyPaths.Length is < 1 or > 3 ||
     keyPaths.Any(p => !Path.IsPathFullyQualified(p) || !File.Exists(p))))
     throw new InvalidOperationException("Config rollout requires 1-3 existing absolute pinned public-key paths");
 var signingKeys = new Dictionary<string, string>(StringComparer.Ordinal);
-if (allowConfigChanges)
+if (allowConfigChanges || allowEngineConfigChanges)
 foreach (var path in keyPaths)
 {
     var pem = File.ReadAllText(path);
@@ -36,7 +40,12 @@ foreach (var path in keyPaths)
 if (allowConfigChanges && (!Path.IsPathFullyQualified(gatewayConfigPath) ||
     !Path.IsPathFullyQualified(stageRoot) || !File.Exists(gatewayConfigPath)))
     throw new InvalidOperationException("Config changes require an existing absolute gateway config path and absolute stage directory");
-if (allowConfigChanges) Directory.CreateDirectory(stageRoot);
+if (allowEngineConfigChanges &&
+    (enginePaths.Count is < 1 or > 2 || !Path.IsPathFullyQualified(stageRoot) ||
+     enginePaths.Any(e => !EngineConfigContract.ValidEngineId(e.Key) ||
+         !Path.IsPathFullyQualified(e.Value) || !File.Exists(e.Value))))
+    throw new InvalidOperationException("Engine changes require explicit allowlisted L4/GSLB file paths and an absolute staging directory");
+if (allowConfigChanges || allowEngineConfigChanges) Directory.CreateDirectory(stageRoot);
 var sequencePath = Path.Combine(stageRoot, "last-accepted-sequence.txt");
 var revisionLock = new SemaphoreSlim(1,1);
 static string Sha(byte[] data) => Convert.ToHexString(SHA256.HashData(data));
@@ -70,6 +79,7 @@ app.MapGet("/agent/v1/status", () => Results.Ok(new
     utc = DateTimeOffset.UtcNow,
     serviceManagementEnabled = allowActions,
     configDeploymentEnabled = allowConfigChanges,
+    engineConfigStagingEnabled = allowEngineConfigChanges,
     revision = allowConfigChanges ? Sha(File.ReadAllBytes(gatewayConfigPath)) : null,
     allowedServiceNames = allowedServices,
     highestAcceptedSequence = allowConfigChanges ? FleetSequenceState.Read(sequencePath) : 0,
@@ -190,6 +200,118 @@ app.MapPost("/agent/v1/config/rollback", async (ConfigRollback input) =>
     }
     finally {revisionLock.Release();}
 });
+
+app.MapGet("/agent/v1/engines", () =>
+{
+    if (!allowEngineConfigChanges) return Results.Problem("Engine management disabled",statusCode:403);
+    return Results.Ok(enginePaths.Select(row => new {
+        engineId=row.Key, revision=Sha(File.ReadAllBytes(row.Value)),
+        mode="signed-file-staging-only", serviceRestarted=false
+    }).ToArray());
+});
+
+app.MapPost("/agent/v1/engines/{engineId}/config/prepare", async (string engineId, EnginePrepare input) =>
+{
+    if (!allowEngineConfigChanges) return Results.Problem("Engine management disabled",statusCode:403);
+    if (!enginePaths.TryGetValue(engineId,out var configPath)) return Results.NotFound();
+    if (!ValidTx(input.TransactionId) || input.Config is not JsonObject candidate ||
+        !EngineConfigContract.Validate(engineId,candidate,allowEnginePublicBind))
+        return Results.BadRequest(new { error="Invalid engine config or listener binding policy" });
+    var signature=new FleetConfigSignature.SignedV2(input.KeyId,input.Sequence,
+        input.ExpiresUnixSeconds,input.Signature);
+    if (!EngineConfigContract.Verify(signingKeys,engineId,input.TransactionId,
+        input.ExpectedRevision,candidate,signature,DateTimeOffset.UtcNow.ToUnixTimeSeconds()))
+        return Results.Problem("Invalid, expired or wrong-engine signed payload",statusCode:403);
+    await revisionLock.WaitAsync();
+    try
+    {
+        var original=await File.ReadAllBytesAsync(configPath);
+        var revision=Sha(original);
+        if (!revision.Equals(input.ExpectedRevision,StringComparison.OrdinalIgnoreCase))
+            return Results.Conflict(new {error="Engine config drift",currentRevision=revision});
+        var staging=Path.Combine(stageRoot,"engines",engineId);
+        Directory.CreateDirectory(staging);
+        var tx=Path.Combine(staging,input.TransactionId);
+        if (Directory.Exists(tx)) return Results.Conflict(new {error="Duplicate transaction"});
+        var seqPath=Path.Combine(staging,"last-accepted-sequence.txt");
+        if (input.Sequence <= FleetSequenceState.Read(seqPath))
+            return Results.Conflict(new {error="Signed sequence reused"});
+        FleetSequenceState.Accept(seqPath,input.Sequence);
+        Directory.CreateDirectory(tx);
+        var proposed=Encoding.UTF8.GetBytes(candidate.ToJsonString(new JsonSerializerOptions{WriteIndented=true}));
+        await File.WriteAllBytesAsync(Path.Combine(tx,"original.json"),original);
+        await File.WriteAllBytesAsync(Path.Combine(tx,"prepared.json"),proposed);
+        await File.WriteAllTextAsync(Path.Combine(tx,"sequence.txt"),input.Sequence.ToString(
+            System.Globalization.CultureInfo.InvariantCulture));
+        return Results.Ok(new {state="prepared",engineId,transactionId=input.TransactionId,
+            originalRevision=revision,preparedRevision=Sha(proposed)});
+    }
+    finally {revisionLock.Release();}
+});
+
+app.MapPost("/agent/v1/engines/{engineId}/config/activate", async (string engineId, EngineActivate input) =>
+{
+    if (!allowEngineConfigChanges) return Results.Problem("Engine management disabled",statusCode:403);
+    if (!enginePaths.TryGetValue(engineId,out var configPath)) return Results.NotFound();
+    if (!ValidTx(input.TransactionId)) return Results.BadRequest();
+    await revisionLock.WaitAsync();
+    try
+    {
+        var stage=Path.Combine(stageRoot,"engines",engineId);
+        var tx=Path.Combine(stage,input.TransactionId);
+        var prepared=Path.Combine(tx,"prepared.json");
+        var originalPath=Path.Combine(tx,"original.json");
+        var seqFile=Path.Combine(tx,"sequence.txt");
+        if (!File.Exists(prepared) || !File.Exists(originalPath) || !File.Exists(seqFile))
+            return Results.NotFound();
+        if (!long.TryParse(await File.ReadAllTextAsync(seqFile),out var sequence) ||
+            sequence != FleetSequenceState.Read(Path.Combine(stage,"last-accepted-sequence.txt")))
+            return Results.Conflict(new {error="Transaction superseded"});
+        var proposed=await File.ReadAllBytesAsync(prepared);
+        if (!Sha(proposed).Equals(input.PreparedRevision,StringComparison.OrdinalIgnoreCase))
+            return Results.Conflict(new {error="Prepared revision mismatch"});
+        var original=await File.ReadAllBytesAsync(originalPath);
+        if (Sha(await File.ReadAllBytesAsync(configPath)) != Sha(original))
+            return Results.Conflict(new {error="Engine config changed after prepare"});
+        await File.WriteAllBytesAsync(configPath+".next",proposed);
+        File.Move(configPath+".next",configPath,true);
+        app.Logger.LogWarning("Engine {Engine} config activated transaction {Tx}; restart NOT performed",engineId,input.TransactionId);
+        return Results.Ok(new {engineId,state="activated-file-only",revision=Sha(proposed),requiresRestart=true});
+    }
+    finally {revisionLock.Release();}
+});
+
+app.MapPost("/agent/v1/engines/{engineId}/config/rollback", async (string engineId, EngineRollback input) =>
+{
+    if (!allowEngineConfigChanges) return Results.Problem("Engine management disabled",statusCode:403);
+    if (!enginePaths.TryGetValue(engineId,out var configPath)) return Results.NotFound();
+    if (!ValidTx(input.TransactionId)) return Results.BadRequest();
+    await revisionLock.WaitAsync();
+    try
+    {
+        var stage=Path.Combine(stageRoot,"engines",engineId);
+        var tx=Path.Combine(stage,input.TransactionId);
+        var originalPath=Path.Combine(tx,"original.json");
+        var preparedPath=Path.Combine(tx,"prepared.json");
+        var seqFile=Path.Combine(tx,"sequence.txt");
+        if (!File.Exists(originalPath) || !File.Exists(preparedPath) || !File.Exists(seqFile))
+            return Results.NotFound();
+        if (!long.TryParse(await File.ReadAllTextAsync(seqFile),out var sequence) ||
+            sequence != FleetSequenceState.Read(Path.Combine(stage,"last-accepted-sequence.txt")))
+            return Results.Conflict(new {error="Cannot roll back superseded transaction"});
+        var original=await File.ReadAllBytesAsync(originalPath);
+        var proposed=await File.ReadAllBytesAsync(preparedPath);
+        var actual=Sha(await File.ReadAllBytesAsync(configPath));
+        if (actual != Sha(original) && actual != Sha(proposed))
+            return Results.Conflict(new {error="Engine config drift; manual recovery required"});
+        await File.WriteAllBytesAsync(configPath+".next",original);
+        File.Move(configPath+".next",configPath,true);
+        app.Logger.LogWarning("Engine {Engine} config rolled back transaction {Tx}; restart NOT performed",engineId,input.TransactionId);
+        return Results.Ok(new {engineId,state="rolled-back-file-only",revision=Sha(original),requiresRestart=true});
+    }
+    finally {revisionLock.Release();}
+});
+
 app.Run();
 
 static async Task<(int exitCode, string output)> RunSc(string command, string serviceName)
@@ -211,3 +333,8 @@ record ConfigPrepare(string TransactionId, string ExpectedRevision, JsonObject R
     long ExpiresUnixSeconds, long Sequence, string KeyId, string Signature);
 record ConfigActivate(string TransactionId, string PreparedRevision);
 record ConfigRollback(string TransactionId);
+
+record EnginePrepare(string TransactionId,string ExpectedRevision,JsonObject Config,
+    long ExpiresUnixSeconds,long Sequence,string KeyId,string Signature);
+record EngineActivate(string TransactionId,string PreparedRevision);
+record EngineRollback(string TransactionId);
