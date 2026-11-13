@@ -153,8 +153,13 @@ void Record(string name, object details)
 }
 async Task<bool> RoutesOnly(string node)
 {
-    var sample = await Sample(20, 5);
-    return sample.Success == 20 && sample.Nodes.GetValueOrDefault(node) == 20;
+    // Two independent batches avoid accidental success from an 80%-weighted
+    // destination before the asynchronous active health probe settles.
+    var first = await Sample(80, 12);
+    if (first.Success != 80 || first.Nodes.GetValueOrDefault(node) != 80) return false;
+    await Task.Delay(300);
+    var second = await Sample(80, 12);
+    return second.Success == 80 && second.Nodes.GetValueOrDefault(node) == 80;
 }
 
 void CheckRendezvous()
