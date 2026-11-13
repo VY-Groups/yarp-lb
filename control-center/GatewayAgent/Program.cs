@@ -50,7 +50,7 @@ var sequencePath = Path.Combine(stageRoot, "last-accepted-sequence.txt");
 var revisionLock = new SemaphoreSlim(1,1);
 static string Sha(byte[] data) => Convert.ToHexString(SHA256.HashData(data));
 static bool ValidTx(string id) => Regex.IsMatch(id, "^[A-Za-z0-9_-]{12,80}$");
-if (allowedThumbprints.Length == 0) throw new InvalidOperationException("No trusted client certificates configured");
+var normalized = AgentClientCertificatePolicy.ParsePinnedThumbprints(allowedThumbprints);
 if (allowedServices.Any(x => !Regex.IsMatch(x, "^[A-Za-z0-9_.-]{1,64}$")))
     throw new InvalidOperationException("Invalid allowlisted Windows service name");
 builder.WebHost.ConfigureKestrel(server =>
@@ -62,12 +62,11 @@ builder.WebHost.ConfigureKestrel(server =>
     });
 });
 var app = builder.Build();
-var normalized = allowedThumbprints.Select(x => x.Replace(" ", "").ToUpperInvariant()).ToHashSet();
+
 app.Use(async (ctx, next) =>
 {
     // Kestrel performs TLS chain validation. This additionally pins controller identities.
-    var cert = ctx.Connection.ClientCertificate;
-    if (!ctx.Request.IsHttps || cert is null || !normalized.Contains(cert.Thumbprint.ToUpperInvariant()))
+    if (!AgentClientCertificatePolicy.IsAuthorized(ctx, normalized))
     { ctx.Response.StatusCode = StatusCodes.Status403Forbidden; return; }
     ctx.Response.Headers.CacheControl = "no-store";
     await next();
