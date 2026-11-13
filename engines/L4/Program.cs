@@ -247,9 +247,16 @@ static async Task RelayUdpResponse(UdpSession session, Socket downstream, Cancel
     catch (Exception ex) when (ex is SocketException or ObjectDisposedException or OperationCanceledException) { }
 }
 sealed record L4Config(bool AllowNonLoopbackListeners, L4Listener[] Tcp, L4Listener[] Udp);
-sealed record L4Listener(string Name, string ListenHost, int ListenPort, L4Backend[] Backends,
-    int TcpIdleTimeoutSeconds = 300, int ProbeIntervalSeconds = 2, bool SendProxyProtocolV1 = false);
-sealed record L4Backend(string Host, int Port, bool DrainNewConnections = false);
+sealed record L4Listener(string Name, string ListenHost, int ListenPort, L4Backend[] Backends)
+{
+    public int TcpIdleTimeoutSeconds { get; init; } = 300;
+    public int ProbeIntervalSeconds { get; init; } = 2;
+    public bool SendProxyProtocolV1 { get; init; }
+}
+sealed record L4Backend(string Host, int Port)
+{
+    public bool DrainNewConnections { get; init; }
+}
 sealed class TcpTarget
 {
     public TcpTarget(L4Backend backend) => Backend = backend;
