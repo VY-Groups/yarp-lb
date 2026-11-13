@@ -9,6 +9,7 @@ using System.Text.RegularExpressions;
 using System.Security.Claims;
 using System.Security.Cryptography;
 using System.Text;
+using Yarp.ReverseProxy;
 using Yarp.ReverseProxy.Model;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Cookies;
