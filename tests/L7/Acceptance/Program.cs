@@ -89,9 +89,13 @@ void Configure(string policy, int aWeight, int bWeight)
             Clusters = new Dictionary<string, object> {
                 ["api"] = new {
                     LoadBalancingPolicy = policy,
-                    HealthCheck = new { Active = new {
-                        Enabled = true, Interval = "00:00:01", Timeout = "00:00:01",
-                        Policy = "ConsecutiveFailures", Path = "/health/ready" } },
+                    HealthCheck = new {
+                        AvailableDestinationsPolicy = "HealthyAndUnknown",
+                        Active = new {
+                            Enabled = true, Interval = "00:00:01", Timeout = "00:00:01",
+                            Policy = "ConsecutiveFailures", Path = "/health/ready"
+                        }
+                    },
                     Metadata = new Dictionary<string,string> {
                         ["ConsecutiveFailuresHealthPolicy.Threshold"] = "1"
                     },

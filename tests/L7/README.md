@@ -26,7 +26,7 @@ It writes JSON evidence to artifacts/l7/lab-results.json and process stdout/stde
 | Rendezvous | 5,000 deterministic keys; only removed node's clients move |
 | Live reload | Weight change while sending 5,000 requests, no lost responses |
 | Backend health | Unhealthy A removed; healthy B continues; A recovers |
-| Both down | HTTP 503 rather than false success |
+| Both down | HTTP 503 with explicitly configured HealthyAndUnknown policy |
 | In-flight failure | Killing A mid-request must not report HTTP 2xx |
 | Backend restart | A re-enters selection after restart |
 
@@ -39,3 +39,5 @@ It writes JSON evidence to artifacts/l7/lab-results.json and process stdout/stde
 - Health timing is aggressive to reduce CI runtime.
 
 Never upload credentials, real customer data or production certificates.
+
+**YARP default behavior:** HealthyOrPanic deliberately routes to unhealthy destinations if all health checks fail. The lab explicitly configures HealthyAndUnknown to enforce fail-closed 503 behavior. Choose the production policy based on service risk and readiness semantics.
