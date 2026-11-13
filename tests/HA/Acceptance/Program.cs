@@ -24,7 +24,8 @@ void Require(bool ok, string description)
     Console.WriteLine("PASS: " + description);
     checks.Add(new { description, utc = DateTimeOffset.UtcNow });
 }
-void Config(string path, IEnumerable<(string Id, string Address)> destinations, string probe)
+void Config(string path, IEnumerable<(string Id, string Address)> destinations,
+    string probe, bool explicitPanic = false)
 {
     var dict = destinations.ToDictionary(d => d.Id, d => new
     {
@@ -41,18 +42,21 @@ void Config(string path, IEnumerable<(string Id, string Address)> destinations, 
                 ["api"] = new {
                     LoadBalancingPolicy = "RoundRobin",
                     HealthCheck = new {
-                        AvailableDestinationsPolicy = "HealthyAndUnknown",
+                        AvailableDestinationsPolicy = explicitPanic ? "HealthyOrPanic" : "HealthyAndUnknown", // never implicit panic,
                         Active = new {
-                            Enabled = true, Interval = "00:00:01",
-                            Timeout = "00:00:01", Policy = "ConsecutiveFailures", Path = probe },
+                            Enabled = true, Interval = probe == "/lab/ping" ? "00:00:00.500" : "00:00:01",
+                            Timeout = probe == "/lab/ping" ? "00:00:00.500" : "00:00:01",
+                            Policy = "ConsecutiveFailures", Path = probe },
                         Passive = new {
                             Enabled = probe == "/lab/ping",
-                            Policy = "ImmediateTransportFailure",
-                            ReactivationPeriod = "00:00:30"
+                            Policy = "BoundedTransportFailure",
+                            ReactivationPeriod = "00:00:02"
                         }
                     },
                     Metadata = new Dictionary<string,string> {
-                        ["ConsecutiveFailuresHealthPolicy.Threshold"] = "1"
+                        ["ConsecutiveFailuresHealthPolicy.Threshold"] = "1",
+                        ["BoundedTransportFailure.MaxEjectedPercent"] = "50",
+                        ["BoundedTransportFailure.MinHealthyRemaining"] = "1"
                     },
                     Destinations = dict
                 }
@@ -151,7 +155,29 @@ try
     await WaitFor("ingress",()=>Responds("http://127.0.0.1:19080/lab/ping"));
     await Task.Delay(2500);
     var initial=await Sample(300);
-    Require(initial.Ok==300,"300 HTTP requests traverse ingress and both healthy gateway candidates");
+    checks.Add(new {description="initial-ingress-warmup",successful=initial.Ok,
+        failed=initial.Fail,utc=DateTimeOffset.UtcNow});
+    // A gateway may report /lab/ping before active health's very first probe
+    // marks both destinations eligible (particularly on loaded Windows CI).
+    // We allow a bounded warmup but NEVER discard the initial failure evidence.
+    if(initial.Ok!=300)
+    {
+        await WaitFor("two complete post-warmup ingress samples",async () =>
+        {
+            var first=await Sample(300);
+            if(first.Ok!=300) return false;
+            var second=await Sample(300);
+            return second.Ok==300;
+        },20);
+        initial=await Sample(300);
+    }
+    Require(initial.Ok==300,
+        $"300 HTTP requests traverse ingress after bounded health warmup, ok={initial.Ok} fail={initial.Fail}");
+    using(var slow=await client.GetAsync("http://127.0.0.1:19080/api/slow"))
+        Require(slow.StatusCode==HttpStatusCode.OK,
+            "700ms slow but healthy upstream response is not misclassified as failed");
+    Require((await Sample(100)).Ok==100,
+        "healthy edge remains routable after slow upstream response");
 
     // A production-like MAINTENANCE stop is a two-step sequence: mark gateway
     // unready -> wait until ingress routes solely to the survivor -> gracefully
@@ -310,12 +336,52 @@ try
             Math.Round(failuresAfter.Max(x => x.CompletedMs - killAtMs),1),
         observedFailureWindowMs = failuresAfter.Length == 0 ? 0 :
             Math.Round(failuresAfter.Max(x => x.CompletedMs) - failuresAfter.Min(x => x.CompletedMs),1),
+        lastFailureAfterKillUnder2s = failuresAfter.Length == 0 ||
+            failuresAfter.Max(x=>x.CompletedMs - killAtMs) <= 2000,
         p95LatencyMs = Math.Round(Percentile(latencies,0.95),2),
         p99LatencyMs = Math.Round(Percentile(latencies,0.99),2),
         caveat = "Last observed failure offset is NOT a YARP health-detection timestamp; in-flight retries are not assumed."
     };
     checks.Add(new { description="continuous-load-failover", evidence=failoverEvidence });
+    Require(failoverEvidence.lastFailureAfterKillUnder2s,
+        "Windows/Ubuntu last observed gateway-kill failure ends within 2s of fault");
     Console.WriteLine("FAILOVER UNDER LOAD: "+JsonSerializer.Serialize(failoverEvidence));
+    // Non-idempotent requests have a strict ZERO automatic replay budget.
+    // A lost HTTP response may hide an applied operation, therefore count
+    // backend side effects rather than using status alone as an oracle.
+    var txStatuses=new List<int>();
+    var maxApplications=0;
+    for(var i=0;i<24;i++)
+    {
+        var txId="neverretry"+i.ToString("D6");
+        int status;
+        try
+        {
+            using var response=await client.PostAsync(
+                "http://127.0.0.1:19080/api/transaction/"+txId,
+                new StringContent("one-commit"));
+            status=(int)response.StatusCode;
+        }
+        catch(HttpRequestException) {status=0;}
+        txStatuses.Add(status);
+        async Task<int> Count(string host)
+        {
+            using var reply=await client.GetAsync(host+"/lab/transaction-count/"+txId);
+            reply.EnsureSuccessStatusCode();
+            using var doc=JsonDocument.Parse(await reply.Content.ReadAsStringAsync());
+            return doc.RootElement.GetProperty("count").GetInt32();
+        }
+        var applied=await Count("http://127.0.0.1:18081")+await Count("http://127.0.0.1:18082");
+        maxApplications=Math.Max(maxApplications,applied);
+        Require(applied<=1,
+            $"transaction {txId} delivered at most once after failover, applied={applied}");
+        if(status==200) Require(applied==1,
+            $"HTTP 200 transaction {txId} committed exactly once");
+    }
+    checks.Add(new {description="non-idempotent-post-no-replay",
+        evidence=new {attempts=txStatuses.Count,maxApplications,
+            successful=txStatuses.Count(x=>x==200),failed=txStatuses.Count(x=>x!=200),
+            retryBudget=0}});
     var afterFailure=await Sample(400);
     Require(afterFailure.Ok==400,
         "gateway 1 terminated: 400/400 NEW requests continue through remaining gateway");
@@ -333,6 +399,27 @@ try
     await gateway2.WaitForExitAsync();
     await WaitFor("both down gives HTTP 503",()=>Responds("http://127.0.0.1:19080/api/identity",503));
     Require(true,"ingress refuses traffic rather than forwarding to known dead gateways");
+    // Opt-in panic is an explicitly different availability contract: on TOTAL
+    // loss YARP retries known dead candidate destinations once as NEW requests
+    // (not a replay of a previously forwarded non-idempotent operation).
+    // Never enable this for CA/RA signing or enrollment without risk approval.
+    Config(edgeConfig,new[] {("gateway-1","http://127.0.0.1:18080/"),
+        ("gateway-2","http://127.0.0.1:18083/")}, "/lab/ping", explicitPanic:true);
+    await WaitFor("explicit panic tries all-down destinations",async () =>
+    {
+        try
+        {
+            using var response=await client.GetAsync("http://127.0.0.1:19080/api/identity");
+            return (int)response.StatusCode==502;
+        }
+        catch {return false;}
+    },20);
+    checks.Add(new {description="all-down-explicit-panic",
+        evidence="opt-in YARP HealthyOrPanic attempts dead backends; default 503 remains safer"});
+    Config(edgeConfig,new[] {("gateway-1","http://127.0.0.1:18080/"),
+        ("gateway-2","http://127.0.0.1:18083/")}, "/lab/ping", explicitPanic:false);
+    await WaitFor("reverted all-down policy fails closed with HTTP 503",
+        ()=>Responds("http://127.0.0.1:19080/api/identity",503),20);
     success=true;
     Console.WriteLine("ALL HA LAB INTEGRATION CHECKS PASSED");
 }
