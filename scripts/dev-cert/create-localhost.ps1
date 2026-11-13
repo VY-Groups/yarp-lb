@@ -8,7 +8,7 @@ if ([string]::IsNullOrWhiteSpace($env:DEV_PFX_PASSWORD)) {
 New-Item -ItemType Directory -Path $OutputDirectory -Force | Out-Null
 $folder = (Resolve-Path $OutputDirectory).Path
 $cert = New-SelfSignedCertificate -DnsName "localhost" `
-    -CertStoreLocation "Cert:\\CurrentUser\\My" -Type SSLServerAuthentication `
+    -CertStoreLocation "Cert:\CurrentUser\My" -Type SSLServerAuthentication `
     -KeyAlgorithm RSA -KeyLength 3072 -KeyExportPolicy Exportable `
     -NotAfter (Get-Date).AddDays(7)
 $password = ConvertTo-SecureString $env:DEV_PFX_PASSWORD -AsPlainText -Force
