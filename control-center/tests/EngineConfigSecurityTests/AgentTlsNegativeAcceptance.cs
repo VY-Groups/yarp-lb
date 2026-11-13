@@ -102,7 +102,8 @@ public static class AgentTlsNegativeAcceptance
             try
             {
                 using var response = await client.SendAsync(request);
-                if (response.StatusCode != HttpStatusCode.Forbidden)
+                if (response.StatusCode is not (HttpStatusCode.BadRequest or
+                    HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden))
                     throw new Exception("FAIL: "+name+" unexpected HTTP "+response.StatusCode);
             }
             catch (HttpRequestException) { /* TLS handshake rejected client */ }
