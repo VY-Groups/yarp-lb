@@ -47,6 +47,8 @@ jobs:
         run: dotnet build GatewayAgent/SpeedSignGatewayAgent.csproj --configuration Release
       - name: Run load balancing core tests
         run: dotnet run --project tests/LoadBalancingCoreTests/LoadBalancingCoreTests.csproj --configuration Release
+      - name: Verify actual Control Center console cannot block gateway request threads
+        run: dotnet run --project tests/NonBlockingConsoleLoggerTests/NonBlockingConsoleLoggerTests.csproj --configuration Release
       - name: Verify signed fleet configuration acceptance
         run: dotnet run --project tests/FleetConfigSignatureTests/FleetConfigSignatureTests.csproj --configuration Release
       - name: Verify signed independent engine config contracts
