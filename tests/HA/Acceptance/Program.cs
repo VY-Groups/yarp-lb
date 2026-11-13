@@ -44,7 +44,12 @@ void Config(string path, IEnumerable<(string Id, string Address)> destinations, 
                         AvailableDestinationsPolicy = "HealthyAndUnknown",
                         Active = new {
                             Enabled = true, Interval = "00:00:01",
-                            Timeout = "00:00:01", Policy = "ConsecutiveFailures", Path = probe }
+                            Timeout = "00:00:01", Policy = "ConsecutiveFailures", Path = probe },
+                        Passive = new {
+                            Enabled = probe == "/lab/ping",
+                            Policy = "ImmediateTransportFailure",
+                            ReactivationPeriod = "00:00:30"
+                        }
                     },
                     Metadata = new Dictionary<string,string> {
                         ["ConsecutiveFailuresHealthPolicy.Threshold"] = "1"
@@ -131,24 +136,92 @@ try
     var backend2=Start("backend-b",backendDll,["18082","B"]);
     await WaitFor("application backends",async()=>await Responds("http://127.0.0.1:18081/health/ready") &&
         await Responds("http://127.0.0.1:18082/health/ready"));
-    Dictionary<string,string> Settings(int port,int tls,string path) => new()
+    Dictionary<string,string> Settings(int port,int tls,string path, string nodeName) => new()
     {
         ["YARP_LAB_HTTP_PORT"]=port.ToString(),
         ["YARP_LAB_TLS_PORT"]=tls.ToString(),
-        ["YARP_LAB_CONFIG_FILE"]=path
+        ["YARP_LAB_CONFIG_FILE"]=path,
+        ["YARP_LAB_GATEWAY_ID"]=nodeName
     };
-    var gateway1=Start("gateway-1",gatewayDll,[],Settings(18080,18443,g1config));
-    var gateway2=Start("gateway-2",gatewayDll,[],Settings(18083,18444,g2config));
+    var gateway1=Start("gateway-1",gatewayDll,[],Settings(18080,18443,g1config,"gateway-1"));
+    var gateway2=Start("gateway-2",gatewayDll,[],Settings(18083,18444,g2config,"gateway-2"));
     await WaitFor("both YARP gateways",async()=>await Responds("http://127.0.0.1:18080/lab/ping") &&
         await Responds("http://127.0.0.1:18083/lab/ping"));
-    _=Start("health-aware-ingress",gatewayDll,[],Settings(19080,19443,edgeConfig));
+    _=Start("health-aware-ingress",gatewayDll,[],Settings(19080,19443,edgeConfig,""));
     await WaitFor("ingress",()=>Responds("http://127.0.0.1:19080/lab/ping"));
     await Task.Delay(2500);
     var initial=await Sample(300);
     Require(initial.Ok==300,"300 HTTP requests traverse ingress and both healthy gateway candidates");
+
+    // A production-like MAINTENANCE stop is a two-step sequence: mark gateway
+    // unready -> wait until ingress routes solely to the survivor -> gracefully
+    // shut down Kestrel. SIGTERM on Linux enters the same host-stop lifecycle.
+    // A plain SIGTERM with no prior drain is NOT asserted zero loss.
+    var gracefulStatuses = new ConcurrentQueue<(double AtMs,int Status,string Gateway)>();
+    using var gracefulCancel = new CancellationTokenSource();
+    var gracefulOrigin = Stopwatch.GetTimestamp();
+    var gracefulWorkers = Enumerable.Range(0,16).Select(async _ =>
+    {
+        while (!gracefulCancel.IsCancellationRequested)
+        {
+            int status=0; string selected="?";
+            try
+            {
+                using var response=await client.GetAsync("http://127.0.0.1:19080/api/identity",gracefulCancel.Token);
+                status=(int)response.StatusCode;
+                selected=response.Headers.TryGetValues("X-Lab-Gateway",out var headers)
+                    ? headers.FirstOrDefault() ?? "?" : "?";
+            }
+            catch(OperationCanceledException) when (gracefulCancel.IsCancellationRequested) { break; }
+            catch(Exception ex) when (ex is HttpRequestException or TaskCanceledException or IOException) { }
+            gracefulStatuses.Enqueue((Stopwatch.GetElapsedTime(gracefulOrigin).TotalMilliseconds,status,selected));
+            try { await Task.Delay(20,gracefulCancel.Token); }
+            catch(OperationCanceledException) { break; }
+        }
+    }).ToArray();
+    await Task.Delay(1250);
+    var gracefulDrainStart=Stopwatch.GetElapsedTime(gracefulOrigin).TotalMilliseconds;
+    using (var drainReply=await client.PostAsync("http://127.0.0.1:18080/lab/drain",null))
+        drainReply.EnsureSuccessStatusCode();
+    await WaitFor("gateway 1 readiness drops",()=>Responds("http://127.0.0.1:18080/lab/ping",503));
+    // Ensure ingress has converged, not merely that gateway 1 self-declares drain.
+    await WaitFor("ingress routes to gateway 2 only",async () =>
+    {
+        for (var i=0;i<25;i++)
+        {
+            using var res=await client.GetAsync("http://127.0.0.1:19080/api/identity");
+            if (!res.IsSuccessStatusCode || !res.Headers.TryGetValues("X-Lab-Gateway",out var values) ||
+                values.FirstOrDefault()!="gateway-2") return false;
+        }
+        return true;
+    },20);
+    var gracefulReadyMs=Stopwatch.GetElapsedTime(gracefulOrigin).TotalMilliseconds;
+    using (var gracefulStop=await client.PostAsync("http://127.0.0.1:18080/lab/graceful-stop",null))
+        gracefulStop.EnsureSuccessStatusCode();
+    using(var graceTimeout=new CancellationTokenSource(TimeSpan.FromSeconds(20)))
+        await gateway1.WaitForExitAsync(graceTimeout.Token);
+    await Task.Delay(1500);
+    gracefulCancel.Cancel();
+    await Task.WhenAll(gracefulWorkers);
+    var gracefulArray=gracefulStatuses.ToArray();
+    var gracefulFailures=gracefulArray.Where(x=>x.Status!=200).ToArray();
+    Require(gracefulArray.Length>=100,"graceful lifecycle measured >=100 requests");
+    Require(gracefulFailures.Length==0,
+        $"pre-drained graceful host stop caused zero HTTP errors: observed {gracefulFailures.Length}");
+    checks.Add(new {description="graceful-drain-under-load",
+        evidence=new { method="pre-drain followed by IHostApplicationLifetime.StopApplication",
+          measuredRequests=gracefulArray.Length,failedRequests=gracefulFailures.Length,
+          readinessConvergenceMs=Math.Round(gracefulReadyMs-gracefulDrainStart,1),
+          gateway2Observed=gracefulArray.Count(x=>x.Gateway=="gateway-2") }});
+    // Restore gateway 1 to run the independent sudden-crash (SIGKILL) scenario.
+    gateway1=Start("gateway-1-after-graceful",gatewayDll,[],Settings(18080,18443,g1config,"gateway-1"));
+    await WaitFor("gateway 1 restored after graceful stop",()=>Responds("http://127.0.0.1:18080/lab/ping"));
+    await Task.Delay(2500);
+    Require((await Sample(150)).Ok==150,"both gateways functional before SIGKILL test");
+
     // Continuous in-flight HTTP traffic spans the exact moment the gateway dies.
     // Every attempted request is counted, including exceptions and status >= 500.
-    var timeline = new ConcurrentQueue<(double StartMs, int Status, double LatencyMs)>();
+    var timeline = new ConcurrentQueue<(double StartMs, double CompletedMs, int Status, double LatencyMs)>();
     using var trafficStop = new CancellationTokenSource();
     var epoch = Stopwatch.GetTimestamp();
     var trafficWorkers = Enumerable.Range(0,24).Select(async _ =>
@@ -166,6 +239,7 @@ try
             catch (OperationCanceledException) when (trafficStop.IsCancellationRequested) { break; }
             catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or IOException) { }
             timeline.Enqueue((Stopwatch.GetElapsedTime(epoch,started).TotalMilliseconds,
+                Stopwatch.GetElapsedTime(epoch).TotalMilliseconds,
                 status, Stopwatch.GetElapsedTime(started).TotalMilliseconds));
             try { await Task.Delay(15,trafficStop.Token); }
             catch (OperationCanceledException) { break; }
@@ -179,9 +253,11 @@ try
     trafficStop.Cancel();
     await Task.WhenAll(trafficWorkers);
     var measured = timeline.ToArray();
-    var preKill = measured.Where(x => x.StartMs < killAtMs).ToArray();
-    var postKill = measured.Where(x => x.StartMs >= killAtMs).ToArray();
-    var steadyState = measured.Where(x => x.StartMs > killAtMs + 4500).ToArray();
+    // Use COMPLETION time so in-flight requests started before the kill but
+    // aborted after it still count as post-fault failures.
+    var preKill = measured.Where(x => x.CompletedMs < killAtMs).ToArray();
+    var postKill = measured.Where(x => x.CompletedMs >= killAtMs).ToArray();
+    var steadyState = measured.Where(x => x.CompletedMs > killAtMs + 4500).ToArray();
     Require(preKill.Length >= 80 && postKill.Length >= 150,
         "continuous load measured requests before and after gateway process death");
     Require(steadyState.Length >= 30 && steadyState.All(x => x.Status == 200),
@@ -201,8 +277,12 @@ try
         afterFailures = failuresAfter.Length,
         failuresByStatus = failuresAfter.GroupBy(x => x.Status)
             .ToDictionary(x => x.Key.ToString(),x=>x.Count()),
-        lastObservedFailureOffsetMs = failuresAfter.Length == 0 ? 0 :
-            Math.Round(failuresAfter.Max(x => x.StartMs - killAtMs),1),
+        firstObservedFailureOffsetMs = failuresAfter.Length == 0 ? (double?)null :
+            Math.Round(failuresAfter.Min(x => x.CompletedMs - killAtMs),1),
+        lastObservedFailureOffsetMs = failuresAfter.Length == 0 ? (double?)null :
+            Math.Round(failuresAfter.Max(x => x.CompletedMs - killAtMs),1),
+        observedFailureWindowMs = failuresAfter.Length == 0 ? 0 :
+            Math.Round(failuresAfter.Max(x => x.CompletedMs) - failuresAfter.Min(x => x.CompletedMs),1),
         p95LatencyMs = Math.Round(Percentile(latencies,0.95),2),
         p99LatencyMs = Math.Round(Percentile(latencies,0.99),2),
         caveat = "Last observed failure offset is NOT a YARP health-detection timestamp; in-flight retries are not assumed."
@@ -215,7 +295,7 @@ try
     Require(!gateway2.HasExited,"gateway 2 remains serving after gateway 1 dies");
     // Controller is never part of the data plane in this isolated test.
     // The gateways continue serving from their on-disk last-known configuration.
-    var restart=Start("gateway-1-restarted",gatewayDll,[],Settings(18080,18443,g1config));
+    var restart=Start("gateway-1-restarted",gatewayDll,[],Settings(18080,18443,g1config,"gateway-1"));
     await WaitFor("gateway 1 recovery",()=>Responds("http://127.0.0.1:18080/lab/ping"));
     await Task.Delay(2500);
     var recovered=await Sample(250);
