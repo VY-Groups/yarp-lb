@@ -70,7 +70,7 @@ jobs:
           dotnet build tests/L7/GatewayLab/GatewayLab.csproj -c Release
           dotnet build tests/L7/BackendLab/BackendLab.csproj -c Release
           dotnet build tests/L7/Acceptance/Acceptance.csproj -c Release
-      - name: Compare direct backends, HTTP proxy and HTTPS proxy under the same load
+      - name: Compare direct backends, HTTP proxy and HTTPS proxy with/without keep-alive
         shell: bash
         run: |
           set -euo pipefail
@@ -86,14 +86,15 @@ jobs:
           done
           if [[ "$ready" != 1 ]]; then cat artifacts/k6/load-rig.log; exit 1; fi
 
-          for phase in direct proxy-http proxy-https; do
+          for phase in direct proxy-http proxy-https proxy-https-no-reuse; do
             case "$phase" in
-              direct) mode=direct; target=http://127.0.0.1:18081; tls=0;;
-              proxy-http) mode=proxy; target=http://127.0.0.1:18080; tls=0;;
-              proxy-https) mode=proxy; target=https://127.0.0.1:18443; tls=1;;
+              direct) mode=direct; target=http://127.0.0.1:18081; tls=0; no_reuse=0;;
+              proxy-http) mode=proxy; target=http://127.0.0.1:18080; tls=0; no_reuse=0;;
+              proxy-https) mode=proxy; target=https://127.0.0.1:18443; tls=1; no_reuse=0;;
+              proxy-https-no-reuse) mode=proxy; target=https://127.0.0.1:18443; tls=1; no_reuse=1;;
             esac
             docker run --rm --network host --user "$(id -u):$(id -g)" \
-              -e MODE="$mode" -e TARGET="$target" -e LAB_TLS="$tls" -e DURATION=20s -e VUS=75 \
+              -e MODE="$mode" -e TARGET="$target" -e LAB_TLS="$tls" -e NO_REUSE="$no_reuse" -e DURATION=20s -e VUS=75 \
               -v "$GITHUB_WORKSPACE:/workspace" -w /workspace \
               grafana/k6:0.55.0 run \
               --summary-export="/workspace/artifacts/k6/$phase.json" \
