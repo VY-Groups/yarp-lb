@@ -28,6 +28,11 @@ Must(provider.QueuedMessages <= 32, "bounded queue never exceeds 32 messages");
 var dropped = provider.DroppedMessages;
 for (var i = 0; i < 1000; i++) logger.LogWarning("more {Index}",i);
 Must(provider.DroppedMessages > dropped, "drop count increases while stdout stays blocked");
+Must(provider.DroppedHighPriorityMessages > 0, "high-priority overflow is measured separately");
+Must(provider.DroppedLowPriorityMessages == 0, "warning-only flood never labeled low-priority");
+Must(provider.DroppedMessages ==
+    provider.DroppedHighPriorityMessages + provider.DroppedLowPriorityMessages,
+    "drop counters reconcile");
 var reported = false;
 using(var listener = new MeterListener())
 {
@@ -47,6 +52,23 @@ Must(reported, "OpenTelemetry Meter exposes the actual dropped message total");
 hold.Set();
 await Task.Delay(100);
 Must(writer.LinesWritten > 0, "queued output resumes when stdout is unblocked");
+// Verify that an INFO flood leaves queue capacity for a later ERROR.
+using var lowHold = new ManualResetEventSlim(false);
+using var lowEntered = new ManualResetEventSlim(false);
+using var lowWriter = new BlockedWriter(lowHold,lowEntered);
+using(var priority = new NonBlockingConsoleLoggerProvider(lowWriter,capacity:32,maxLineChars:128))
+{
+    var l = priority.CreateLogger("priority");
+    l.LogInformation("block the writer");
+    Must(lowEntered.Wait(TimeSpan.FromSeconds(3)), "priority writer is blocked");
+    for (var i=0; i<1000; i++) l.LogInformation("low level {Index}",i);
+    Must(priority.DroppedLowPriorityMessages>0, "low priority flood is discarded");
+    Must(priority.DroppedHighPriorityMessages==0, "no warnings lost during INFO flood");
+    var queueBefore = priority.QueuedMessages;
+    l.LogError("must be retained");
+    Must(priority.EnqueuedMessages>queueBefore, "ERROR preserved in reserved capacity");
+    lowHold.Set();
+}
 Console.WriteLine("PRODUCT BOUNDED CONSOLE LOGGING ACCEPTANCE PASSED");
 
 sealed class BlockedWriter : TextWriter
