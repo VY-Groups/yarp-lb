@@ -7,11 +7,13 @@ using Yarp.ReverseProxy.LoadBalancing;
 
 var builder = WebApplication.CreateBuilder(args);
 // Ephemeral loopback-only TLS identity. Never deploy this certificate for real clients.
-using var tlsKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+using var tlsKey = RSA.Create(2048);
 var certRequest = new CertificateRequest(new X500DistinguishedName("CN=localhost"),
-    tlsKey, HashAlgorithmName.SHA256);
+    tlsKey, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
 certRequest.CertificateExtensions.Add(new X509BasicConstraintsExtension(false, false, 0, true));
 certRequest.CertificateExtensions.Add(new X509KeyUsageExtension(X509KeyUsageFlags.DigitalSignature, true));
+certRequest.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension(
+    new OidCollection { new Oid("1.3.6.1.5.5.7.3.1") }, false));
 var san = new SubjectAlternativeNameBuilder();
 san.AddDnsName("localhost");
 san.AddIpAddress(IPAddress.Loopback);
