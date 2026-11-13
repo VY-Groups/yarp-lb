@@ -127,7 +127,13 @@ sealed class ImmediateTransportFailureHealthPolicy : IPassiveHealthCheckPolicy
     public string Name => "ImmediateTransportFailure";
     public void RequestProxied(HttpContext context, ClusterState cluster, DestinationState destination)
     {
-        if (context.Features.Get<IForwarderErrorFeature>() is null) return;
+        // Never eject a healthy gateway because a downstream test client,
+        // browser or load generator canceled its request.
+        if (context.RequestAborted.IsCancellationRequested) return;
+        var error = context.Features.Get<IForwarderErrorFeature>()?.Error;
+        if (error is not (ForwarderError.Request or ForwarderError.RequestTimedOut or
+                          ForwarderError.RequestBodyDestination or ForwarderError.ResponseBodyDestination))
+            return;
         var reactivation = cluster.Model.Config.HealthCheck?.Passive?.ReactivationPeriod ?? TimeSpan.FromSeconds(30);
         _updater.SetPassive(cluster, destination, DestinationHealth.Unhealthy, reactivation);
     }
