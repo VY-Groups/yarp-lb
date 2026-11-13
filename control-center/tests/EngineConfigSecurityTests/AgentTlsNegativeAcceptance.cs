@@ -83,7 +83,23 @@ public static class AgentTlsNegativeAcceptance
             await MustDeny(http, new HttpRequestMessage(HttpMethod.Post,uri+"/agent/v1/engines/l4/config/prepare") {
                 Content = new StringContent("{}", System.Text.Encoding.UTF8,"application/json")
             }, "missing client certificate denied at real HTTPS engine-change endpoint");
-            Console.WriteLine("PASS: real Kestrel HTTPS refuses unauthenticated agent calls");
+            // A distinct client identity must not be accepted by the live TLS
+            // endpoint, even if that identity attempts mutual authentication.
+            using var wrongKey = RSA.Create(2048);
+            var wrongRequest = new CertificateRequest("CN=untrusted-client",wrongKey,
+                HashAlgorithmName.SHA256,RSASignaturePadding.Pkcs1);
+            using var wrongCert = wrongRequest.CreateSelfSigned(
+                DateTimeOffset.UtcNow.AddMinutes(-5),DateTimeOffset.UtcNow.AddHours(1));
+            using var wrongHandler = new HttpClientHandler {UseProxy=false};
+            wrongHandler.ClientCertificateOptions = ClientCertificateOption.Manual;
+            wrongHandler.ClientCertificates.Add(wrongCert);
+            wrongHandler.ServerCertificateCustomValidationCallback = (_,server,_,_) =>
+                server?.Thumbprint == serverCert.Thumbprint;
+            using var withWrongCert = new HttpClient(wrongHandler) {Timeout=TimeSpan.FromSeconds(3)};
+            await MustDeny(withWrongCert,
+                new HttpRequestMessage(HttpMethod.Get,uri+"/agent/v1/status"),
+                "untrusted real TLS client certificate cannot read status");
+            Console.WriteLine("PASS: live HTTPS negative authentication cases");
         }
         finally
         {
@@ -102,8 +118,14 @@ public static class AgentTlsNegativeAcceptance
             try
             {
                 using var response = await client.SendAsync(request);
-                if (response.StatusCode is not (HttpStatusCode.BadRequest or
-                    HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden))
+                // GET status has no body to parse; 400 can only originate at
+                // the TLS/Kestrel layer. A malformed POST can return 400 from
+                // JSON parsing, so POST must be rejected as 401/403 or TLS error.
+                var allowed = request.Method == HttpMethod.Get
+                    ? response.StatusCode is HttpStatusCode.BadRequest or HttpStatusCode.Unauthorized
+                        or HttpStatusCode.Forbidden
+                    : response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden;
+                if (!allowed)
                     throw new Exception("FAIL: "+name+" unexpected HTTP "+response.StatusCode);
             }
             catch (HttpRequestException) { /* TLS handshake rejected client */ }
