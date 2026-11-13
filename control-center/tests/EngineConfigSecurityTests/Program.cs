@@ -127,6 +127,13 @@ using var otherCert = otherReq.CreateSelfSigned(DateTimeOffset.UtcNow.AddMinutes
 allowed.Connection.ClientCertificate = otherCert;
 Must(!AgentClientCertificatePolicy.IsAuthorized(allowed,pinned),
     "untrusted client certificate denied");
+allowed.Connection.ClientCertificate = clientCert;
+var wrongPin = AgentClientCertificatePolicy.ParsePinnedThumbprints(new[]{otherCert.Thumbprint});
+Must(!AgentClientCertificatePolicy.IsAuthorized(allowed,wrongPin),
+    "correct presented client cert with wrong configured thumbprint denied");
+allowed.Connection.ClientCertificate = otherCert;
+Must(!AgentClientCertificatePolicy.IsAuthorized(allowed,pinned),
+    "presented wrong identity rejected even when configured thumbprint is unchanged");
 var invalidPins=false;
 try { AgentClientCertificatePolicy.ParsePinnedThumbprints(new[]{"not-a-thumbprint"}); }
 catch (InvalidOperationException) { invalidPins=true; }
