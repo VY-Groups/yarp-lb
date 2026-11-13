@@ -10,7 +10,8 @@ for line in (directory / "process-samples.jsonl").read_text(encoding="utf-8").sp
     if line.strip():
         values.append(json.loads(line))
 assert len(values) >= 5, "Not enough memory samples for a soak report"
-end = json.loads((directory / "after.json").read_text(encoding="utf-8"))
+after_file = directory / "after.json"
+end = json.loads(after_file.read_text(encoding="utf-8")) if after_file.exists() else values[-1]
 start = json.loads((directory / "before.json").read_text(encoding="utf-8"))
 summary = json.loads((directory / "k6-summary.json").read_text(encoding="utf-8"))["metrics"]
 # Custom five-minute k6 Trends are absent in older runs. Never infer p99
@@ -71,6 +72,7 @@ report = {
     "working_set_quarter_trends": memory_quarters,
     "note": "Loopback/hosted runner only. Working-set trend alone cannot prove a leak.",
     "samples": len(values),
+    "final_process_metrics_source": "after-request" if after_file.exists() else "last-valid-sample",
     "server_gc_enabled": end.get("serverGc"),
     "sample_duration_minutes_approx": round((len(values)-1)*0.5, 2),
     "working_set_initial_bytes": start["processWorkingSetBytes"],
