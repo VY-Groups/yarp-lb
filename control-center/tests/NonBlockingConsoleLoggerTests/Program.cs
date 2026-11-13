@@ -64,9 +64,12 @@ using(var priority = new NonBlockingConsoleLoggerProvider(lowWriter,capacity:32,
     for (var i=0; i<1000; i++) l.LogInformation("low level {Index}",i);
     Must(priority.DroppedLowPriorityMessages>0, "low priority flood is discarded");
     Must(priority.DroppedHighPriorityMessages==0, "no warnings lost during INFO flood");
-    var queueBefore = priority.QueuedMessages;
+    var beforeError = priority.EnqueuedMessages;
     l.LogError("must be retained");
-    Must(priority.EnqueuedMessages>queueBefore, "ERROR preserved in reserved capacity");
+    Must(priority.EnqueuedMessages == beforeError + 1,
+        "ERROR is accepted into reserved capacity");
+    Must(priority.DroppedHighPriorityMessages == 0,
+        "priority reserve does not discard the ERROR");
     lowHold.Set();
 }
 Console.WriteLine("PRODUCT BOUNDED CONSOLE LOGGING ACCEPTANCE PASSED");
