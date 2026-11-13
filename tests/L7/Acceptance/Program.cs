@@ -213,6 +213,7 @@ try
     // production chain validation and is deliberately confined to the lab.
     using (var labTls = new HttpClient(new HttpClientHandler
     {
+        UseProxy = false, // Never route a loopback TLS lab call via environment HTTPS_PROXY
         ServerCertificateCustomValidationCallback = (_, certificate, _, _) =>
             certificate is not null &&
             certificate.Subject.Contains("CN=localhost", StringComparison.Ordinal) &&
