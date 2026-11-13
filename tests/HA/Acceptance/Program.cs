@@ -41,18 +41,21 @@ void Config(string path, IEnumerable<(string Id, string Address)> destinations, 
                 ["api"] = new {
                     LoadBalancingPolicy = "RoundRobin",
                     HealthCheck = new {
-                        AvailableDestinationsPolicy = "HealthyAndUnknown",
+                        AvailableDestinationsPolicy = "HealthyAndUnknown" // fail-closed for CA-class services,
                         Active = new {
-                            Enabled = true, Interval = "00:00:01",
-                            Timeout = "00:00:01", Policy = "ConsecutiveFailures", Path = probe },
+                            Enabled = true, Interval = probe == "/lab/ping" ? "00:00:00.500" : "00:00:01",
+                            Timeout = probe == "/lab/ping" ? "00:00:00.500" : "00:00:01",
+                            Policy = "ConsecutiveFailures", Path = probe },
                         Passive = new {
                             Enabled = probe == "/lab/ping",
-                            Policy = "ImmediateTransportFailure",
-                            ReactivationPeriod = "00:00:30"
+                            Policy = "BoundedTransportFailure",
+                            ReactivationPeriod = "00:00:02"
                         }
                     },
                     Metadata = new Dictionary<string,string> {
-                        ["ConsecutiveFailuresHealthPolicy.Threshold"] = "1"
+                        ["ConsecutiveFailuresHealthPolicy.Threshold"] = "1",
+                        ["BoundedTransportFailure.MaxEjectedPercent"] = "50",
+                        ["BoundedTransportFailure.MinHealthyRemaining"] = "1"
                     },
                     Destinations = dict
                 }
@@ -310,11 +313,15 @@ try
             Math.Round(failuresAfter.Max(x => x.CompletedMs - killAtMs),1),
         observedFailureWindowMs = failuresAfter.Length == 0 ? 0 :
             Math.Round(failuresAfter.Max(x => x.CompletedMs) - failuresAfter.Min(x => x.CompletedMs),1),
+        lastFailureAfterKillUnder2s = failuresAfter.Length == 0 ||
+            failuresAfter.Max(x=>x.CompletedMs - killAtMs) <= 2000,
         p95LatencyMs = Math.Round(Percentile(latencies,0.95),2),
         p99LatencyMs = Math.Round(Percentile(latencies,0.99),2),
         caveat = "Last observed failure offset is NOT a YARP health-detection timestamp; in-flight retries are not assumed."
     };
     checks.Add(new { description="continuous-load-failover", evidence=failoverEvidence });
+    Require(failoverEvidence.lastFailureAfterKillUnder2s,
+        "Windows/Ubuntu last observed gateway-kill failure ends within 2s of fault");
     Console.WriteLine("FAILOVER UNDER LOAD: "+JsonSerializer.Serialize(failoverEvidence));
     var afterFailure=await Sample(400);
     Require(afterFailure.Ok==400,
