@@ -29,8 +29,8 @@ jobs:
           # Prior comparison evidence is stored in run 43505217113.
           # This repeat exercises ONLY the candidate fix to avoid burning 2
           # additional 15-minute runners on already captured old failures.
-          - label: logging-backpressure-fix
-            source_sha: 6eb0bdc6c682db694222fc838ce6961735eeb8eb
+          - label: shipping-logger-shared-with-lab
+            source_sha: 09fea6710fa8580f0bb34b4032eecf1276bd7ffa
     steps:
       - uses: actions/checkout@v4
       - name: Checkout pinned historical gateway revision
@@ -67,9 +67,10 @@ jobs:
           lab_pid=""
           counters_pid=""
           watchdog_pid=""
+          stats_pid=""
           k6_pid=""
           cleanup() {
-            for pid in "$k6_pid" "$watchdog_pid" "$counters_pid" "$lab_pid"; do
+            for pid in "$k6_pid" "$watchdog_pid" "$counters_pid" "$stats_pid" "$lab_pid"; do
               if [[ "$pid" =~ ^[0-9]+$ ]]; then kill "$pid" 2>/dev/null || true; fi
             done
             if [[ "$lab_pid" =~ ^[0-9]+$ ]]; then
@@ -113,6 +114,21 @@ jobs:
             --capture-script tests/L7/performance/issue17/capture_hang.sh \
             --timeout 3 --interval 2 > "$out/watchdog.log" 2>&1 &
           watchdog_pid=$!
+          # Runtime logging telemetry sampled through the same loopback stats
+          # endpoint the product's logger exposes. Retain before/after and
+          # intermediate counter values to detect increasing drop/error counts.
+          (
+            while kill -0 "$gateway_pid" 2>/dev/null; do
+              if sample="$(curl --noproxy '*' --connect-timeout 1 --max-time 2 \
+                -fsS http://127.0.0.1:18080/lab/stats 2>/dev/null)"; then
+                echo "$sample" >> "$out/stats-samples.jsonl"
+              else
+                echo "{\"probeFailureAtEpoch\":$(date +%s)}" >> "$out/stats-samples.jsonl"
+              fi
+              sleep 10
+            done
+          ) &
+          stats_pid=$!
           stamp="$(($(date +%s) * 1000))"
           timeout --signal=TERM --kill-after=10s 1050s \
             docker run --rm --network host --user "$(id -u):$(id -g)" \
@@ -144,6 +160,29 @@ jobs:
               sleep 2
             done
           fi
+          curl --noproxy '*' --connect-timeout 1 --max-time 3 -fsS \
+            http://127.0.0.1:18080/lab/stats > "$out/stats-after.json" 2>"$out/stats-final-error.txt" || true
+          python3 - "$out" <<'PY'
+          import json, pathlib, sys
+          folder=pathlib.Path(sys.argv[1])
+          before=json.loads((folder/"ready.json").read_text())
+          path=folder/"stats-after.json"
+          if not path.exists() or not path.stat().st_size:
+              print("FINAL_STATS_UNAVAILABLE: see watchdog snapshot or stats-final-error.txt")
+              sys.exit(1)
+          after=json.loads(path.read_text())
+          fields=("loggingDroppedTotal","loggingDroppedLowPriorityTotal",
+              "loggingDroppedHighPriorityTotal","loggingWriteErrorsTotal")
+          for field in fields:
+              if field not in after:
+                  print(f"LOGGING_METRIC_MISSING: {field}")
+                  sys.exit(1)
+              print(f"{field}: before={before.get(field,'unknown')} after={after[field]}")
+          if int(after["loggingDroppedTotal"]) != (int(after["loggingDroppedLowPriorityTotal"])
+              + int(after["loggingDroppedHighPriorityTotal"])):
+              print("LOGGING_METRICS_INCONSISTENT")
+              sys.exit(1)
+          PY
           if [[ -f "$out/hang-trigger.json" ]]; then
             echo "REPRODUCED_HANG: dump/stacks and counters attached; k6 exit=$k6_rc" | tee -a "$out/result.txt"
             exit 1
