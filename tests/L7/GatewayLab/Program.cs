@@ -33,7 +33,11 @@ var keyFlags = OperatingSystem.IsWindows()
     : X509KeyStorageFlags.EphemeralKeySet;
 using var loopbackCert = new X509Certificate2(
     issuedCert.Export(X509ContentType.Pfx, pfxPassword), pfxPassword, keyFlags);
-builder.Logging.AddFilter("Microsoft.AspNetCore.Server.Kestrel.Https", LogLevel.Debug);
+// The disposable benchmark previously emitted millions of per-request INFO
+// messages to redirected stdout. The console writer blocked while its bounded
+// queue filled, then request threads blocked inside ConsoleLoggerProcessor.Enqueue.
+// Preserve warnings/errors; do not make the throughput lab an unbounded log sink.
+builder.Logging.AddFilter((provider, category, level) => level >= LogLevel.Warning);
 var httpPort = int.TryParse(Environment.GetEnvironmentVariable("YARP_LAB_HTTP_PORT"), out var h) ? h : 18080;
 var tlsPort = int.TryParse(Environment.GetEnvironmentVariable("YARP_LAB_TLS_PORT"), out var t) ? t : 18443;
 if (httpPort is < 1025 or > 65535 || tlsPort is < 1025 or > 65535 || httpPort == tlsPort)
