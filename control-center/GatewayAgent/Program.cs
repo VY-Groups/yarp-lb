@@ -67,7 +67,9 @@ if (!string.IsNullOrWhiteSpace(labCaPath))
         allowActions)
         throw new InvalidOperationException(
             "Isolated client test CA is restricted to HTTPS loopback with all management changes disabled");
-    labRoot = X509Certificate2.CreateFromPemFile(labCaPath);
+    // Public test-root PEM has NO private key; do not call CreateFromPemFile,
+    // which attempts to load a corresponding key from the same PEM path.
+    labRoot = X509CertificateLoader.LoadCertificateFromFile(labCaPath);
     if (!labRoot.Extensions.OfType<X509BasicConstraintsExtension>().Any(x=>x.CertificateAuthority))
         throw new InvalidOperationException("Lab trust anchor is not a CA certificate");
 }
