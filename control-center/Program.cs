@@ -1136,6 +1136,7 @@ app.Use(async (ctx, next) =>
 
 
 app.MapOrganizationProfile(privateDir);
+app.MapTlsInventory();
 app.MapReverseProxy(proxyPipeline =>
 {
     // Drain filtering runs before affinity and load balancing, for all policies.

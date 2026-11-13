@@ -17,3 +17,6 @@ GitHub Actions test real HTTP draining, recovery, warmup distribution, active he
 ```json
 { "Address": "https://app1.example.net/", "Metadata": { "Weight": "80", "TrafficState": "active", "SlowStartSeconds": "30" } }
 ```
+
+## Certificate readiness
+`GET /admin/api/tls/inventory` lists non-secret LocalMachine/My certificate metadata and currently declared Kestrel listeners for authenticated local administrators. It does not export private keys or alter bindings. Certificate renewal, backend client certificate deployment, trust policy validation, CT monitoring and ACME automation are not implemented.

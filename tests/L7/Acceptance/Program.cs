@@ -79,7 +79,7 @@ async Task<int> InFlight(string url)
     return json.RootElement.GetProperty("count").GetInt32();
 }
 
-void Configure(string policy, int aWeight, int bWeight, bool drainA = false, int slowStartA = 0)
+void Configure(string policy, int aWeight, int bWeight, bool drainA = false, int slowStartA = 0, bool drainKillA = false)
 {
     var config = new {
         ReverseProxy = new {
@@ -106,7 +106,7 @@ void Configure(string policy, int aWeight, int bWeight, bool drainA = false, int
                     }
                 },
                 ["kill"] = new { Destinations = new Dictionary<string, object> {
-                    ["A"] = new { Address = aUrl + "/" }
+                    ["A"] = new { Address = aUrl + "/", Metadata = new Dictionary<string,string> { ["TrafficState"] = drainKillA ? "draining" : "active" } }
                 } }
             }
         }
@@ -228,6 +228,19 @@ try
     var backFromDrain = await Sample(400);
     Require(backFromDrain.Success == 400 && backFromDrain.Nodes.ContainsKey("A"), "un-drained A re-enters pool");
     Record("drain-restore", backFromDrain);
+
+    var longRequest = client.GetAsync(proxy + "/kill/slow");
+    await WaitFor("in-flight request begins on A", async () => await InFlight(aUrl) > 0);
+    Configure("WeightedRandom", 80, 20, drainKillA: true);
+    await Task.Delay(1700);
+    using (var refused = await client.GetAsync(proxy + "/kill/slow"))
+        Require(refused.StatusCode == HttpStatusCode.ServiceUnavailable,
+            "draining blocks NEW requests even while an existing one remains in flight");
+    using (var completed = await longRequest)
+        Require(completed.IsSuccessStatusCode, "previously forwarded request completes during drain");
+    Record("inflight-preserved-during-drain", new { completed = true, newTraffic = 503 });
+    Configure("WeightedRandom", 80, 20);
+    await Task.Delay(1600);
     Configure("WeightedRandom", 80, 20, slowStartA: 10);
     await Task.Delay(1500);
     var early = await Sample(500);

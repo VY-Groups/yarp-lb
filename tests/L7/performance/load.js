@@ -1,6 +1,7 @@
 import http from 'k6/http';
 import { check } from 'k6';
 export const options = {
+  summaryTrendStats: ['avg', 'min', 'med', 'max', 'p(90)', 'p(95)', 'p(99)'],
   scenarios: {
     sustained: { executor: 'constant-vus', vus: 75, duration: '45s' },
   },
