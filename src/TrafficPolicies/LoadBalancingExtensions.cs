@@ -12,12 +12,29 @@ public sealed class WeightedRandomPolicy : ILoadBalancingPolicy
         IReadOnlyList<DestinationState> availableDestinations)
     {
         if (availableDestinations.Count == 0) return null;
-        var active = availableDestinations.Where(d => !TrafficLifecycle.IsDraining(d)).ToArray();
-        if (active.Length == 0) return null;
-        var weights = active.Select(d => TrafficLifecycle.EffectiveWeightedRandomWeight(d, WeightOf(d))).ToArray();
-        var total = weights.Sum();
+        // Characterization-preserving two-pass weighted selection. Each HTTP
+        // request previously allocated a filtered destination array + weight
+        // array and LINQ enumerators. Keep only a bounded stack span of weights.
+        Span<int> weights = availableDestinations.Count <= 128
+            ? stackalloc int[availableDestinations.Count]
+            : new int[availableDestinations.Count];
+        var total = 0;
+        for (var i = 0; i < availableDestinations.Count; i++)
+        {
+            var candidate = availableDestinations[i];
+            if (TrafficLifecycle.IsDraining(candidate)) continue;
+            var weight = TrafficLifecycle.EffectiveWeightedRandomWeight(candidate, WeightOf(candidate));
+            weights[i] = weight;
+            total = checked(total + weight);
+        }
+        if (total == 0) return null;
         var ticket = RandomNumberGenerator.GetInt32(total);
-        return active[LoadBalancingCore.PickWeightedIndex(weights, ticket)];
+        for (var i = 0; i < availableDestinations.Count; i++)
+        {
+            if (ticket < weights[i]) return availableDestinations[i];
+            ticket -= weights[i];
+        }
+        throw new InvalidOperationException("Weighted selection failed after valid total");
     }
 
     internal static int WeightOf(DestinationState destination)
