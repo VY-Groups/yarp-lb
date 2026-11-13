@@ -8,9 +8,9 @@ phases = ("direct", "proxy-http", "proxy-https")
 def row(name):
     report = json.loads((root / f"{name}.json").read_text(encoding="utf-8"))
     metrics = report["metrics"]
-    req = metrics["http_reqs"]["values"]["count"]
-    dur = metrics["http_req_duration"]["values"]
-    fail = metrics["http_req_failed"]["values"]["rate"]
+    req = metrics["http_reqs"]["count"]
+    dur = metrics["http_req_duration"]
+    fail = metrics["http_req_failed"]["value"]
     assert req > 100 and fail < 0.01, (name, req, fail)
     return {
         "requests": int(req),
