@@ -13,7 +13,11 @@ services:
       BACKEND: http://protected-app:8000
       SERVER_NAME: localhost
       PORT: "8080"
-      MODSEC_RULE_ENGINE: "On"
+      MODSEC_RULE_ENGINE: "${WAF_MODE:-On}"
+      MODSEC_REQ_BODY_ACCESS: "On"
+      MODSEC_REQ_BODY_LIMIT: "131072"
+      MODSEC_REQ_BODY_NOFILES_LIMIT: "65536"
+      MODSEC_REQ_BODY_LIMIT_ACTION: "Reject"
       BLOCKING_PARANOIA: "1"
       DETECTION_PARANOIA: "1"
       ANOMALY_INBOUND: "5"
