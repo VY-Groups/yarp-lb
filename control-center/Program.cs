@@ -760,7 +760,7 @@ async Task<IResult> CommitReviewedChange(HttpContext ctx, JsonObject submitted)
         {
             if (!BackendMutualTls.TryNormalizeThumbprint(clientCertificate.ToString(), out _))
                 return Results.BadRequest(new { error = $"Cluster {key}: client certificate thumbprint must be 40 hex characters" });
-            if (dests.Any(d => !d.Value?["Address"]!.ToString().StartsWith("https://", StringComparison.OrdinalIgnoreCase)))
+            if (dests.Any(d => !(d.Value?["Address"]?.ToString() ?? "").StartsWith("https://", StringComparison.OrdinalIgnoreCase)))
                 return Results.BadRequest(new { error = $"Cluster {key}: backend mTLS requires all HTTPS destinations" });
         }
         var hc = c["HealthCheck"]?["Active"];
