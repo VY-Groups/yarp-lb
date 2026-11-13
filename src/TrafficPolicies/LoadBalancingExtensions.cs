@@ -3,7 +3,7 @@ using Microsoft.AspNetCore.Http;
 using Yarp.ReverseProxy.LoadBalancing;
 using Yarp.ReverseProxy.Model;
 
-/// <summary>Weighted random selection among YARP's available destinations.</summary>
+/// <summary>Weighted random selection among destinations that YARP has already deemed available.</summary>
 public sealed class WeightedRandomPolicy : ILoadBalancingPolicy
 {
     public string Name => "WeightedRandom";
@@ -12,16 +12,20 @@ public sealed class WeightedRandomPolicy : ILoadBalancingPolicy
         IReadOnlyList<DestinationState> availableDestinations)
     {
         if (availableDestinations.Count == 0) return null;
-        var weights = availableDestinations.Select(WeightOf).ToArray();
+        var active = availableDestinations.Where(d => !TrafficLifecycle.IsDraining(d)).ToArray();
+        if (active.Length == 0) return null;
+        var weights = active.Select(d => TrafficLifecycle.EffectiveWeightedRandomWeight(d, WeightOf(d))).ToArray();
         var total = weights.Sum();
         var ticket = RandomNumberGenerator.GetInt32(total);
-        return availableDestinations[LoadBalancingCore.PickWeightedIndex(weights, ticket)];
+        return active[LoadBalancingCore.PickWeightedIndex(weights, ticket)];
     }
 
     internal static int WeightOf(DestinationState destination)
     {
         var metadata = destination.Model.Config.Metadata;
         if (metadata is null || !metadata.TryGetValue("Weight", out var raw)) return 1;
+        // The frontend and reviewed-change validation enforce 1..100. Fail closed
+        // at runtime rather than silently accepting an invalid deployed weight.
         if (!LoadBalancingCore.TryWeight(raw, out var weight))
             throw new InvalidOperationException("Invalid Weight metadata for destination " + destination.DestinationId);
         return weight;
@@ -29,9 +33,9 @@ public sealed class WeightedRandomPolicy : ILoadBalancingPolicy
 }
 
 /// <summary>
-/// Deterministic weighted rendezvous hashing by the TCP peer IP.
-/// Source-NAT will collapse all requests to the NAT IP. Do not trust
-/// unvalidated client-provided X-Forwarded-For headers as identity.
+/// Weighted rendezvous hashing by the TCP peer IP. For L4 SNAT this is the firewall
+/// address, NOT the real client. Do not trust user-supplied X-Forwarded-For values.
+/// Deploy only after validating the trusted proxy chain and shared identities.
 /// </summary>
 public sealed class SourceIpHashPolicy : ILoadBalancingPolicy
 {
@@ -41,10 +45,13 @@ public sealed class SourceIpHashPolicy : ILoadBalancingPolicy
         IReadOnlyList<DestinationState> availableDestinations)
     {
         if (availableDestinations.Count == 0) return null;
+        var active = availableDestinations.Where(d => !TrafficLifecycle.IsDraining(d)).ToArray();
+        if (active.Length == 0) return null;
         var address = context.Connection.RemoteIpAddress?.MapToIPv6().ToString();
-        if (string.IsNullOrWhiteSpace(address)) return null;
-        var ids = availableDestinations.Select(d => d.DestinationId).ToArray();
-        var weights = availableDestinations.Select(WeightedRandomPolicy.WeightOf).ToArray();
-        return availableDestinations[LoadBalancingCore.PickRendezvousIndex(address, ids, weights)];
+        if (string.IsNullOrWhiteSpace(address)) return null; // no identity, no affinity
+        var ids = active.Select(d => d.DestinationId).ToArray();
+        // Slow-start is excluded from source-affinity to avoid remapping existing clients.
+        var weights = active.Select(WeightedRandomPolicy.WeightOf).ToArray();
+        return active[LoadBalancingCore.PickRendezvousIndex(address, ids, weights)];
     }
 }
