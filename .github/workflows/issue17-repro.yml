@@ -1,7 +1,6 @@
 name: Issue 17 - bounded soak comparison and hang diagnostics
 on:
-  push:
-    branches: ["feature/issue17-hang-watchdog-*"]
+  pull_request:
     paths: [".github/workflows/issue17-repro.yml", "tests/L7/performance/issue17/**"]
   workflow_dispatch:
 permissions:
