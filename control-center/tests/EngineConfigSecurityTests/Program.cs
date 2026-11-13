@@ -1,4 +1,6 @@
 using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
+using Microsoft.AspNetCore.Http;
 using System.Text.Json.Nodes;
 
 static void Must(bool condition, string name)
@@ -64,4 +66,69 @@ var badDns=dns.DeepClone().AsObject();
 badDns["Zones"]![0]!["Sites"]![0]!["HealthUrl"]="file:///etc/passwd";
 Must(!EngineConfigContract.Validate("gslb",badDns,false),
     "unsafe probe URL scheme rejected");
+// Per-engine replay state must survive process restarts and reject duplicates.
+var stageRoot = Path.Combine(Path.GetTempPath(), "engine-security-"+Guid.NewGuid().ToString("N"));
+Directory.CreateDirectory(stageRoot);
+try
+{
+    var l4Sequence = Path.Combine(stageRoot,"l4","last-accepted-sequence.txt");
+    var gslbSequence = Path.Combine(stageRoot,"gslb","last-accepted-sequence.txt");
+    Directory.CreateDirectory(Path.GetDirectoryName(l4Sequence)!);
+    Directory.CreateDirectory(Path.GetDirectoryName(gslbSequence)!);
+    FleetSequenceState.Accept(l4Sequence,4);
+    Must(FleetSequenceState.Read(l4Sequence)==4, "L4 sequence is durable");
+    Must(FleetSequenceState.Read(gslbSequence)==0, "GSLB sequence state is isolated");
+    var replayRejected=false;
+    try { FleetSequenceState.Accept(l4Sequence,4); }
+    catch (InvalidOperationException) { replayRejected=true; }
+    Must(replayRejected, "repeated signed L4 revision fails closed");
+}
+finally { Directory.Delete(stageRoot,true); }
+var missingSignature = signed with { Signature = "" };
+Must(!EngineConfigContract.Verify(trust,"l4",tx,revision,l4,missingSignature,now),
+    "unsigned L4 payload rejected");
+var signedDns=EngineConfigContract.Sign(privatePem,"gslb",tx,revision,dns,now+120,5);
+Must(EngineConfigContract.Verify(trust,"gslb",tx,revision,dns,signedDns,now),
+    "signed GSLB payload accepted");
+Must(!EngineConfigContract.Verify(trust,"gslb",tx,revision,dns,
+    signedDns with {Signature=""},now), "unsigned GSLB payload rejected");
+var tamperedDns=dns.DeepClone().AsObject();
+tamperedDns["Zones"]![0]!["Sites"]![0]!["Weight"]=2;
+Must(!EngineConfigContract.Verify(trust,"gslb",tx,revision,tamperedDns,signedDns,now),
+    "tampered GSLB site weight rejected");
+Must(!EngineConfigContract.Verify(trust,"gslb",tx,revision,dns,signedDns,now+121),
+    "expired GSLB signature rejected");
+// This tests the actual policy invoked by every GatewayAgent route.
+// Kestrel's certificate-chain trust and revocation must ALSO be verified in a
+// separate real-TLS deployment test; a context test cannot prove TLS handshake.
+using var certificateKey = RSA.Create(2048);
+var certificateRequest = new CertificateRequest("CN=ci-controller",certificateKey,
+    HashAlgorithmName.SHA256,RSASignaturePadding.Pkcs1);
+using var clientCert = certificateRequest.CreateSelfSigned(
+    DateTimeOffset.UtcNow.AddMinutes(-5),DateTimeOffset.UtcNow.AddHours(1));
+var pinned = AgentClientCertificatePolicy.ParsePinnedThumbprints(new[]{clientCert.Thumbprint});
+var allowed = new DefaultHttpContext();
+allowed.Request.Scheme = "https";
+allowed.Connection.ClientCertificate = clientCert;
+Must(AgentClientCertificatePolicy.IsAuthorized(allowed,pinned),
+    "pinned certificate authorized only on HTTPS");
+allowed.Request.Scheme = "http";
+Must(!AgentClientCertificatePolicy.IsAuthorized(allowed,pinned),
+    "plaintext request never authorizes with pinned cert");
+allowed.Request.Scheme = "https";
+allowed.Connection.ClientCertificate = null;
+Must(!AgentClientCertificatePolicy.IsAuthorized(allowed,pinned),
+    "missing client certificate denied");
+using var otherCertKey = RSA.Create(2048);
+var otherReq = new CertificateRequest("CN=untrusted",otherCertKey,
+    HashAlgorithmName.SHA256,RSASignaturePadding.Pkcs1);
+using var otherCert = otherReq.CreateSelfSigned(DateTimeOffset.UtcNow.AddMinutes(-5),
+    DateTimeOffset.UtcNow.AddHours(1));
+allowed.Connection.ClientCertificate = otherCert;
+Must(!AgentClientCertificatePolicy.IsAuthorized(allowed,pinned),
+    "untrusted client certificate denied");
+var invalidPins=false;
+try { AgentClientCertificatePolicy.ParsePinnedThumbprints(new[]{"not-a-thumbprint"}); }
+catch (InvalidOperationException) { invalidPins=true; }
+Must(invalidPins, "invalid configured controller thumbprint rejects startup");
 Console.WriteLine("ENGINE CONFIG CONTRACT ACCEPTANCE PASSED");
