@@ -29,7 +29,10 @@ public static class EngineConfigContract
     private static bool Str(JsonNode? n, out string value)
     {
         value = "";
-        return n is JsonValue v && v.TryGetValue<string>(out value!) && !string.IsNullOrWhiteSpace(value);
+        if (n is not JsonValue v || !v.TryGetValue<string>(out var literal) ||
+            string.IsNullOrWhiteSpace(literal)) return false;
+        value = literal;
+        return true;
     }
     private static bool Num(JsonNode? n, int min, int max) =>
         n is JsonValue v && v.TryGetValue<int>(out var num) && num >= min && num <= max;
@@ -38,8 +41,10 @@ public static class EngineConfigContract
     private static bool Ip(JsonNode? n, out IPAddress address)
     {
         address = IPAddress.None;
-        return Str(n, out var literal) && IPAddress.TryParse(literal, out address!) &&
-               address.AddressFamily == AddressFamily.InterNetwork;
+        if (!Str(n, out var literal) || !IPAddress.TryParse(literal, out var parsed) ||
+            parsed.AddressFamily != AddressFamily.InterNetwork) return false;
+        address = parsed;
+        return true;
     }
 
     public static bool Validate(string engineId, JsonObject config, bool allowPublicBind)
