@@ -35,9 +35,15 @@ if [[ "$xss_code" != "403" ]]; then
   exit 1
 fi
 echo "PASS: XSS blocked by real ModSecurity/CRS rules (HTTP 403)"
-if docker compose -f "$COMPOSE" port protected-app 8000 2>/dev/null | grep -q .; then
-  echo "FAIL: protected app unexpectedly published to host" >&2; exit 1
-fi
-echo "PASS: backend not published to host"
+# Compose 'port' output is not proof of a host port binding; inspect Docker's
+# actual NetworkSettings.Ports and reject any published HostIp/HostPort.
+app_id="$(docker compose -f "$COMPOSE" ps --quiet protected-app)"
+docker inspect "$app_id" --format '{{json .NetworkSettings.Ports}}' > "$DIR/backend-bindings.json"
+python3 - "$DIR/backend-bindings.json" <<'PY'
+import json,sys
+bindings=json.load(open(sys.argv[1],encoding='utf-8'))
+assert all(not rows for rows in bindings.values()), f'Backend exposed on host: {bindings}'
+print('PASS: Docker confirms no backend HostIp/HostPort bindings')
+PY
 docker compose -f "$COMPOSE" images > "$DIR/images.txt"
 echo "WAF_CRS_LAB_PASS"
