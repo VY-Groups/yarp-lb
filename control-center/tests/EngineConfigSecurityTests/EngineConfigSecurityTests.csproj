@@ -6,5 +6,8 @@
   <ItemGroup>
     <Compile Include="../../FleetConfigSignature.cs" Link="FleetConfigSignature.cs" />
     <Compile Include="../../GatewayAgent/EngineConfigContract.cs" Link="EngineConfigContract.cs" />
+    <Compile Include="../../GatewayAgent/AgentClientCertificatePolicy.cs" Link="AgentClientCertificatePolicy.cs" />
+    <Compile Include="../../FleetSequenceState.cs" Link="FleetSequenceState.cs" />
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
   </ItemGroup>
 </Project>
