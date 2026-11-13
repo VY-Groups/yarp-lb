@@ -1,4 +1,5 @@
 using System.Net;
+using System.Collections.Concurrent;
 
 if (args.Length != 2 || !int.TryParse(args[0], out var port) ||
     port is < 1025 or > 65535 || args[1] is not ("A" or "B"))
@@ -18,6 +19,23 @@ bool IsLoopback(HttpContext ctx) =>
 app.MapGet("/health/ready", () =>
     state.Ready ? (IResult)Results.Ok(new { ready = true, node }) : Results.StatusCode(503));
 app.MapGet("/api/identity", () => Results.Ok(new { node }));
+app.MapGet("/api/slow", async (HttpContext ctx) =>
+{
+    await Task.Delay(700, ctx.RequestAborted);
+    return Results.Ok(new { node, slow=true });
+});
+var committed=new ConcurrentDictionary<string,int>(StringComparer.Ordinal);
+app.MapPost("/api/transaction/{id}",(string id) =>
+{
+    if(id.Length is < 8 or > 80 || id.Any(c=>!char.IsAsciiLetterOrDigit(c)))
+        return Results.BadRequest(new {error="Invalid test transaction ID"});
+    var count=committed.AddOrUpdate(id,1,(_,value)=>value+1);
+    // Deliberately NOT idempotent: second forwarding of the same request is a
+    // duplicate side effect which tests can detect explicitly.
+    return Results.Ok(new {node,id,appliedCount=count});
+});
+app.MapGet("/lab/transaction-count/{id}",(string id) =>
+    Results.Ok(new {node,id,count=committed.GetValueOrDefault(id)}));
 app.MapGet("/api/payload/{bytes:int}", (int bytes) =>
     bytes is >= 1 and <= 65536
         ? (IResult)Results.Bytes(new byte[bytes], "application/octet-stream")
