@@ -20,13 +20,18 @@ san.AddIpAddress(IPAddress.Loopback);
 certRequest.CertificateExtensions.Add(san.Build());
 using var loopbackCert = certRequest.CreateSelfSigned(
     DateTimeOffset.UtcNow.AddMinutes(-10), DateTimeOffset.UtcNow.AddHours(6));
+var httpPort = int.TryParse(Environment.GetEnvironmentVariable("YARP_LAB_HTTP_PORT"), out var h) ? h : 18080;
+var tlsPort = int.TryParse(Environment.GetEnvironmentVariable("YARP_LAB_TLS_PORT"), out var t) ? t : 18443;
+if (httpPort is < 1025 or > 65535 || tlsPort is < 1025 or > 65535 || httpPort == tlsPort)
+    throw new ArgumentException("Lab listener ports invalid.");
 builder.WebHost.ConfigureKestrel(k =>
 {
-    k.ListenLocalhost(18080);
-    k.ListenLocalhost(18443, listen => listen.UseHttps(loopbackCert));
+    k.ListenLocalhost(httpPort);
+    k.ListenLocalhost(tlsPort, listen => listen.UseHttps(loopbackCert));
 });
 
-var configPath = Path.Combine(AppContext.BaseDirectory, "lab.json");
+var configPath = Environment.GetEnvironmentVariable("YARP_LAB_CONFIG_FILE")
+    ?? Path.Combine(AppContext.BaseDirectory, "lab.json");
 builder.Configuration.AddJsonFile(configPath, optional: false, reloadOnChange: true);
 builder.Services.AddReverseProxy()
     .LoadFromConfig(builder.Configuration.GetSection("ReverseProxy"));

@@ -110,3 +110,31 @@ jobs:
           name: l7-k6-performance-ubuntu
           path: artifacts/k6/
           retention-days: 14
+
+  ha-failure-injection:
+    name: HA ingress failover (two YARP nodes) - ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, ubuntu-24.04]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+      - name: Build app backends and YARP gateway
+        run: |
+          dotnet build tests/L7/GatewayLab/GatewayLab.csproj -c Release
+          dotnet build tests/L7/BackendLab/BackendLab.csproj -c Release
+          dotnet build tests/HA/Acceptance/Acceptance.csproj -c Release
+      - name: Kill gateway, verify last-known config and health-aware ingress recovery
+        run: dotnet run --project tests/HA/Acceptance/Acceptance.csproj -c Release --no-build -- "${{ github.workspace }}"
+      - name: Upload HA failure injection evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ha-evidence-${{ matrix.os }}
+          path: artifacts/ha/
+          retention-days: 14
