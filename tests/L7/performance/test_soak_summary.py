@@ -91,4 +91,45 @@ with tempfile.TemporaryDirectory() as folder:
     assert report["five_minute_p99_ms"] == []
     assert report["p99_drift_assessment"] == "insufficient-window-evidence"
 
-print("PASS: soak report time-window and legacy-run regression contracts")
+    # Shared product logger metrics are mandatory for new one-hour soaks,
+    # but legacy historical evidence remains reportable without them.
+    baseline_logging = {
+        "loggingQueueCapacity": 1024, "loggingQueueDepth": 0,
+        "loggingDroppedTotal": 0, "loggingDroppedLowPriorityTotal": 0,
+        "loggingDroppedHighPriorityTotal": 0, "loggingWriteErrorsTotal": 0,
+    }
+    final_logging = {**baseline_logging,
+        "loggingQueueDepth": 3, "loggingDroppedTotal": 15,
+        "loggingDroppedLowPriorityTotal": 15,
+        "loggingDroppedHighPriorityTotal": 0}
+    (root / "before.json").write_text(json.dumps({**vals[0], **baseline_logging}))
+    (root / "after.json").write_text(json.dumps({**vals[-1], **final_logging}))
+    observed = [{**v, **baseline_logging} for v in vals]
+    observed[4]["loggingQueueDepth"] = 25
+    (root / "process-samples.jsonl").write_text(
+        "\n".join(json.dumps(x) for x in observed),encoding="utf-8")
+    log_env={**os.environ,"SOAK_REQUIRE_PRODUCT_LOGGING":"1",
+             "SOAK_MAX_HIGH_PRIORITY_DROPS":"0"}
+    result=subprocess.run([sys.executable,str(script),str(root)],env=log_env,
+                          capture_output=True,text=True,check=True)
+    report=json.loads((root/"report.json").read_text())
+    assert report["shared_product_logger_instrumented"] is True
+    assert report["log_drop_and_error_deltas"]["loggingDroppedTotal"] == 15
+    assert report["log_queue_peak_sample"] == 25
+    assert "loggingDroppedLowPriorityTotal" in result.stdout
+
+    (root / "after.json").write_text(json.dumps({
+        **vals[-1], **final_logging,
+        "loggingDroppedTotal": 16,
+        "loggingDroppedHighPriorityTotal": 1,
+    }))
+    failed=subprocess.run([sys.executable,str(script),str(root)],env=log_env,
+                          capture_output=True,text=True)
+    assert failed.returncode != 0 and "SOAK_LOGGING_FAIL" in failed.stderr
+
+    (root / "after.json").write_text(json.dumps({**vals[-1]}))
+    absent=subprocess.run([sys.executable,str(script),str(root)],env=log_env,
+                          capture_output=True,text=True)
+    assert absent.returncode != 0 and "SOAK_LOGGING_FAIL" in absent.stderr
+
+print("PASS: soak report time-window, shared logging and legacy-run regression contracts")

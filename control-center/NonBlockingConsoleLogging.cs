@@ -17,6 +17,8 @@ public sealed class NonBlockingConsoleLoggerProvider : ILoggerProvider, ISupport
     private readonly int maxLineChars;
     private IExternalScopeProvider scopes = new LoggerExternalScopeProvider();
     private long dropped;
+    private long droppedLowPriority;
+    private long droppedHighPriority;
     private long written;
     private long writeErrors;
     private long enqueued;
@@ -31,6 +33,12 @@ public sealed class NonBlockingConsoleLoggerProvider : ILoggerProvider, ISupport
         meter = new Meter("SpeedSignYarp.Logging", "0.1");
         meter.CreateObservableCounter<long>("yarp_logging_dropped_total",
             () => DroppedMessages, "messages", "Console log messages discarded when the bounded writer queue is full");
+        meter.CreateObservableCounter<long>("yarp_logging_dropped_low_priority_total",
+            () => DroppedLowPriorityMessages, "messages",
+            "Debug/Information messages discarded under console-log queue pressure");
+        meter.CreateObservableCounter<long>("yarp_logging_dropped_high_priority_total",
+            () => DroppedHighPriorityMessages, "messages",
+            "Warning/Error/Critical messages discarded under console-log queue pressure");
         meter.CreateObservableCounter<long>("yarp_logging_write_errors_total",
             () => WriteErrors, "messages", "Console log records lost on output writer failure");
         worker = new Thread(WriteLoop) { IsBackground = true, Name = "YarpBoundedConsoleWriter" };
@@ -40,6 +48,8 @@ public sealed class NonBlockingConsoleLoggerProvider : ILoggerProvider, ISupport
     public int Capacity => queue.BoundedCapacity;
     public int QueuedMessages => queue.Count;
     public long DroppedMessages => Interlocked.Read(ref dropped);
+    public long DroppedLowPriorityMessages => Interlocked.Read(ref droppedLowPriority);
+    public long DroppedHighPriorityMessages => Interlocked.Read(ref droppedHighPriority);
     public long EnqueuedMessages => Interlocked.Read(ref enqueued);
     public long WrittenMessages => Interlocked.Read(ref written);
     public long WriteErrors => Interlocked.Read(ref writeErrors);
@@ -51,15 +61,25 @@ public sealed class NonBlockingConsoleLoggerProvider : ILoggerProvider, ISupport
 
     internal IDisposable? BeginScope<TState>(TState state) where TState : notnull => scopes.Push(state);
 
+    private void Drop(LogLevel level)
+    {
+        Interlocked.Increment(ref dropped);
+        if (level < LogLevel.Warning) Interlocked.Increment(ref droppedLowPriority);
+        else Interlocked.Increment(ref droppedHighPriority);
+    }
+
     internal void Enqueue<TState>(string category, LogLevel level, EventId id, TState state,
         Exception? exception, Func<TState, Exception?, string> formatter)
     {
-        if (queue.IsAddingCompleted) return;
-        // Do not format messages when there is already no capacity. A full queue
-        // must not force expensive per-request exception stringification.
-        if (queue.Count >= Capacity)
+        if (queue.IsAddingCompleted) { Drop(level); return; }
+        // Preserve 1/8 of the bounded queue for warnings/errors during an INFO
+        // flood. Once that reserve is full, warnings can still be dropped;
+        // audit is never delegated to this lossy channel.
+        var reserve = Math.Max(1, Capacity / 8);
+        var depth = queue.Count;
+        if (depth >= Capacity || (level < LogLevel.Warning && depth >= Capacity - reserve))
         {
-            Interlocked.Increment(ref dropped);
+            Drop(level);
             return;
         }
         string message;
@@ -72,9 +92,9 @@ public sealed class NonBlockingConsoleLoggerProvider : ILoggerProvider, ISupport
         try
         {
             if (queue.TryAdd(line)) Interlocked.Increment(ref enqueued);
-            else Interlocked.Increment(ref dropped);
+            else Drop(level);
         }
-        catch (InvalidOperationException) { Interlocked.Increment(ref dropped); }
+        catch (InvalidOperationException) { Drop(level); }
     }
 
     private void WriteLoop()

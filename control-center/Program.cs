@@ -17,7 +17,6 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.RateLimiting;
 using System.Threading.RateLimiting;
-using Microsoft.Extensions.Logging.Console;
 using Yarp.ReverseProxy.LoadBalancing;
 
 var privateDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "SpeedSignYarp", "ControlPlane");
@@ -25,12 +24,8 @@ Directory.CreateDirectory(privateDir);
 var keyDir = Path.Combine(privateDir, "data-protection-keys");
 Directory.CreateDirectory(keyDir);
 var builder = WebApplication.CreateBuilder(args);
-// Prevent a blocked console/stdout collector from waiting inside proxy requests.
-// Retain Debug/EventSource and other preexisting providers: filter ONLY the default
-// blocking console provider; replace it with a separate bounded background writer.
-var boundedConsole = new NonBlockingConsoleLoggerProvider(Console.Out, capacity: 1024);
-builder.Logging.AddFilter<ConsoleLoggerProvider>((_, _) => false);
-builder.Logging.AddProvider(boundedConsole);
+// Production and the GatewayLab use the same nonblocking registration.
+var boundedConsole = GatewayLoggingConfiguration.Install(builder.Logging, Console.Out);
 builder.Services.AddDataProtection()
     .SetApplicationName("SpeedSignYarpControlCenter")
     .PersistKeysToFileSystem(new DirectoryInfo(keyDir))
@@ -98,6 +93,8 @@ app.MapGet("/admin/api/logging-health", () => Results.Ok(new {
     enqueuedTotal = boundedConsole.EnqueuedMessages,
     writtenTotal = boundedConsole.WrittenMessages,
     droppedTotal = boundedConsole.DroppedMessages,
+    droppedLowPriorityTotal = boundedConsole.DroppedLowPriorityMessages,
+    droppedHighPriorityTotal = boundedConsole.DroppedHighPriorityMessages,
     writeErrorsTotal = boundedConsole.WriteErrors,
     guidance = "Alert on any rise in droppedTotal or writeErrorsTotal; audit is separate."
 })).RequireAuthorization();

@@ -169,6 +169,22 @@ void Require(bool okay, string name)
     if (!okay) throw new InvalidOperationException("FAIL: " + name);
     Console.WriteLine("PASS: " + name);
 }
+async Task VerifySharedProductLogger()
+{
+    using var response = await client.GetAsync(proxy + "/lab/stats");
+    response.EnsureSuccessStatusCode();
+    using var stats = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+    var root = stats.RootElement;
+    Require(root.GetProperty("loggingQueueCapacity").GetInt32() == 1024,
+        "soak lab uses 1024-entry shipping product logging queue");
+    var dropped = root.GetProperty("loggingDroppedTotal").GetInt64();
+    Require(dropped == root.GetProperty("loggingDroppedLowPriorityTotal").GetInt64()
+                   + root.GetProperty("loggingDroppedHighPriorityTotal").GetInt64(),
+        "soak lab logging counters reconcile by severity");
+    _ = root.GetProperty("loggingWriteErrorsTotal").GetInt64();
+    Record("shared-logging-observability", new { dropped, queueBound = 1024 });
+}
+
 void Record(string name, object details)
 {
     stages.Add(new { name, details, utc = DateTimeOffset.UtcNow });
@@ -220,6 +236,7 @@ try
         await WaitFor("load backend B", () => IsStatus(bUrl + "/health/ready", HttpStatusCode.OK));
         _ = Start(gateDll, "load-gateway");
         await WaitFor("load proxy", () => IsStatus(proxy + "/lab/ping", HttpStatusCode.OK));
+        await VerifySharedProductLogger();
         Console.WriteLine("LOAD_RIG_READY");
         var holdMinutes = args.Length >= 3 && int.TryParse(args[2], out var minutes)
             ? Math.Clamp(minutes, 1, 320) : 4;
@@ -234,6 +251,7 @@ try
     await WaitFor("backend B", () => IsStatus(bUrl + "/health/ready", HttpStatusCode.OK));
     _ = Start(gateDll, "gateway");
     await WaitFor("gateway", () => IsStatus(proxy + "/lab/ping", HttpStatusCode.OK));
+    await VerifySharedProductLogger();
     // Acceptance trusts only a loopback ephemeral certificate. This is NOT
     // production chain validation and is deliberately confined to the lab.
     using (var labTls = new HttpClient(new HttpClientHandler

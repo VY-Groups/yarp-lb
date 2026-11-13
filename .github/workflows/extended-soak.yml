@@ -60,6 +60,8 @@ jobs:
           VUS: ${{ inputs.vus || '75' }}
           PAYLOAD_BYTES: ${{ inputs.payload_bytes || '0' }}
           REUSE_CONNECTIONS: ${{ inputs.connection_reuse || 'true' }}
+          SOAK_REQUIRE_PRODUCT_LOGGING: "1"
+          SOAK_MAX_HIGH_PRIORITY_DROPS: "0"
         run: |
           set -euo pipefail
           mkdir -p artifacts/soak

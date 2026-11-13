@@ -60,7 +60,28 @@ for idx in range(0, len(values), chunk):
             "mean_working_set_bytes": round(sum(x["processWorkingSetBytes"] for x in part) / len(part)),
             "gen2_collections_delta": part[-1]["gc2Collections"] - part[0]["gc2Collections"],
         })
+logging_counters = ("loggingDroppedTotal","loggingDroppedLowPriorityTotal",
+                    "loggingDroppedHighPriorityTotal","loggingWriteErrorsTotal")
+logger_instrumented = all(x in start and x in end for x in logging_counters)
+if os.environ.get("SOAK_REQUIRE_PRODUCT_LOGGING") == "1" and not logger_instrumented:
+    raise SystemExit("SOAK_LOGGING_FAIL: shared product log counters missing from lab snapshots")
+logging_deltas = {name: end[name] - start[name] for name in logging_counters} if logger_instrumented else None
+if logger_instrumented and (
+    logging_deltas["loggingDroppedTotal"] != (
+        logging_deltas["loggingDroppedLowPriorityTotal"]
+        + logging_deltas["loggingDroppedHighPriorityTotal"]
+    ) or any(x < 0 for x in logging_deltas.values())
+):
+    raise SystemExit("SOAK_LOGGING_FAIL: log counters reset or do not reconcile")
+logging_queue_peak = max((x.get("loggingQueueDepth", 0) for x in values), default=0) if logger_instrumented else None
+if logger_instrumented and any(
+    x.get("loggingQueueDepth", 0) > x.get("loggingQueueCapacity", 1024) for x in values
+):
+    raise SystemExit("SOAK_LOGGING_FAIL: log queue exceeded configured capacity")
 report = {
+    "shared_product_logger_instrumented": logger_instrumented,
+    "log_drop_and_error_deltas": logging_deltas,
+    "log_queue_peak_sample": logging_queue_peak,
     "expected_five_minute_availability_windows": expected_windows,
     "five_minute_availability": availability_windows,
     "sustained_availability_pass": soak_continuity_pass,
@@ -101,3 +122,8 @@ print(json.dumps(report, indent=2))
 
 if expected_windows and not soak_continuity_pass:
     raise SystemExit("SOAK_SLO_FAIL: missing or failed five-minute availability window")
+if logging_deltas and int(os.environ.get("SOAK_MAX_HIGH_PRIORITY_DROPS", "-1")) >= 0 and (
+    logging_deltas["loggingDroppedHighPriorityTotal"] >
+    int(os.environ["SOAK_MAX_HIGH_PRIORITY_DROPS"])
+):
+    raise SystemExit("SOAK_LOGGING_FAIL: high-priority warning/error logs were dropped")

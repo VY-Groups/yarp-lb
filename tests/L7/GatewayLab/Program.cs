@@ -33,11 +33,9 @@ var keyFlags = OperatingSystem.IsWindows()
     : X509KeyStorageFlags.EphemeralKeySet;
 using var loopbackCert = new X509Certificate2(
     issuedCert.Export(X509ContentType.Pfx, pfxPassword), pfxPassword, keyFlags);
-// The disposable benchmark previously emitted millions of per-request INFO
-// messages to redirected stdout. The console writer blocked while its bounded
-// queue filled, then request threads blocked inside ConsoleLoggerProcessor.Enqueue.
-// Preserve warnings/errors; do not make the throughput lab an unbounded log sink.
-builder.Logging.AddFilter((provider, category, level) => level >= LogLevel.Warning);
+// Include ordinary INFO/Warning/Error traffic as in the shipping gateway.
+// Exercise the IDENTICAL product logging bootstrap under real k6 load.
+var boundedConsole = GatewayLoggingConfiguration.Install(builder.Logging, Console.Out);
 var httpPort = int.TryParse(Environment.GetEnvironmentVariable("YARP_LAB_HTTP_PORT"), out var h) ? h : 18080;
 var tlsPort = int.TryParse(Environment.GetEnvironmentVariable("YARP_LAB_TLS_PORT"), out var t) ? t : 18443;
 if (httpPort is < 1025 or > 65535 || tlsPort is < 1025 or > 65535 || httpPort == tlsPort)
@@ -86,6 +84,14 @@ app.MapGet("/lab/stats", () => Results.Ok(new
     allocatedBytesTotal = GC.GetTotalAllocatedBytes(false),
     processCpuTimeMs = Process.GetCurrentProcess().TotalProcessorTime.TotalMilliseconds,
     threadPoolThreadCount = ThreadPool.ThreadCount,
+    loggingQueueCapacity = boundedConsole.Capacity,
+    loggingQueueDepth = boundedConsole.QueuedMessages,
+    loggingEnqueuedTotal = boundedConsole.EnqueuedMessages,
+    loggingWrittenTotal = boundedConsole.WrittenMessages,
+    loggingDroppedTotal = boundedConsole.DroppedMessages,
+    loggingDroppedLowPriorityTotal = boundedConsole.DroppedLowPriorityMessages,
+    loggingDroppedHighPriorityTotal = boundedConsole.DroppedHighPriorityMessages,
+    loggingWriteErrorsTotal = boundedConsole.WriteErrors,
     processWorkingSetBytes = Environment.WorkingSet,
     gcManagedHeapBytes = GC.GetTotalMemory(false),
     gc0Collections = GC.CollectionCount(0),
