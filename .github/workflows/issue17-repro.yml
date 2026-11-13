@@ -30,7 +30,7 @@ jobs:
           # This repeat exercises ONLY the candidate fix to avoid burning 2
           # additional 15-minute runners on already captured old failures.
           - label: logging-backpressure-fix
-            source_sha: 47d6202b3b13c24e95af8305cb5a53b2d69fd22d
+            source_sha: 6eb0bdc6c682db694222fc838ce6961735eeb8eb
     steps:
       - uses: actions/checkout@v4
       - name: Checkout pinned historical gateway revision
