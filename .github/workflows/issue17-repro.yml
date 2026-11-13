@@ -26,10 +26,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - label: first-k6-2026
-            source_sha: 83e6bd1f2831ffbfe86f262947a865f33ab4ce2f
-          - label: main-before-hardening
-            source_sha: fc6cdd8ad54746542ba912e036dadfac2bc4603a
+          # Prior comparison evidence is stored in run 43505217113.
+          # This repeat exercises ONLY the candidate fix to avoid burning 2
+          # additional 15-minute runners on already captured old failures.
+          - label: logging-backpressure-fix
+            source_sha: 47d6202b3b13c24e95af8305cb5a53b2d69fd22d
     steps:
       - uses: actions/checkout@v4
       - name: Checkout pinned historical gateway revision
