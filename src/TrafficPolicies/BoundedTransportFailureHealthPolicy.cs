@@ -69,7 +69,7 @@ public static class EjectionBudget
     {
         if(total<0 || percent is < 1 or > 100 || minHealthyRemaining<0)
             throw new ArgumentOutOfRangeException(nameof(total));
-        return Math.Min(total-minHealthyRemaining,
-            (int)((long)total*percent/100)) is var limit && limit>0 ? limit : 0;
+        var limit=Math.Min(total-minHealthyRemaining,(int)((long)total*percent/100));
+        return Math.Max(0,limit);
     }
 }
