@@ -11,10 +11,14 @@ using var stop = new CancellationTokenSource();
 var tcpA = new TcpListener(IPAddress.Loopback, 19111);
 var tcpB = new TcpListener(IPAddress.Loopback, 19112);
 tcpA.Start(); tcpB.Start();
+var proxyBackend = new TcpListener(IPAddress.Loopback,19113);
+var idleBackend = new TcpListener(IPAddress.Loopback,19114);
+proxyBackend.Start(); idleBackend.Start();
 using var udpA = new UdpClient(new IPEndPoint(IPAddress.Loopback, 19121));
 using var udpB = new UdpClient(new IPEndPoint(IPAddress.Loopback, 19122));
 var workers = new [] {
     TcpEcho(tcpA, "A", stop.Token), TcpEcho(tcpB, "B", stop.Token),
+    ProxyProtocolBackend(proxyBackend, stop.Token), IdleBackend(idleBackend, stop.Token),
     UdpEcho(udpA, "A", stop.Token), UdpEcho(udpB, "B", stop.Token)
 };
 var scratch = Path.Combine(Path.GetTempPath(), "yarp-l4-" + Guid.NewGuid().ToString("N"));
@@ -22,8 +26,17 @@ Directory.CreateDirectory(scratch);
 var configFile = Path.Combine(scratch, "l4.json");
 File.WriteAllText(configFile, JsonSerializer.Serialize(new {
     AllowNonLoopbackListeners = false,
-    Tcp = new [] { new { Name = "tcp-echo", ListenHost="127.0.0.1", ListenPort=19011,
-      Backends = new [] { new { Host="127.0.0.1", Port=19111 }, new { Host="127.0.0.1", Port=19112 } } } },
+    Tcp = new object [] { new { Name = "tcp-echo", ListenHost="127.0.0.1", ListenPort=19011,
+      Backends = new [] { new { Host="127.0.0.1", Port=19111 }, new { Host="127.0.0.1", Port=19112 } } },
+      new { Name = "tcp-proxy-header", ListenHost="127.0.0.1", ListenPort=19012,
+        SendProxyProtocolV1=true, TcpIdleTimeoutSeconds=2,
+        Backends = new [] { new { Host="127.0.0.1", Port=19113 } } },
+      new { Name = "tcp-idle", ListenHost="127.0.0.1", ListenPort=19013,
+        TcpIdleTimeoutSeconds=1,
+        Backends = new [] { new { Host="127.0.0.1", Port=19114 } } },
+      new { Name = "tcp-drain", ListenHost="127.0.0.1", ListenPort=19014,
+        Backends = new [] { new { Host="127.0.0.1", Port=19111, DrainNewConnections=true },
+          new { Host="127.0.0.1", Port=19112, DrainNewConnections=false } } } },
     Udp = new [] { new { Name = "udp-echo", ListenHost="127.0.0.1", ListenPort=19021,
       Backends = new [] { new { Host="127.0.0.1", Port=19121 }, new { Host="127.0.0.1", Port=19122 } } } }
 }));
@@ -61,13 +74,24 @@ try
         var reply=await UdpRoundTrip(c1,"repeat"+i);
         Assert(reply.StartsWith(first[..2]),"UDP source endpoint remains sticky to same backend");
     }
+    for (var i=0;i<12;i++)
+        Assert((await TcpRoundTrip("drain-"+i,19014)).StartsWith("B|"),
+            "backend flagged draining does not receive new TCP streams");
+    Assert(await ValidateProxyHeader(), "PROXY v1 reports source and destination before application bytes");
+    Assert(await ValidateTcpIdle(), "idle TCP stream closed by configured timeout");
+    // Verify active health rejects down nodes rather than repeatedly relying on connect exceptions.
+    tcpA.Stop();
+    await Task.Delay(2600);
+    for(var i=0;i<20;i++)
+        Assert((await TcpRoundTrip("unhealthy-"+i)).StartsWith("B|"),
+            "active health probe removes down backend from new connection selection");
     Assert(await ValidatePublicBindDenied(), "public listener requires explicit opt-in");
     Console.WriteLine("L4 TCP+UDP REAL-SOCKET ACCEPTANCE PASSED");
 }
 finally
 {
     stop.Cancel();
-    tcpA.Stop();tcpB.Stop();
+    tcpA.Stop();tcpB.Stop();proxyBackend.Stop();idleBackend.Stop();
     if(!proxy.HasExited)proxy.Kill(entireProcessTree:true);
     await proxy.WaitForExitAsync();
     try { await Task.WhenAll(workers); } catch {}
@@ -78,10 +102,10 @@ finally
 }
 return 0;
 
-async Task<string> TcpRoundTrip(string message)
+async Task<string> TcpRoundTrip(string message, int port=19011)
 {
     using var client=new TcpClient(AddressFamily.InterNetwork);
-    await client.ConnectAsync(IPAddress.Loopback,19011);
+    await client.ConnectAsync(IPAddress.Loopback,port);
     using var stream=client.GetStream();
     var bytes=Encoding.UTF8.GetBytes(message+"\n");
     await stream.WriteAsync(bytes);
@@ -97,6 +121,31 @@ async Task<string> UdpRoundTrip(UdpClient c,string message)
     using var timeout=new CancellationTokenSource(TimeSpan.FromSeconds(3));
     var result=await c.ReceiveAsync(timeout.Token);
     return Encoding.UTF8.GetString(result.Buffer);
+}
+async Task<bool> ValidateProxyHeader()
+{
+    using var client = new TcpClient(AddressFamily.InterNetwork);
+    await client.ConnectAsync(IPAddress.Loopback,19012);
+    using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+    var bytes = new byte[256];
+    var read = await client.GetStream().ReadAsync(bytes, timeout.Token);
+    var reply = Encoding.ASCII.GetString(bytes,0,read);
+    var tokens = reply.Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries);
+    return tokens.Length==6 && tokens[0]=="PROXY" && tokens[1]=="TCP4" &&
+        tokens[2]=="127.0.0.1" && tokens[3]=="127.0.0.1" &&
+        int.TryParse(tokens[4],out var sourcePort) && sourcePort>0 &&
+        int.TryParse(tokens[5],out var targetPort) && targetPort==19012;
+}
+async Task<bool> ValidateTcpIdle()
+{
+    using var client = new TcpClient(AddressFamily.InterNetwork);
+    await client.ConnectAsync(IPAddress.Loopback,19013);
+    using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+    try
+    {
+        return await client.GetStream().ReadAsync(new byte[1],timeout.Token)==0;
+    }
+    catch(OperationCanceledException) { return false; }
 }
 async Task<bool> ValidatePublicBindDenied()
 {
@@ -166,4 +215,50 @@ static async Task UdpEcho(UdpClient listener,string id,CancellationToken token)
     }
     catch(OperationCanceledException){}
     catch(ObjectDisposedException){}
+}
+static async Task ProxyProtocolBackend(TcpListener listener, CancellationToken token)
+{
+    try
+    {
+        while (!token.IsCancellationRequested)
+        {
+            var client=await listener.AcceptTcpClientAsync(token);
+            _=Task.Run(async()=>
+            {
+                using(client)
+                {
+                    try
+                    {
+                        using var reader=new StreamReader(client.GetStream(),Encoding.ASCII,leaveOpen:true);
+                        var header=await reader.ReadLineAsync(token);
+                        if(header is not null && header.StartsWith("PROXY TCP4 "))
+                            await client.GetStream().WriteAsync(Encoding.ASCII.GetBytes(header+"\n"),token);
+                    }
+                    catch(Exception ex) when(ex is IOException or SocketException or OperationCanceledException) { }
+                }
+            },token);
+        }
+    }
+    catch(OperationCanceledException) { }
+    catch(SocketException) when(token.IsCancellationRequested) { }
+}
+static async Task IdleBackend(TcpListener listener, CancellationToken token)
+{
+    try
+    {
+        while (!token.IsCancellationRequested)
+        {
+            var client=await listener.AcceptTcpClientAsync(token);
+            _=Task.Run(async()=>
+            {
+                using(client)
+                {
+                    try { await Task.Delay(TimeSpan.FromSeconds(10),token); }
+                    catch(OperationCanceledException) { }
+                }
+            },token);
+        }
+    }
+    catch(OperationCanceledException) { }
+    catch(SocketException) when(token.IsCancellationRequested) { }
 }
