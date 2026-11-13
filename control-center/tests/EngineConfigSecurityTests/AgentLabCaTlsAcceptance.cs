@@ -90,7 +90,14 @@ public static class AgentLabCaTlsAcceptance
                     if (process.HasExited) break;
                     await Task.Delay(100);
                 }
-                if(!ready) throw new Exception("Lab CA agent listener failed to bind");
+                if(!ready)
+                {
+                    if(!process.HasExited) process.Kill(entireProcessTree:true);
+                    await process.WaitForExitAsync();
+                    throw new Exception("Lab CA agent listener failed to bind; stdout=" +
+                        (await stdout)[..Math.Min(3000,(await stdout).Length)] +
+                        " stderr=" + (await stderr)[..Math.Min(7000,(await stderr).Length)]);
+                }
                 var url="https://127.0.0.1:"+port+"/agent/v1/status";
                 using var a=Client(server,old);
                 using var b=Client(server,newer);
