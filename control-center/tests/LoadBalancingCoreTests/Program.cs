@@ -69,7 +69,7 @@ static int OriginalRendezvous(string key, IReadOnlyList<string> ids, IReadOnlyLi
     {
         if (weights[i] is < 1 or > 100 || string.IsNullOrEmpty(ids[i]))
             throw new ArgumentOutOfRangeException(nameof(weights));
-        var bytes=SHA256.HashData(Encoding.UTF8.GetBytes(key+"\\u001f"+ids[i]));
+        var bytes=SHA256.HashData(Encoding.UTF8.GetBytes(key+"\u001f"+ids[i]));
         var hash=BinaryPrimitives.ReadUInt64BigEndian(bytes.AsSpan(0,8));
         var u=Math.Clamp((hash+0.5)/18446744073709551616.0,double.Epsilon,Math.BitDecrement(1.0));
         var score=-Math.Log(u)/weights[i];
