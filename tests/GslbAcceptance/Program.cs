@@ -69,8 +69,17 @@ try
         "failed site not returned while secondary healthy");
     s2.Healthy=0;
     await Task.Delay(3500);
-    await Wait(async()=> (await Query("app.integration.test")).Status==2);
-    Must((await Query("app.integration.test")).Address is null,"all-down DNS fails closed without stale site");
+    // By default, total probe failure must not create DNS outage.
+    await Wait(async()=> (await Query("app.integration.test")).Address is not null);
+    var allDown=new HashSet<string>();
+    for(var i=0;i<30;i++)
+    {
+        var reply=await Query("app.integration.test");
+        Must(reply.Status==0 && reply.Address is not null,"all-down fallback answers rather than SERVFAIL");
+        allDown.Add(reply.Address);
+    }
+    Must(allDown.SetEquals(new[]{"127.0.0.21","127.0.0.22"}),
+        "all-down fallback includes all configured sites");
     s1.Healthy=1;
     await Task.Delay(2500);
     await Wait(async()=> (await Query("app.integration.test")).Address=="127.0.0.21");
