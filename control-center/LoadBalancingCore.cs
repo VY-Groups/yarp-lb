@@ -12,6 +12,22 @@ public static class LoadBalancingCore
     public const int MinWeight = 1;
     public const int MaxWeight = 100;
 
+    public static bool TrySlowStartSeconds(string? raw, out int seconds)
+    {
+        seconds = 0;
+        return raw is null || (int.TryParse(raw, NumberStyles.None, CultureInfo.InvariantCulture, out seconds)
+            && seconds is >= 0 and <= 600);
+    }
+
+    public static int RampedWeight(int configuredWeight, double elapsedSeconds, int slowStartSeconds)
+    {
+        if (configuredWeight is < MinWeight or > MaxWeight) throw new ArgumentOutOfRangeException(nameof(configuredWeight));
+        if (slowStartSeconds is < 0 or > 600) throw new ArgumentOutOfRangeException(nameof(slowStartSeconds));
+        if (slowStartSeconds == 0 || elapsedSeconds >= slowStartSeconds) return configuredWeight;
+        if (double.IsNaN(elapsedSeconds) || elapsedSeconds <= 0) return 1;
+        return Math.Clamp((int)Math.Floor(configuredWeight * elapsedSeconds / slowStartSeconds), 1, configuredWeight);
+    }
+
     public static bool TryWeight(string? raw, out int weight)
     {
         weight = 1;

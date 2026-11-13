@@ -6,7 +6,8 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 
 // Run from repository root: dotnet run --project tests/L7/Acceptance -c Release --no-build
-var repo = args.Length == 1 ? Path.GetFullPath(args[0]) : Directory.GetCurrentDirectory();
+var repo = args.Length >= 1 ? Path.GetFullPath(args[0]) : Directory.GetCurrentDirectory();
+var holdForExternalLoad = args.Skip(1).Contains("--hold", StringComparer.Ordinal);
 var backDll = Path.Combine(repo, "tests", "L7", "BackendLab", "bin", "Release", "net10.0", "BackendLab.dll");
 var gateDll = Path.Combine(repo, "tests", "L7", "GatewayLab", "bin", "Release", "net10.0", "GatewayLab.dll");
 var gatewayDir = Path.GetDirectoryName(gateDll)!;
@@ -78,7 +79,7 @@ async Task<int> InFlight(string url)
     return json.RootElement.GetProperty("count").GetInt32();
 }
 
-void Configure(string policy, int aWeight, int bWeight)
+void Configure(string policy, int aWeight, int bWeight, bool drainA = false, int slowStartA = 0, bool drainKillA = false)
 {
     var config = new {
         ReverseProxy = new {
@@ -100,12 +101,12 @@ void Configure(string policy, int aWeight, int bWeight)
                         ["ConsecutiveFailuresHealthPolicy.Threshold"] = "1"
                     },
                     Destinations = new Dictionary<string, object> {
-                        ["A"] = new { Address = aUrl + "/", Metadata = new Dictionary<string,string> { ["Weight"] = aWeight.ToString() } },
+                        ["A"] = new { Address = aUrl + "/", Metadata = new Dictionary<string,string> { ["Weight"] = aWeight.ToString(), ["TrafficState"] = drainA ? "draining" : "active", ["SlowStartSeconds"] = slowStartA.ToString() } },
                         ["B"] = new { Address = bUrl + "/", Metadata = new Dictionary<string,string> { ["Weight"] = bWeight.ToString() } }
                     }
                 },
                 ["kill"] = new { Destinations = new Dictionary<string, object> {
-                    ["A"] = new { Address = aUrl + "/" }
+                    ["A"] = new { Address = aUrl + "/", Metadata = new Dictionary<string,string> { ["TrafficState"] = drainKillA ? "draining" : "active" } }
                 } }
             }
         }
@@ -188,6 +189,19 @@ var passed = false;
 try
 {
     Require(File.Exists(backDll) && File.Exists(gateDll), "both compiled binaries exist");
+    if (holdForExternalLoad)
+    {
+        Configure("WeightedRandom", 70, 30);
+        _ = Start(backDll, "load-A", "18081", "A");
+        _ = Start(backDll, "load-B", "18082", "B");
+        await WaitFor("load backend A", () => IsStatus(aUrl + "/health/ready", HttpStatusCode.OK));
+        await WaitFor("load backend B", () => IsStatus(bUrl + "/health/ready", HttpStatusCode.OK));
+        _ = Start(gateDll, "load-gateway");
+        await WaitFor("load proxy", () => IsStatus(proxy + "/lab/ping", HttpStatusCode.OK));
+        Console.WriteLine("LOAD_RIG_READY");
+        await Task.Delay(TimeSpan.FromMinutes(4));
+        return 0;
+    }
     Configure("WeightedRandom", 80, 20);
     var backendA = Start(backDll, "backend-A", "18081", "A");
     _ = Start(backDll, "backend-B", "18082", "B");
@@ -202,6 +216,43 @@ try
     var aPercent = 100.0 * weighted.Nodes.GetValueOrDefault("A") / 4000;
     Require(aPercent is >= 75 and <= 85, $"80:20 ratio in tolerance: A={aPercent:F2}%");
     Record("weighted-80-20", new { aPercent, weighted });
+
+    Configure("WeightedRandom", 80, 20, drainA: true);
+    await Task.Delay(1600);
+    var drained = await Sample(300);
+    Require(drained.Success == 300 && drained.Nodes.GetValueOrDefault("B") == 300,
+        "drained A receives no NEW requests");
+    Record("drain-new-requests", drained);
+    Configure("WeightedRandom", 80, 20);
+    await Task.Delay(1600);
+    var backFromDrain = await Sample(400);
+    Require(backFromDrain.Success == 400 && backFromDrain.Nodes.ContainsKey("A"), "un-drained A re-enters pool");
+    Record("drain-restore", backFromDrain);
+
+    var longRequest = client.GetAsync(proxy + "/kill/slow");
+    await WaitFor("in-flight request begins on A", async () => await InFlight(aUrl) > 0);
+    Configure("WeightedRandom", 80, 20, drainKillA: true);
+    await Task.Delay(1700);
+    using (var refused = await client.GetAsync(proxy + "/kill/slow"))
+        Require(refused.StatusCode == HttpStatusCode.ServiceUnavailable,
+            "draining blocks NEW requests even while an existing one remains in flight");
+    using (var completed = await longRequest)
+        Require(completed.IsSuccessStatusCode, "previously forwarded request completes during drain");
+    Record("inflight-preserved-during-drain", new { completed = true, newTraffic = 503 });
+    Configure("WeightedRandom", 80, 20);
+    await Task.Delay(1600);
+    Configure("WeightedRandom", 80, 20, slowStartA: 10);
+    await Task.Delay(1500);
+    var early = await Sample(500);
+    Require(early.Success == 500 && early.Nodes.GetValueOrDefault("A") < 350,
+        "slow-start limits fresh A during warmup");
+    await Task.Delay(10500);
+    var late = await Sample(1000);
+    var lateAPercent = 100.0 * late.Nodes.GetValueOrDefault("A") / 1000;
+    Require(late.Success == 1000 && lateAPercent is >= 72 and <= 88,
+        $"slow-start returns to 80 percent A: {lateAPercent:F2}%");
+    Record("slow-start", new { early, lateAPercent });
+
 
     Configure("SourceIpHash", 80, 20);
     await Task.Delay(2500);

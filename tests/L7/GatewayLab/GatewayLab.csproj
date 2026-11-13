@@ -8,5 +8,6 @@
     <PackageReference Include="Yarp.ReverseProxy" Version="2.3.0" />
     <Compile Include="../../../src/TrafficPolicies/LoadBalancingCore.cs" Link="LoadBalancingCore.cs" />
     <Compile Include="../../../src/TrafficPolicies/LoadBalancingExtensions.cs" Link="LoadBalancingExtensions.cs" />
+    <Compile Include="../../../control-center/TrafficLifecycle.cs" Link="TrafficLifecycle.cs" />
   </ItemGroup>
 </Project>

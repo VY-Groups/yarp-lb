@@ -12,10 +12,12 @@ public sealed class WeightedRandomPolicy : ILoadBalancingPolicy
         IReadOnlyList<DestinationState> availableDestinations)
     {
         if (availableDestinations.Count == 0) return null;
-        var weights = availableDestinations.Select(WeightOf).ToArray();
+        var active = availableDestinations.Where(d => !TrafficLifecycle.IsDraining(d)).ToArray();
+        if (active.Length == 0) return null;
+        var weights = active.Select(d => TrafficLifecycle.EffectiveWeightedRandomWeight(d, WeightOf(d))).ToArray();
         var total = weights.Sum();
         var ticket = RandomNumberGenerator.GetInt32(total);
-        return availableDestinations[LoadBalancingCore.PickWeightedIndex(weights, ticket)];
+        return active[LoadBalancingCore.PickWeightedIndex(weights, ticket)];
     }
 
     internal static int WeightOf(DestinationState destination)
@@ -43,10 +45,13 @@ public sealed class SourceIpHashPolicy : ILoadBalancingPolicy
         IReadOnlyList<DestinationState> availableDestinations)
     {
         if (availableDestinations.Count == 0) return null;
+        var active = availableDestinations.Where(d => !TrafficLifecycle.IsDraining(d)).ToArray();
+        if (active.Length == 0) return null;
         var address = context.Connection.RemoteIpAddress?.MapToIPv6().ToString();
         if (string.IsNullOrWhiteSpace(address)) return null; // no identity, no affinity
-        var ids = availableDestinations.Select(d => d.DestinationId).ToArray();
-        var weights = availableDestinations.Select(WeightedRandomPolicy.WeightOf).ToArray();
-        return availableDestinations[LoadBalancingCore.PickRendezvousIndex(address, ids, weights)];
+        var ids = active.Select(d => d.DestinationId).ToArray();
+        // Slow-start is excluded from source-affinity to avoid remapping existing clients.
+        var weights = active.Select(WeightedRandomPolicy.WeightOf).ToArray();
+        return active[LoadBalancingCore.PickRendezvousIndex(address, ids, weights)];
     }
 }

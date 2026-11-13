@@ -45,4 +45,12 @@ for(var i = 0; i < 2000; i++)
 }
 Check(skew > 1400, "weights bias rendezvous distribution");
 Check(LoadBalancingCore.PickRendezvousIndex("user",Array.Empty<string>(),Array.Empty<int>()) == -1,"no destinations");
+Check(LoadBalancingCore.TrySlowStartSeconds(null, out var ss0) && ss0 == 0, "slow-start disabled by default");
+Check(LoadBalancingCore.TrySlowStartSeconds("600", out var ss600) && ss600 == 600, "slow-start maximum");
+foreach (var invalid in new [] { "-1", "601", "1.5", "n/a" })
+    Check(!LoadBalancingCore.TrySlowStartSeconds(invalid, out _), "slow-start rejects " + invalid);
+Check(LoadBalancingCore.RampedWeight(80, 0, 10) == 1, "warmup first weight");
+Check(LoadBalancingCore.RampedWeight(80, 5, 10) == 40, "warmup midway");
+Check(LoadBalancingCore.RampedWeight(80, 10, 10) == 80, "warmup complete");
+Check(LoadBalancingCore.RampedWeight(80, 0, 0) == 80, "warmup disabled");
 Console.WriteLine($"PASS: all offline algorithm tests. Remapped {moves}/2000; weighted favored B {skew}/2000.");

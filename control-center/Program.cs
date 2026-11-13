@@ -9,6 +9,7 @@ using System.Text.RegularExpressions;
 using System.Security.Claims;
 using System.Security.Cryptography;
 using System.Text;
+using Yarp.ReverseProxy;
 using Yarp.ReverseProxy.Model;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Cookies;
@@ -160,11 +161,13 @@ app.UseAuthorization();
 // Process-local, low-cardinality HTTP request telemetry. This is NOT per-destination
 // YARP telemetry and is reset on each process restart.
 long requestsTotal = 0, requests2xx = 0, requests4xx = 0, requests5xx = 0, durationTicks = 0;
+var requestHistogram = new GatewayRequestHistogram();
 app.Use(async (ctx, next) =>
 {
     if (ctx.Request.Path.StartsWithSegments("/admin") || ctx.Request.Path.StartsWithSegments("/dashboard") ||
         ctx.Request.Path.StartsWithSegments("/gateway")) { await next(); return; }
     var started = System.Diagnostics.Stopwatch.GetTimestamp();
+    requestHistogram.Started();
     try { await next(); }
     finally
     {
@@ -173,7 +176,9 @@ app.Use(async (ctx, next) =>
         if (code is >= 200 and < 300) Interlocked.Increment(ref requests2xx);
         if (code is >= 400 and < 500) Interlocked.Increment(ref requests4xx);
         if (code >= 500) Interlocked.Increment(ref requests5xx);
-        Interlocked.Add(ref durationTicks, System.Diagnostics.Stopwatch.GetTimestamp() - started);
+        var elapsed = System.Diagnostics.Stopwatch.GetTimestamp() - started;
+        Interlocked.Add(ref durationTicks, elapsed);
+        requestHistogram.Finished(elapsed);
     }
 });
 var destinationTelemetry = new ConcurrentDictionary<string, DestinationCounters>();
@@ -217,6 +222,30 @@ app.MapGet("/gateway/metrics", (HttpContext ctx) =>
     output.Append("yarp_control_http_duration_seconds_sum ")
         .Append((Interlocked.Read(ref durationTicks) / (double)System.Diagnostics.Stopwatch.Frequency).ToString("R", System.Globalization.CultureInfo.InvariantCulture))
         .Append('\n');
+    requestHistogram.Append(output);
+    output.AppendLine("# HELP yarp_control_process_working_set_bytes Current process working set");
+    output.AppendLine("# TYPE yarp_control_process_working_set_bytes gauge");
+    output.Append("yarp_control_process_working_set_bytes ").Append(Environment.WorkingSet).Append('\n');
+    output.AppendLine("# HELP yarp_control_gc_heap_bytes Current managed heap bytes estimated by GC");
+    output.AppendLine("# TYPE yarp_control_gc_heap_bytes gauge");
+    output.Append("yarp_control_gc_heap_bytes ").Append(GC.GetTotalMemory(false)).Append('\n');
+    output.AppendLine("# HELP yarp_control_destination_inflight_requests YARP in-flight requests by destination");
+    output.AppendLine("# TYPE yarp_control_destination_inflight_requests gauge");
+    output.AppendLine("# HELP yarp_control_destination_active_health YARP active health 1 healthy, 0 unknown, -1 unhealthy");
+    output.AppendLine("# TYPE yarp_control_destination_active_health gauge");
+    var runtime = ctx.RequestServices.GetRequiredService<IProxyStateLookup>();
+    foreach (var cluster in runtime.GetClusters())
+    foreach (var dest in cluster.Destinations.Values)
+    {
+        var key = (cluster.ClusterId + "/" + dest.DestinationId)
+            .Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\n", "\\n");
+        output.Append("yarp_control_destination_inflight_requests{destination=\"")
+            .Append(key).Append("\"} ").Append(dest.ConcurrentRequestCount).Append('\n');
+        output.Append("yarp_control_destination_active_health{destination=\"")
+            .Append(key).Append("\"} ")
+            .Append(dest.Health.Active.ToString() switch { "Healthy" => 1, "Unhealthy" => -1, _ => 0 })
+            .Append('\n');
+    }
     output.AppendLine("# HELP yarp_control_destination_requests_total HTTP requests by configured YARP destination");
     output.AppendLine("# TYPE yarp_control_destination_requests_total counter");
     foreach (var pair in destinationTelemetry)
@@ -718,6 +747,12 @@ async Task<IResult> CommitReviewedChange(HttpContext ctx, JsonObject submitted)
             if (node?["Metadata"]?["Weight"] is JsonNode weightValue &&
                 !LoadBalancingCore.TryWeight(weightValue.ToString(), out _))
                 return Results.BadRequest(new { error = $"Destination {destId} Weight must be integer 1..100" });
+            var trafficState = node?["Metadata"]?["TrafficState"]?.ToString() ?? "active";
+            if (trafficState is not ("active" or "draining"))
+                return Results.BadRequest(new { error = $"Destination {destId} TrafficState must be active or draining" });
+            if (node?["Metadata"]?["SlowStartSeconds"] is JsonNode secondsNode &&
+                !LoadBalancingCore.TrySlowStartSeconds(secondsNode.ToString(), out _))
+                return Results.BadRequest(new { error = $"Destination {destId} SlowStartSeconds must be 0..600" });
         }
         var hc = c["HealthCheck"]?["Active"];
         if (hc is not null && hc["Path"] is not null && !ValidPath(hc["Path"]!.ToString())) return Results.BadRequest(new { error = "Invalid health-check path" });
@@ -993,6 +1028,10 @@ app.MapPost("/admin/api/fleet/rollout/{changeId}", async (HttpContext ctx, strin
     try
     {
         var proxy = new JsonObject { ["Routes"]=routes.DeepClone(),["Clusters"]=clusters.DeepClone() };
+        var signingKeyPath = Path.Combine(privateDir, "fleet-signing-private.pem");
+        if (!File.Exists(signingKeyPath))
+            throw new InvalidOperationException("Fleet signing key not provisioned. Signed deployment is required.");
+        var signingKeyPem = await File.ReadAllTextAsync(signingKeyPath);
         var prepared = new List<(FleetGateway Gateway,string Revision)>();
         foreach (var row in gateways)
         {
@@ -1002,8 +1041,10 @@ app.MapPost("/admin/api/fleet/rollout/{changeId}", async (HttpContext ctx, strin
             var status=JsonNode.Parse(await statusResponse.Content.ReadAsStringAsync());
             var revision=status?["revision"]?.ToString();
             if (string.IsNullOrWhiteSpace(revision)) throw new InvalidOperationException(row.Id+": no revision / deployment disabled");
+            var expires = DateTimeOffset.UtcNow.AddMinutes(3).ToUnixTimeSeconds();
+            var signature = FleetConfigSignature.Sign(signingKeyPem, txId, revision, proxy, expires);
             using var response=await client.PostAsJsonAsync(new Uri(new Uri(row.Url),"agent/v1/config/prepare"),
-                new {TransactionId=txId,ExpectedRevision=revision,ReverseProxy=proxy});
+                new {TransactionId=txId,ExpectedRevision=revision,ReverseProxy=proxy, ExpiresUnixSeconds=expires, Signature=signature});
             if (!response.IsSuccessStatusCode) throw new InvalidOperationException(row.Id+": prepare HTTP "+(int)response.StatusCode);
             var staged=JsonNode.Parse(await response.Content.ReadAsStringAsync());
             var revisionStaged=staged?["preparedRevision"]?.ToString();
@@ -1095,8 +1136,20 @@ app.Use(async (ctx, next) =>
 
 
 app.MapOrganizationProfile(privateDir);
+app.MapTlsInventory();
 app.MapReverseProxy(proxyPipeline =>
 {
+    // Drain filtering runs before affinity and load balancing, for all policies.
+    // Existing forwarded requests continue; no in-flight cancellation occurs.
+    proxyPipeline.Use(async (context, next) =>
+    {
+        var feature = context.GetReverseProxyFeature();
+        TrafficLifecycle.Observe(feature.AllDestinations, feature.AvailableDestinations);
+        if (feature.AvailableDestinations.Any(TrafficLifecycle.IsDraining))
+            feature.AvailableDestinations = feature.AvailableDestinations
+                .Where(d => !TrafficLifecycle.IsDraining(d)).ToArray();
+        await next();
+    });
     proxyPipeline.Use(async (context, next) =>
     {
         var clock = System.Diagnostics.Stopwatch.GetTimestamp();

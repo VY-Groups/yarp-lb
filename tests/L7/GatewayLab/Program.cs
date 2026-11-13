@@ -1,3 +1,4 @@
+using Yarp.ReverseProxy.Model;
 using Yarp.ReverseProxy.LoadBalancing;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -12,5 +13,28 @@ builder.Services.AddSingleton<ILoadBalancingPolicy, SourceIpHashPolicy>();
 
 var app = builder.Build();
 app.MapGet("/lab/ping", () => Results.Ok(new { lab = true }));
-app.MapReverseProxy();
+app.MapGet("/lab/stats", () => Results.Ok(new
+{
+    processWorkingSetBytes = Environment.WorkingSet,
+    gcManagedHeapBytes = GC.GetTotalMemory(false),
+    gc0Collections = GC.CollectionCount(0),
+    gc1Collections = GC.CollectionCount(1),
+    gc2Collections = GC.CollectionCount(2),
+    timeUtc = DateTimeOffset.UtcNow
+}));
+app.MapReverseProxy(proxyPipeline =>
+{
+    proxyPipeline.Use(async (ctx, next) =>
+    {
+        var proxy = ctx.GetReverseProxyFeature();
+        TrafficLifecycle.Observe(proxy.AllDestinations, proxy.AvailableDestinations);
+        if (proxy.AvailableDestinations.Any(TrafficLifecycle.IsDraining))
+            proxy.AvailableDestinations = proxy.AvailableDestinations
+                .Where(d => !TrafficLifecycle.IsDraining(d)).ToArray();
+        await next();
+    });
+    proxyPipeline.UseSessionAffinity();
+    proxyPipeline.UseLoadBalancing();
+    proxyPipeline.UsePassiveHealthChecks();
+});
 app.Run();
