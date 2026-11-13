@@ -41,7 +41,7 @@ void Config(string path, IEnumerable<(string Id, string Address)> destinations, 
                 ["api"] = new {
                     LoadBalancingPolicy = "RoundRobin",
                     HealthCheck = new {
-                        AvailableDestinationsPolicy = "HealthyAndUnknown" // fail-closed for CA-class services,
+                        AvailableDestinationsPolicy = "HealthyAndUnknown", // fail-closed for CA-class services,
                         Active = new {
                             Enabled = true, Interval = probe == "/lab/ping" ? "00:00:00.500" : "00:00:01",
                             Timeout = probe == "/lab/ping" ? "00:00:00.500" : "00:00:01",
