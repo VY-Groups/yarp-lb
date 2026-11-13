@@ -17,6 +17,10 @@ var allowActions = builder.Configuration.GetValue<bool>("Agent:EnableServiceActi
 var allowConfigChanges = builder.Configuration.GetValue<bool>("Agent:EnableConfigChanges");
 var gatewayConfigPath = builder.Configuration["Agent:GatewayConfigPath"] ?? "";
 var stageRoot = builder.Configuration["Agent:StageDirectory"] ?? "";
+var signingPublicKeyPath = builder.Configuration["Agent:ControllerSigningPublicKeyPath"] ?? "";
+if (allowConfigChanges && (!Path.IsPathFullyQualified(signingPublicKeyPath) || !File.Exists(signingPublicKeyPath)))
+    throw new InvalidOperationException("Signed config rollout requires an existing absolute ControllerSigningPublicKeyPath");
+var signingPublicKey = allowConfigChanges ? File.ReadAllText(signingPublicKeyPath) : "";
 if (allowConfigChanges && (!Path.IsPathFullyQualified(gatewayConfigPath) ||
     !Path.IsPathFullyQualified(stageRoot) || !File.Exists(gatewayConfigPath)))
     throw new InvalidOperationException("Config changes require an existing absolute gateway config path and absolute stage directory");
@@ -86,6 +90,9 @@ app.MapPost("/agent/v1/config/prepare", async (ConfigPrepare input) =>
         candidate["Routes"] is not JsonObject || candidate["Clusters"] is not JsonObject ||
         Encoding.UTF8.GetByteCount(candidate.ToJsonString()) > 524288)
         return Results.BadRequest(new { error = "Invalid transaction or proxy configuration" });
+    if (!FleetConfigSignature.Verify(signingPublicKey, input.TransactionId, input.ExpectedRevision,
+        candidate, input.ExpiresUnixSeconds, input.Signature, DateTimeOffset.UtcNow.ToUnixTimeSeconds()))
+        return Results.Problem("Missing, expired or invalid controller signature", statusCode: 403);
     await revisionLock.WaitAsync();
     try
     {
@@ -168,6 +175,7 @@ static async Task<(int exitCode, string output)> RunSc(string command, string se
 }
 record ServiceAction(string Action);
 
-record ConfigPrepare(string TransactionId, string ExpectedRevision, JsonObject ReverseProxy);
+record ConfigPrepare(string TransactionId, string ExpectedRevision, JsonObject ReverseProxy,
+    long ExpiresUnixSeconds, string Signature);
 record ConfigActivate(string TransactionId, string PreparedRevision);
 record ConfigRollback(string TransactionId);

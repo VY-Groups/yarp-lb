@@ -1028,6 +1028,10 @@ app.MapPost("/admin/api/fleet/rollout/{changeId}", async (HttpContext ctx, strin
     try
     {
         var proxy = new JsonObject { ["Routes"]=routes.DeepClone(),["Clusters"]=clusters.DeepClone() };
+        var signingKeyPath = Path.Combine(privateDir, "fleet-signing-private.pem");
+        if (!File.Exists(signingKeyPath))
+            throw new InvalidOperationException("Fleet signing key not provisioned. Signed deployment is required.");
+        var signingKeyPem = await File.ReadAllTextAsync(signingKeyPath);
         var prepared = new List<(FleetGateway Gateway,string Revision)>();
         foreach (var row in gateways)
         {
@@ -1037,8 +1041,10 @@ app.MapPost("/admin/api/fleet/rollout/{changeId}", async (HttpContext ctx, strin
             var status=JsonNode.Parse(await statusResponse.Content.ReadAsStringAsync());
             var revision=status?["revision"]?.ToString();
             if (string.IsNullOrWhiteSpace(revision)) throw new InvalidOperationException(row.Id+": no revision / deployment disabled");
+            var expires = DateTimeOffset.UtcNow.AddMinutes(3).ToUnixTimeSeconds();
+            var signature = FleetConfigSignature.Sign(signingKeyPem, txId, revision, proxy, expires);
             using var response=await client.PostAsJsonAsync(new Uri(new Uri(row.Url),"agent/v1/config/prepare"),
-                new {TransactionId=txId,ExpectedRevision=revision,ReverseProxy=proxy});
+                new {TransactionId=txId,ExpectedRevision=revision,ReverseProxy=proxy, ExpiresUnixSeconds=expires, Signature=signature});
             if (!response.IsSuccessStatusCode) throw new InvalidOperationException(row.Id+": prepare HTTP "+(int)response.StatusCode);
             var staged=JsonNode.Parse(await response.Content.ReadAsStringAsync());
             var revisionStaged=staged?["preparedRevision"]?.ToString();

@@ -47,6 +47,8 @@ jobs:
         run: dotnet build GatewayAgent/SpeedSignGatewayAgent.csproj --configuration Release
       - name: Run load balancing core tests
         run: dotnet run --project tests/LoadBalancingCoreTests/LoadBalancingCoreTests.csproj --configuration Release
+      - name: Verify signed fleet configuration acceptance
+        run: dotnet run --project tests/FleetConfigSignatureTests/FleetConfigSignatureTests.csproj --configuration Release
       - name: Check frontend compile reproducibility
         shell: bash
         run: |
