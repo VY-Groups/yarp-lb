@@ -16,6 +16,10 @@ bool IsLoopback(HttpContext ctx) =>
 app.MapGet("/health/ready", () =>
     state.Ready ? (IResult)Results.Ok(new { ready = true, node }) : Results.StatusCode(503));
 app.MapGet("/api/identity", () => Results.Ok(new { node }));
+app.MapGet("/api/payload/{bytes:int}", (int bytes) =>
+    bytes is >= 1 and <= 65536
+        ? (IResult)Results.Bytes(new byte[bytes], "application/octet-stream")
+        : Results.BadRequest(new { error = "Payload size must be 1..65536" }));
 app.MapGet("/lab/inflight", () => Results.Ok(new { count = Volatile.Read(ref state.InFlight) }));
 app.MapPost("/lab/ready/{enabled:bool}", (HttpContext ctx, bool enabled) =>
 {

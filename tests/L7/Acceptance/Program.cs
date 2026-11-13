@@ -209,6 +209,20 @@ try
     await WaitFor("backend B", () => IsStatus(bUrl + "/health/ready", HttpStatusCode.OK));
     _ = Start(gateDll, "gateway");
     await WaitFor("gateway", () => IsStatus(proxy + "/lab/ping", HttpStatusCode.OK));
+    // Acceptance trusts only a loopback ephemeral certificate. This is NOT
+    // production chain validation and is deliberately confined to the lab.
+    using (var labTls = new HttpClient(new HttpClientHandler
+    {
+        ServerCertificateCustomValidationCallback = (_, certificate, _, _) =>
+            certificate is not null &&
+            certificate.Subject.Contains("CN=localhost", StringComparison.Ordinal) &&
+            certificate.NotAfter.ToUniversalTime() > DateTime.UtcNow
+    }))
+    {
+        using var tlsReply = await labTls.GetAsync("https://127.0.0.1:18443/api/identity");
+        Require(tlsReply.IsSuccessStatusCode, "real HTTPS termination through YARP works");
+    }
+    Record("loopback-tls-termination", new { port = 18443, trust = "ephemeral localhost lab certificate only" });
     await Task.Delay(2500);
 
     var weighted = await Sample(4000);

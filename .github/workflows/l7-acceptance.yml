@@ -70,7 +70,7 @@ jobs:
           dotnet build tests/L7/GatewayLab/GatewayLab.csproj -c Release
           dotnet build tests/L7/BackendLab/BackendLab.csproj -c Release
           dotnet build tests/L7/Acceptance/Acceptance.csproj -c Release
-      - name: Start loopback-only load lab, measure p95/p99 and process memory
+      - name: Compare direct backends, HTTP proxy and HTTPS proxy under the same load
         shell: bash
         run: |
           set -euo pipefail
@@ -79,31 +79,30 @@ jobs:
           runner_pid=$!
           trap 'kill "$runner_pid" 2>/dev/null || true; wait "$runner_pid" 2>/dev/null || true' EXIT
           ready=0
-          for i in $(seq 1 100); do
-            if curl --silent --fail http://127.0.0.1:18080/lab/stats > artifacts/k6/before.json; then ready=1; break; fi
+          for i in $(seq 1 150); do
+            if curl --silent --fail http://127.0.0.1:18080/lab/stats > artifacts/k6/before.json &&
+               curl --silent --fail --insecure https://127.0.0.1:18443/lab/ping >/dev/null; then ready=1; break; fi
             sleep 0.3
           done
           if [[ "$ready" != 1 ]]; then cat artifacts/k6/load-rig.log; exit 1; fi
-          docker run --rm --network host \
-            --user "$(id -u):$(id -g)" \
-            -v "$GITHUB_WORKSPACE:/workspace" -w /workspace \
-            grafana/k6:0.55.0 run \
-            --summary-export=/workspace/artifacts/k6/summary.json \
-            /workspace/tests/L7/performance/load.js
-          test -s artifacts/k6/summary.json  # Fail if the exporter could not write evidence
+
+          for phase in direct proxy-http proxy-https; do
+            case "$phase" in
+              direct) mode=direct; target=http://127.0.0.1:18081; tls=0;;
+              proxy-http) mode=proxy; target=http://127.0.0.1:18080; tls=0;;
+              proxy-https) mode=proxy; target=https://127.0.0.1:18443; tls=1;;
+            esac
+            docker run --rm --network host --user "$(id -u):$(id -g)" \
+              -e MODE="$mode" -e TARGET="$target" -e LAB_TLS="$tls" -e DURATION=20s -e VUS=75 \
+              -v "$GITHUB_WORKSPACE:/workspace" -w /workspace \
+              grafana/k6:0.55.0 run \
+              --summary-export="/workspace/artifacts/k6/$phase.json" \
+              /workspace/tests/L7/performance/load.js
+            test -s "artifacts/k6/$phase.json"
+          done
           curl --silent --show-error --fail http://127.0.0.1:18080/lab/stats > artifacts/k6/after.json
-          python - <<'PY'
-          import json
-          before=json.load(open('artifacts/k6/before.json'))
-          after=json.load(open('artifacts/k6/after.json'))
-          delta=after['processWorkingSetBytes']-before['processWorkingSetBytes']
-          evidence={'workingSetBytesBefore':before['processWorkingSetBytes'],
-             'workingSetBytesAfter':after['processWorkingSetBytes'],
-             'workingSetDeltaBytes':delta,
-             'gcCollectionDeltas':{f'gen{i}': after[f'gc{i}Collections']-before[f'gc{i}Collections'] for i in range(3)}}
-          with open('artifacts/k6/runtime-delta.json','w') as f: json.dump(evidence,f,indent=2)
-          print(evidence)
-          PY
+          python tests/L7/performance/compare.py artifacts/k6
+
       - name: Upload benchmark and memory evidence
         if: always()
         uses: actions/upload-artifact@v4

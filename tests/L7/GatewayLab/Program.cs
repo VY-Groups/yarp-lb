@@ -1,8 +1,28 @@
+using System.Net;
+using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
+using Microsoft.AspNetCore.Server.Kestrel.Https;
 using Yarp.ReverseProxy.Model;
 using Yarp.ReverseProxy.LoadBalancing;
 
 var builder = WebApplication.CreateBuilder(args);
-builder.WebHost.UseUrls("http://127.0.0.1:18080");
+// Ephemeral loopback-only TLS identity. Never deploy this certificate for real clients.
+using var tlsKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+var certRequest = new CertificateRequest(new X500DistinguishedName("CN=localhost"),
+    tlsKey, HashAlgorithmName.SHA256);
+certRequest.CertificateExtensions.Add(new X509BasicConstraintsExtension(false, false, 0, true));
+certRequest.CertificateExtensions.Add(new X509KeyUsageExtension(X509KeyUsageFlags.DigitalSignature, true));
+var san = new SubjectAlternativeNameBuilder();
+san.AddDnsName("localhost");
+san.AddIpAddress(IPAddress.Loopback);
+certRequest.CertificateExtensions.Add(san.Build());
+using var loopbackCert = certRequest.CreateSelfSigned(
+    DateTimeOffset.UtcNow.AddMinutes(-10), DateTimeOffset.UtcNow.AddHours(6));
+builder.WebHost.ConfigureKestrel(k =>
+{
+    k.ListenLocalhost(18080);
+    k.ListenLocalhost(18443, listen => listen.UseHttps(loopbackCert));
+});
 
 var configPath = Path.Combine(AppContext.BaseDirectory, "lab.json");
 builder.Configuration.AddJsonFile(configPath, optional: false, reloadOnChange: true);
