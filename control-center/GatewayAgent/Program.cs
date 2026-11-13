@@ -50,7 +50,7 @@ var sequencePath = Path.Combine(stageRoot, "last-accepted-sequence.txt");
 var revisionLock = new SemaphoreSlim(1,1);
 static string Sha(byte[] data) => Convert.ToHexString(SHA256.HashData(data));
 static bool ValidTx(string id) => Regex.IsMatch(id, "^[A-Za-z0-9_-]{12,80}$");
-var normalized = AgentClientCertificatePolicy.ParsePinnedThumbprints(allowedThumbprints);
+_ = AgentClientCertificatePolicy.ParsePinnedThumbprints(allowedThumbprints); // Fail closed at startup
 if (allowedServices.Any(x => !Regex.IsMatch(x, "^[A-Za-z0-9_.-]{1,64}$")))
     throw new InvalidOperationException("Invalid allowlisted Windows service name");
 builder.WebHost.ConfigureKestrel(server =>
@@ -66,7 +66,7 @@ var app = builder.Build();
 app.Use(async (ctx, next) =>
 {
     // Kestrel performs TLS chain validation. This additionally pins controller identities.
-    if (!AgentClientCertificatePolicy.IsAuthorized(ctx, normalized))
+    if (!AgentClientCertificatePolicy.IsAuthorizedLive(ctx, builder.Configuration))
     { ctx.Response.StatusCode = StatusCodes.Status403Forbidden; return; }
     ctx.Response.Headers.CacheControl = "no-store";
     await next();
