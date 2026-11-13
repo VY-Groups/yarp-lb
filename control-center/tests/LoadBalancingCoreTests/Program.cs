@@ -83,9 +83,10 @@ var candidateIds = new[]{ "gw-a", "gw-🔥-b", "bravo-gateway-" + new string('é
 var candidateWeights = new[]{ 1,5,100,11 };
 var keys=Enumerable.Range(0,2000).Select(i=>"src:" + i + "-東京-🛡️").ToArray();
 foreach(var key in keys)
-    Check(OriginalRendezvous(key,candidateIds,candidateWeights) ==
-          LoadBalancingCore.PickRendezvousIndex(key,candidateIds,candidateWeights),
-          "rendezvous exact legacy hash and tie semantics "+key);
+    if (OriginalRendezvous(key,candidateIds,candidateWeights) !=
+        LoadBalancingCore.PickRendezvousIndex(key,candidateIds,candidateWeights))
+        throw new Exception("FAIL: rendezvous differs for Unicode key " + key);
+Check(true, "2000 Unicode candidates match original rendezvous output exactly");
 for(var i=0;i<1000;i++)
 {
     OriginalRendezvous(keys[i],candidateIds,candidateWeights);
