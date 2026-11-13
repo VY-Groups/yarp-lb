@@ -4,6 +4,16 @@ using System.Net;
 using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
+// Verify response limiting with deterministic monotonic timestamps: no flaky UDP flood.
+var rate=new DnsResponseRateLimiter(2,2);
+var ip1=IPAddress.Parse("127.0.0.31");
+var ip2=IPAddress.Parse("127.0.0.32");
+var ip3=IPAddress.Parse("127.0.0.33");
+if(!rate.Allow(ip1,0) || !rate.Allow(ip1,100) || rate.Allow(ip1,200) ||
+   !rate.Allow(ip1,1000) || !rate.Allow(ip2,1000) || rate.Allow(ip3,1000) ||
+   !rate.Allow(ip3,3000))
+    throw new Exception("FAIL: bounded UDP per-source rate limiter or recovery");
+Console.WriteLine("PASS: UDP response rate limit, table capacity, expiry and recovery");
 var repo=args.Length==1?Path.GetFullPath(args[0]):Directory.GetCurrentDirectory();
 var dll=Path.Combine(repo,"engines","GslbDns","bin","Release","net10.0","GslbDns.dll");
 if(!File.Exists(dll))throw new FileNotFoundException("Compile DNS server first",dll);
@@ -69,8 +79,17 @@ try
         "failed site not returned while secondary healthy");
     s2.Healthy=0;
     await Task.Delay(3500);
-    await Wait(async()=> (await Query("app.integration.test")).Status==2);
-    Must((await Query("app.integration.test")).Address is null,"all-down DNS fails closed without stale site");
+    // By default, total probe failure must not create DNS outage.
+    await Wait(async()=> (await Query("app.integration.test")).Address is not null);
+    var allDown=new HashSet<string>();
+    for(var i=0;i<30;i++)
+    {
+        var reply=await Query("app.integration.test");
+        Must(reply.Status==0 && reply.Address is not null,"all-down fallback answers rather than SERVFAIL");
+        allDown.Add(reply.Address);
+    }
+    Must(allDown.SetEquals(new[]{"127.0.0.21","127.0.0.22"}),
+        "all-down fallback includes all configured sites");
     s1.Healthy=1;
     await Task.Delay(2500);
     await Wait(async()=> (await Query("app.integration.test")).Address=="127.0.0.21");

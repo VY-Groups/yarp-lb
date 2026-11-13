@@ -19,6 +19,7 @@ if (!IPAddress.TryParse(config.ListenHost, out var listen) ||
     (!config.AllowNonLoopbackListeners && !IPAddress.IsLoopback(listen)) ||
     config.ListenPort is < 1025 or > 65535 ||
     config.ProbeIntervalSeconds is < 1 or > 60 ||
+    config.MaxResponsesPerSecondPerClient is < 20 or > 20000 ||
     config.Zones is not { Length: >= 1 and <= 64 })
     throw new InvalidDataException("Invalid DNS listener or zones. Non-loopback binding requires explicit opt-in.");
 var names=new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -41,7 +42,7 @@ foreach(var zone in config.Zones)
             throw new InvalidDataException("Invalid GSLB site address, weight or health probe URL");
         sites.Add(new Site(address,health,site.Weight));
     }
-    groups.Add(zone.Name.TrimEnd('.').ToLowerInvariant(), new SiteGroup(sites.ToArray(),zone.TtlSeconds));
+    groups.Add(zone.Name.TrimEnd('.').ToLowerInvariant(), new SiteGroup(sites.ToArray(),zone.TtlSeconds,zone.FailClosedWhenAllSitesDown));
 }
 using var stop=new CancellationTokenSource();
 Console.CancelKeyPress += (_, e)=>{e.Cancel=true;stop.Cancel();};
@@ -83,6 +84,7 @@ using var dnsSocket=new Socket(AddressFamily.InterNetwork,SocketType.Dgram,Proto
 dnsSocket.Bind(new IPEndPoint(listen,config.ListenPort));
 Console.WriteLine($"GSLB_DNS_READY UDP={config.ListenHost}:{config.ListenPort} zones={groups.Count}");
 var buffer=new byte[4096];
+var responseLimiter=new DnsResponseRateLimiter(config.MaxResponsesPerSecondPerClient);
 try
 {
     while(!stop.IsCancellationRequested)
@@ -92,6 +94,10 @@ try
             new IPEndPoint(IPAddress.Any,0),stop.Token); }
         catch(OperationCanceledException) when(stop.IsCancellationRequested){break;}
         catch(SocketException) when(stop.IsCancellationRequested){break;}
+        // IP-keyed response budget. Do not echo arbitrary UDP traffic without limits.
+        // Loopback is still the required default deployment boundary.
+        var source=((IPEndPoint)received.RemoteEndPoint).Address;
+        if(!responseLimiter.Allow(source,Environment.TickCount64))continue;
         var response=BuildResponse(buffer.AsSpan(0,received.ReceivedBytes),groups);
         if(response is null)continue;
         try { await dnsSocket.SendToAsync(response,SocketFlags.None,received.RemoteEndPoint,stop.Token); }
@@ -133,8 +139,18 @@ static byte[]? BuildResponse(ReadOnlySpan<byte> query, Dictionary<string, SiteGr
     {
         var eligible=group.Sites.Where(x=>Volatile.Read(ref x.Healthy)==1).ToArray();
         var total=eligible.Sum(x=>x.Weight);
-        if(total==0)code=2; // SERVFAIL, fail closed
-        else
+        if(total==0)
+        {
+            if(group.FailClosedWhenAllSitesDown)code=2; // explicit strict policy
+            else
+            {
+                // Probe failures may be regional or systemic: retain DNS availability.
+                // This is intentionally NOT a claim that any returned site is healthy.
+                eligible=group.Sites;
+                total=eligible.Sum(x=>x.Weight);
+            }
+        }
+        if(total>0)
         {
             var ticket=(int)(Interlocked.Increment(ref group.Counter) % total);
             foreach(var site in eligible)
@@ -165,8 +181,12 @@ static byte[]? BuildResponse(ReadOnlySpan<byte> query, Dictionary<string, SiteGr
     return response;
 }
 sealed record DnsConfig(bool AllowNonLoopbackListeners,string ListenHost,int ListenPort,
-    int ProbeIntervalSeconds,DnsZone[] Zones);
-sealed record DnsZone(string Name,int TtlSeconds,DnsSite[] Sites);
+    int ProbeIntervalSeconds,DnsZone[] Zones)
+{
+    public int MaxResponsesPerSecondPerClient {get;init;} = 500;
+}
+sealed record DnsZone(string Name,int TtlSeconds,DnsSite[] Sites,
+    bool FailClosedWhenAllSitesDown=false);
 sealed record DnsSite(string Address,string HealthUrl,int Weight);
 sealed class Site
 {
@@ -178,7 +198,9 @@ sealed class Site
 }
 sealed class SiteGroup
 {
-    public SiteGroup(Site[] sites,int ttl)=>(Sites,Ttl)=(sites,ttl);
+    public SiteGroup(Site[] sites,int ttl,bool failClosedWhenAllSitesDown)
+        =>(Sites,Ttl,FailClosedWhenAllSitesDown)=(sites,ttl,failClosedWhenAllSitesDown);
+    public bool FailClosedWhenAllSitesDown {get;}
     public Site[] Sites {get;}
     public int Ttl {get;}
     public long Counter=-1;

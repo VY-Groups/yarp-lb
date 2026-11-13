@@ -1,4 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk"><PropertyGroup>
  <OutputType>Exe</OutputType><TargetFramework>net10.0</TargetFramework>
  <Nullable>enable</Nullable><ImplicitUsings>enable</ImplicitUsings>
- </PropertyGroup></Project>
+ </PropertyGroup>  <ItemGroup>
+    <Compile Include="../../engines/GslbDns/DnsResponseRateLimiter.cs" Link="DnsResponseRateLimiter.cs" />
+  </ItemGroup>
+</Project>
