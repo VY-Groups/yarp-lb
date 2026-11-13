@@ -1,3 +1,5 @@
+using System.Diagnostics;
+using System.Runtime;
 using System.Net;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
@@ -52,6 +54,11 @@ var app = builder.Build();
 app.MapGet("/lab/ping", () => Results.Ok(new { lab = true }));
 app.MapGet("/lab/stats", () => Results.Ok(new
 {
+    processId = Environment.ProcessId,
+    serverGc = GCSettings.IsServerGC,
+    allocatedBytesTotal = GC.GetTotalAllocatedBytes(false),
+    processCpuTimeMs = Process.GetCurrentProcess().TotalProcessorTime.TotalMilliseconds,
+    threadPoolThreadCount = ThreadPool.ThreadCount,
     processWorkingSetBytes = Environment.WorkingSet,
     gcManagedHeapBytes = GC.GetTotalMemory(false),
     gc0Collections = GC.CollectionCount(0),
