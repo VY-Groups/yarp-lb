@@ -26,7 +26,7 @@ Directory.CreateDirectory(scratch);
 var configFile = Path.Combine(scratch, "l4.json");
 File.WriteAllText(configFile, JsonSerializer.Serialize(new {
     AllowNonLoopbackListeners = false,
-    Tcp = new [] { new { Name = "tcp-echo", ListenHost="127.0.0.1", ListenPort=19011,
+    Tcp = new object [] { new { Name = "tcp-echo", ListenHost="127.0.0.1", ListenPort=19011,
       Backends = new [] { new { Host="127.0.0.1", Port=19111 }, new { Host="127.0.0.1", Port=19112 } } },
       new { Name = "tcp-proxy-header", ListenHost="127.0.0.1", ListenPort=19012,
         SendProxyProtocolV1=true, TcpIdleTimeoutSeconds=2,
