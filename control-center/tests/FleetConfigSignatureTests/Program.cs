@@ -47,7 +47,7 @@ Must(!FleetConfigSignature.VerifyV2(trusted, transaction, revision, p, signed, n
     "v2 expired signature rejected");
 using var nextKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
 var nextPrivate = nextKey.ExportPkcs8PrivateKeyPem();
-var nextPublic = nextKey.ExportSubjectPublicKeyPem();
+var nextPublic = nextKey.ExportSubjectPublicKeyInfoPem();
 var rotated = new Dictionary<string, string>(trusted)
 {
     [FleetConfigSignature.KeyIdFromPublicKey(nextPublic)] = nextPublic
