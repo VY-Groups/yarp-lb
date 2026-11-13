@@ -85,10 +85,12 @@ jobs:
           done
           if [[ "$ready" != 1 ]]; then cat artifacts/k6/load-rig.log; exit 1; fi
           docker run --rm --network host \
+            --user "$(id -u):$(id -g)" \
             -v "$GITHUB_WORKSPACE:/workspace" -w /workspace \
             grafana/k6:0.55.0 run \
             --summary-export=/workspace/artifacts/k6/summary.json \
             /workspace/tests/L7/performance/load.js
+          test -s artifacts/k6/summary.json  # Fail if the exporter could not write evidence
           curl --silent --show-error --fail http://127.0.0.1:18080/lab/stats > artifacts/k6/after.json
           python - <<'PY'
           import json
