@@ -41,7 +41,7 @@ foreach(var zone in config.Zones)
             throw new InvalidDataException("Invalid GSLB site address, weight or health probe URL");
         sites.Add(new Site(address,health,site.Weight));
     }
-    groups.Add(zone.Name.TrimEnd('.').ToLowerInvariant(), new SiteGroup(sites.ToArray(),zone.TtlSeconds));
+    groups.Add(zone.Name.TrimEnd('.').ToLowerInvariant(), new SiteGroup(sites.ToArray(),zone.TtlSeconds,zone.FailClosedWhenAllSitesDown));
 }
 using var stop=new CancellationTokenSource();
 Console.CancelKeyPress += (_, e)=>{e.Cancel=true;stop.Cancel();};
@@ -133,8 +133,18 @@ static byte[]? BuildResponse(ReadOnlySpan<byte> query, Dictionary<string, SiteGr
     {
         var eligible=group.Sites.Where(x=>Volatile.Read(ref x.Healthy)==1).ToArray();
         var total=eligible.Sum(x=>x.Weight);
-        if(total==0)code=2; // SERVFAIL, fail closed
-        else
+        if(total==0)
+        {
+            if(group.FailClosedWhenAllSitesDown)code=2; // explicit strict policy
+            else
+            {
+                // Probe failures may be regional or systemic: retain DNS availability.
+                // This is intentionally NOT a claim that any returned site is healthy.
+                eligible=group.Sites;
+                total=eligible.Sum(x=>x.Weight);
+            }
+        }
+        if(total>0)
         {
             var ticket=(int)(Interlocked.Increment(ref group.Counter) % total);
             foreach(var site in eligible)
@@ -166,7 +176,8 @@ static byte[]? BuildResponse(ReadOnlySpan<byte> query, Dictionary<string, SiteGr
 }
 sealed record DnsConfig(bool AllowNonLoopbackListeners,string ListenHost,int ListenPort,
     int ProbeIntervalSeconds,DnsZone[] Zones);
-sealed record DnsZone(string Name,int TtlSeconds,DnsSite[] Sites);
+sealed record DnsZone(string Name,int TtlSeconds,DnsSite[] Sites,
+    bool FailClosedWhenAllSitesDown=false);
 sealed record DnsSite(string Address,string HealthUrl,int Weight);
 sealed class Site
 {
@@ -178,7 +189,9 @@ sealed class Site
 }
 sealed class SiteGroup
 {
-    public SiteGroup(Site[] sites,int ttl)=>(Sites,Ttl)=(sites,ttl);
+    public SiteGroup(Site[] sites,int ttl,bool failClosedWhenAllSitesDown)
+        =>(Sites,Ttl,FailClosedWhenAllSitesDown)=(sites,ttl,failClosedWhenAllSitesDown);
+    public bool FailClosedWhenAllSitesDown {get;}
     public Site[] Sites {get;}
     public int Ttl {get;}
     public long Counter=-1;
