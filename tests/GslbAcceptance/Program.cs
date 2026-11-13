@@ -75,7 +75,7 @@ async Task<(int Status,string? Address,int Ttl)> Query(string domain)
     var request=new List<byte>(256);
     var tx=(ushort)Random.Shared.Next(0,65536);
     request.Add((byte)(tx>>8));request.Add((byte)tx);
-    request.AddRange(new byte[]{1,0,0,1,0,0,0,0,0,0,0,0});
+    request.AddRange(new byte[]{1,0,0,1,0,0,0,0,0,0}); // DNS flags + QD/AN/NS/AR = 10 bytes
     foreach(var label in domain.Split('.'))
     {
         request.Add((byte)label.Length);
