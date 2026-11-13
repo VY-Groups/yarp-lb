@@ -9,8 +9,8 @@ var dll=Path.Combine(repo,"engines","GslbDns","bin","Release","net10.0","GslbDns
 if(!File.Exists(dll))throw new FileNotFoundException("Compile DNS server first",dll);
 using var cancel=new CancellationTokenSource();
 var s1=new ProbeState();var s2=new ProbeState();
-using var healthA=new TcpListener(IPAddress.Loopback,19711);
-using var healthB=new TcpListener(IPAddress.Loopback,19712);
+var healthA=new TcpListener(IPAddress.Loopback,19711);
+var healthB=new TcpListener(IPAddress.Loopback,19712);
 healthA.Start();healthB.Start();
 var tasks=new []{ProbeServer(healthA,s1,cancel.Token),ProbeServer(healthB,s2,cancel.Token)};
 var temp=Path.Combine(Path.GetTempPath(),"yarp-dns-"+Guid.NewGuid().ToString("N"));
