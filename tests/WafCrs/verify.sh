@@ -14,7 +14,9 @@ docker compose -f "$COMPOSE" config --quiet
 docker compose -f "$COMPOSE" up --detach
 ready=0
 for i in $(seq 1 150); do
-  if curl --silent --fail --max-time 2 "http://127.0.0.1:18888/" -o "$DIR/benign-body.txt"; then
+  code="$(curl --silent --max-time 2 -w '%{http_code}' "http://127.0.0.1:18888/" -o "$DIR/benign-body.txt" || true)"
+  printf '%s\n' "$code" > "$DIR/last-benign-status.txt"
+  if [[ "$code" == "200" ]]; then
     ready=1; break
   fi
   sleep 0.6

@@ -25,4 +25,4 @@ services:
     networks: ["waf-private"]
 networks:
   waf-private:
-    internal: true
+    driver: bridge  # app is unexposed; published WAF loopback port remains reachable from host
