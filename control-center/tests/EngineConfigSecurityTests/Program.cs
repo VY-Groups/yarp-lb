@@ -131,4 +131,5 @@ var invalidPins=false;
 try { AgentClientCertificatePolicy.ParsePinnedThumbprints(new[]{"not-a-thumbprint"}); }
 catch (InvalidOperationException) { invalidPins=true; }
 Must(invalidPins, "invalid configured controller thumbprint rejects startup");
+await AgentTlsNegativeAcceptance.RunAsync();
 Console.WriteLine("ENGINE CONFIG CONTRACT ACCEPTANCE PASSED");
