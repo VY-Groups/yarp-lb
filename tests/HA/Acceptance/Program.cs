@@ -296,9 +296,21 @@ try
         }
     }).ToArray();
     await Task.Delay(1500);
-    var killAtMs = Stopwatch.GetElapsedTime(epoch).TotalMilliseconds;
-    gateway1.Kill(entireProcessTree:true);
+    var killRequestedAtMs = Stopwatch.GetElapsedTime(epoch).TotalMilliseconds;
+    // The gateway lab is a single dotnet host with NO child processes.
+    // On Windows Kill(entireProcessTree:true) can spend substantial time
+    // enumerating descendants before stopping the target process. Use the
+    // actual single-process abrupt termination; never include test-harness
+    // descendant traversal time in a YARP failover measurement.
+    gateway1.Kill();
     await gateway1.WaitForExitAsync();
+    var killAtMs = Stopwatch.GetElapsedTime(epoch).TotalMilliseconds;
+    checks.Add(new {description="fault-timing",
+        evidence=new {requestedAtMs=Math.Round(killRequestedAtMs,1),
+            exitedAtMs=Math.Round(killAtMs,1),
+            processTerminationDelayMs=Math.Round(killAtMs-killRequestedAtMs,1)}});
+    Require(killAtMs - killRequestedAtMs <= 2000,
+        "single-process abrupt-kill operation itself completes within 2s");
     await Task.Delay(6000);
     trafficStop.Cancel();
     await Task.WhenAll(trafficWorkers);
