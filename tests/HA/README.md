@@ -27,3 +27,7 @@ The Windows test calls a loopback-only Kestrel host-stop endpoint, which exercis
 For SIGKILL, the report now classifies requests by **completion time** so requests already in flight when the process dies count as failures after the fault. It reports failed-request count, first/last failure offset and observed window in milliseconds; it doesn't invent a health-detector timestamp.
 
 Even with passive ejection, already-in-flight requests on the terminated gateway can fail. Do not retry signing, OCSP POST or other non-idempotent operations without explicit, auditable idempotency semantics.
+
+## Exact Linux SIGTERM acceptance
+
+Linux CI now sends **`/usr/bin/kill -TERM <dotnet-gateway-pid>`** to the real gateway process *after ingress has confirmed readiness withdrawal*. Windows CI retains the `IHostApplicationLifetime.StopApplication` path, which is not a literal SIGTERM. Both assert zero failed requests and preserve distinct shutdown-method labels in the evidence. A raw SIGTERM without readiness withdrawal is outside the zero-failure guarantee.
