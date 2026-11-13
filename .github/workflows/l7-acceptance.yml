@@ -55,3 +55,57 @@ jobs:
           path: artifacts/l7/
           if-no-files-found: warn
           retention-days: 14
+
+  performance-soak:
+    name: 75-client k6 HTTP load (Ubuntu, 45s)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+      - name: Build isolated gateway and backends
+        run: |
+          dotnet build tests/L7/GatewayLab/GatewayLab.csproj -c Release
+          dotnet build tests/L7/BackendLab/BackendLab.csproj -c Release
+          dotnet build tests/L7/Acceptance/Acceptance.csproj -c Release
+      - name: Start loopback-only load lab, measure p95/p99 and process memory
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/k6
+          dotnet tests/L7/Acceptance/bin/Release/net10.0/Acceptance.dll "$GITHUB_WORKSPACE" --hold >artifacts/k6/load-rig.log 2>&1 &
+          runner_pid=$!
+          trap 'kill "$runner_pid" 2>/dev/null || true; wait "$runner_pid" 2>/dev/null || true' EXIT
+          ready=0
+          for i in $(seq 1 100); do
+            if curl --silent --fail http://127.0.0.1:18080/lab/stats > artifacts/k6/before.json; then ready=1; break; fi
+            sleep 0.3
+          done
+          if [[ "$ready" != 1 ]]; then cat artifacts/k6/load-rig.log; exit 1; fi
+          docker run --rm --network host \
+            -v "$GITHUB_WORKSPACE:/workspace" -w /workspace \
+            grafana/k6:0.55.0 run \
+            --summary-export=/workspace/artifacts/k6/summary.json \
+            /workspace/tests/L7/performance/load.js
+          curl --silent --show-error --fail http://127.0.0.1:18080/lab/stats > artifacts/k6/after.json
+          python - <<'PY'
+          import json
+          before=json.load(open('artifacts/k6/before.json'))
+          after=json.load(open('artifacts/k6/after.json'))
+          delta=after['processWorkingSetBytes']-before['processWorkingSetBytes']
+          evidence={'workingSetBytesBefore':before['processWorkingSetBytes'],
+             'workingSetBytesAfter':after['processWorkingSetBytes'],
+             'workingSetDeltaBytes':delta,
+             'gcCollectionDeltas':{f'gen{i}': after[f'gc{i}Collections']-before[f'gc{i}Collections'] for i in range(3)}}
+          with open('artifacts/k6/runtime-delta.json','w') as f: json.dump(evidence,f,indent=2)
+          print(evidence)
+          PY
+      - name: Upload benchmark and memory evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: l7-k6-performance-ubuntu
+          path: artifacts/k6/
+          retention-days: 14

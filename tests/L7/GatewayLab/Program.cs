@@ -13,6 +13,15 @@ builder.Services.AddSingleton<ILoadBalancingPolicy, SourceIpHashPolicy>();
 
 var app = builder.Build();
 app.MapGet("/lab/ping", () => Results.Ok(new { lab = true }));
+app.MapGet("/lab/stats", () => Results.Ok(new
+{
+    processWorkingSetBytes = Environment.WorkingSet,
+    gcManagedHeapBytes = GC.GetTotalMemory(false),
+    gc0Collections = GC.CollectionCount(0),
+    gc1Collections = GC.CollectionCount(1),
+    gc2Collections = GC.CollectionCount(2),
+    timeUtc = DateTimeOffset.UtcNow
+}));
 app.MapReverseProxy(proxyPipeline =>
 {
     proxyPipeline.Use(async (ctx, next) =>

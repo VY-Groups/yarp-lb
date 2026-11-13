@@ -6,7 +6,8 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 
 // Run from repository root: dotnet run --project tests/L7/Acceptance -c Release --no-build
-var repo = args.Length == 1 ? Path.GetFullPath(args[0]) : Directory.GetCurrentDirectory();
+var repo = args.Length >= 1 ? Path.GetFullPath(args[0]) : Directory.GetCurrentDirectory();
+var holdForExternalLoad = args.Skip(1).Contains("--hold", StringComparer.Ordinal);
 var backDll = Path.Combine(repo, "tests", "L7", "BackendLab", "bin", "Release", "net10.0", "BackendLab.dll");
 var gateDll = Path.Combine(repo, "tests", "L7", "GatewayLab", "bin", "Release", "net10.0", "GatewayLab.dll");
 var gatewayDir = Path.GetDirectoryName(gateDll)!;
@@ -188,6 +189,19 @@ var passed = false;
 try
 {
     Require(File.Exists(backDll) && File.Exists(gateDll), "both compiled binaries exist");
+    if (holdForExternalLoad)
+    {
+        Configure("WeightedRandom", 70, 30);
+        _ = Start(backDll, "load-A", "18081", "A");
+        _ = Start(backDll, "load-B", "18082", "B");
+        await WaitFor("load backend A", () => IsStatus(aUrl + "/health/ready", HttpStatusCode.OK));
+        await WaitFor("load backend B", () => IsStatus(bUrl + "/health/ready", HttpStatusCode.OK));
+        _ = Start(gateDll, "load-gateway");
+        await WaitFor("load proxy", () => IsStatus(proxy + "/lab/ping", HttpStatusCode.OK));
+        Console.WriteLine("LOAD_RIG_READY");
+        await Task.Delay(TimeSpan.FromMinutes(4));
+        return 0;
+    }
     Configure("WeightedRandom", 80, 20);
     var backendA = Start(backDll, "backend-A", "18081", "A");
     _ = Start(backDll, "backend-B", "18082", "B");
