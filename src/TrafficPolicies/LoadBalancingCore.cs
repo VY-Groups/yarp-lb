@@ -58,6 +58,23 @@ public static class LoadBalancingCore
     {
         if (string.IsNullOrEmpty(clientKey)) throw new ArgumentException("Missing client key", nameof(clientKey));
         if (ids.Count != weights.Count) throw new ArgumentException("ID/weight lengths differ");
+        // Preserve the exact hash input and selection semantics while avoiding
+        // a concatenated string, UTF-8 byte[] and SHA-256 byte[] PER candidate.
+        // Stack memory is bounded; larger client/destination IDs use a single
+        // per-call allocation rather than per-candidate churn.
+        var maxInputBytes = Encoding.UTF8.GetByteCount(clientKey) + 1;
+        foreach (var id in ids)
+        {
+            if (string.IsNullOrEmpty(id)) throw new ArgumentOutOfRangeException(nameof(ids));
+            maxInputBytes = checked(Math.Max(maxInputBytes,
+                Encoding.UTF8.GetByteCount(clientKey) + 1 + Encoding.UTF8.GetByteCount(id)));
+        }
+        Span<byte> input = maxInputBytes <= 1024
+            ? stackalloc byte[maxInputBytes]
+            : new byte[maxInputBytes];
+        var keyBytes = Encoding.UTF8.GetBytes(clientKey, input);
+        input[keyBytes] = 0x1f;
+        Span<byte> digest = stackalloc byte[32];
         var bestScore = double.PositiveInfinity;
         var bestIndex = -1;
         for (var i = 0; i < ids.Count; i++)
@@ -66,8 +83,9 @@ public static class LoadBalancingCore
                 throw new ArgumentOutOfRangeException(nameof(weights));
             // Weighted rendezvous: smaller -ln(U)/weight wins. A deterministic hash
             // of the client and destination gives minimal remapping on node changes.
-            var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(clientKey + "\u001f" + ids[i]));
-            var hash = BinaryPrimitives.ReadUInt64BigEndian(bytes.AsSpan(0, 8));
+            var idBytes = Encoding.UTF8.GetBytes(ids[i], input[(keyBytes + 1)..]);
+            SHA256.HashData(input[..(keyBytes + 1 + idBytes)], digest);
+            var hash = BinaryPrimitives.ReadUInt64BigEndian(digest[..8]);
             var u = Math.Clamp((hash + 0.5) / 18446744073709551616.0, double.Epsilon, Math.BitDecrement(1.0));
             var score = -Math.Log(u) / weights[i];
             if (score < bestScore || (score == bestScore && (bestIndex < 0 ||

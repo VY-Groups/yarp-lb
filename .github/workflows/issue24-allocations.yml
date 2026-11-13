@@ -1,0 +1,94 @@
+name: Issue 24 - direct vs proxy allocation comparison
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/issue24-allocations.yml"
+      - "control-center/LoadBalancingCore.cs"
+      - "control-center/LoadBalancingExtensions.cs"
+      - "src/TrafficPolicies/**"
+      - "control-center/tests/LoadBalancingCoreTests/**"
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: issue24-allocation-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  compare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 17
+    strategy:
+      fail-fast: false
+      matrix:
+        label: ["before", "after"]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Checkout exact comparison revision
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.label == 'before' && 'd2b135f760e92fb2646ec5542d89a7dc309eb88c' || github.event.pull_request.head.sha || github.sha }}
+          path: source
+          persist-credentials: false
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+      - name: Verify allocation analyzer contract
+        run: python3 -m unittest discover -s tests/L7/performance/issue24 -p 'test_*.py' -v
+      - name: Build exact pinned application version
+        run: |
+          dotnet build source/tests/L7/GatewayLab/GatewayLab.csproj -c Release
+          dotnet build source/tests/L7/BackendLab/BackendLab.csproj -c Release
+          dotnet build source/tests/L7/Acceptance/Acceptance.csproj -c Release
+      - name: Run sequential matched direct-backend and proxy load
+        shell: bash
+        env:
+          LABEL: ${{ matrix.label }}
+        run: |
+          set -euo pipefail
+          out="$GITHUB_WORKSPACE/artifacts/issue24/$LABEL"
+          mkdir -p "$out"
+          lab_pid=""
+          cleanup() {
+            [[ -n "$lab_pid" ]] && kill "$lab_pid" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+          dotnet source/tests/L7/Acceptance/bin/Release/net10.0/Acceptance.dll \
+            "$GITHUB_WORKSPACE/source" --hold 6 >"$out/lab.log" 2>&1 &
+          lab_pid=$!
+          ready=0
+          for i in $(seq 1 150); do
+            if curl --noproxy '*' --max-time 2 -fsS \
+              http://127.0.0.1:18080/lab/stats > "$out/ready.json" 2>/dev/null; then
+              ready=1; break
+            fi
+            if ! kill -0 "$lab_pid" 2>/dev/null; then break; fi
+            sleep 0.4
+          done
+          if [[ "$ready" != "1" ]]; then cat "$out/lab.log"; exit 1; fi
+          measure() {
+            mode="$1"
+            curl --noproxy '*' --max-time 3 -fsS \
+              http://127.0.0.1:18080/lab/stats > "$out/$mode-before.json"
+            date +%s%3N > "$out/$mode-start-ms.txt"
+            timeout --signal=TERM --kill-after=5s 115s docker run --rm \
+              --network host --user "$(id -u):$(id -g)" \
+              -e MODE="$mode" -e VUS=75 -e DURATION=45s \
+              -e PAYLOAD_BYTES=0 -e NO_REUSE=0 \
+              -v "$GITHUB_WORKSPACE:/workspace" -w /workspace \
+              grafana/k6:0.55.0 run \
+              --summary-export="/workspace/artifacts/issue24/$LABEL/$mode-k6.json" \
+              /workspace/tests/L7/performance/load.js > "$out/$mode-k6.log" 2>&1
+            date +%s%3N > "$out/$mode-end-ms.txt"
+            curl --noproxy '*' --max-time 3 -fsS \
+              http://127.0.0.1:18080/lab/stats > "$out/$mode-after.json"
+          }
+          measure direct
+          sleep 2
+          measure proxy
+          python3 tests/L7/performance/issue24/compare.py "$out"
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: issue24-${{ matrix.label }}
+          path: artifacts/issue24/${{ matrix.label }}/
+          retention-days: 7

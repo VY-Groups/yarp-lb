@@ -1,6 +1,9 @@
 using System;
 using System.Linq;
 using System.Collections.Generic;
+using System.Buffers.Binary;
+using System.Security.Cryptography;
+using System.Text;
 
 static void Check(bool condition, string label)
 {
@@ -53,4 +56,50 @@ Check(LoadBalancingCore.RampedWeight(80, 0, 10) == 1, "warmup first weight");
 Check(LoadBalancingCore.RampedWeight(80, 5, 10) == 40, "warmup midway");
 Check(LoadBalancingCore.RampedWeight(80, 10, 10) == 80, "warmup complete");
 Check(LoadBalancingCore.RampedWeight(80, 0, 0) == 80, "warmup disabled");
+// Characterization BEFORE claiming lower allocations: keep a copied original
+// oracle strictly inside tests. The production result must match byte-for-byte
+// for Unicode identities, long names, weights, and destination ordering.
+static int OriginalRendezvous(string key, IReadOnlyList<string> ids, IReadOnlyList<int> weights)
+{
+    if (string.IsNullOrEmpty(key)) throw new ArgumentException(nameof(key));
+    if (ids.Count != weights.Count) throw new ArgumentException("Lengths differ");
+    var best=double.PositiveInfinity;
+    var bestIndex=-1;
+    for (var i=0; i<ids.Count; i++)
+    {
+        if (weights[i] is < 1 or > 100 || string.IsNullOrEmpty(ids[i]))
+            throw new ArgumentOutOfRangeException(nameof(weights));
+        var bytes=SHA256.HashData(Encoding.UTF8.GetBytes(key+"\u001f"+ids[i]));
+        var hash=BinaryPrimitives.ReadUInt64BigEndian(bytes.AsSpan(0,8));
+        var u=Math.Clamp((hash+0.5)/18446744073709551616.0,double.Epsilon,Math.BitDecrement(1.0));
+        var score=-Math.Log(u)/weights[i];
+        if(score<best || (score==best && (bestIndex<0 ||
+            string.CompareOrdinal(ids[i],ids[bestIndex])<0)))
+        {best=score;bestIndex=i;}
+    }
+    return bestIndex;
+}
+var candidateIds = new[]{ "gw-a", "gw-🔥-b", "bravo-gateway-" + new string('é',450), "edge/3" };
+var candidateWeights = new[]{ 1,5,100,11 };
+var keys=Enumerable.Range(0,2000).Select(i=>"src:" + i + "-東京-🛡️").ToArray();
+foreach(var key in keys)
+    if (OriginalRendezvous(key,candidateIds,candidateWeights) !=
+        LoadBalancingCore.PickRendezvousIndex(key,candidateIds,candidateWeights))
+        throw new Exception("FAIL: rendezvous differs for Unicode key " + key);
+Check(true, "2000 Unicode candidates match original rendezvous output exactly");
+for(var i=0;i<1000;i++)
+{
+    OriginalRendezvous(keys[i],candidateIds,candidateWeights);
+    LoadBalancingCore.PickRendezvousIndex(keys[i],candidateIds,candidateWeights);
+}
+const int runs=10_000;
+GC.Collect();GC.WaitForPendingFinalizers();GC.Collect();
+var before=GC.GetAllocatedBytesForCurrentThread();
+for(var i=0;i<runs;i++) _=OriginalRendezvous(keys[i%keys.Length],candidateIds,candidateWeights);
+var legacyBytes=GC.GetAllocatedBytesForCurrentThread()-before;
+before=GC.GetAllocatedBytesForCurrentThread();
+for(var i=0;i<runs;i++) _=LoadBalancingCore.PickRendezvousIndex(keys[i%keys.Length],candidateIds,candidateWeights);
+var optimizedBytes=GC.GetAllocatedBytesForCurrentThread()-before;
+Console.WriteLine($"RENDEZVOUS_ALLOCATION_COMPARE iterations={runs} legacy={legacyBytes} optimized={optimizedBytes} legacy_per_pick={(double)legacyBytes/runs:F1} optimized_per_pick={(double)optimizedBytes/runs:F1}");
+Check(optimizedBytes < legacyBytes/2, "rendezvous helper allocations cut by >50% in warmed synchronous comparison");
 Console.WriteLine($"PASS: all offline algorithm tests. Remapped {moves}/2000; weighted favored B {skew}/2000.");
