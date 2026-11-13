@@ -7,6 +7,8 @@ if (args.Length != 2 || !int.TryParse(args[0], out var port) ||
 var node = args[1];
 var state = new LabBackendState();
 var builder = WebApplication.CreateBuilder(Array.Empty<string>());
+// Keep synthetic backend output bounded under millions of proxy requests.
+builder.Logging.AddFilter((provider, category, level) => level >= LogLevel.Warning);
 builder.WebHost.UseUrls($"http://127.0.0.1:{port}");
 var app = builder.Build();
 
