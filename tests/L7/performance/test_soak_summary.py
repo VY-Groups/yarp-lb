@@ -107,7 +107,7 @@ with tempfile.TemporaryDirectory() as folder:
     observed = [{**v, **baseline_logging} for v in vals]
     observed[4]["loggingQueueDepth"] = 25
     (root / "process-samples.jsonl").write_text(
-        "\\n".join(json.dumps(x) for x in observed),encoding="utf-8")
+        "\n".join(json.dumps(x) for x in observed),encoding="utf-8")
     log_env={**os.environ,"SOAK_REQUIRE_PRODUCT_LOGGING":"1",
              "SOAK_MAX_HIGH_PRIORITY_DROPS":"0"}
     result=subprocess.run([sys.executable,str(script),str(root)],env=log_env,
