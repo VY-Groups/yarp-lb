@@ -33,9 +33,14 @@ mkdir -p "$out"
 # Capture stack report quickly before the heap dump potentially suspends runtime.
 timeout -k 5s 40s dotnet-stack report --process-id "$pid" > "$out/managed-stacks.txt" 2>&1
 echo "dotnet_stack_exit=$?" > "$out/stack-capture-status.txt"
-timeout -k 10s 115s dotnet-dump collect --process-id "$pid" --type Heap --output "$out/hang-heap.dmp" > "$out/dump-collect.log" 2>&1
-echo "dotnet_dump_exit=$?" > "$out/dump-capture-status.txt"
-if [[ ! -s "$out/hang-heap.dmp" ]]; then
-  echo "No dump was captured; inspect dump-collect.log and managed-stacks.txt" >> "$out/dump-collect.log"
+# Prior 600-MiB Heap dumps timed out on suspended/high-contention test
+# processes. Capture a smaller, complete Mini dump first; stack snapshots and
+# pre-trigger counters remain the primary starvation evidence.
+timeout -k 5s 65s dotnet-dump collect --process-id "$pid" --type Mini --output "$out/hang-mini.dmp" > "$out/dump-collect.log" 2>&1
+dump_status=$?
+echo "dotnet_dump_exit=$dump_status" > "$out/dump-capture-status.txt"
+if [[ "$dump_status" != 0 ]]; then
+  rm -f "$out/hang-mini.dmp" # timed-out dump is incomplete and unsafe to analyze
+  echo "Dump capture failed or timed out; managed-stacks.txt remains usable" >> "$out/dump-collect.log"
 fi
 exit 0
