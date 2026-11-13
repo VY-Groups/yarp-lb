@@ -50,15 +50,53 @@ var sequencePath = Path.Combine(stageRoot, "last-accepted-sequence.txt");
 var revisionLock = new SemaphoreSlim(1,1);
 static string Sha(byte[] data) => Convert.ToHexString(SHA256.HashData(data));
 static bool ValidTx(string id) => Regex.IsMatch(id, "^[A-Za-z0-9_-]{12,80}$");
-var normalized = AgentClientCertificatePolicy.ParsePinnedThumbprints(allowedThumbprints);
+_ = AgentClientCertificatePolicy.ParsePinnedThumbprints(allowedThumbprints); // Fail closed at startup
 if (allowedServices.Any(x => !Regex.IsMatch(x, "^[A-Za-z0-9_.-]{1,64}$")))
     throw new InvalidOperationException("Invalid allowlisted Windows service name");
+// Isolated self-signed test CA is allowed ONLY on loopback with ALL mutating
+// management features disabled. It is not a production PKI trust shortcut.
+var labCaPath = builder.Configuration["Agent:LabOnlyClientCaCertificatePath"];
+X509Certificate2? labRoot = null;
+if (!string.IsNullOrWhiteSpace(labCaPath))
+{
+    var listener = builder.Configuration["Kestrel:Endpoints:AgentHttps:Url"] ?? "";
+    if (!Path.IsPathFullyQualified(labCaPath) || !File.Exists(labCaPath) ||
+        !Uri.TryCreate(listener, UriKind.Absolute, out var bound) ||
+        bound.Scheme != "https" || !IPAddress.TryParse(bound.Host,out var bindIp) ||
+        !IPAddress.IsLoopback(bindIp) || allowConfigChanges || allowEngineConfigChanges ||
+        allowActions)
+        throw new InvalidOperationException(
+            "Isolated client test CA is restricted to HTTPS loopback with all management changes disabled");
+    // Public test-root PEM has NO private key; do not call CreateFromPemFile,
+    // which attempts to load a corresponding key from the same PEM path.
+    labRoot = X509CertificateLoader.LoadCertificateFromFile(labCaPath);
+    if (!labRoot.Extensions.OfType<X509BasicConstraintsExtension>().Any(x=>x.CertificateAuthority))
+        throw new InvalidOperationException("Lab trust anchor is not a CA certificate");
+}
 builder.WebHost.ConfigureKestrel(server =>
 {
     server.ConfigureHttpsDefaults(https =>
     {
         https.ClientCertificateMode = ClientCertificateMode.RequireCertificate;
-        https.CheckCertificateRevocation = true;
+        https.CheckCertificateRevocation = labRoot is null;
+        if (labRoot is not null)
+        {
+            https.ClientCertificateValidation = (cert, _, _) =>
+            {
+                if (cert is null) return false;
+                // The CA is ephemeral and has no published CRL. Skipping
+                // revocation is permissible ONLY in this loopback test mode.
+                using var custom = new X509Chain();
+                custom.ChainPolicy.TrustMode = X509ChainTrustMode.CustomRootTrust;
+                custom.ChainPolicy.CustomTrustStore.Add(labRoot);
+                custom.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;
+                custom.ChainPolicy.VerificationFlags = X509VerificationFlags.NoFlag;
+                var eku = cert.Extensions.OfType<X509EnhancedKeyUsageExtension>()
+                    .Any(ext => ext.EnhancedKeyUsages.Cast<Oid>()
+                        .Any(oid => oid.Value=="1.3.6.1.5.5.7.3.2"));
+                return eku && custom.Build(cert);
+            };
+        }
     });
 });
 var app = builder.Build();
@@ -66,7 +104,7 @@ var app = builder.Build();
 app.Use(async (ctx, next) =>
 {
     // Kestrel performs TLS chain validation. This additionally pins controller identities.
-    if (!AgentClientCertificatePolicy.IsAuthorized(ctx, normalized))
+    if (!AgentClientCertificatePolicy.IsAuthorizedLive(ctx, builder.Configuration))
     { ctx.Response.StatusCode = StatusCodes.Status403Forbidden; return; }
     ctx.Response.Headers.CacheControl = "no-store";
     await next();
