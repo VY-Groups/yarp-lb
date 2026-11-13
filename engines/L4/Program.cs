@@ -142,10 +142,10 @@ async Task RunUdp(L4Listener cfg, CancellationToken token)
             catch (OperationCanceledException) when (token.IsCancellationRequested) { break; }
             catch (SocketException) when (token.IsCancellationRequested) { break; }
             var now = Environment.TickCount64;
-            foreach (var (key, value) in sessions.ToArray())
+            foreach (var (expiredKey, value) in sessions.ToArray())
             {
                 if (now - value.LastSeenMs <= 30_000) continue;
-                sessions.Remove(key);
+                sessions.Remove(expiredKey);
                 value.Close();
             }
             var remote = (IPEndPoint)received.RemoteEndPoint;
