@@ -216,9 +216,26 @@ try
     }
     Require(initial.Ok==300,
         $"300 HTTP requests traverse ingress after bounded health warmup, ok={initial.Ok} fail={initial.Fail}");
-    using(var slow=await client.GetAsync("http://127.0.0.1:19080/api/slow"))
+    var slowStarted=DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+    var slowStatus=0;
+    var slowError="";
+    try
+    {
+        using var slow=await client.GetAsync("http://127.0.0.1:19080/api/slow");
+        slowStatus=(int)slow.StatusCode;
         Require(slow.StatusCode==HttpStatusCode.OK,
             "700ms slow but healthy upstream response is not misclassified as failed");
+    }
+    catch (Exception ex)
+    {
+        slowError=ex.GetType().Name;
+        throw; // Never hide or weaken the existing slow-backend gate.
+    }
+    finally
+    {
+        sampleRows.Enqueue(("slow-700ms", slowStarted,
+            DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),slowStatus,slowError));
+    }
     Require((await Sample(100,"post-slow-healthy")).Ok==100,
         "healthy edge remains routable after slow upstream response");
 
