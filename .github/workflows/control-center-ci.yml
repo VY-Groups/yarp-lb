@@ -1,3 +1,4 @@
+# CI evidence-only verification after merging PR #31 and PR #32; no behavior or thresholds changed.
 name: Control Center 0.1 - complete application source checks
 
 on:
