@@ -68,7 +68,7 @@ services:
     image: grafana/grafana:11.6.1
     environment:
       GF_SECURITY_ADMIN_USER: "ci_operator"
-      GF_SECURITY_ADMIN_PASSWORD: "CI_ONLY_NOT_PRODUCTION_01"
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_CI_PASSWORD:?Generate an ephemeral CI Grafana admin password}
       GF_USERS_ALLOW_SIGN_UP: "false"
     ports:
       - "127.0.0.1:13000:3000"

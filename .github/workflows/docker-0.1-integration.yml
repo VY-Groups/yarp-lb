@@ -28,6 +28,9 @@ jobs:
             -subj '/CN=localhost' -addext 'subjectAltName=IP:127.0.0.1,DNS:localhost' \
             -days 2 -keyout tests/CI/stack/certs/server.key -out tests/CI/stack/certs/server.crt
           chmod 0600 tests/CI/stack/certs/server.key
+          secret=$(openssl rand -hex 24)
+          echo "::add-mask::$secret"
+          echo "GRAFANA_CI_PASSWORD=$secret" >> "$GITHUB_ENV"
           openssl x509 -in tests/CI/stack/certs/server.crt -text -noout | grep -A1 'Public Key Algorithm'
       - name: Validate compose graph
         run: docker compose -f tests/CI/stack/compose.yml config --quiet
@@ -60,10 +63,10 @@ jobs:
             sleep 1
           done
           test "$ready" = 1
-          curl --fail --silent --show-error -u 'ci_operator:CI_ONLY_NOT_PRODUCTION_01' \
+          curl --fail --silent --show-error -u "ci_operator:$GRAFANA_CI_PASSWORD" \
             http://127.0.0.1:13000/api/dashboards/uid/yarp-ci-01 > artifacts/ci-01/grafana-dashboard.json
           python -c 'import json; a=json.load(open("artifacts/ci-01/grafana-dashboard.json")); assert a["dashboard"]["uid"]=="yarp-ci-01"; assert len(a["dashboard"]["panels"])==5'
-          curl --fail --silent --show-error -u 'ci_operator:CI_ONLY_NOT_PRODUCTION_01' \
+          curl --fail --silent --show-error -u "ci_operator:$GRAFANA_CI_PASSWORD" \
             http://127.0.0.1:13000/api/datasources > artifacts/ci-01/grafana-datasources.json
           python -c 'import json; a=json.load(open("artifacts/ci-01/grafana-datasources.json")); assert {"ci-prom-a","ci-prom-b"}.issubset({x["uid"] for x in a})'
       - name: Kill a gateway, keep both ingress endpoints available
