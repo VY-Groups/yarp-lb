@@ -92,3 +92,5 @@ jobs:
           name: issue24-${{ matrix.label }}
           path: artifacts/issue24/${{ matrix.label }}/
           retention-days: 7
+# CI-only revalidation of combined merged PR #31 + #32 implementation.
+# No changed test thresholds, workload, code, or production behavior.
