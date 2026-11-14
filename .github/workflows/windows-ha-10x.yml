@@ -1,0 +1,70 @@
+name: Windows HA 10-run stability gate
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/windows-ha-10x.yml"
+      - "tests/HA/**"
+      - "tests/L7/GatewayLab/**"
+      - "tests/L7/BackendLab/**"
+      - "src/TrafficPolicies/**"
+      - "control-center/**"
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: windows-ha-10x-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  repeat:
+    name: Windows HA repeat ${{ matrix.repeat }} / 10
+    runs-on: windows-2022
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        repeat: [1,2,3,4,5,6,7,8,9,10]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+      - name: Build real two-gateway HA fault-injection rig
+        shell: pwsh
+        run: |
+          dotnet build tests/L7/GatewayLab/GatewayLab.csproj -c Release
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          dotnet build tests/L7/BackendLab/BackendLab.csproj -c Release
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          dotnet build tests/HA/Acceptance/Acceptance.csproj -c Release
+          exit $LASTEXITCODE
+      - name: Execute Windows kill/drain/no-replay/failclosed/panic acceptance - repeat ${{ matrix.repeat }}
+        shell: pwsh
+        run: |
+          dotnet run --project tests/HA/Acceptance/Acceptance.csproj -c Release --no-build -- "${{ github.workspace }}"
+          exit $LASTEXITCODE
+      - name: Retain full per-run pass/fail evidence and fault timeline
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ha-windows-repeat-${{ matrix.repeat }}
+          path: artifacts/ha/
+          retention-days: 14
+          if-no-files-found: warn
+  all-ten:
+    name: Require all 10 independent Windows runs green
+    needs: repeat
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Fail closed unless all ten matrix jobs passed
+        env:
+          MATRIX_RESULT: ${{ needs.repeat.result }}
+        run: |
+          if [ "$MATRIX_RESULT" != "success" ]; then
+            echo "FAIL: at least one Windows HA repetition failed or was cancelled."
+            exit 1
+          fi
+          echo "PASS: all 10 independent Windows HA fault-injection matrix jobs succeeded." >> "$GITHUB_STEP_SUMMARY"
+          echo "Inspect the 10 uploaded artifacts for per-run latency, failure windows and drain counts." >> "$GITHUB_STEP_SUMMARY"
