@@ -258,6 +258,25 @@ def acceptance(base:str,origin_port:int):
     admin.request("POST","/admin/api/mail",{"enabled":True,"host":"smtp.invalid","port":587,
         "from":"admin@example.invalid","username":"","password":"","startTls":True},expect=409)
     check(not admin.request("GET","/admin/api/mail")["enabled"],"SMTP verification prerequisite cannot be bypassed")
+    anonymous.request("GET","/admin/api/mail",expect=401)
+    viewer.request("GET","/admin/api/mail",expect=403)
+    operator.request("POST","/admin/api/mail",{"enabled":False},expect=403)
+    admin.request("POST","/admin/api/mail",{"enabled":False},csrf=False,expect=403)
+    # Every OAuth secret must be restricted to its trusted provider SMTP host.
+    oauth={"enabled":False,"host":"attacker.invalid","port":587,
+        "from":"admin@example.invalid","username":"admin@example.invalid",
+        "password":"","startTls":True,"authMode":"google-oauth",
+        "oauthClientId":"ci-client-id","oauthClientSecret":"ci-only-secret",
+        "oauthRefreshToken":"ci-only-refresh","oauthTenant":""}
+    admin.request("POST","/admin/api/mail",oauth,expect=400)
+    oauth["host"]="smtp.gmail.com"
+    oauth["oauthClientSecret"]=""
+    admin.request("POST","/admin/api/mail",oauth,expect=400)
+    oauth["oauthClientSecret"]="ci-only-secret"
+    oauth["oauthRefreshToken"]=""
+    admin.request("POST","/admin/api/mail",oauth,expect=400)
+    check(not admin.request("GET","/admin/api/mail")["oauthClientSecretConfigured"],
+        "invalid OAuth settings did not persist OAuth credentials")
     admin.request("GET","/admin/api/directory")
     admin.request("POST","/admin/api/directory",{"enabled":True},expect=400)
     admin.request("GET","/admin/api/fleet")
