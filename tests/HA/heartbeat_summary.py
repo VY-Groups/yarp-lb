@@ -94,6 +94,7 @@ def analyze(root: Path) -> dict:
                     break
     bad = [x for x in samples if x["status"] != 200 or x["error"]]
     correlations = []
+    isolated_gaps = []
     for event in gap_events:
         overlapping = sorted({
             other["role"] for other in gap_events
@@ -108,6 +109,14 @@ def analyze(root: Path) -> dict:
                 "interval_utc_ms": [event["start_utc_ms"], event["end_utc_ms"]],
                 "hypothesis_only": "multiple-process scheduler/host pause candidate",
             })
+        elif event["duration_ms"] >= 500:
+            isolated_gaps.append({
+                "role": event["role"],
+                "duration_ms": event["duration_ms"],
+                "interval_utc_ms": [event["start_utc_ms"], event["end_utc_ms"]],
+                "threadpool_pending_after": event["threadpool_pending_after"],
+                "hypothesis_only": "process-local scheduling or ThreadPool stall candidate",
+            })
     return {
         "diagnostics_complete": not missing and not failures,
         "expected_early_missing": missing,
@@ -116,6 +125,7 @@ def analyze(root: Path) -> dict:
         "gap_threshold_ms": GAP_MS,
         "clocks": clocks,
         "cross_process_gap_candidates": correlations[:60],
+        "isolated_gap_candidates": isolated_gaps[:60],
         "prekill_requests_recorded": len(samples),
         "prekill_request_failures": len(bad),
         "prekill_failure_samples": bad[:50],
@@ -145,6 +155,7 @@ def main() -> int:
         "prekill_requests_recorded": report["prekill_requests_recorded"],
         "prekill_request_failures": report["prekill_request_failures"],
         "correlated_gap_events": len(report["cross_process_gap_candidates"]),
+        "isolated_gap_events": len(report["isolated_gap_candidates"]),
     }, indent=2))
     # Diagnostics never override the separate strict HA test's exit code.
     return 0
