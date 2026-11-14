@@ -46,6 +46,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node control-center/tests/test_auth_ui.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node control-center/tests/test_five_screens.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Build self-contained Windows x64 release
         shell: pwsh
         run: |
