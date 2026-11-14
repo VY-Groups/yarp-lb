@@ -23,6 +23,12 @@ for(let i=0;i<6;i++){
  vm.runInContext(`topologyStep=${i}`,ctx);
  assert.ok(get('topologyStepHtml()').length>150,`step ${i} is not rendered`);
 }
+assert.ok(js.includes('setup-quick-lab'),'quick standalone review template is discoverable');
+assert.ok(js.includes('setup-local-web'),'local web-server draft action is discoverable');
+assert.ok(js.includes('addLocalWebWizard'),'local IIS/Apache/Nginx route wizard is implemented');
+assert.ok(js.includes('SMTP accepted test message'),'SMTP delivery guidance remains available');
+assert.ok(js.includes('OTP remains unavailable until the saved SMTP settings pass the delivery test'),'OTP has a disabled-until-verified explanation');
+assert.ok(js.includes('Remote web servers require HTTPS and independent approval'),'local web wizard rejects remote cleartext origins');
 assert.ok(js.includes('/admin/api/onboarding'));
 assert.ok(!js.includes('style="'),'no inline CSS in generated application HTML');
 console.log('PASS: mode transitions, server count, six wizard steps, HTML escaping, no inline styles');
