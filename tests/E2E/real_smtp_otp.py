@@ -7,6 +7,8 @@ relay with a self-generated CA. Does NOT access Zoho or user mail credentials.
 from __future__ import annotations
 from contextlib import contextmanager
 from pathlib import Path
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from threading import Thread
 import email
 import json
 import os
@@ -53,10 +55,27 @@ def local_smtp(root:Path,port_number:int):
     csr=certdir/"server.csr"
     leaf=certdir/"server.pem"
     ext=certdir/"server.ext"
+    class CRLResponder(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path!="/ca.crl":
+                self.send_error(404)
+                return
+            payload=(certdir/"ca.crl").read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type","application/pkix-crl")
+            self.send_header("Content-Length",str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+        def log_message(self,*_): pass
+    responder=ThreadingHTTPServer(("127.0.0.1",0),CRLResponder)
+    responder_thread=Thread(target=responder.serve_forever,daemon=True)
+    responder_thread.start()
+    crlport=responder.server_address[1]
     ext.write_text("subjectAltName=DNS:localhost,IP:127.0.0.1\n"
                    "extendedKeyUsage=serverAuth\n"
                    "keyUsage=digitalSignature,keyEncipherment\n"
-                   "basicConstraints=critical,CA:FALSE\n")
+                   "basicConstraints=critical,CA:FALSE\n"
+                   f"crlDistributionPoints=URI:http://127.0.0.1:{crlport}/ca.crl\n")
     def openssl(*args):
         subprocess.run(["openssl",*args],check=True,
                        stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
@@ -67,6 +86,33 @@ def local_smtp(root:Path,port_number:int):
             "-subj","/CN=localhost","-keyout",str(key),"-out",str(csr))
     openssl("x509","-req","-in",str(csr),"-CA",str(ca),"-CAkey",str(cakey),
             "-CAcreateserial","-out",str(leaf),"-days","2","-extfile",str(ext))
+    # Supply a real signed, short-lived EMPTY CRL so clients can verify
+    # revocation instead of requiring an unsafe "ignore revocation" flag.
+    (certdir/"index.txt").write_text("")
+    (certdir/"serial").write_text("1000\n")
+    (certdir/"crlnumber").write_text("1000\n")
+    (certdir/"newcerts").mkdir()
+    ca_cfg=certdir/"openssl-ca.cnf"
+    ca_cfg.write_text(f"""[ca]
+default_ca = CA_default
+[CA_default]
+dir = {certdir}
+database = $dir/index.txt
+new_certs_dir = $dir/newcerts
+certificate = $dir/ca.pem
+private_key = $dir/ca.key
+serial = $dir/serial
+crlnumber = $dir/crlnumber
+default_md = sha256
+default_crl_days = 2
+policy = policy_any
+[policy_any]
+commonName = supplied
+""")
+    openssl("ca","-gencrl","-config",str(ca_cfg),"-out",str(certdir/"ca-crl.pem"),
+            "-batch")
+    openssl("crl","-in",str(certdir/"ca-crl.pem"),"-outform","DER","-out",
+            str(certdir/"ca.crl"))
     key.chmod(0o600)
     cakey.chmod(0o600)
     context=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
@@ -82,6 +128,9 @@ def local_smtp(root:Path,port_number:int):
         yield mailbox,ca
     finally:
         ctrl.stop()
+        responder.shutdown()
+        responder.server_close()
+        responder_thread.join(timeout=3)
 
 def plaintext_mail(message):
     parts=[]
