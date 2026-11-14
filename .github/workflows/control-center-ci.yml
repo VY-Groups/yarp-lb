@@ -59,6 +59,8 @@ jobs:
       - name: Verify Linux production Data Protection RSA encryption and rotation
         if: runner.os == 'Linux'
         run: dotnet run --project tests/LinuxKeyProtectionTests/LinuxKeyProtectionTests.csproj --configuration Release
+      - name: Reject unsafe legacy-state cutover without modifying users or keys
+        run: dotnet run --project tests/LegacyStateGuardTests/LegacyStateGuardTests.csproj --configuration Release
       - name: Verify real Control Center EC2 CI-only TLS safety and allowlist
         run: dotnet run --project tests/Ec2LabSafetyTests/Ec2LabSafetyTests.csproj --configuration Release
       - name: Offline functional smoke of the real Control Center and two local backends
