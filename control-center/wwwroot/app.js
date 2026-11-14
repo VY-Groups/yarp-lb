@@ -850,7 +850,7 @@ async function mailPage() {
         return;
     try {
         const m = await api('/admin/api/mail');
-        $('content').innerHTML = `<div class="toolbar"><div><h2>Mail relay & email OTP</h2><p class="subtle">Configure the internal SMTP relay, test delivery, then enable OTP. A local admin account is kept for disaster recovery.</p></div><span class="chip ${m.deliveryVerified ? 'good' : 'bad'}">${m.deliveryVerified ? 'SMTP test accepted' : 'Test required'}</span></div>
+        $('content').innerHTML = `<div class="toolbar"><div><h2>Mail relay & email OTP</h2><p class="subtle">Step 1: save relay settings with OTP off. Step 2: test delivery to the administrator email. Step 3: enable OTP only after the test passes. An optional SMTP relay is not needed for local gateway traffic.</p></div><span class="chip ${m.deliveryVerified ? 'good' : 'bad'}">${m.deliveryVerified ? 'SMTP test accepted' : 'Test required'}</span></div>
   <div class="settings-columns"><div class="card"><h3>SMTP connection</h3><form id="mail-config" class="settings-form">
    <label>SMTP DNS host<input name="host" value="${esc(m.host || '')}" placeholder="smtp.internal.example.com" required></label>
    <label>Port<input name="port" type="number" value="${esc(m.port || 587)}" min="1" max="65535" required></label>
@@ -858,7 +858,7 @@ async function mailPage() {
    <label>SMTP login (optional)<input name="username" autocomplete="off" value="${esc(m.username || '')}"></label>
    <label>SMTP password (leave blank to preserve)<input name="password" autocomplete="new-password" type="password" placeholder="${m.passwordConfigured ? 'A credential is stored' : ''}"></label>
    <label class="setting-check"><input name="startTls" type="checkbox" ${m.startTls ? 'checked' : ''}> Require STARTTLS (recommended: 587)</label>
-   <label class="setting-check"><input name="enabled" type="checkbox" ${m.enabled ? 'checked' : ''}> Require email OTP at sign-in</label>
+   <label class="setting-check"><input name="enabled" type="checkbox" ${m.enabled ? 'checked' : ''} ${!m.deliveryVerified ? 'disabled' : ''}> Require email OTP at sign-in</label>${!m.deliveryVerified ? '<p class="subtle">OTP remains unavailable until the saved SMTP settings pass the delivery test. Save with OTP off, test, then return here.</p>' : ''}
    <div class="action-strip"><button type="submit" class="primary">Save SMTP settings</button><button type="button" class="ghost" data-action="mail-test" data-id="">Send test to my account</button></div>
   </form></div><div class="card"><h3>Secure setup sequence</h3><p class="subtle">1. Save the mail server with OTP disabled.</p><p class="subtle">2. Send a test to your registered administrator email.</p><p class="subtle">3. Confirm the email arrived.</p><p class="subtle">4. Enable OTP and save again. Next login will require a code.</p><div class="healthbanner">Authenticated mail requires STARTTLS and a trusted SMTP certificate. Implicit TLS on port 465 is not supported by the current .NET SmtpClient implementation. Email OTP is not phishing-resistant MFA.</div></div></div>`;
     }
