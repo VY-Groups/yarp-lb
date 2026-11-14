@@ -1,0 +1,31 @@
+name: On-prem Prometheus rules contract (synthetic CI)
+on:
+  push:
+    branches: ["ops/**"]
+    paths:
+      - "control-center/ops/prometheus/**"
+      - ".github/workflows/onprem-promtool.yml"
+  pull_request:
+    paths:
+      - "control-center/ops/prometheus/**"
+      - ".github/workflows/onprem-promtool.yml"
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  promtool:
+    name: Prometheus rules parsing and synthetic alert evaluation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate production alert rule syntax (Prometheus promtool)
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm -v "$PWD/control-center/ops/prometheus:/work:ro" --entrypoint /bin/promtool prom/prometheus:v3.6.0 check rules /work/gateway-alerts.yml
+      - name: Evaluate outage/health/expiry/drop synthetic alert fixtures
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm -v "$PWD/control-center/ops/prometheus:/work:ro" --workdir /work --entrypoint /bin/promtool prom/prometheus:v3.6.0 test rules alert-tests.yml
