@@ -50,7 +50,7 @@ void Config(string path, IEnumerable<(string Id, string Address)> destinations,
                         Passive = new {
                             Enabled = probe == "/lab/ping",
                             Policy = "BoundedTransportFailure",
-                            ReactivationPeriod = "00:00:02"
+                            ReactivationPeriod = "00:00:15"
                         }
                     },
                     Metadata = new Dictionary<string,string> {
