@@ -678,9 +678,10 @@ app.MapPost("/admin/api/mail/test", async (HttpContext ctx) =>
         // server banners, usernames or recipient addresses in exception text.
         var failureType = ex.GetType().Name;
         var innerType = ex.InnerException?.GetType().Name ?? "None";
-        app.Logger.LogWarning("SMTP_DELIVERY_TEST_FAILED errorType={ErrorType} innerType={InnerType}",
-            failureType, innerType);
-        await Audit(Actor(ctx), "SMTP_DELIVERY_TEST_FAILED", new { failureType, innerType });
+        var smtpStatus = ex is SmtpException smtpException ? (int)smtpException.StatusCode : -1;
+        app.Logger.LogWarning("SMTP_DELIVERY_TEST_FAILED errorType={ErrorType} innerType={InnerType} smtpStatus={SmtpStatus}",
+            failureType, innerType, smtpStatus);
+        await Audit(Actor(ctx), "SMTP_DELIVERY_TEST_FAILED", new { failureType, innerType, smtpStatus });
         return Results.Json(new { code = "SMTP_RELAY_UNAVAILABLE", error = "SMTP relay test failed. Check reachability, STARTTLS certificate trust, credentials and relay permissions. No OTP settings were enabled." }, statusCode: 503);
     }
 }).RequireRateLimiting("mailtest").RequireAuthorization(p => p.RequireRole("Administrator"));
