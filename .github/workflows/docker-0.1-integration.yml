@@ -1,0 +1,97 @@
+name: v0.1 disposable Docker integration (real Control Center)
+on:
+  pull_request:
+    paths:
+      - "tests/CI/stack/**"
+      - ".github/workflows/docker-0.1-integration.yml"
+      - "control-center/**"
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: docker-01-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  docker-lab:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - name: Docker availability
+        run: docker compose version && docker version
+      - name: Generate disposable trust-verified P-256 ingress identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p tests/CI/stack/certs artifacts/ci-01
+          openssl req -x509 -nodes -newkey ec -pkeyopt ec_paramgen_curve:P-256 -sha256 \
+            -subj '/CN=localhost' -addext 'subjectAltName=IP:127.0.0.1,DNS:localhost' \
+            -days 2 -keyout tests/CI/stack/certs/server.key -out tests/CI/stack/certs/server.crt
+          chmod 0600 tests/CI/stack/certs/server.key
+          openssl x509 -in tests/CI/stack/certs/server.crt -text -noout | grep -A1 'Public Key Algorithm'
+      - name: Validate compose graph
+        run: docker compose -f tests/CI/stack/compose.yml config --quiet
+      - name: Build and boot two shipping YARP instances, two ingress, two backends, two local Prometheus
+        run: docker compose -f tests/CI/stack/compose.yml up -d --build
+      - name: Real HTTP, real HTTPS with chain trust, RBAC boundary, no-replay, metrics and collector
+        run: python tests/CI/stack/acceptance.py --phase baseline --out artifacts/ci-01/baseline.json
+      - name: Kill a gateway, keep both ingress endpoints available
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker compose -f tests/CI/stack/compose.yml kill -s SIGKILL gateway-a
+          python tests/CI/stack/acceptance.py --phase gateway-loss --out artifacts/ci-01/gateway-loss.json
+          docker compose -f tests/CI/stack/compose.yml up -d --no-deps gateway-a
+      - name: Kill one ingress, continue through independent second ingress container
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker compose -f tests/CI/stack/compose.yml kill -s SIGKILL ingress-a
+          python tests/CI/stack/acceptance.py --phase ingress-loss --out artifacts/ci-01/ingress-loss.json
+          docker compose -f tests/CI/stack/compose.yml up -d --no-deps ingress-a
+      - name: Rotate P-256 leaf and reload both ingress containers
+        shell: bash
+        run: |
+          set -euo pipefail
+          crt=tests/CI/stack/certs/server.crt
+          key=tests/CI/stack/certs/server.key
+          before=$(openssl x509 -in "$crt" -serial -noout)
+          openssl req -x509 -nodes -newkey ec -pkeyopt ec_paramgen_curve:P-256 -sha256 \
+            -subj '/CN=localhost' -addext 'subjectAltName=IP:127.0.0.1,DNS:localhost' \
+            -days 2 -keyout "$key.next" -out "$crt.next"
+          mv "$key.next" "$key"; mv "$crt.next" "$crt"
+          docker compose -f tests/CI/stack/compose.yml exec -T ingress-a nginx -t
+          docker compose -f tests/CI/stack/compose.yml exec -T ingress-a nginx -s reload
+          docker compose -f tests/CI/stack/compose.yml exec -T ingress-b nginx -s reload
+          after=$(openssl x509 -in "$crt" -serial -noout)
+          test "$before" != "$after"
+          printf 'before=%s\nafter=%s\n' "$before" "$after" > artifacts/ci-01/rotation.txt
+          python tests/CI/stack/acceptance.py --phase recovered --out artifacts/ci-01/recovered.json
+      - name: Fail-closed invalid Linux X509 certificate file
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +e
+          timeout 25s docker compose -f tests/CI/stack/compose.yml run --no-deps --rm \
+            -e YARP_LINUX_DP_CERT_PFX_PATH=/state/secrets/not-here.pfx gateway-a \
+            > artifacts/ci-01/missing-pfx.log 2>&1
+          code=$?
+          set -e
+          test "$code" != 0
+          test "$code" != 124
+          grep -Eq 'Missing or symlinked secret|Missing absolute secret' artifacts/ci-01/missing-pfx.log
+      - name: Capture evidence and tear down CI resources
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          docker compose -f tests/CI/stack/compose.yml ps -a > artifacts/ci-01/docker-ps.txt 2>&1
+          docker compose -f tests/CI/stack/compose.yml logs --no-color > artifacts/ci-01/docker-logs.txt 2>&1
+          docker compose -f tests/CI/stack/compose.yml down -v --remove-orphans
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: docker-01-real-control-center-evidence
+          path: artifacts/ci-01/
+          if-no-files-found: warn
+          retention-days: 14
