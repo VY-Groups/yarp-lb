@@ -138,6 +138,19 @@ test('browser: bootstrap, navigation, onboarding, websites, route edit, users an
     await expect(page.locator('#page-title')).toContainText('Mail & OTP');
   });
 
+  await test.step('Zoho India SMTP profile uses SMTP host not webmail, with no credential autofill',async()=>{
+    await page.locator('button.nav[data-view="mail"]').click();
+    await expect(page.locator('#smtp-preset')).toBeVisible();
+    await page.locator('#smtp-preset').selectOption('zoho-in-org');
+    await expect(page.locator('#mail-config [name="host"]')).toHaveValue('smtppro.zoho.in');
+    await expect(page.locator('#mail-config [name="port"]')).toHaveValue('587');
+    await expect(page.locator('#mail-config [name="startTls"]')).toBeChecked();
+    await expect(page.locator('#mail-config [name="password"]')).toHaveValue('');
+    await expect(page.locator('#mail-config [name="enabled"]')).not.toBeChecked();
+    await page.locator('#smtp-preset').selectOption('zoho-in-standard');
+    await expect(page.locator('#mail-config [name="host"]')).toHaveValue('smtp.zoho.in');
+  });
+
   await test.step('Sign out, reject invalid password, and restore session',async()=>{
     await page.locator('#logout').click();
     await expect(page.locator('#auth-screen')).toBeVisible();
