@@ -1,4 +1,4 @@
-# SpeedSign HA design specification
+# GatewayCore HA design specification
 
 ## Modes
 

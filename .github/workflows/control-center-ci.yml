@@ -43,9 +43,9 @@ jobs:
         with:
           node-version: '22'
       - name: Build complete ASP.NET Core control plane
-        run: dotnet build SpeedSignYarp.csproj --configuration Release
+        run: dotnet build GatewayCoreYarp.csproj --configuration Release
       - name: Build separate gateway agent
-        run: dotnet build GatewayAgent/SpeedSignGatewayAgent.csproj --configuration Release
+        run: dotnet build GatewayAgent/GatewayCoreGatewayAgent.csproj --configuration Release
       - name: Run load balancing core tests
         run: dotnet run --project tests/LoadBalancingCoreTests/LoadBalancingCoreTests.csproj --configuration Release
       - name: Verify actual Control Center console cannot block gateway request threads
@@ -62,7 +62,7 @@ jobs:
       - name: Verify real Control Center EC2 CI-only TLS safety and allowlist
         run: dotnet run --project tests/Ec2LabSafetyTests/Ec2LabSafetyTests.csproj --configuration Release
       - name: Offline functional smoke of the real Control Center and two local backends
-        run: python ../tests/EC2Functional/smoke.py --root . --dll bin/Release/net10.0/SpeedSignYarp.dll
+        run: python ../tests/EC2Functional/smoke.py --root . --dll bin/Release/net10.0/GatewayCoreYarp.dll
       - name: Verify EC2 request caps and read-only harness without network access
         run: python -m unittest discover -s ../tests/EC2Functional -p 'test_*.py' -v
       - name: Test TLS certificate inventory status logic
@@ -74,6 +74,9 @@ jobs:
           git diff --exit-code -- wwwroot/app.js
       - name: Run frontend UI regression tests
         run: node --test tests/test_onboarding_ui.mjs tests/test_setup_ui.mjs
+      - name: Verify repository-wide neutral branding and build target paths
+        working-directory: .
+        run: python -m unittest discover -s tests/CI/branding -p 'test_*.py' -v
       - name: Run backend source contract checks
         shell: bash
         run: |

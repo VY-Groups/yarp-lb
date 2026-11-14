@@ -1,6 +1,6 @@
 # CA production release gates — 0.1 development baseline
 
-The following checks must be **actually evidenced**, independently reviewed, and signed off before moving this application into a SpeedSign CA change window. A green Setup Center status only describes configuration, not proof of successful failover or compliance.
+The following checks must be **actually evidenced**, independently reviewed, and signed off before moving this application into a GatewayCore CA change window. A green Setup Center status only describes configuration, not proof of successful failover or compliance.
 
 ## G0: Build, package, rollback
 
@@ -33,7 +33,7 @@ The following checks must be **actually evidenced**, independently reviewed, and
 
 ## G4: CA trust services
 
-- Classify every route: SpeedSign public website, partner API, eKYC, RA/SSCA, restricted tools, OCSP, CRL. Separate public and private ingress; maintain firewall and IAM trust boundaries.
+- Classify every route: GatewayCore public website, partner API, eKYC, RA/SSCA, restricted tools, OCSP, CRL. Separate public and private ingress; maintain firewall and IAM trust boundaries.
 - Validate OCSP GET/POST binary payloads, cache headers, revocation freshness and URLs already embedded in certificates before cutover; CRL objects remain reachable with expected paths/content types.
 - Protect HSM and issuance services from external reverse-proxy exposure; require CA operations/CPS change approval.
 

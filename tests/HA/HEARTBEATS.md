@@ -43,8 +43,8 @@ zero automatic replay requirements are **unchanged**. A no-data run is a
 failed HA run. The first two matrices remain **9/10 and 8/10**, not green.
 
 Run links:
-- https://github.com/VY-Groups/yarp-lb/actions/runs/43547047146
-- https://github.com/VY-Groups/yarp-lb/actions/runs/43547492741
+- GitHub Actions run 43547047146
+- GitHub Actions run 43547492741
 
 The new 10-run workflow deliberately fails its aggregate check unless all
 ten individual tests pass. Investigate failed-run heartbeat evidence before

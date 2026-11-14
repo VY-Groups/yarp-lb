@@ -15,7 +15,7 @@ public static class AgentLabCaTlsAcceptance
     public static async Task RunAsync()
     {
         var dll=Path.Combine(Directory.GetCurrentDirectory(),"GatewayAgent","bin",
-            "Release","net10.0","SpeedSignGatewayAgent.dll");
+            "Release","net10.0","GatewayCoreGatewayAgent.dll");
         if (!File.Exists(dll)) throw new FileNotFoundException("Build real agent first",dll);
         var dir=Path.Combine(Path.GetTempPath(),"agent-ephemeral-pki-"+Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(dir);

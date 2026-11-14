@@ -10,9 +10,9 @@ for value in ['/admin/api/organization','/admin/api/organization/sectors','MapOr
 assert 'OrganizationProfile.cs' in installer
 assert 'app.MapOrganizationProfile(privateDir)' in app
 assert "IsLoopback(address)" in app and 'yarp_control_http_requests_total' in app
-assert "'SpeedSign.ApplicationCategory'" not in ui
-assert 'Set up your SpeedSign gateway' not in ui
-assert '<strong>SpeedSign</strong>' not in html
+assert "'GatewayCore.ApplicationCategory'" not in ui
+assert 'Set up your GatewayCore gateway' not in ui
+assert '<strong>GatewayCore</strong>' not in html
 assert 'data-organization-name' in html
 assert 'Organization profile' in ui
 assert "multiTenantIsolation = false" in api

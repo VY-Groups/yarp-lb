@@ -1,7 +1,7 @@
 # Single-tenant on-prem production release gates — **NO-GO**
 
 This document describes the shipping candidate on the draft
-[PR #60](https://github.com/VY-Groups/yarp-lb/pull/60) and replaces
+PR #60 and replaces
 the obsolete loopback-only/Redis-as-P0 guidance. **No production
 deployment has happened from CI.** An auditor must not convert a green
 GitHub Actions suite into physical operational approval.
@@ -59,14 +59,14 @@ Use actual response sizes, weighted routes, HTTP/HTTPS split,
 peak RPS, new connections/s and concurrent client count.
 
 The isolated GitHub-hosted
-[20-second canary](https://github.com/VY-Groups/yarp-lb/actions/runs/43576670237)
+20-second canary (GitHub Actions run 43576670237)
 at the older head recorded **1.006572 Gbps** of HTTP body throughput
 via the real .NET 10 YARP, 2,400 HTTP 200 responses, zero transport/HTTP
 errors and **2.051 ms p99** using **synthetic 1 MiB plain HTTP**.
 It is **not** a physical-site, 60-minute, real-mix acceptance result.
 
 The different GitHub-hosted
-[one-hour k6 soak](https://github.com/VY-Groups/yarp-lb/actions/runs/43568270365)
+one-hour k6 soak (GitHub Actions run 43568270365)
 recorded 34,010,745 requests, zero request failures and 32.29 ms
 overall p99, **but 993,610 dropped low-priority log messages**.
 Those dropped messages violate a zero-log-loss production operations
@@ -111,11 +111,11 @@ gate; its CI availability PASS does not authorize production.
 
 ## Architecture and policy
 
-- v1 P0 [#36](https://github.com/VY-Groups/yarp-lb/issues/36):
+- v1 P0 #36:
   two independent gateway hosts and identical signed configs behind
   proven VRRP or ECMP, **no Redis requirement**.
 - Redis/Sentinel is the separate post-v1 research
-  [#61](https://github.com/VY-Groups/yarp-lb/issues/61).
+  #61.
 - Single-tenant only; future SaaS multi-tenancy [#39] is P2.
 - Follow `ops/automation/ONPREM_RUN_ORDER.md` and
   `ops/capacity/EOD_500MBPS_RELEASE_PLAN.md`.
@@ -123,3 +123,17 @@ gate; its CI availability PASS does not authorize production.
   GitHub Actions has permission to touch the private production network.
 
 **Release status: SOFTWARE CI GO on its verified SHA; PRODUCTION NO-GO.**
+
+## Neutral identity migration gate (not passed on site)
+
+The application and service identifiers are now **GatewayCore**. This
+changes the assembly binary name, cookie and ASP.NET Data Protection
+application isolation, protected credential purposes and default
+Windows/Linux state paths. Backed-up old ciphertext cannot simply
+be copied to the new installation and assumed to decrypt. Existing
+installations must be inventoried, backed up and migrated through
+approved credential re-enrollment with fail-closed verification.
+A new empty CI install **does not test upgrades from legacy state**.
+Treat live state conversion and restoration as **NOT RUN**, and do not
+deploy a replacement over an existing service without an approved
+migration and rollback record.

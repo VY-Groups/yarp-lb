@@ -26,7 +26,7 @@ var ec2Lab = Ec2WorkflowLab.Enabled;
 var privateDir = ec2Lab ? Ec2WorkflowLab.PrivateDirectory()
     : OperatingSystem.IsLinux() ? LinuxKeyProtection.InitializeStateDirectory()
     : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
-        "SpeedSignYarp", "ControlPlane");
+        "GatewayCoreYarp", "ControlPlane");
 if (!OperatingSystem.IsLinux() || ec2Lab)
     Directory.CreateDirectory(privateDir);
 var keyDir = Path.Combine(privateDir, "data-protection-keys");
@@ -39,7 +39,7 @@ isolatedListeners?.Configure(builder.WebHost);
 // Production and the GatewayLab use the same nonblocking registration.
 var boundedConsole = GatewayLoggingConfiguration.Install(builder.Logging, Console.Out);
 var dataProtection = builder.Services.AddDataProtection()
-    .SetApplicationName("SpeedSignYarpControlCenter")
+    .SetApplicationName("GatewayCoreYarpControlCenter")
     .PersistKeysToFileSystem(new DirectoryInfo(keyDir));
 if (OperatingSystem.IsWindows())
     dataProtection.ProtectKeysWithDpapi(protectToLocalMachine: true);
@@ -80,7 +80,7 @@ builder.Services.AddSingleton<IPassiveHealthCheckPolicy, BoundedTransportFailure
 builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme)
     .AddCookie(options =>
     {
-        options.Cookie.Name = "SpeedSignYarpAdmin";
+        options.Cookie.Name = "GatewayCoreYarpAdmin";
         options.Cookie.HttpOnly = true;
         options.Cookie.SameSite = SameSiteMode.Strict;
         options.Cookie.SecurePolicy = CookieSecurePolicy.SameAsRequest; // local HTTP TEST only; mandate HTTPS for remote administration
@@ -172,7 +172,7 @@ var loginGate = new SemaphoreSlim(1, 1);
 var pendingOtp = new ConcurrentDictionary<string, OtpChallenge>();
 var mailPath = Path.Combine(privateDir, "mail-settings.json");
 var mailProofPath = Path.Combine(privateDir, "mail-test-proof.sha256");
-var protector = app.Services.GetRequiredService<IDataProtectionProvider>().CreateProtector("SpeedSignYarp.AdminMail.v1");
+var protector = app.Services.GetRequiredService<IDataProtectionProvider>().CreateProtector("GatewayCoreYarp.AdminMail.v1");
 MailSettings ReadMail() => File.Exists(mailPath)
     ? JsonSerializer.Deserialize<MailSettings>(File.ReadAllText(mailPath), jsonOptions) ?? new MailSettings()
     : new MailSettings();

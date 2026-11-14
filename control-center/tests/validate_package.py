@@ -15,5 +15,5 @@ assert 'style="' not in html
 assert not re.search(r'\bstyle\s*=\s*["\']', ts)
 assert '/admin/api/change-requests' in js
 assert 'C:\\YARP\\Backups' in installer
-assert 'C:\\YARP\\SpeedSignYarp' in installer
+assert 'C:\\YARP\\GatewayCoreYarp' in installer
 print('PASS: static package assertions; C# runtime build not performed')

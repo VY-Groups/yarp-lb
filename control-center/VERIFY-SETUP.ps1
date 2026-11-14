@@ -3,7 +3,7 @@
 param([string]$BaseUrl = 'http://127.0.0.1:8080')
 $ErrorActionPreference = 'Stop'
 $base = $BaseUrl.TrimEnd('/')
-Write-Host 'SpeedSign YARP Control Center 0.1 — API and security smoke checks' -ForegroundColor Cyan
+Write-Host 'GatewayCore YARP Control Center 0.1 — API and security smoke checks' -ForegroundColor Cyan
 function Expect([string]$Path, [int]$Status) {
     $url = $base + $Path
     try {

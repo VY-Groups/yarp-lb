@@ -35,13 +35,13 @@ jobs:
           python3 tests/EC2Functional/ec2_functional.py \
             --preflight --out artifacts/ec2
       - name: Build real shipping Control Center gateway from this commit
-        run: dotnet build control-center/SpeedSignYarp.csproj -c Release
+        run: dotnet build control-center/GatewayCoreYarp.csproj -c Release
       - name: Exercise routing, weights, hashing, ejection, backend TLS and live weight switch
         run: |
           python3 tests/EC2Functional/ec2_functional.py \
             --run --out artifacts/ec2 \
             --root control-center \
-            --dll control-center/bin/Release/net10.0/SpeedSignYarp.dll
+            --dll control-center/bin/Release/net10.0/GatewayCoreYarp.dll
       - name: Publish failure context when preflight or test fails
         if: failure()
         shell: bash

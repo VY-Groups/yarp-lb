@@ -15,7 +15,7 @@ $h = CheckPage '/gateway/health' 200 'application/json'
 $body = $h.Content | ConvertFrom-Json
 if ($body.status -ne 'healthy') { throw 'Gateway health endpoint returned non-healthy status' }
 $dashboard = CheckPage '/dashboard' 200 'text/html'
-if ($dashboard.Content -notmatch 'SpeedSign') { throw 'Dashboard shell missing SpeedSign label' }
+if ($dashboard.Content -notmatch 'GatewayCore') { throw 'Dashboard shell missing GatewayCore label' }
 if ($dashboard.Headers['Content-Security-Policy'] -notmatch "style-src 'self'") { throw 'Expected strict CSP missing from dashboard' }
 CheckPage '/dashboard/app.js' 200 'javascript' | Out-Null
 CheckPage '/dashboard/style.css' 200 'text/css' | Out-Null

@@ -5,46 +5,46 @@ groups:
     interval: 30s
     rules:
       - alert: YarpMetricsDown
-        expr: up{job="speedsign-gateway"} == 0
+        expr: up{job="gatewaycore-gateway"} == 0
         for: 1m
         labels: {severity: critical}
       - alert: YarpMetricsAbsent
-        expr: absent(yarp_control_http_requests_total{job="speedsign-gateway"})
+        expr: absent(yarp_control_http_requests_total{job="gatewaycore-gateway"})
         for: 2m
         labels: {severity: critical}
       - alert: YarpHigh5xxFraction
-        expr: (sum by (instance) (rate(yarp_control_http_responses_total{job="speedsign-gateway",status_class="5xx"}[5m])) / clamp_min(sum by (instance) (rate(yarp_control_http_requests_total{job="speedsign-gateway"}[5m])), 1)) > 0.001
+        expr: (sum by (instance) (rate(yarp_control_http_responses_total{job="gatewaycore-gateway",status_class="5xx"}[5m])) / clamp_min(sum by (instance) (rate(yarp_control_http_requests_total{job="gatewaycore-gateway"}[5m])), 1)) > 0.001
         for: 2m
         labels: {severity: critical}
       - alert: YarpHighP99
-        expr: histogram_quantile(0.99, sum by (instance,le) (rate(yarp_control_http_duration_seconds_bucket{job="speedsign-gateway"}[5m]))) >= 0.100
+        expr: histogram_quantile(0.99, sum by (instance,le) (rate(yarp_control_http_duration_seconds_bucket{job="gatewaycore-gateway"}[5m]))) >= 0.100
         for: 5m
         labels: {severity: critical}
       - alert: YarpUnhealthyDestination
-        expr: yarp_control_destination_active_health{job="speedsign-gateway"} < 0
+        expr: yarp_control_destination_active_health{job="gatewaycore-gateway"} < 0
         for: 1m
         labels: {severity: critical}
       - alert: YarpUnknownDestination
-        expr: yarp_control_destination_active_health{job="speedsign-gateway"} == 0
+        expr: yarp_control_destination_active_health{job="gatewaycore-gateway"} == 0
         for: 2m
         labels: {severity: warning}
       - alert: YarpTLSExpiringWithin14Days
-        expr: (probe_ssl_earliest_cert_expiry{job="speedsign-tls-probe"} - time()) < 1209600
+        expr: (probe_ssl_earliest_cert_expiry{job="gatewaycore-tls-probe"} - time()) < 1209600
         for: 5m
         labels: {severity: critical}
       - alert: YarpTLSProbeFailed
-        expr: probe_success{job="speedsign-tls-probe"} == 0
+        expr: probe_success{job="gatewaycore-tls-probe"} == 0
         for: 1m
         labels: {severity: critical}
       - alert: YarpDroppedLogs
-        expr: increase(yarp_logging_dropped_total{job="speedsign-gateway"}[5m]) > 0
+        expr: increase(yarp_logging_dropped_total{job="gatewaycore-gateway"}[5m]) > 0
         for: 1m
         labels: {severity: critical}
       - alert: YarpHighPriorityLogsDropped
-        expr: increase(yarp_logging_dropped_high_priority_total{job="speedsign-gateway"}[5m]) > 0
+        expr: increase(yarp_logging_dropped_high_priority_total{job="gatewaycore-gateway"}[5m]) > 0
         for: 0m
         labels: {severity: critical}
       - alert: YarpLogWriterError
-        expr: increase(yarp_logging_write_errors_total{job="speedsign-gateway"}[5m]) > 0
+        expr: increase(yarp_logging_write_errors_total{job="gatewaycore-gateway"}[5m]) > 0
         for: 1m
         labels: {severity: critical}

@@ -4,40 +4,40 @@ evaluation_interval: 1m
 tests:
   - interval: 1m
     input_series:
-      - series: 'up{job="speedsign-gateway",instance="gateway-01"}'
+      - series: 'up{job="gatewaycore-gateway",instance="gateway-01"}'
         values: '0 0 0 0 0'
     alert_rule_test:
       - eval_time: 3m
         alertname: YarpMetricsDown
         exp_alerts:
-          - exp_labels: {job: speedsign-gateway, instance: gateway-01, severity: critical}
+          - exp_labels: {job: gatewaycore-gateway, instance: gateway-01, severity: critical}
   - interval: 1m
     input_series:
-      - series: 'yarp_control_destination_active_health{job="speedsign-gateway",instance="gateway-01",destination="cluster-a/node-a"}'
+      - series: 'yarp_control_destination_active_health{job="gatewaycore-gateway",instance="gateway-01",destination="cluster-a/node-a"}'
         values: '-1 -1 -1 -1'
     alert_rule_test:
       - eval_time: 3m
         alertname: YarpUnhealthyDestination
         exp_alerts:
-          - exp_labels: {job: speedsign-gateway, instance: gateway-01, destination: "cluster-a/node-a", severity: critical}
+          - exp_labels: {job: gatewaycore-gateway, instance: gateway-01, destination: "cluster-a/node-a", severity: critical}
   - interval: 1m
     input_series:
-      - series: 'probe_ssl_earliest_cert_expiry{job="speedsign-tls-probe",instance="gateway-01"}'
+      - series: 'probe_ssl_earliest_cert_expiry{job="gatewaycore-tls-probe",instance="gateway-01"}'
         values: '604800 604800 604800 604800 604800 604800 604800 604800'
     alert_rule_test:
       - eval_time: 7m
         alertname: YarpTLSExpiringWithin14Days
         exp_alerts:
-          - exp_labels: {job: speedsign-tls-probe, instance: gateway-01, severity: critical}
+          - exp_labels: {job: gatewaycore-tls-probe, instance: gateway-01, severity: critical}
   - interval: 1m
     input_series:
-      - series: 'yarp_logging_dropped_total{job="speedsign-gateway",instance="gateway-01"}'
+      - series: 'yarp_logging_dropped_total{job="gatewaycore-gateway",instance="gateway-01"}'
         values: '0 0 1 1 1 1 1 1'
     alert_rule_test:
       - eval_time: 4m
         alertname: YarpDroppedLogs
         exp_alerts:
-          - exp_labels: {job: speedsign-gateway, instance: gateway-01, severity: critical}
+          - exp_labels: {job: gatewaycore-gateway, instance: gateway-01, severity: critical}
 
   - interval: 1m
     input_series:
@@ -47,12 +47,12 @@ tests:
       - eval_time: 4m
         alertname: YarpMetricsAbsent
         exp_alerts:
-          - exp_labels: {job: speedsign-gateway, severity: critical}
+          - exp_labels: {job: gatewaycore-gateway, severity: critical}
   - interval: 1m
     input_series:
-      - series: 'yarp_control_http_requests_total{job="speedsign-gateway",instance="gateway-01"}'
+      - series: 'yarp_control_http_requests_total{job="gatewaycore-gateway",instance="gateway-01"}'
         values: '0+60x14'
-      - series: 'yarp_control_http_responses_total{job="speedsign-gateway",instance="gateway-01",status_class="5xx"}'
+      - series: 'yarp_control_http_responses_total{job="gatewaycore-gateway",instance="gateway-01",status_class="5xx"}'
         values: '0+6x14'
     alert_rule_test:
       - eval_time: 9m
@@ -61,13 +61,13 @@ tests:
           - exp_labels: {instance: gateway-01, severity: critical}
   - interval: 1m
     input_series:
-      - series: 'yarp_control_http_duration_seconds_bucket{job="speedsign-gateway",instance="gateway-01",le="0.005"}'
+      - series: 'yarp_control_http_duration_seconds_bucket{job="gatewaycore-gateway",instance="gateway-01",le="0.005"}'
         values: '0+0x14'
-      - series: 'yarp_control_http_duration_seconds_bucket{job="speedsign-gateway",instance="gateway-01",le="0.1"}'
+      - series: 'yarp_control_http_duration_seconds_bucket{job="gatewaycore-gateway",instance="gateway-01",le="0.1"}'
         values: '0+0x14'
-      - series: 'yarp_control_http_duration_seconds_bucket{job="speedsign-gateway",instance="gateway-01",le="0.25"}'
+      - series: 'yarp_control_http_duration_seconds_bucket{job="gatewaycore-gateway",instance="gateway-01",le="0.25"}'
         values: '0+100x14'
-      - series: 'yarp_control_http_duration_seconds_bucket{job="speedsign-gateway",instance="gateway-01",le="+Inf"}'
+      - series: 'yarp_control_http_duration_seconds_bucket{job="gatewaycore-gateway",instance="gateway-01",le="+Inf"}'
         values: '0+100x14'
     alert_rule_test:
       - eval_time: 11m
@@ -76,37 +76,37 @@ tests:
           - exp_labels: {instance: gateway-01, severity: critical}
   - interval: 1m
     input_series:
-      - series: 'yarp_control_destination_active_health{job="speedsign-gateway",instance="gateway-01",destination="cluster-a/node-b"}'
+      - series: 'yarp_control_destination_active_health{job="gatewaycore-gateway",instance="gateway-01",destination="cluster-a/node-b"}'
         values: '0 0 0 0 0 0'
     alert_rule_test:
       - eval_time: 4m
         alertname: YarpUnknownDestination
         exp_alerts:
-          - exp_labels: {job: speedsign-gateway,instance: gateway-01,destination: "cluster-a/node-b",severity: warning}
+          - exp_labels: {job: gatewaycore-gateway,instance: gateway-01,destination: "cluster-a/node-b",severity: warning}
   - interval: 1m
     input_series:
-      - series: 'probe_success{job="speedsign-tls-probe",instance="gateway-01"}'
+      - series: 'probe_success{job="gatewaycore-tls-probe",instance="gateway-01"}'
         values: '0 0 0 0'
     alert_rule_test:
       - eval_time: 3m
         alertname: YarpTLSProbeFailed
         exp_alerts:
-          - exp_labels: {job: speedsign-tls-probe,instance: gateway-01,severity: critical}
+          - exp_labels: {job: gatewaycore-tls-probe,instance: gateway-01,severity: critical}
   - interval: 1m
     input_series:
-      - series: 'yarp_logging_dropped_high_priority_total{job="speedsign-gateway",instance="gateway-01"}'
+      - series: 'yarp_logging_dropped_high_priority_total{job="gatewaycore-gateway",instance="gateway-01"}'
         values: '0 0 1 1 1 1 1'
     alert_rule_test:
       - eval_time: 4m
         alertname: YarpHighPriorityLogsDropped
         exp_alerts:
-          - exp_labels: {job: speedsign-gateway,instance: gateway-01,severity: critical}
+          - exp_labels: {job: gatewaycore-gateway,instance: gateway-01,severity: critical}
   - interval: 1m
     input_series:
-      - series: 'yarp_logging_write_errors_total{job="speedsign-gateway",instance="gateway-01"}'
+      - series: 'yarp_logging_write_errors_total{job="gatewaycore-gateway",instance="gateway-01"}'
         values: '0 0 1 1 1 1 1'
     alert_rule_test:
       - eval_time: 4m
         alertname: YarpLogWriterError
         exp_alerts:
-          - exp_labels: {job: speedsign-gateway,instance: gateway-01,severity: critical}
+          - exp_labels: {job: gatewaycore-gateway,instance: gateway-01,severity: critical}

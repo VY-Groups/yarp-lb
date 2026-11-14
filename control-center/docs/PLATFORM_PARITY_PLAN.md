@@ -1,4 +1,4 @@
-# SpeedSign YARP Control Center — complete load-balancer platform plan
+# GatewayCore YARP Control Center — complete load-balancer platform plan
 
 ## Product boundary
 
@@ -41,9 +41,9 @@
 | Canary/blue-green | Weighted destinations, deployment revisions, readiness gates | Basic weighting new; no full deployment workflow | 5/25/100% ramp with stop/rollback health gates |
 | Multi-tenant | Tenant-scoped DB, RBAC and fleet segmentation | Not implemented | Cross-tenant access tests at every endpoint and data join |
 
-## SpeedSign CA trust boundaries
+## GatewayCore CA trust boundaries
 
-1. Public SpeedSign sites, partner APIs and eKYC frontends are distinct from RA approval/SSCA admin zones and from private CA/HSM signing paths.
+1. Public GatewayCore sites, partner APIs and eKYC frontends are distinct from RA approval/SSCA admin zones and from private CA/HSM signing paths.
 2. OCSP GET/POST and CRL publication require dedicated public URL, binary request, cache, freshness, and availability validation. Do not put JWT on public OCSP requests.
 3. PostgreSQL 16 and Pgpool-II are a separate consistency/failover plane. HTTP Active–Active does not make databases multi-writer.
 4. For signing/approval/settlement requests, never auto-replay non-idempotent requests without a proven idempotency token and state machine.
