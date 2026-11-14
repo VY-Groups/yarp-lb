@@ -419,7 +419,6 @@ function addApplicationWizard() {
         show('Application added to unsaved draft. Validate both readiness endpoints before enabling active health, then submit for independent approval.');
     });
 }
-
 function addLocalWebWizard() {
     if (currentRole === 'Viewer')
         return show('Viewer accounts cannot submit routing changes', true);
@@ -452,7 +451,6 @@ function addLocalWebWizard() {
         show('Local website added to draft. Submit for independent approval; no live traffic changed.');
     });
 }
-
 function updateRoute(id = '') { const old = data.routes[id] || { Match: { Path: '/api/{**catch-all}', Hosts: [] }, ClusterId: keys(data.clusters)[0] || '' }; modal(id ? 'Edit route' : 'Add route', 'Use comma-separated hostnames or leave blank for any hostname. Avoid exposing internal routes publicly.', [{ name: 'id', label: 'Route ID', value: id || '' }, { name: 'cluster', label: 'Target cluster', value: old.ClusterId || '', options: keys(data.clusters) }, { name: 'path', label: 'Route path', value: old.Match?.Path || '/{**catch-all}' }, { name: 'hosts', label: 'Hostnames (comma-separated, optional)', value: (old.Match?.Hosts || []).join(', ') }], v => { if (!validId(v.id) || !data.clusters[v.cluster] || !v.path.startsWith('/'))
     throw Error('Check route ID, cluster, and /path'); if (v.id !== id && data.routes[v.id])
     throw Error('Route ID already exists'); const x = { ...old, ClusterId: v.cluster, Match: { ...old.Match, Path: v.path, Hosts: v.hosts.split(',').map((s) => s.trim()).filter(Boolean) } }; if (x.Match.Hosts.length === 0)
@@ -696,7 +694,7 @@ function act(type, id) {
         return;
     }
     if (type === 'mail-test') {
-        void api('/admin/api/mail/test', 'POST', {}).then(r => { show('SMTP accepted test message for ' + r.recipient); void mailPage(); }).catch(e => show(String(e), true));
+        void api('/admin/api/mail/test', 'POST', {}).then(r => { show('SMTP accepted test message for ' + r.recipient); void mailPage(); }).catch(e => show('Mail test failed: ' + String(e) + '. Save a relay configuration first; verify administrator email and STARTTLS.', true));
         return;
     }
     if (type === 'directory-test') {
