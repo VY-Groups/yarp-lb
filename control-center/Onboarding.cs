@@ -143,6 +143,8 @@ public static class OnboardingApi
                 if (!seen.Add(w.Id)) issues.Add($"Duplicate application destination ID: {w.Id}");
                 if ((w.Application?.Length ?? 0) > 100) issues.Add("Application name exceeds 100 characters.");
                 if (w.Zone is not ("public" or "restricted" or "trust")) issues.Add($"Invalid exposure zone for {w.Id}");
+                if (w.HostingEngine is not ("http" or "iis" or "apache" or "nginx" or "caddy" or "tomcat" or "kestrel" or "node" or "kubernetes-ingress" or "other"))
+                    issues.Add($"Invalid hosting engine classification for {w.Id}");
                 if (!string.IsNullOrWhiteSpace(w.Url) && !ValidBackendUrl(w.Url)) issues.Add($"{w.Id}: invalid HTTP(S) backend URL.");
             }
         }
@@ -254,4 +256,6 @@ public sealed class OnboardingWorkload
     public string Application { get; set; } = "";
     public string Url { get; set; } = "";
     public string Zone { get; set; } = "public";
+    // Display-only origin classification. Does not provision or reconfigure the server.
+    public string HostingEngine { get; set; } = "http";
 }
