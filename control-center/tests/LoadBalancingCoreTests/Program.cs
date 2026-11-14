@@ -102,4 +102,20 @@ for(var i=0;i<runs;i++) _=LoadBalancingCore.PickRendezvousIndex(keys[i%keys.Leng
 var optimizedBytes=GC.GetAllocatedBytesForCurrentThread()-before;
 Console.WriteLine($"RENDEZVOUS_ALLOCATION_COMPARE iterations={runs} legacy={legacyBytes} optimized={optimizedBytes} legacy_per_pick={(double)legacyBytes/runs:F1} optimized_per_pick={(double)optimizedBytes/runs:F1}");
 Check(optimizedBytes < legacyBytes/2, "rendezvous helper allocations cut by >50% in warmed synchronous comparison");
-Console.WriteLine($"PASS: all offline algorithm tests. Remapped {moves}/2000; weighted favored B {skew}/2000.");
+// Safety model: never eject all destinations accidentally. Cap is computed
+// from a configured percent AND a mandatory minimum survivor count.
+Check(EjectionBudget.Allowed(2,50,1)==1,"two-gateway edge ejects at most one");
+Check(EjectionBudget.Allowed(2,100,1)==1,"minimum survivor overrides 100 percent ejection");
+Check(EjectionBudget.Allowed(2,50,2)==0,"no passive ejection without reserve");
+Check(EjectionBudget.Allowed(5,40,1)==2,"five-way pool ejection ceiling");
+Check(EjectionBudget.Allowed(5,80,2)==3,"reserve wins over max percent");
+Check(EjectionBudget.Allowed(1,100,1)==0,"sole healthy candidate not ejected by passive policy");
+Check(EjectionBudget.Allowed(5,100,0)==5,"full ejection is explicit zero-reserve opt-in");
+foreach (var bad in new[] {0,-1,101})
+{
+    var rejected=false;
+    try { EjectionBudget.Allowed(5,bad,1); }
+    catch(ArgumentOutOfRangeException) { rejected=true; }
+    Check(rejected,"invalid percent fail closed "+bad);
+}
+Console.WriteLine($"PASS: all algorithm, allocation and ejection tests. Remapped {moves}/2000; weighted favored B {skew}/2000.");

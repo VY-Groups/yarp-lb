@@ -24,7 +24,8 @@ void Require(bool ok, string description)
     Console.WriteLine("PASS: " + description);
     checks.Add(new { description, utc = DateTimeOffset.UtcNow });
 }
-void Config(string path, IEnumerable<(string Id, string Address)> destinations, string probe)
+void Config(string path, IEnumerable<(string Id, string Address)> destinations,
+    string probe, bool explicitPanic = false)
 {
     var dict = destinations.ToDictionary(d => d.Id, d => new
     {
@@ -40,19 +41,26 @@ void Config(string path, IEnumerable<(string Id, string Address)> destinations, 
             Clusters = new Dictionary<string, object> {
                 ["api"] = new {
                     LoadBalancingPolicy = "RoundRobin",
+                    // 1.5s activity timeout at the LOCAL ingress bounds
+                    // in-flight hangs after a killed gateway. The 700ms
+                    // slow-but-healthy backend regression guards over-ejection.
+                    HttpRequest = new { ActivityTimeout = "00:00:01.500" },
                     HealthCheck = new {
-                        AvailableDestinationsPolicy = "HealthyAndUnknown",
+                        AvailableDestinationsPolicy = explicitPanic ? "HealthyOrPanic" : "HealthyAndUnknown", // never implicit panic,
                         Active = new {
-                            Enabled = true, Interval = "00:00:01",
-                            Timeout = "00:00:01", Policy = "ConsecutiveFailures", Path = probe },
+                            Enabled = true, Interval = probe == "/lab/ping" ? "00:00:00.250" : "00:00:01",
+                            Timeout = probe == "/lab/ping" ? "00:00:00.250" : "00:00:01",
+                            Policy = "ConsecutiveFailures", Path = probe },
                         Passive = new {
                             Enabled = probe == "/lab/ping",
-                            Policy = "ImmediateTransportFailure",
-                            ReactivationPeriod = "00:00:30"
+                            Policy = "BoundedTransportFailure",
+                            ReactivationPeriod = "00:00:15"
                         }
                     },
                     Metadata = new Dictionary<string,string> {
-                        ["ConsecutiveFailuresHealthPolicy.Threshold"] = "1"
+                        ["ConsecutiveFailuresHealthPolicy.Threshold"] = "1",
+                        ["BoundedTransportFailure.MaxEjectedPercent"] = "50",
+                        ["BoundedTransportFailure.MinHealthyRemaining"] = "1"
                     },
                     Destinations = dict
                 }
@@ -60,6 +68,27 @@ void Config(string path, IEnumerable<(string Id, string Address)> destinations, 
         }
     };
     File.WriteAllText(path, JsonSerializer.Serialize(config), Encoding.UTF8);
+}
+// Independently drain every child stdout/stderr stream. Unlike ReadToEndAsync,
+// this does NOT accumulate megabytes of logs in the test harness heap, which
+// itself can introduce GC pauses during a tight failover observation window.
+async Task DrainChild(TextReader input, string path)
+{
+    const long maxRecordedChars = 16L * 1024 * 1024;
+    var recorded = 0L;
+    await using var file = new FileStream(path, FileMode.Create, FileAccess.Write,
+        FileShare.Read, 65536, FileOptions.Asynchronous);
+    await using var writer = new StreamWriter(file);
+    string? line;
+    while ((line = await input.ReadLineAsync()) is not null)
+    {
+        // Keep consuming even when the bounded artifact budget is exhausted.
+        if(recorded >= maxRecordedChars) continue;
+        var clipped = line.Length > 4096 ? line[..4096] + "[LINE TRUNCATED]" : line;
+        recorded += clipped.Length + 1;
+        await writer.WriteLineAsync(clipped);
+    }
+    await writer.FlushAsync();
 }
 Process Start(string label, string dll, string[] argv, Dictionary<string,string>? env = null)
 {
@@ -76,10 +105,10 @@ Process Start(string label, string dll, string[] argv, Dictionary<string,string>
     if (env is not null) foreach (var (key,value) in env) start.Environment[key] = value;
     var process = Process.Start(start) ?? throw new Exception("Process launch failed: " + label);
     processes.Add(process);
-    outputReaders.Add(Task.Run(async () => await File.WriteAllTextAsync(
-        Path.Combine(artifacts,label+".out.log"), await process.StandardOutput.ReadToEndAsync())));
-    outputReaders.Add(Task.Run(async () => await File.WriteAllTextAsync(
-        Path.Combine(artifacts,label+".err.log"), await process.StandardError.ReadToEndAsync())));
+    outputReaders.Add(DrainChild(process.StandardOutput,
+        Path.Combine(artifacts,label+".out.log")));
+    outputReaders.Add(DrainChild(process.StandardError,
+        Path.Combine(artifacts,label+".err.log")));
     return process;
 }
 async Task<bool> Responds(string url, int code = 200)
@@ -147,11 +176,33 @@ try
     var gateway2=Start("gateway-2",gatewayDll,[],Settings(18083,18444,g2config,"gateway-2"));
     await WaitFor("both YARP gateways",async()=>await Responds("http://127.0.0.1:18080/lab/ping") &&
         await Responds("http://127.0.0.1:18083/lab/ping"));
-    _=Start("health-aware-ingress",gatewayDll,[],Settings(19080,19443,edgeConfig,""));
+    var ingress=Start("health-aware-ingress",gatewayDll,[],Settings(19080,19443,edgeConfig,""));
     await WaitFor("ingress",()=>Responds("http://127.0.0.1:19080/lab/ping"));
     await Task.Delay(2500);
     var initial=await Sample(300);
-    Require(initial.Ok==300,"300 HTTP requests traverse ingress and both healthy gateway candidates");
+    checks.Add(new {description="initial-ingress-warmup",successful=initial.Ok,
+        failed=initial.Fail,utc=DateTimeOffset.UtcNow});
+    // A gateway may report /lab/ping before active health's very first probe
+    // marks both destinations eligible (particularly on loaded Windows CI).
+    // We allow a bounded warmup but NEVER discard the initial failure evidence.
+    if(initial.Ok!=300)
+    {
+        await WaitFor("two complete post-warmup ingress samples",async () =>
+        {
+            var first=await Sample(300);
+            if(first.Ok!=300) return false;
+            var second=await Sample(300);
+            return second.Ok==300;
+        },20);
+        initial=await Sample(300);
+    }
+    Require(initial.Ok==300,
+        $"300 HTTP requests traverse ingress after bounded health warmup, ok={initial.Ok} fail={initial.Fail}");
+    using(var slow=await client.GetAsync("http://127.0.0.1:19080/api/slow"))
+        Require(slow.StatusCode==HttpStatusCode.OK,
+            "700ms slow but healthy upstream response is not misclassified as failed");
+    Require((await Sample(100)).Ok==100,
+        "healthy edge remains routable after slow upstream response");
 
     // A production-like MAINTENANCE stop is a two-step sequence: mark gateway
     // unready -> wait until ingress routes solely to the survivor -> gracefully
@@ -245,7 +296,7 @@ try
 
     // Continuous in-flight HTTP traffic spans the exact moment the gateway dies.
     // Every attempted request is counted, including exceptions and status >= 500.
-    var timeline = new ConcurrentQueue<(double StartMs, double CompletedMs, int Status, double LatencyMs)>();
+    var timeline = new ConcurrentQueue<(double StartMs, double CompletedMs, int Status, double LatencyMs, string Gateway)>();
     using var trafficStop = new CancellationTokenSource();
     var epoch = Stopwatch.GetTimestamp();
     var trafficWorkers = Enumerable.Range(0,24).Select(async _ =>
@@ -254,29 +305,55 @@ try
         {
             var started = Stopwatch.GetTimestamp();
             var status = 0;
+            var viaGateway = "";
             try
             {
                 using var response = await client.GetAsync(
                     "http://127.0.0.1:19080/api/identity", trafficStop.Token);
                 status = (int)response.StatusCode;
+                viaGateway = response.Headers.TryGetValues("X-Lab-Gateway", out var via)
+                    ? via.FirstOrDefault() ?? "" : "";
             }
             catch (OperationCanceledException) when (trafficStop.IsCancellationRequested) { break; }
             catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or IOException) { }
             timeline.Enqueue((Stopwatch.GetElapsedTime(epoch,started).TotalMilliseconds,
                 Stopwatch.GetElapsedTime(epoch).TotalMilliseconds,
-                status, Stopwatch.GetElapsedTime(started).TotalMilliseconds));
+                status, Stopwatch.GetElapsedTime(started).TotalMilliseconds, viaGateway));
             try { await Task.Delay(15,trafficStop.Token); }
             catch (OperationCanceledException) { break; }
         }
     }).ToArray();
     await Task.Delay(1500);
-    var killAtMs = Stopwatch.GetElapsedTime(epoch).TotalMilliseconds;
-    gateway1.Kill(entireProcessTree:true);
+    var killRequestedAtMs = Stopwatch.GetElapsedTime(epoch).TotalMilliseconds;
+    // The gateway lab is a single dotnet host with NO child processes.
+    // On Windows Kill(entireProcessTree:true) can spend substantial time
+    // enumerating descendants before stopping the target process. Use the
+    // actual single-process abrupt termination; never include test-harness
+    // descendant traversal time in a YARP failover measurement.
+    gateway1.Kill();
     await gateway1.WaitForExitAsync();
+    var killAtMs = Stopwatch.GetElapsedTime(epoch).TotalMilliseconds;
+    checks.Add(new {description="fault-timing",
+        evidence=new {requestedAtMs=Math.Round(killRequestedAtMs,1),
+            exitedAtMs=Math.Round(killAtMs,1),
+            processTerminationDelayMs=Math.Round(killAtMs-killRequestedAtMs,1)}});
+    Require(killAtMs - killRequestedAtMs <= 2000,
+        "single-process abrupt-kill operation itself completes within 2s");
     await Task.Delay(6000);
     trafficStop.Cancel();
     await Task.WhenAll(trafficWorkers);
     var measured = timeline.ToArray();
+    var rawTimeline = Path.Combine(artifacts, "fault-traffic-timeline.csv");
+    using (var timelineFile = new StreamWriter(rawTimeline, append: false, Encoding.UTF8))
+    {
+        await timelineFile.WriteLineAsync("started_ms,completed_ms,status,latency_ms,via_gateway");
+        foreach(var x in measured.OrderBy(x => x.CompletedMs))
+            await timelineFile.WriteLineAsync(string.Join(",",
+                x.StartMs.ToString("F3",System.Globalization.CultureInfo.InvariantCulture),
+                x.CompletedMs.ToString("F3",System.Globalization.CultureInfo.InvariantCulture),
+                x.Status.ToString(), x.LatencyMs.ToString("F3",System.Globalization.CultureInfo.InvariantCulture),
+                x.Gateway));
+    }
     // Use COMPLETION time so in-flight requests started before the kill but
     // aborted after it still count as post-fault failures.
     var preKill = measured.Where(x => x.CompletedMs < killAtMs).ToArray();
@@ -310,12 +387,52 @@ try
             Math.Round(failuresAfter.Max(x => x.CompletedMs - killAtMs),1),
         observedFailureWindowMs = failuresAfter.Length == 0 ? 0 :
             Math.Round(failuresAfter.Max(x => x.CompletedMs) - failuresAfter.Min(x => x.CompletedMs),1),
+        lastFailureAfterKillUnder2s = failuresAfter.Length == 0 ||
+            failuresAfter.Max(x=>x.CompletedMs - killAtMs) <= 2000,
         p95LatencyMs = Math.Round(Percentile(latencies,0.95),2),
         p99LatencyMs = Math.Round(Percentile(latencies,0.99),2),
         caveat = "Last observed failure offset is NOT a YARP health-detection timestamp; in-flight retries are not assumed."
     };
     checks.Add(new { description="continuous-load-failover", evidence=failoverEvidence });
+    Require(failoverEvidence.lastFailureAfterKillUnder2s,
+        "Windows/Ubuntu last observed gateway-kill failure ends within 2s of fault");
     Console.WriteLine("FAILOVER UNDER LOAD: "+JsonSerializer.Serialize(failoverEvidence));
+    // Non-idempotent requests have a strict ZERO automatic replay budget.
+    // A lost HTTP response may hide an applied operation, therefore count
+    // backend side effects rather than using status alone as an oracle.
+    var txStatuses=new List<int>();
+    var maxApplications=0;
+    for(var i=0;i<24;i++)
+    {
+        var txId="neverretry"+i.ToString("D6");
+        int status;
+        try
+        {
+            using var response=await client.PostAsync(
+                "http://127.0.0.1:19080/api/transaction/"+txId,
+                new StringContent("one-commit"));
+            status=(int)response.StatusCode;
+        }
+        catch(HttpRequestException) {status=0;}
+        txStatuses.Add(status);
+        async Task<int> Count(string host)
+        {
+            using var reply=await client.GetAsync(host+"/lab/transaction-count/"+txId);
+            reply.EnsureSuccessStatusCode();
+            using var doc=JsonDocument.Parse(await reply.Content.ReadAsStringAsync());
+            return doc.RootElement.GetProperty("count").GetInt32();
+        }
+        var applied=await Count("http://127.0.0.1:18081")+await Count("http://127.0.0.1:18082");
+        maxApplications=Math.Max(maxApplications,applied);
+        Require(applied<=1,
+            $"transaction {txId} delivered at most once after failover, applied={applied}");
+        if(status==200) Require(applied==1,
+            $"HTTP 200 transaction {txId} committed exactly once");
+    }
+    checks.Add(new {description="non-idempotent-post-no-replay",
+        evidence=new {attempts=txStatuses.Count,maxApplications,
+            successful=txStatuses.Count(x=>x==200),failed=txStatuses.Count(x=>x!=200),
+            retryBudget=0}});
     var afterFailure=await Sample(400);
     Require(afterFailure.Ok==400,
         "gateway 1 terminated: 400/400 NEW requests continue through remaining gateway");
@@ -333,6 +450,40 @@ try
     await gateway2.WaitForExitAsync();
     await WaitFor("both down gives HTTP 503",()=>Responds("http://127.0.0.1:19080/api/identity",503));
     Require(true,"ingress refuses traffic rather than forwarding to known dead gateways");
+    // Opt-in panic is an explicitly different availability contract: on TOTAL
+    // loss YARP retries known dead candidate destinations once as NEW requests
+    // (not a replay of a previously forwarded non-idempotent operation).
+    // Never enable this for CA/RA signing or enrollment without risk approval.
+    Config(edgeConfig,new[] {("gateway-1","http://127.0.0.1:18080/"),
+        ("gateway-2","http://127.0.0.1:18083/")}, "/lab/ping", explicitPanic:true);
+    // Recreate the disposable lab ingress to characterize the explicitly
+    // opted-in panic policy from startup. Hot-reload of a health policy on
+    // an all-down cluster is a separate requirement; never claim it here.
+    ingress.Kill();
+    await ingress.WaitForExitAsync();
+    ingress=Start("health-aware-ingress-panic",gatewayDll,[],
+        Settings(19080,19443,edgeConfig,""));
+    await WaitFor("panic ingress listener",()=>Responds("http://127.0.0.1:19080/lab/ping"));
+    await WaitFor("explicit panic tries all-down destinations",async () =>
+    {
+        try
+        {
+            using var response=await client.GetAsync("http://127.0.0.1:19080/api/identity");
+            return (int)response.StatusCode is 502 or 504;
+        }
+        catch {return false;}
+    },20);
+    checks.Add(new {description="all-down-explicit-panic",
+        evidence="opt-in YARP HealthyOrPanic tries known-dead gateways and returns 502/504; restart used to apply policy"});
+    Config(edgeConfig,new[] {("gateway-1","http://127.0.0.1:18080/"),
+        ("gateway-2","http://127.0.0.1:18083/")}, "/lab/ping", explicitPanic:false);
+    ingress.Kill();
+    await ingress.WaitForExitAsync();
+    ingress=Start("health-aware-ingress-failclosed",gatewayDll,[],
+        Settings(19080,19443,edgeConfig,""));
+    await WaitFor("failclosed ingress listener",()=>Responds("http://127.0.0.1:19080/lab/ping"));
+    await WaitFor("reverted all-down policy fails closed with HTTP 503",
+        ()=>Responds("http://127.0.0.1:19080/api/identity",503),20);
     success=true;
     Console.WriteLine("ALL HA LAB INTEGRATION CHECKS PASSED");
 }
