@@ -21,12 +21,17 @@ class SourceMappedMetrics(unittest.TestCase):
             with self.subTest(metric=metric):
                 self.assertIn(metric, APP + HIST)
                 self.assertIn(metric, RULES)
-    def test_metrics_are_restricted_to_loopback(self):
+    def test_metrics_are_restricted_to_management_mtls(self):
         self.assertIn('app.MapGet("/gateway/metrics"', APP)
-        self.assertIn("IPAddress.IsLoopback(address)", APP)
+        listener = (BASE / "GatewayListenerIsolation.cs").read_text(encoding="utf-8")
+        self.assertIn("OnMetrics(ctx)", listener)
+        self.assertIn("ClientCertificateMode.RequireCertificate", listener)
     def test_health_endpoint_is_liveness_only(self):
         self.assertIn('app.MapGet("/gateway/health"', APP)
-        self.assertNotIn('app.MapGet("/gateway/health/ready"', APP)
+        self.assertIn('app.MapGet("/gateway/health/ready"', APP)
+        listener = (BASE / "GatewayListenerIsolation.cs").read_text(encoding="utf-8")
+        self.assertIn("AnyDestinationHealthy", listener)
+        self.assertIn("OnData(ctx)", listener)
     def test_certificate_metric_is_from_external_probe(self):
         self.assertIn("probe_ssl_earliest_cert_expiry", RULES)
         self.assertNotIn("probe_ssl_earliest_cert_expiry", APP)
