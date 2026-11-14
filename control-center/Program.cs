@@ -24,11 +24,14 @@ using Yarp.ReverseProxy.LoadBalancing;
 // functional rig uses a private workspace with no persisted identities.
 var ec2Lab = Ec2WorkflowLab.Enabled;
 var privateDir = ec2Lab ? Ec2WorkflowLab.PrivateDirectory()
+    : OperatingSystem.IsLinux() ? LinuxKeyProtection.InitializeStateDirectory()
     : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
         "SpeedSignYarp", "ControlPlane");
-Directory.CreateDirectory(privateDir);
+if (!OperatingSystem.IsLinux() || ec2Lab)
+    Directory.CreateDirectory(privateDir);
 var keyDir = Path.Combine(privateDir, "data-protection-keys");
-Directory.CreateDirectory(keyDir);
+if (!OperatingSystem.IsLinux() || ec2Lab)
+    Directory.CreateDirectory(keyDir);
 var builder = WebApplication.CreateBuilder(args);
 // Production and the GatewayLab use the same nonblocking registration.
 var boundedConsole = GatewayLoggingConfiguration.Install(builder.Logging, Console.Out);
@@ -37,12 +40,32 @@ var dataProtection = builder.Services.AddDataProtection()
     .PersistKeysToFileSystem(new DirectoryInfo(keyDir));
 if (OperatingSystem.IsWindows())
     dataProtection.ProtectKeysWithDpapi(protectToLocalMachine: true);
-else if (!ec2Lab)
-    throw new PlatformNotSupportedException(
-        "Windows DPAPI protection is required outside the disposable CI-only EC2 test mode.");
-else
+else if (OperatingSystem.IsLinux() && !ec2Lab)
+    LinuxKeyProtection.Configure(dataProtection, privateDir);
+else if (ec2Lab)
     Console.Error.WriteLine("WARNING: CI-only EC2 lab uses temporary, unencrypted local Data Protection keys. Never use in production.");
-builder.Configuration.AddJsonFile("appsettings.json", optional: false, reloadOnChange: true);
+else
+    throw new PlatformNotSupportedException("Unsupported OS Data Protection mode");
+// Keep executable/static assets read-only under /opt on hardened Linux.
+// Management may atomically update ONLY a private state-directory config.
+var runtimeConfig = Environment.GetEnvironmentVariable("YARP_RUNTIME_CONFIG_PATH");
+var applicationConfigPath = string.IsNullOrWhiteSpace(runtimeConfig)
+    ? Path.Combine(builder.Environment.ContentRootPath,"appsettings.json")
+    : runtimeConfig;
+if (OperatingSystem.IsLinux() && !ec2Lab)
+{
+    if (string.IsNullOrWhiteSpace(runtimeConfig) || !Path.IsPathFullyQualified(runtimeConfig))
+        throw new InvalidOperationException("Linux requires absolute YARP_RUNTIME_CONFIG_PATH under the private state directory");
+    applicationConfigPath = Path.GetFullPath(applicationConfigPath);
+    var rel = Path.GetRelativePath(privateDir, applicationConfigPath);
+    if (rel.StartsWith("..", StringComparison.Ordinal) || Path.IsPathRooted(rel) ||
+        !rel.Equals(Path.Combine("config","appsettings.json"),StringComparison.Ordinal))
+        throw new InvalidOperationException("Linux YARP runtime config must be state/config/appsettings.json");
+    if (!File.Exists(applicationConfigPath) ||
+        (File.GetAttributes(applicationConfigPath) & FileAttributes.ReparsePoint) != 0)
+        throw new InvalidOperationException("Linux runtime config must exist and must not be a symlink");
+}
+builder.Configuration.AddJsonFile(applicationConfigPath, optional: false, reloadOnChange: true);
 builder.Services.AddReverseProxy()
     .LoadFromConfig(builder.Configuration.GetSection("ReverseProxy"))
     .ConfigureHttpClient(BackendMutualTls.Configure);
@@ -64,7 +87,7 @@ builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationSc
         {
             try
             {
-                var path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "SpeedSignYarp", "ControlPlane", "admin-users.json");
+                var path = Path.Combine(privateDir, "admin-users.json");
                 var users = JsonSerializer.Deserialize<List<AdminUser>>(await File.ReadAllTextAsync(path)) ?? new();
                 var active = users.FirstOrDefault(u => u.Username.Equals(ctx.Principal?.Identity?.Name, StringComparison.OrdinalIgnoreCase));
                 var role = ctx.Principal?.FindFirst(ClaimTypes.Role)?.Value;
@@ -175,7 +198,7 @@ async Task SendOtp(string recipient, string code)
     await SendMailMessage(recipient, "YARP Control Center sign-in code",
         $"Your one-time sign-in code is {code}. It expires in 5 minutes. Do not share this code.");
 }
-var configPath = Path.Combine(root, "appsettings.json");
+var configPath = applicationConfigPath;
 var auditPath = Path.Combine(privateDir, "admin-audit.jsonl");
 var gate = new SemaphoreSlim(1, 1);
 // MANAGEMENT IS LOOPBACK-ONLY IN THIS RELEASE. Never bind management to the public VIP.
@@ -281,6 +304,20 @@ app.MapGet("/gateway/metrics", (HttpContext ctx) =>
     output.AppendLine("# HELP yarp_control_gc_heap_bytes Current managed heap bytes estimated by GC");
     output.AppendLine("# TYPE yarp_control_gc_heap_bytes gauge");
     output.Append("yarp_control_gc_heap_bytes ").Append(GC.GetTotalMemory(false)).Append('\n');
+    output.AppendLine("# HELP yarp_control_gc_collections_total GC collection count by generation since process start");
+    output.AppendLine("# TYPE yarp_control_gc_collections_total counter");
+    for (var gen=0; gen<=2; gen++)
+        output.Append("yarp_control_gc_collections_total{generation=\"").Append(gen)
+            .Append("\"} ").Append(GC.CollectionCount(gen)).Append('\n');
+    output.AppendLine("# HELP yarp_logging_dropped_total Low/high priority nonblocking console messages dropped");
+    output.AppendLine("# TYPE yarp_logging_dropped_total counter");
+    output.Append("yarp_logging_dropped_total ").Append(boundedConsole.DroppedMessages).Append('\n');
+    output.AppendLine("# HELP yarp_logging_dropped_high_priority_total Warning/Error console messages dropped");
+    output.AppendLine("# TYPE yarp_logging_dropped_high_priority_total counter");
+    output.Append("yarp_logging_dropped_high_priority_total ").Append(boundedConsole.DroppedHighPriorityMessages).Append('\n');
+    output.AppendLine("# HELP yarp_logging_write_errors_total Console writer failures");
+    output.AppendLine("# TYPE yarp_logging_write_errors_total counter");
+    output.Append("yarp_logging_write_errors_total ").Append(boundedConsole.WriteErrors).Append('\n');
     output.AppendLine("# HELP yarp_control_destination_inflight_requests YARP in-flight requests by destination");
     output.AppendLine("# TYPE yarp_control_destination_inflight_requests gauge");
     output.AppendLine("# HELP yarp_control_destination_active_health YARP active health 1 healthy, 0 unknown, -1 unhealthy");
