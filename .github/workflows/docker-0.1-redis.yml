@@ -1,0 +1,58 @@
+name: v0.1 Docker Redis TLS Sentinel prototype
+on:
+  pull_request:
+    paths:
+      - "tests/CI/redis/**"
+      - ".github/workflows/docker-0.1-redis.yml"
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: redis-01-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  redis-sentinel:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - name: Generate disposable CA and multi-SAN TLS server certificate
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p tests/CI/redis/certs artifacts/ci-redis
+          echo "REDIS_PASSWORD=$(openssl rand -hex 20)" >> "$GITHUB_ENV"
+          cd tests/CI/redis/certs
+          openssl req -new -x509 -days 2 -nodes -newkey rsa:3072 -sha256 \
+            -subj "/CN=CI Redis Root" -addext "basicConstraints=critical,CA:TRUE" \
+            -keyout ca.key -out ca.crt
+          openssl req -new -nodes -newkey ec -pkeyopt ec_paramgen_curve:P-256 \
+            -subj "/CN=redis-primary" -keyout server.key -out server.csr
+          printf 'subjectAltName=DNS:redis-primary,DNS:redis-replica,DNS:sentinel-a,DNS:sentinel-b,DNS:sentinel-c\nextendedKeyUsage=serverAuth\n' > cert.ext
+          openssl x509 -req -in server.csr -CA ca.crt -CAkey ca.key \
+            -CAcreateserial -days 2 -sha256 -extfile cert.ext -out server.crt
+          chmod 0600 ca.key server.key
+      - name: Validate Compose, TLS Redis primary/replica and 3 Sentinel containers
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker compose -f tests/CI/redis/compose.yml config --quiet
+          docker compose -f tests/CI/redis/compose.yml up -d
+      - name: Validate TLS/auth/ACL, CAS, failover and retained configuration
+        shell: bash
+        run: bash tests/CI/redis/check.sh
+      - name: Collect failure evidence and destroy all disposable secrets and containers
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p artifacts/ci-redis
+          docker compose -f tests/CI/redis/compose.yml ps -a > artifacts/ci-redis/containers.txt 2>&1 || true
+          docker compose -f tests/CI/redis/compose.yml logs --no-color > artifacts/ci-redis/containers.log 2>&1 || true
+          docker compose -f tests/CI/redis/compose.yml down -v --remove-orphans || true
+          rm -rf tests/CI/redis/certs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: redis-01-lab-evidence
+          path: artifacts/ci-redis/
+          retention-days: 14
