@@ -48,7 +48,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference='Stop'
-          $stage=Join-Path $env:RUNNER_TEMP 'GatewayCore-v0.1.0-test.4-win-x64'
+          $stage=Join-Path $env:RUNNER_TEMP 'GatewayCore-v0.1.0-test.5-win-x64'
           New-Item -ItemType Directory -Force -Path (Join-Path $stage 'app') | Out-Null
           dotnet publish control-center/GatewayCoreYarp.csproj -c Release -r win-x64 --self-contained true -p:PublishReadyToRun=false -o (Join-Path $stage 'app')
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -95,11 +95,11 @@ jobs:
       - name: Compress tested release payload and calculate SHA256
         shell: pwsh
         run: |
-          $zip=Join-Path $env:RUNNER_TEMP 'GatewayCore-v0.1.0-test.4-win-x64.zip'
+          $zip=Join-Path $env:RUNNER_TEMP 'GatewayCore-v0.1.0-test.5-win-x64.zip'
           Remove-Item (Join-Path $env:STAGE 'app/appsettings.json') -ErrorAction SilentlyContinue
           Compress-Archive -Path (Join-Path $env:STAGE '*') -DestinationPath $zip -CompressionLevel Optimal
           $hash=(Get-FileHash -Algorithm SHA256 $zip).Hash.ToLowerInvariant()
-          "$hash  GatewayCore-v0.1.0-test.4-win-x64.zip" | Set-Content -Encoding ascii (Join-Path $env:RUNNER_TEMP 'SHA256SUMS.txt')
+          "$hash  GatewayCore-v0.1.0-test.5-win-x64.zip" | Set-Content -Encoding ascii (Join-Path $env:RUNNER_TEMP 'SHA256SUMS.txt')
           echo "RELEASE_ZIP=$zip" >> $env:GITHUB_ENV
       - name: Publish GitHub test pre-release (never production)
         shell: pwsh
@@ -107,7 +107,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $ErrorActionPreference='Stop'
-          $tag='v0.1.0-test.4'
+          $tag='v0.1.0-test.5'
           gh release view $tag --repo $env:GITHUB_REPOSITORY *> $null
           if ($LASTEXITCODE -eq 0) { throw "Tag $tag already published; refuse to silently replace an immutable test release." }
           $notes='**TEST PRE-RELEASE ONLY**. Windows x64 self-contained GatewayCore .NET 10 build with localhost IIS upstream launcher. No Apache. No production approval. Source SHA: '+$env:HEAD_SHA+'. See README.md inside the ZIP. Requires an isolated Windows test machine and an existing IIS test site.'
