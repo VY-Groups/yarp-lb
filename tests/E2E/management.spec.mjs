@@ -130,5 +130,27 @@ test('browser: bootstrap, navigation, onboarding, websites, route edit, users an
     await expect(page.locator('#app-shell')).toBeVisible();
   });
 
+  await test.step('Short mobile viewport still reaches lower navigation entries',async()=>{
+    await page.setViewportSize({width:390,height:667});
+    await page.locator('button.nav[data-view="users"]').click();
+    await expect(page.locator('#content')).toContainText('Administrator accounts');
+    await page.locator('button.nav[data-view="mail"]').click();
+    await expect(page.locator('#page-title')).toContainText('Mail & OTP');
+  });
+
+  await test.step('Sign out, reject invalid password, and restore session',async()=>{
+    await page.locator('#logout').click();
+    await expect(page.locator('#auth-screen')).toBeVisible();
+    await expect(page.locator('#app-shell')).toBeHidden();
+    await page.locator('#auth-username').fill('browseradmin');
+    await page.locator('#auth-password').fill('Not-the-right-password-123!');
+    await page.locator('#auth-submit').click();
+    await expect(page.locator('#auth-message')).toContainText('Authentication failed');
+    await expect(page.locator('#app-shell')).toBeHidden();
+    await page.locator('#auth-password').fill('Browser-secret-long-4096!');
+    await page.locator('#auth-submit').click();
+    await expect(page.locator('#app-shell')).toBeVisible();
+  });
+
   expect(pageErrors,'Unhandled JavaScript exceptions in real Chromium').toEqual([]);
 });
