@@ -44,7 +44,7 @@ rates=allocate(scenario['requests_per_second_per_host'])
 connections=allocate(scenario['connections_per_host'])
 commands=[]
 for profile,rate,conn in zip(mix,rates,connections):
-    cmd=['oha','--no-tui','--output-format','json','--latency-correction','--disable-compression',
+    cmd=['oha','--no-tui','--output-format','json','--latency-correction','--disable-compression','--wait-ongoing-requests-after-deadline',
          '-z',str(scenario['window_seconds'])+'s','-q',str(rate),'-c',str(conn),
          '--worker-threads',str(scenario['threads']),
          '--http-version',scenario['http_version']]

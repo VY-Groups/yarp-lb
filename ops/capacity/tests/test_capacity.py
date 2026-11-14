@@ -127,6 +127,7 @@ class CapacityEvidence(unittest.TestCase):
         self.assertEqual(sum(out["rates"]),1600)
         self.assertEqual(sum(out["connections"]),128)
         self.assertTrue(all("oha"==x[0] for x in out["commands"]))
+        self.assertTrue(all('--wait-ongoing-requests-after-deadline' in x for x in out['commands']))
         self.assertEqual({x[-1] for x in out["commands"]},{m["url"] for m in self.scenario["response_mix"]})
     def test_oha_missing_rate_fails_closed(self):
         self.scenario["connections_per_host"]=128

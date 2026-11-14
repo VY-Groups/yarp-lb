@@ -58,7 +58,7 @@ jobs:
             timeout --signal=TERM --kill-after=10s 60s \
               docker run --rm --network yarp-01-ci_lab "$OHA_IMAGE" \
               --no-tui --output-format json --latency-correction \
-              --disable-compression --http-version 1.1 \
+              --disable-compression --wait-ongoing-requests-after-deadline --http-version 1.1 \
               -z 20s -q 120 -c 24 --worker-threads 4 \
               "http://$target:8080/api/body/1048576" \
               > "artifacts/eod-750/$target.json"
