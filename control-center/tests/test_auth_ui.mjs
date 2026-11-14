@@ -27,6 +27,12 @@ const ctx=vm.createContext({
   }
 });
 vm.runInContext(prefix,ctx);
+// This isolated VM evaluates only the pre-event prefix; login rendering is below
+// the event wiring in app.js. Stub the rendering seam, and separately assert
+// the actual compiled login handler clears CSRF/session state.
+assert.match(js,/function showLogin\(first\)/);
+assert.match(js,/function showLogin\(first\)[\s\S]*?csrf = '';/);
+vm.runInContext("function showLogin(first) { csrf='';currentRole='';document.getElementById('app-shell').hidden=true;document.getElementById('auth-screen').hidden=false; }",ctx);
 const run=(source)=>vm.runInContext(source,ctx);
 run("currentRole='Administrator';csrf='valid-csrf';");
 element('app-shell').hidden=false;
