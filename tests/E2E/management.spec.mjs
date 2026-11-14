@@ -155,6 +155,32 @@ test('browser: bootstrap, navigation, onboarding, websites, route edit, users an
     await expect(page.locator('#mail-config [name="host"]')).toHaveValue('smtp.zoho.in');
   });
 
+  await test.step('Gmail, Microsoft, Outlook and Exchange provider selection remains secure',async()=>{
+    const preset=page.locator('#smtp-preset');
+    await preset.selectOption('gmail');
+    await expect(page.locator('#mail-config [name="host"]')).toHaveValue('smtp.gmail.com');
+    await expect(page.locator('#mail-auth-mode')).toHaveValue('google-oauth');
+    await expect(page.locator('#mail-config [name="oauthClientId"]')).toBeVisible();
+    await expect(page.locator('#mail-config [name="password"]')).toHaveValue('');
+    await expect(page.locator('#mail-config [name="enabled"]')).not.toBeChecked();
+    await preset.selectOption('microsoft365');
+    await expect(page.locator('#mail-config [name="host"]')).toHaveValue('smtp.office365.com');
+    await expect(page.locator('#mail-auth-mode')).toHaveValue('microsoft-oauth');
+    await preset.selectOption('outlook');
+    await expect(page.locator('#mail-config [name="host"]')).toHaveValue('smtp-mail.outlook.com');
+    await preset.selectOption('exchange');
+    await expect(page.locator('#mail-config [name="host"]')).toHaveValue('');
+    await expect(page.locator('#mail-auth-mode')).toHaveValue('password');
+    await expect(page.locator('#mail-config [name="oauthClientId"]')).toBeHidden();
+    await preset.selectOption('yahoo');
+    await expect(page.locator('#mail-config [name="host"]')).toHaveValue('smtp.mail.yahoo.com');
+    await preset.selectOption('icloud');
+    await expect(page.locator('#mail-config [name="host"]')).toHaveValue('smtp.mail.me.com');
+    await preset.selectOption('fastmail');
+    await expect(page.locator('#mail-config [name="host"]')).toHaveValue('smtp.fastmail.com');
+    await expect(page.locator('#mail-config [name="enabled"]')).not.toBeChecked();
+  });
+
   await test.step('Sign out, reject invalid password, and restore session',async()=>{
     await page.locator('#logout').click();
     await expect(page.locator('#auth-screen')).toBeVisible();
