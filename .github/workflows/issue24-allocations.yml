@@ -1,3 +1,4 @@
+# CI evidence-only verification on current main after merging PR #32; preserve original baseline/candidate constraints.
 name: Issue 24 - direct vs proxy allocation comparison
 on:
   pull_request:
