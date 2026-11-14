@@ -1,0 +1,55 @@
+{
+  "name": "EOD_500Mbps_REPORTED_NOT_VERIFIED",
+  "tool": "oha",
+  "_peak_source": "User-reported max 500 Mbps; confirm bits vs bytes and obtain switch/ISP sample plus times",
+  "http_version": "1.1",
+  "baseline_alpn": "http/1.1",
+  "keepalive": true,
+  "baseline_keepalive": true,
+  "tls_ca_file": null,
+  "hosts": [
+    "GENERATOR_A",
+    "GENERATOR_B"
+  ],
+  "gateway_nodes": [
+    "NODE_A"
+  ],
+  "isolated_gateway": "NODE_A",
+  "windows": 60,
+  "window_seconds": 60,
+  "peak_gbps": 0.5,
+  "peak_rps": null,
+  "link_gbps": 10,
+  "peak_concurrent_connections": null,
+  "new_connections_per_second": null,
+  "https_share": null,
+  "headroom": 0.5,
+  "max_p99_ms": null,
+  "allowed_status": [
+    200
+  ],
+  "server_specs": {
+    "cpu_model": null,
+    "cpu_cores": null,
+    "ram_gb": null,
+    "nic_model": null,
+    "nic_speed_gbps": null
+  },
+  "response_mix": [
+    {
+      "name": "http_unmeasured",
+      "url": "http://example.invalid/bench/1024",
+      "response_bytes": 1024,
+      "weight": null
+    },
+    {
+      "name": "https_unmeasured",
+      "url": "https://example.invalid/bench/4096",
+      "response_bytes": 4096,
+      "weight": null
+    }
+  ],
+  "requests_per_second_per_host": null,
+  "connections_per_host": null,
+  "threads": null
+}

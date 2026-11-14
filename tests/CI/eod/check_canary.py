@@ -18,7 +18,10 @@ def read_one(path):
     transport=sum(int(value) for value in errors.values())
     assert duration>0 and math.isfinite(duration) and body>0 and math.isfinite(body)
     assert good>0 and bad>=0 and transport>=0 and math.isfinite(rps)
-    assert int(summary['successRate']==1) == 1, 'successRate is not 100%'
+    assert summary['successRate'] == 1, 'successRate is not 100%'
+    if bad == 0 and transport == 0:
+        assert body == good * 1048576, 'unexpected body size (not the exact 1 MiB fixture)'
+    assert abs(good/duration-rps) <= max(1,rps*.02), 'raw request rate inconsistent with count/duration'
     return {'duration_seconds':duration,'body_bytes':body,
             'body_gbps':body*8/(duration*1e9),'rps':rps,'http_2xx':good,
             'http_non200':bad,'transport_failures':transport,

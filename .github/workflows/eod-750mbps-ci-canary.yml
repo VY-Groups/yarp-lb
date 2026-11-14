@@ -17,6 +17,8 @@ jobs:
     timeout-minutes: 22
     steps:
       - uses: actions/checkout@v4
+      - name: Fail-closed canary parser unit tests
+        run: python3 -m unittest discover -s tests/CI/eod -p 'test_*.py' -v
       - name: Check and start isolated real .NET 10 gateway + backend
         shell: bash
         run: |
