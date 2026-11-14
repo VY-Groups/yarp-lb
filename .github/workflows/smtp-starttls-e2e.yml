@@ -1,0 +1,42 @@
+name: Real SMTP STARTTLS and OTP integration (isolated CI)
+on:
+  pull_request:
+    paths:
+      - "control-center/**"
+      - "tests/E2E/real_smtp_otp.py"
+      - "tests/E2E/real_control_center.py"
+      - ".github/workflows/smtp-starttls-e2e.yml"
+  push:
+    branches: [main]
+    paths:
+      - "control-center/**"
+      - "tests/E2E/real_smtp_otp.py"
+      - "tests/E2E/real_control_center.py"
+      - ".github/workflows/smtp-starttls-e2e.yml"
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: real-smtp-otp-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  starttls-mail-otp:
+    name: Real authenticated STARTTLS relay + certificate trust + OTP verification
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      CI: "true"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build shipping Control Center
+        run: dotnet build control-center/GatewayCoreYarp.csproj --configuration Release
+      - name: Install pinned isolated SMTP test fixture
+        run: python -m pip install aiosmtpd==1.4.6
+      - name: Exercise real authenticated TLS SMTP and complete OTP login
+        run: python tests/E2E/real_smtp_otp.py
