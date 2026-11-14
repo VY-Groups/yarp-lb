@@ -82,8 +82,7 @@ async function api(url, method = 'GET', body) { const opts = { method, credentia
     }
     throw Error('Authentication failed. Check your credentials or verification code.');
 } if (r.status === 403)
-    throw Error('Access denied. This action requires an authorized role or valid CSRF token.');
-if (!r.ok) {
+    throw Error('Access denied. This action requires an authorized role or valid CSRF token.'); if (!r.ok) {
     let e = 'HTTP ' + r.status;
     try {
         e = (await r.json()).error ?? e;
