@@ -31,13 +31,30 @@ A cancelled, skipped or failed test is not positive evidence.
 
 ## Mail provider guidance
 
-Zoho's official SMTP guide says to confirm exact SMTP hostname in the
-account's Server Configuration Details. Paid domain-based organizations may
-use smtppro.zoho.com and others smtp.zoho.com, with port 587 and STARTTLS.
-With MFA use an app-specific password. The webmail login URL is not SMTP.
-Do not store secrets in source, GitHub Actions logs, images, tickets or chat.
+For an India data-center account the webmail login is mail.zoho.in
+(HTTPS); it is NOT the SMTP server. Zoho's India data-center notice lists
+smtppro.zoho.in and smtp.zoho.in as SMTP hostnames. For a paid
+custom-domain organization try smtppro.zoho.in, port 587, STARTTLS; for
+personal/free accounts try smtp.zoho.in, port 587, STARTTLS.
+Always confirm the exact hostname in Zoho Mail's Server Configuration Details,
+because account type and data center determine the correct endpoint.
+With MFA use a NEW app-specific password and rotate any exposed credentials.
+Never put credentials in GitHub, issues, logs, screenshots or test fixtures.
 
-Official source: https://www.zoho.com/mail/help/zoho-smtp.html
+The Mail & OTP page now offers Zoho India presets that only fill host,
+port and STARTTLS, while leaving usernames and passwords to the operator.
+To test the real network/TLS handshake WITHOUT AUTH or sending a message,
+run the optional preflight on an approved testing server:
+
+    python tests/E2E/zoho_india_smtp_preflight.py --host smtppro.zoho.in
+
+A successful preflight is NOT evidence of provider credentials, actual email
+delivery, inbox receipt or OTP verification. Those require a separately
+provisioned least-privilege testing mailbox and operator approval. Never
+hardcode this account's credentials in the repository or CI.
+
+Official SMTP source: https://www.zoho.com/mail/help/zoho-smtp.html
+India data center notice: https://help.zoho.com/portal/en/community/topic/important-notice-to-zoho-mail-indian-datacentre-in-dc-deployment-users
 
 ## GO/NO-GO rule
 
