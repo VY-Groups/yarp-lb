@@ -79,6 +79,7 @@ jobs:
           trap 'if [[ -n "$load_pid" ]]; then kill "$load_pid" 2>/dev/null || true; fi; kill "$rig_pid" 2>/dev/null || true' EXIT
           ready=0
           for attempt in $(seq 1 120); do
+            if (( attempt % 30 == 0 )); then echo "Waiting for soak gateway: attempt $attempt/120"; fi
             if curl --connect-timeout 1 --max-time 3 -fsS http://127.0.0.1:18080/lab/stats >artifacts/soak/before.json; then ready=1; break; fi
             sleep 0.3
           done

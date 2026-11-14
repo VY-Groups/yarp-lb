@@ -58,6 +58,7 @@ jobs:
           lab_pid=$!
           ready=0
           for i in $(seq 1 150); do
+            if (( i % 30 == 0 )); then echo "Waiting for allocation lab: attempt $i/150"; fi
             if curl --noproxy '*' --max-time 2 -fsS \
               http://127.0.0.1:18080/lab/stats > "$out/ready.json" 2>/dev/null; then
               ready=1; break

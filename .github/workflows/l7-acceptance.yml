@@ -80,6 +80,7 @@ jobs:
           trap 'kill "$runner_pid" 2>/dev/null || true; wait "$runner_pid" 2>/dev/null || true' EXIT
           ready=0
           for i in $(seq 1 150); do
+            if (( i % 30 == 0 )); then echo "Waiting for k6 lab: attempt $i/150"; fi
             if curl --silent --fail http://127.0.0.1:18080/lab/stats > artifacts/k6/before.json &&
                curl --silent --fail --insecure https://127.0.0.1:18443/lab/ping >/dev/null; then ready=1; break; fi
             sleep 0.3
@@ -176,6 +177,7 @@ jobs:
           trap 'if [[ -n "$collector_pid" ]]; then kill -INT "$collector_pid" 2>/dev/null || true; fi; kill "$rig_pid" 2>/dev/null || true' EXIT
           ready=0
           for i in $(seq 1 150); do
+            if (( i % 30 == 0 )); then echo "Waiting for profiler lab: attempt $i/150"; fi
             if curl -fsS http://127.0.0.1:18080/lab/stats > artifacts/profile/before.json; then ready=1; break; fi
             sleep 0.3
           done
@@ -196,6 +198,7 @@ jobs:
             /workspace/tests/L7/performance/load.js
           kill -INT "$collector_pid" 2>/dev/null || true
           for i in $(seq 1 25); do
+            if (( i % 5 == 0 )); then echo "Waiting for counter collector shutdown: attempt $i/25"; fi
             if ! kill -0 "$collector_pid" 2>/dev/null; then break; fi
             sleep 0.2
           done

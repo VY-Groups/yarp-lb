@@ -59,6 +59,7 @@ jobs:
           set -euo pipefail
           ready=0
           for i in $(seq 1 60); do
+            if (( i % 15 == 0 )); then echo "Waiting for Grafana readiness: attempt $i/60"; fi
             if curl --connect-timeout 1 --max-time 3 -fsS http://127.0.0.1:13000/api/health > artifacts/ci-01/grafana-health.json; then ready=1; break; fi
             sleep 1
           done
@@ -82,6 +83,7 @@ jobs:
           set -euo pipefail
           health=0
           for attempt in $(seq 1 60); do
+            if (( attempt % 15 == 0 )); then echo "Waiting for gateway rejoin: attempt $attempt/60"; fi
             if docker compose -f tests/CI/stack/compose.yml exec -T gateway-a \
               curl --noproxy '*' --connect-timeout 1 --max-time 2 -fsS http://127.0.0.1:8080/gateway/health >/dev/null; then
               health=1
