@@ -639,12 +639,12 @@ app.MapPost("/admin/api/mail", async (HttpContext ctx, MailSettingsInput input) 
     if (input.Host is null || input.From is null || input.Username is null || input.Password is null ||
         input.Port is < 1 or > 65535 || input.Port == 465 || input.Host.Length > 255 || input.From.Length > 254 || input.Username.Length > 254 ||
         (input.Enabled && (string.IsNullOrWhiteSpace(input.Host) || !ValidEmail(input.From) || !input.StartTls)))
-        return Results.BadRequest(new { error = "Invalid SMTP settings" });
+        return Results.BadRequest(new { code = "SMTP_INVALID_SETTINGS", error = "Check SMTP host, port (465 unsupported), sender address, and STARTTLS before enabling OTP." });
     var existing = ReadMail();
     var encrypted = string.IsNullOrEmpty(input.Password) ? existing.EncryptedPassword : protector.Protect(input.Password);
     var mail = new MailSettings(input.Enabled, input.Host, input.Port, input.From, input.Username, encrypted, input.StartTls);
     if (input.Enabled && !MailDeliveryVerified(mail))
-        return Results.BadRequest(new { error = "Send a successful test email using the saved settings before enabling OTP" });
+        return Results.Json(new { code = "SMTP_TEST_REQUIRED", error = "Save SMTP settings with OTP disabled, send a successful test to the administrator email, then enable OTP." }, statusCode: 409);
     File.WriteAllText(mailPath + ".tmp", JsonSerializer.Serialize(mail)); File.Move(mailPath + ".tmp", mailPath, true);
     await Audit(Actor(ctx), "MAIL_SETTINGS_UPDATED", new { input.Enabled, input.Host, input.Port, input.StartTls });
     return Results.Ok(new { saved = true, otpRequiredOnNextLogin = mail.Enabled });
@@ -653,10 +653,12 @@ app.MapPost("/admin/api/mail", async (HttpContext ctx, MailSettingsInput input) 
 app.MapPost("/admin/api/mail/test", async (HttpContext ctx) =>
 {
     var admin = ReadUsers().FirstOrDefault(x => x.Username.Equals(Actor(ctx), StringComparison.OrdinalIgnoreCase));
-    if (admin is null || !ValidEmail(admin.Email)) return Results.BadRequest(new { error = "Set a valid administrator email first" });
+    if (admin is null || !ValidEmail(admin.Email)) return Results.BadRequest(new { code = "SMTP_ADMIN_EMAIL_REQUIRED", error = "Set a valid administrator email under Administrators and roles before sending a test." });
     try
     {
         var cfg = ReadMail();
+        if (string.IsNullOrWhiteSpace(cfg.Host) || !ValidEmail(cfg.From) || !cfg.StartTls)
+            return Results.Json(new { code = "SMTP_NOT_CONFIGURED", error = "Save a valid SMTP relay, sender, and STARTTLS configuration with OTP disabled before testing." }, statusCode: 409);
         await SendMailMessage(admin.Email!, "YARP Control Center SMTP test", "This is a test message from your local YARP administration console.");
         File.WriteAllText(mailProofPath + ".tmp", MailFingerprint(cfg));
         File.Move(mailProofPath + ".tmp", mailProofPath, true);
@@ -666,7 +668,7 @@ app.MapPost("/admin/api/mail/test", async (HttpContext ctx) =>
     catch
     {
         await Audit(Actor(ctx), "SMTP_DELIVERY_TEST_FAILED");
-        return Results.Json(new { error = "SMTP test failed. Check STARTTLS, server certificate, credentials and relay permissions" }, statusCode: 503);
+        return Results.Json(new { code = "SMTP_RELAY_UNAVAILABLE", error = "SMTP relay test failed. Check reachability, STARTTLS certificate trust, credentials and relay permissions. No OTP settings were enabled." }, statusCode: 503);
     }
 }).RequireRateLimiting("mailtest").RequireAuthorization(p => p.RequireRole("Administrator"));
 
