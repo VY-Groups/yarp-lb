@@ -40,11 +40,11 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m unittest discover -s tests/CI/listeners -p 'test_metric_contract.py' -v
-          python3 tests/CI/listeners/check_metric_contract.py \\
-            --metrics artifacts/listeners/metrics.txt \\
-            --contract control-center/ops/prometheus/METRIC_CONTRACT.md \\
-            --alerts control-center/ops/prometheus/gateway-alerts.yml \\
-            --dashboard tests/CI/stack/grafana/dashboard.json \\
+          python3 tests/CI/listeners/check_metric_contract.py \
+            --metrics artifacts/listeners/metrics.txt \
+            --contract control-center/ops/prometheus/METRIC_CONTRACT.md \
+            --alerts control-center/ops/prometheus/gateway-alerts.yml \
+            --dashboard tests/CI/stack/grafana/dashboard.json \
             --out artifacts/listeners/metric-contract-result.json
       - uses: actions/upload-artifact@v4
         if: always()

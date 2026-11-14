@@ -25,16 +25,20 @@ if missing:errors.append('MISSING_FROM_REAL_EXPORTER '+str(sorted(missing)))
 if extra:errors.append('UNDECLARED_REAL_EXPORTER '+str(sorted(extra)))
 
 sampled=set(re.findall(r'^(yarp_[A-Za-z0-9_]+)(?:\{|\s)',args.metrics.read_text(),re.M))
-if expected-sampled:errors.append('MISSING_REAL_SAMPLE '+str(sorted(expected-sampled)))
+unsampled={name for name in expected if name not in sampled and not (name+'_bucket' in sampled or name+'_count' in sampled)}
+if unsampled:errors.append('MISSING_REAL_SAMPLE '+str(sorted(unsampled)))
 alert_refs=set(re.findall(r'\b(yarp_[A-Za-z0-9_]+|probe_[A-Za-z0-9_]+)\b',args.alerts.read_text()))
 dashboard=json.loads(args.dashboard.read_text())
 expressions=' '.join(t.get('expr','') for panel in dashboard['panels'] for t in panel.get('targets',[]))
 dashboard_refs=set(re.findall(r'\b(yarp_[A-Za-z0-9_]+|probe_[A-Za-z0-9_]+)\b',expressions))
 allowed_external={'probe_ssl_earliest_cert_expiry','probe_success'}
 for source,refs in [('ALERT',alert_refs),('DASHBOARD',dashboard_refs)]:
-    unknown=refs-actual-allowed_external
+    # Histogram suffixes are samples of the # TYPE family; do not invent separate TYPE entries.
+    unknown={name for name in refs if name not in actual and name not in allowed_external and
+             not (name.endswith('_bucket') and name[:-7] in actual)}
     if unknown:errors.append('UNKNOWN_'+source+'_METRIC '+str(sorted(unknown)))
-    missing_shipping={x for x in refs if x.startswith('yarp_') and x not in sampled}
+    missing_shipping={x for x in refs if x.startswith('yarp_') and x not in sampled and
+                      not (x.endswith('_bucket') and x in sampled)}
     if missing_shipping:errors.append('UNEMITTED_'+source+'_METRIC '+str(sorted(missing_shipping)))
 report={'result':'PASS' if not errors else 'FAIL','real_series_count':len(actual),
   'contract_series_count':len(expected),'alert_references':sorted(alert_refs),

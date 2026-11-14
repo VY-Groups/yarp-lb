@@ -4,6 +4,25 @@ Source: shipping `control-center/Program.cs`, `GatewayRequestHistogram.cs`.
 Machine-checked in GitHub Actions against **actual HTTP response** from the
 real Control Center loopback-internal socket, not copied documentation.
 
+### Exact # TYPE families from running Control Center
+
+```metrics
+yarp_control_destination_active_health
+yarp_control_destination_inflight_requests
+yarp_control_destination_requests_total
+yarp_control_gc_collections_total
+yarp_control_gc_heap_bytes
+yarp_control_http_duration_seconds
+yarp_control_http_duration_seconds_sum
+yarp_control_http_inflight_requests
+yarp_control_http_requests_total
+yarp_control_http_responses_total
+yarp_control_process_working_set_bytes
+yarp_logging_dropped_high_priority_total
+yarp_logging_dropped_total
+yarp_logging_write_errors_total
+```
+
 ### Required gateway-series (exact samples, not invented aliases)
 - `yarp_control_http_requests_total`
 - `yarp_control_http_responses_total`
