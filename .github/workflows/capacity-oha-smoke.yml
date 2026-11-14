@@ -31,11 +31,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          docker pull ghcr.io/hatoo/oha:latest
-          version=$(docker run --rm ghcr.io/hatoo/oha:latest --version)
+          docker pull ghcr.io/hatoo/oha@sha256:3ec3dbf549ea197793482d47a6324797411406bbf438c2fe8b91f244ec641a2f
+          version=$(docker run --rm ghcr.io/hatoo/oha@sha256:3ec3dbf549ea197793482d47a6324797411406bbf438c2fe8b91f244ec641a2f --version)
           echo "Generator executable: $version"
           test "$version" = 'oha 1.16.0'
-          OHA_IMAGE=$(docker image inspect ghcr.io/hatoo/oha:latest --format '{{index .RepoDigests 0}}')
+          OHA_IMAGE=$(docker image inspect ghcr.io/hatoo/oha@sha256:3ec3dbf549ea197793482d47a6324797411406bbf438c2fe8b91f244ec641a2f --format '{{index .RepoDigests 0}}')
           test -n "$OHA_IMAGE"
           echo "version=$version" > artifacts/oha-smoke/image.txt
           echo "image=$OHA_IMAGE" >> artifacts/oha-smoke/image.txt
