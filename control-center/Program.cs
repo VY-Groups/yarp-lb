@@ -46,7 +46,26 @@ else if (ec2Lab)
     Console.Error.WriteLine("WARNING: CI-only EC2 lab uses temporary, unencrypted local Data Protection keys. Never use in production.");
 else
     throw new PlatformNotSupportedException("Unsupported OS Data Protection mode");
-builder.Configuration.AddJsonFile("appsettings.json", optional: false, reloadOnChange: true);
+// Keep executable/static assets read-only under /opt on hardened Linux.
+// Management may atomically update ONLY a private state-directory config.
+var runtimeConfig = Environment.GetEnvironmentVariable("YARP_RUNTIME_CONFIG_PATH");
+var applicationConfigPath = string.IsNullOrWhiteSpace(runtimeConfig)
+    ? Path.Combine(builder.Environment.ContentRootPath,"appsettings.json")
+    : runtimeConfig;
+if (OperatingSystem.IsLinux() && !ec2Lab)
+{
+    if (string.IsNullOrWhiteSpace(runtimeConfig) || !Path.IsPathFullyQualified(runtimeConfig))
+        throw new InvalidOperationException("Linux requires absolute YARP_RUNTIME_CONFIG_PATH under the private state directory");
+    applicationConfigPath = Path.GetFullPath(applicationConfigPath);
+    var rel = Path.GetRelativePath(privateDir, applicationConfigPath);
+    if (rel.StartsWith("..", StringComparison.Ordinal) || Path.IsPathRooted(rel) ||
+        !rel.Equals(Path.Combine("config","appsettings.json"),StringComparison.Ordinal))
+        throw new InvalidOperationException("Linux YARP runtime config must be state/config/appsettings.json");
+    if (!File.Exists(applicationConfigPath) ||
+        (File.GetAttributes(applicationConfigPath) & FileAttributes.ReparsePoint) != 0)
+        throw new InvalidOperationException("Linux runtime config must exist and must not be a symlink");
+}
+builder.Configuration.AddJsonFile(applicationConfigPath, optional: false, reloadOnChange: true);
 builder.Services.AddReverseProxy()
     .LoadFromConfig(builder.Configuration.GetSection("ReverseProxy"))
     .ConfigureHttpClient(BackendMutualTls.Configure);
@@ -179,7 +198,7 @@ async Task SendOtp(string recipient, string code)
     await SendMailMessage(recipient, "YARP Control Center sign-in code",
         $"Your one-time sign-in code is {code}. It expires in 5 minutes. Do not share this code.");
 }
-var configPath = Path.Combine(root, "appsettings.json");
+var configPath = applicationConfigPath;
 var auditPath = Path.Combine(privateDir, "admin-audit.jsonl");
 var gate = new SemaphoreSlim(1, 1);
 // MANAGEMENT IS LOOPBACK-ONLY IN THIS RELEASE. Never bind management to the public VIP.
