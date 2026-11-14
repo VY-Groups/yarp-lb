@@ -36,6 +36,12 @@ const ctx=vm.createContext({
   document:{getElementById:el,querySelectorAll:()=>[]}
 });
 vm.runInContext(prefix,ctx);
+// The password editor is declared below the browser event wiring. Evaluate
+// that exact production function in this isolated DOM context, not a stub.
+const passwordStart=js.indexOf('function resetPassword(');
+const passwordEnd=js.indexOf('async function mailPage()',passwordStart);
+assert.ok(passwordStart>0&&passwordEnd>passwordStart,'password editor must be present');
+vm.runInContext(js.slice(passwordStart,passwordEnd),ctx);
 const run=(src)=>vm.runInContext(src,ctx);
 // 1. Setup Center: accessible entry points and observable stage status.
 run("currentRole='Administrator';csrf='test-csrf';");
