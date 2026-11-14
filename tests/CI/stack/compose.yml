@@ -1,0 +1,72 @@
+name: yarp-01-ci
+services:
+  backend-a:
+    image: python:3.12-alpine
+    command: ["python", "-u", "/lab/backend.py", "A"]
+    volumes:
+      - ./backend.py:/lab/backend.py:ro
+    networks: [lab]
+  backend-b:
+    image: python:3.12-alpine
+    command: ["python", "-u", "/lab/backend.py", "B"]
+    volumes:
+      - ./backend.py:/lab/backend.py:ro
+    networks: [lab]
+  gateway-a:
+    image: yarp-ci-controlcenter:0.1
+    build:
+      context: ../../..
+      dockerfile: tests/CI/stack/Dockerfile.gateway
+    volumes:
+      - state_a:/state
+    depends_on: [backend-a, backend-b]
+    networks: [lab]
+  gateway-b:
+    image: yarp-ci-controlcenter:0.1
+    build:
+      context: ../../..
+      dockerfile: tests/CI/stack/Dockerfile.gateway
+    volumes:
+      - state_b:/state
+    depends_on: [backend-a, backend-b]
+    networks: [lab]
+  ingress-a:
+    image: nginx:1.27-alpine
+    ports:
+      - "127.0.0.1:18080:8080"
+      - "127.0.0.1:18443:8443"
+    volumes:
+      - ./ingress.conf:/etc/nginx/nginx.conf:ro
+      - ./certs:/etc/labcert:ro
+    depends_on: [gateway-a, gateway-b]
+    networks: [lab]
+  ingress-b:
+    image: nginx:1.27-alpine
+    ports:
+      - "127.0.0.1:18081:8080"
+      - "127.0.0.1:18444:8443"
+    volumes:
+      - ./ingress.conf:/etc/nginx/nginx.conf:ro
+      - ./certs:/etc/labcert:ro
+    depends_on: [gateway-a, gateway-b]
+    networks: [lab]
+  prom-a:
+    image: prom/prometheus:v3.6.0
+    network_mode: "service:gateway-a"
+    command: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.path=/prometheus", "--web.listen-address=:9090"]
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    depends_on: [gateway-a]
+  prom-b:
+    image: prom/prometheus:v3.6.0
+    network_mode: "service:gateway-b"
+    command: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.path=/prometheus", "--web.listen-address=:9090"]
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    depends_on: [gateway-b]
+volumes:
+  state_a: {}
+  state_b: {}
+networks:
+  lab:
+    internal: true
