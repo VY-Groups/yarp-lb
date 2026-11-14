@@ -24,11 +24,14 @@ using Yarp.ReverseProxy.LoadBalancing;
 // functional rig uses a private workspace with no persisted identities.
 var ec2Lab = Ec2WorkflowLab.Enabled;
 var privateDir = ec2Lab ? Ec2WorkflowLab.PrivateDirectory()
+    : OperatingSystem.IsLinux() ? LinuxKeyProtection.InitializeStateDirectory()
     : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
         "SpeedSignYarp", "ControlPlane");
-Directory.CreateDirectory(privateDir);
+if (!OperatingSystem.IsLinux() || ec2Lab)
+    Directory.CreateDirectory(privateDir);
 var keyDir = Path.Combine(privateDir, "data-protection-keys");
-Directory.CreateDirectory(keyDir);
+if (!OperatingSystem.IsLinux() || ec2Lab)
+    Directory.CreateDirectory(keyDir);
 var builder = WebApplication.CreateBuilder(args);
 // Production and the GatewayLab use the same nonblocking registration.
 var boundedConsole = GatewayLoggingConfiguration.Install(builder.Logging, Console.Out);
@@ -37,11 +40,12 @@ var dataProtection = builder.Services.AddDataProtection()
     .PersistKeysToFileSystem(new DirectoryInfo(keyDir));
 if (OperatingSystem.IsWindows())
     dataProtection.ProtectKeysWithDpapi(protectToLocalMachine: true);
-else if (!ec2Lab)
-    throw new PlatformNotSupportedException(
-        "Windows DPAPI protection is required outside the disposable CI-only EC2 test mode.");
-else
+else if (OperatingSystem.IsLinux() && !ec2Lab)
+    LinuxKeyProtection.Configure(dataProtection, privateDir);
+else if (ec2Lab)
     Console.Error.WriteLine("WARNING: CI-only EC2 lab uses temporary, unencrypted local Data Protection keys. Never use in production.");
+else
+    throw new PlatformNotSupportedException("Unsupported OS Data Protection mode");
 builder.Configuration.AddJsonFile("appsettings.json", optional: false, reloadOnChange: true);
 builder.Services.AddReverseProxy()
     .LoadFromConfig(builder.Configuration.GetSection("ReverseProxy"))
