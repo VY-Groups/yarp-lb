@@ -5,6 +5,15 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 
+// HA test HARNESS only. Scheduling the 15-way async health samples while
+// continuously draining stdout can starve default minimum ThreadPool workers.
+// No application gateway ThreadPool values are changed, and this does not
+// modify the existing 8s client timeout or any 1.5s/2s failover acceptance.
+ThreadPool.GetMinThreads(out var originalWorkers, out var originalIo);
+var requestedWorkers = Math.Max(originalWorkers, Math.Max(64, Environment.ProcessorCount * 4));
+if (!ThreadPool.SetMinThreads(requestedWorkers, originalIo))
+    throw new InvalidOperationException("HA harness cannot apply bounded worker minimum");
+Console.WriteLine($"HA HARNESS THREADPOOL min_workers={requestedWorkers} original={originalWorkers} io={originalIo}");
 var repo = args.Length == 1 ? Path.GetFullPath(args[0]) : Directory.GetCurrentDirectory();
 var backendDll = Path.Combine(repo, "tests", "L7", "BackendLab", "bin", "Release", "net10.0", "BackendLab.dll");
 var gatewayDll = Path.Combine(repo, "tests", "L7", "GatewayLab", "bin", "Release", "net10.0", "GatewayLab.dll");
@@ -29,7 +38,7 @@ void Require(bool ok, string description)
     Console.WriteLine("PASS: " + description);
     checks.Add(new { description, utc = DateTimeOffset.UtcNow });
 }
-void Config(string path, IEnumerable<(string Id, string Address)> destinations,
+async Task ConfigAsync(string path, IEnumerable<(string Id, string Address)> destinations,
     string probe, bool explicitPanic = false)
 {
     var dict = destinations.ToDictionary(d => d.Id, d => new
@@ -72,7 +81,7 @@ void Config(string path, IEnumerable<(string Id, string Address)> destinations,
             }
         }
     };
-    File.WriteAllText(path, JsonSerializer.Serialize(config), Encoding.UTF8);
+    await File.WriteAllTextAsync(path, JsonSerializer.Serialize(config), Encoding.UTF8);
 }
 // Independently drain every child stdout/stderr stream. Unlike ReadToEndAsync,
 // this does NOT accumulate megabytes of logs in the test harness heap, which
@@ -175,9 +184,9 @@ try
     var g2config=Path.Combine(temp,"gateway-2.json");
     var edgeConfig=Path.Combine(temp,"ingress.json");
     var apps = new[] { ("A", "http://127.0.0.1:18081/"), ("B", "http://127.0.0.1:18082/") };
-    Config(g1config,apps,"/health/ready");
-    Config(g2config,apps,"/health/ready");
-    Config(edgeConfig,new[] { ("gateway-1","http://127.0.0.1:18080/"),
+    await ConfigAsync(g1config,apps,"/health/ready");
+    await ConfigAsync(g2config,apps,"/health/ready");
+    await ConfigAsync(edgeConfig,new[] { ("gateway-1","http://127.0.0.1:18080/"),
          ("gateway-2","http://127.0.0.1:18083/") }, "/lab/ping");
     var backend1=Start("backend-a",backendDll,["18081","A"]);
     var backend2=Start("backend-b",backendDll,["18082","B"]);
@@ -489,7 +498,7 @@ try
     // loss YARP retries known dead candidate destinations once as NEW requests
     // (not a replay of a previously forwarded non-idempotent operation).
     // Never enable this for CA/RA signing or enrollment without risk approval.
-    Config(edgeConfig,new[] {("gateway-1","http://127.0.0.1:18080/"),
+    await ConfigAsync(edgeConfig,new[] {("gateway-1","http://127.0.0.1:18080/"),
         ("gateway-2","http://127.0.0.1:18083/")}, "/lab/ping", explicitPanic:true);
     // Recreate the disposable lab ingress to characterize the explicitly
     // opted-in panic policy from startup. Hot-reload of a health policy on
@@ -510,7 +519,7 @@ try
     },20);
     checks.Add(new {description="all-down-explicit-panic",
         evidence="opt-in YARP HealthyOrPanic tries known-dead gateways and returns 502/504; restart used to apply policy"});
-    Config(edgeConfig,new[] {("gateway-1","http://127.0.0.1:18080/"),
+    await ConfigAsync(edgeConfig,new[] {("gateway-1","http://127.0.0.1:18080/"),
         ("gateway-2","http://127.0.0.1:18083/")}, "/lab/ping", explicitPanic:false);
     ingress.Kill();
     await ingress.WaitForExitAsync();
@@ -531,8 +540,14 @@ finally
 {
     foreach(var proc in processes.AsEnumerable().Reverse())
     {
-        try { if(!proc.HasExited)proc.Kill(entireProcessTree:true);proc.WaitForExit(5000); }
-        catch {}
+        try
+        {
+            if (!proc.HasExited) proc.Kill(entireProcessTree:true);
+            using var exitDeadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            await proc.WaitForExitAsync(exitDeadline.Token);
+        }
+        catch (OperationCanceledException) { }
+        catch (InvalidOperationException) { }
     }
     try { await Task.WhenAll(outputReaders); } catch {}
     // Write complete request evidence EVEN if the test fails before process kill.
@@ -545,9 +560,9 @@ finally
             await sampleFile.WriteLineAsync(string.Join(",",
                 x.Phase,x.StartUtcMs,x.EndUtcMs,x.Status,x.Error));
     }
-    File.WriteAllText(Path.Combine(artifacts,"ha-results.json"),
+    await File.WriteAllTextAsync(Path.Combine(artifacts,"ha-results.json"),
         JsonSerializer.Serialize(new { passed=success,checks,finishedUtc=DateTimeOffset.UtcNow },
-            new JsonSerializerOptions {WriteIndented=true}));
+            new JsonSerializerOptions {WriteIndented=true }));
     try { Directory.Delete(temp,true); } catch {}
 }
 return success?0:1;
