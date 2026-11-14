@@ -117,6 +117,12 @@ test('browser: bootstrap, navigation, onboarding, websites, route edit, users an
     for(const view of ['overview','clusters','backends','health','metrics',
       'inventory','approvals','backups','mail','directory','fleet','capabilities','featurematrix']){
       const nav=page.locator('button.nav[data-view="'+view+'"]');
+      if(await nav.isHidden()){
+        // A standalone topology intentionally hides Fleet; that is an access
+        // guard, NOT missing or broken navigation.
+        expect(view,'only standalone Fleet may be hidden').toBe('fleet');
+        continue;
+      }
       await nav.click();
       await expect(page.locator('#page-title')).not.toBeEmpty();
       await expect(page.locator('#content')).not.toBeEmpty();
