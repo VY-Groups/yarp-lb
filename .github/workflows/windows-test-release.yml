@@ -4,7 +4,7 @@ on:
     paths:
       - "ops/windows-test/**"
       - ".github/workflows/windows-test-release.yml"
- workflow_dispatch:
+  workflow_dispatch:
 permissions:
   contents: write
 concurrency:
