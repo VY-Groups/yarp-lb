@@ -1,6 +1,8 @@
 using System.Net;
 using System.Collections.Concurrent;
 
+// One independent 100ms clock per backend, opt-in for the HA harness only.
+using var haHeartbeat = HaProcessHeartbeat.StartFromEnvironment();
 if (args.Length != 2 || !int.TryParse(args[0], out var port) ||
     port is < 1025 or > 65535 || args[1] is not ("A" or "B"))
     throw new ArgumentException("BackendLab requires port and node A|B");
