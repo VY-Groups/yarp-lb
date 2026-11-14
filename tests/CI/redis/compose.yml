@@ -12,6 +12,7 @@ services:
         exec redis-server --port 0 --tls-port 6379 --tls-cert-file /certs/server.crt --tls-key-file /certs/server.key --tls-ca-cert-file /certs/ca.crt --tls-auth-clients no --requirepass "$$REDIS_PASSWORD" --appendonly yes
     volumes:
       - ./certs:/certs:ro
+      - ./cas_revision.lua:/ci/cas_revision.lua:ro
     networks: [redis-ci]
   redis-replica:
     image: redis:7.4-alpine

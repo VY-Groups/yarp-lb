@@ -42,8 +42,12 @@ sealed class DirectoryAuthService
 
     public DirectoryAuthService(IDataProtectionProvider provider)
     {
-        var directory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
-            "SpeedSignYarp", "ControlPlane");
+        // Linux uses the same explicit private 0700 root validated by the product bootstrap.
+        // Never fall back to /usr/share or create a second unprotected identity store.
+        var directory = OperatingSystem.IsLinux()
+            ? LinuxKeyProtection.InitializeStateDirectory()
+            : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+                "SpeedSignYarp", "ControlPlane");
         Directory.CreateDirectory(directory);
         _configPath = Path.Combine(directory, "active-directory.json");
         _protector = provider.CreateProtector("SpeedSignYarp.DirectoryBindPassword.v1");
