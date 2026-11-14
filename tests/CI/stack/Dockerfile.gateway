@@ -4,7 +4,7 @@ WORKDIR /src
 COPY . .
 RUN dotnet publish control-center/SpeedSignYarp.csproj -c Release -o /published
 
-FROM mcr.microsoft.com/dotnet/aspnet:10.0-bookworm-slim
+FROM mcr.microsoft.com/dotnet/aspnet:10.0
 USER root
 RUN apt-get update && apt-get install -y --no-install-recommends openssl ca-certificates curl && rm -rf /var/lib/apt/lists/* \
  && useradd --uid 10001 --home-dir /state --create-home --shell /usr/sbin/nologin yarpci \
