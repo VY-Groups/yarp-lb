@@ -11,6 +11,7 @@ import email
 import json
 import os
 import re
+import smtplib
 import ssl
 import subprocess
 import tempfile
@@ -99,8 +100,21 @@ def acceptance(root:Path):
     gatewayport,mailport,originport=port(),port(),port()
     openssl_state(root,originport)
     with local_smtp(root,mailport) as (mailbox,ca):
-        # Linux OpenSSL certificate trust: real path validation with a fresh,
-        # disposable locally generated CA; no certificate bypass callbacks.
+        # Probe the fixture with a strict, real Python STARTTLS SMTP client
+        # first. This distinguishes fixture defects from product defects.
+        with smtplib.SMTP("localhost",mailport,timeout=8) as client:
+            client.ehlo()
+            client.starttls(context=ssl.create_default_context(cafile=str(ca)))
+            client.ehlo()
+            client.login(MAIL_USER,MAIL_PASSWORD)
+            check(True,"independent strict client validates TLS and AUTH on local SMTP")
+        # .NET reads platform trust; the disposable Ubuntu runner temporarily
+        # trusts ONLY our freshly generated CI CA. No certificate bypass.
+        # This MUST never run on a user's workstation or physical server.
+        trust=Path("/usr/local/share/ca-certificates/gatewaycore-e2e-local.crt")
+        subprocess.run(["sudo","install","-m","0644",str(ca),str(trust)],check=True)
+        subprocess.run(["sudo","update-ca-certificates"],check=True,
+                       stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
         previous=os.environ.get("SSL_CERT_FILE")
         os.environ["SSL_CERT_FILE"]=str(ca)
         try:
@@ -161,6 +175,9 @@ def acceptance(root:Path):
                 os.environ.pop("SSL_CERT_FILE",None)
             else:
                 os.environ["SSL_CERT_FILE"]=previous
+            subprocess.run(["sudo","rm","-f",str(trust)],check=True)
+            subprocess.run(["sudo","update-ca-certificates"],check=True,
+                           stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
 
 def main():
     if os.environ.get("CI")!="true" or os.environ.get("GITHUB_ACTIONS")!="true":
