@@ -78,3 +78,4 @@ jobs:
           python tests/test_traffic_contracts.py
           python tests/test_universal_contracts.py
           python tests/validate_package.py
+# CI-only revalidation for merged PR31 and PR32: no change to tests or thresholds.
