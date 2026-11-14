@@ -1,0 +1,66 @@
+name: EC2-backed real Control Center functional checks (read-only)
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 19 * * *" # 00:30 IST daily; no PR/push backend traffic
+permissions:
+  contents: read
+concurrency:
+  group: ec2-control-center-live-readonly
+  cancel-in-progress: false
+jobs:
+  ec2-functional:
+    name: Real Control Center against two existing Mumbai EC2 backends
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      CI: "true"
+      BACKEND_A_HOST: ${{ vars.BACKEND_A_HOST }}
+      BACKEND_B_HOST: ${{ vars.BACKEND_B_HOST }}
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+      - name: Check deterministic harness safety contracts (no EC2 traffic)
+        run: |
+          python3 -m unittest discover -s tests/EC2Functional -p 'test_*.py' -v
+          python3 -m py_compile tests/EC2Functional/ec2_functional.py
+      - name: Preflight five direct HTTP requests per EC2 backend
+        id: preflight
+        run: |
+          python3 tests/EC2Functional/ec2_functional.py \
+            --preflight --out artifacts/ec2
+      - name: Build real shipping Control Center gateway from this commit
+        run: dotnet build control-center/SpeedSignYarp.csproj -c Release
+      - name: Exercise routing, weights, hashing, ejection, backend TLS and live weight switch
+        run: |
+          python3 tests/EC2Functional/ec2_functional.py \
+            --run --out artifacts/ec2 \
+            --root control-center \
+            --dll control-center/bin/Release/net10.0/SpeedSignYarp.dll
+      - name: Publish failure context when preflight or test fails
+        if: failure()
+        shell: bash
+        run: |
+          {
+            echo '### EC2 functional checks failed'
+            echo 'See uploaded per-request CSV and gateway logs. No production readiness is implied.'
+            if [ -f artifacts/ec2/fatal.txt ]; then
+              echo '~~~text'
+              head -c 3000 artifacts/ec2/fatal.txt
+              echo
+              echo '~~~'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload per-request CSV and explicit not-tested evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ec2-control-center-functional
+          path: artifacts/ec2/
+          if-no-files-found: warn
+          retention-days: 7

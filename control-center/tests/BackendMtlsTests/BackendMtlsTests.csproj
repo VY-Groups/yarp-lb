@@ -6,5 +6,6 @@
   <ItemGroup>
     <PackageReference Include="Yarp.ReverseProxy" Version="2.3.0" />
     <Compile Include="../../BackendMutualTls.cs" Link="BackendMutualTls.cs" />
+    <Compile Include="../../Ec2WorkflowLab.cs" Link="Ec2WorkflowLab.cs" />
   </ItemGroup>
 </Project>
