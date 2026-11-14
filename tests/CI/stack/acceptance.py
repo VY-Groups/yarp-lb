@@ -37,17 +37,23 @@ def compose_exec(service, *args):
 
 
 def wait_ready():
-    deadline = time.monotonic() + 135
+    deadline = time.monotonic() + 90
+    last = []
+    urls = ("http://127.0.0.1:18080/api/identity", "http://127.0.0.1:18081/api/identity")
     while time.monotonic() < deadline:
-        try:
-            for url in ("http://127.0.0.1:18080/api/identity", "http://127.0.0.1:18081/api/identity"):
-                code, _, _ = http(url)
-                if code != 200:
-                    raise RuntimeError("not ready")
+        current = []
+        for url in urls:
+            try:
+                code, body, _ = http(url)
+                current.append({"url": url, "status": code, "body": body[:250].decode(errors="replace")})
+            except (URLError, TimeoutError, ConnectionError, OSError) as error:
+                current.append({"url": url, "exception": repr(error)})
+        if all(row.get("status") == 200 for row in current):
             return
-        except (URLError, TimeoutError, RuntimeError, ConnectionError):
-            time.sleep(1)
-    raise AssertionError("Both Docker ingress endpoints never became ready")
+        last = current
+        time.sleep(1)
+    RESULTS["observations"].append({"check": "readiness failures", "latest": last})
+    raise AssertionError("Published ingress endpoints not ready: " + repr(last))
 
 
 def request_samples(url, number, cert=None, allow_initial_failures=False):

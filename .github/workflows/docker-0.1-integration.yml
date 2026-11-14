@@ -33,6 +33,21 @@ jobs:
         run: docker compose -f tests/CI/stack/compose.yml config --quiet
       - name: Build and boot two shipping YARP instances, two ingress, two backends, two local Prometheus
         run: docker compose -f tests/CI/stack/compose.yml up -d --build
+      - name: Capture deterministic host, ingress and gateway endpoint diagnostics
+        shell: bash
+        run: |
+          set +e
+          {
+            echo "Gateway A local health:"
+            docker compose -f tests/CI/stack/compose.yml exec -T gateway-a curl --noproxy '*' -sS -v --max-time 3 http://127.0.0.1:8080/gateway/health
+            echo "Ingress to gateway A health:"
+            docker compose -f tests/CI/stack/compose.yml exec -T ingress-a wget -S -O - -T 3 http://gateway-a:8080/gateway/health
+            echo "Runner to published ingress A health:"
+            curl --noproxy '*' -sS -v --max-time 3 http://127.0.0.1:18080/gateway/health
+            echo "Runner to published ingress A API:"
+            curl --noproxy '*' -sS -v --max-time 3 http://127.0.0.1:18080/api/identity
+          } >artifacts/ci-01/network-diagnostics.txt 2>&1
+          cat artifacts/ci-01/network-diagnostics.txt
       - name: Real HTTP, real HTTPS with chain trust, RBAC boundary, no-replay, metrics and collector
         run: python tests/CI/stack/acceptance.py --phase baseline --out artifacts/ci-01/baseline.json
       - name: Verify CI Grafana provisioned dashboards and two datasources
