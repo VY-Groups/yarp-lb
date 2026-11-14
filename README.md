@@ -61,7 +61,7 @@ Relevant tests and workflows:
 - [L7 HTTP traffic and failover tests](tests/L7/)
 - [External integration evidence and manual acceptance ledger](control-center/docs/EXTERNAL_INTEGRATION_ACCEPTANCE.md)
 
-**Verified source reference:** the test.11 application includes the fixes from [PR #68] and [PR #71](../../pull/71);(../../pull/68), whose exact-source CI passed **9/9**. The [post-fix main L7 run](../../actions/runs/43602455405) passed all **7/7** jobs; the [test.10 Windows release workflow](../../actions/runs/43602276788) passed. These refer to their recorded commits, **not** an automatic all-green assertion about future commits. Check the [latest Actions status](../../actions) before testing another revision.
+**Verified source reference:** [PR #71](../../pull/71) passed **11/11 exact-commit CI workflows**, including the new mail-provider security gate; [PR #68](../../pull/68) delivered the earlier browser fixes. The [test.11 Windows release workflow](.github/workflows/windows-test-release.yml) independently gates source parity, Windows executable smoke and security tests. These results apply only to their verified commits, not to future changes. Check the [latest Actions status](../../actions) before installation.
 
 ## SMTP providers and security verification
 
