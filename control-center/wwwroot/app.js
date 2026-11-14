@@ -787,8 +787,23 @@ function topologyInputUpdate(el) {
 }
 $('content').addEventListener('input', e => { const el = e.target; if (el.matches('[data-setup-field],[data-setup-array]'))
     topologyInputUpdate(el); });
-$('content').addEventListener('change', e => { const el = e.target; if (el.matches('[data-setup-field],[data-setup-array]'))
-    topologyInputUpdate(el); });
+$('content').addEventListener('change', e => {
+    const el = e.target;
+    if (el.matches('#smtp-preset')) {
+        const host = el.value === 'zoho-in-org' ? 'smtppro.zoho.in' : el.value === 'zoho-in-standard' ? 'smtp.zoho.in' : '';
+        const form = $('mail-config');
+        if (host && form) {
+            form.elements.namedItem('host').value = host;
+            form.elements.namedItem('port').value = '587';
+            form.elements.namedItem('startTls').checked = true;
+            form.elements.namedItem('enabled').checked = false;
+            show('Zoho India SMTP preset selected. Save with OTP off, test real delivery, then enable OTP. Never paste account passwords into GitHub.');
+        }
+        return;
+    }
+    if (el.matches('[data-setup-field],[data-setup-array]'))
+        topologyInputUpdate(el);
+});
 document.querySelectorAll('.nav').forEach(el => el.onclick = () => { view = el.dataset.view || 'overview'; render(); });
 $('page-back').onclick = () => navigateBack();
 $('modal-close').onclick = () => $('modal').close();
@@ -940,6 +955,12 @@ async function mailPage() {
         const m = await api('/admin/api/mail');
         $('content').innerHTML = `<div class="toolbar"><div><h2>Mail relay & email OTP</h2><p class="subtle">Step 1: save relay settings with OTP off. Step 2: test delivery to the administrator email. Step 3: enable OTP only after the test passes. An optional SMTP relay is not needed for local gateway traffic.</p></div><span class="chip ${m.deliveryVerified ? 'good' : 'bad'}">${m.deliveryVerified ? 'SMTP test accepted' : 'Test required'}</span></div>
   <div class="settings-columns"><div class="card"><h3>SMTP connection</h3><form id="mail-config" class="settings-form">
+   <label>SMTP provider / region<select id="smtp-preset">
+    <option value="">Custom SMTP server (keep existing settings)</option>
+    <option value="zoho-in-org">Zoho Mail India — organization (smtppro.zoho.in)</option>
+    <option value="zoho-in-standard">Zoho Mail India — personal/free (smtp.zoho.in)</option>
+   </select></label>
+   <p class="subtle">mail.zoho.in is the webmail website, not the SMTP endpoint. Confirm the exact server in Zoho Mail → Server Configuration Details. Selecting a preset changes only host, port, STARTTLS and disables OTP until re-tested; it never populates or transmits a password.</p>
    <label>SMTP DNS host<input name="host" value="${esc(m.host || '')}" placeholder="smtp.internal.example.com" required></label>
    <label>Port<input name="port" type="number" value="${esc(m.port || 587)}" min="1" max="65535" required></label>
    <label>Sender address<input name="from" type="email" value="${esc(m.from || '')}" placeholder="yarp-alerts@example.com" required></label>
@@ -948,7 +969,7 @@ async function mailPage() {
    <label class="setting-check"><input name="startTls" type="checkbox" ${m.startTls ? 'checked' : ''}> Require STARTTLS (recommended: 587)</label>
    <label class="setting-check"><input name="enabled" type="checkbox" ${m.enabled ? 'checked' : ''} ${!m.deliveryVerified ? 'disabled' : ''}> Require email OTP at sign-in</label>${!m.deliveryVerified ? '<p class="subtle">OTP remains unavailable until the saved SMTP settings pass the delivery test. Save with OTP off, test, then return here.</p>' : ''}
    <div class="action-strip"><button type="submit" class="primary">Save SMTP settings</button><button type="button" class="ghost" data-action="mail-test" data-id="">Send test to my account</button></div>
-  </form></div><div class="card"><h3>Secure setup sequence</h3><p class="subtle">1. Save the mail server with OTP disabled.</p><p class="subtle">2. Send a test to your registered administrator email.</p><p class="subtle">3. Confirm the email arrived.</p><p class="subtle">4. Enable OTP and save again. Next login will require a code.</p><div class="healthbanner">Authenticated mail requires STARTTLS and a trusted SMTP certificate. Implicit TLS on port 465 is not supported by the current .NET SmtpClient implementation. Email OTP is not phishing-resistant MFA.</div></div></div>`;
+  </form></div><div class="card"><h3>Secure setup sequence</h3><p class="subtle">1. Save the mail server with OTP disabled.</p><p class="subtle">2. Send a test to your registered administrator email.</p><p class="subtle">3. Confirm the email arrived.</p><p class="subtle">4. Enable OTP and save again. Next login will require a code.</p><div class="healthbanner">Authenticated mail requires STARTTLS and a trusted SMTP certificate. This version supports authenticated STARTTLS (usually port 587); implicit TLS on 465 is intentionally disabled in this version. Email OTP is not phishing-resistant MFA.</div></div></div>`;
     }
     catch (e) {
         show(String(e), true);

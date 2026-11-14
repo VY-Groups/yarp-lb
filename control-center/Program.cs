@@ -193,14 +193,30 @@ async Task SendMailMessage(string recipient, string subject, string body)
     if (string.IsNullOrWhiteSpace(cfg.Host) || cfg.Port is < 1 or > 65535 ||
         cfg.Port == 465 || !ValidEmail(cfg.From) || !ValidEmail(recipient))
         throw new InvalidOperationException("SMTP host, supported port, sender and recipient must be configured.");
-    // SmtpClient supports STARTTLS, but not implicit TLS on port 465.
-    // In a CA environment, authenticated SMTP must never send credentials in cleartext.
+    // Never downgrade to plaintext or ignore the server certificate.
+    // MailKit validates the platform CA trust store and hostname by default.
     if (!cfg.StartTls) throw new InvalidOperationException("STARTTLS is required for management OTP mail.");
-    using var smtp = new SmtpClient(cfg.Host, cfg.Port) { EnableSsl = true, Timeout = 10000 };
+    using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+    using var smtp = new MailKit.Net.Smtp.SmtpClient();
+    // Standard certificate/hostname checks remain MANDATORY. The callback
+    // only records safe TLS policy and chain error categories on rejection.
+    smtp.ServerCertificateValidationCallback = (_, _, chain, errors) =>
+    {
+        if (errors != System.Net.Security.SslPolicyErrors.None)
+            app.Logger.LogWarning("SMTP_TLS_CERT_REJECTED policy={Policy} chain={Chain}",
+                errors, string.Join(",", chain?.ChainStatus.Select(x => x.Status.ToString()) ?? Enumerable.Empty<string>()));
+        return errors == System.Net.Security.SslPolicyErrors.None;
+    };
+    await smtp.ConnectAsync(cfg.Host, cfg.Port, MailKit.Security.SecureSocketOptions.StartTls, timeout.Token);
     if (!string.IsNullOrWhiteSpace(cfg.Username))
-        smtp.Credentials = new NetworkCredential(cfg.Username, protector.Unprotect(cfg.EncryptedPassword));
-    using var message = new MailMessage(cfg.From, recipient, subject, body);
-    await smtp.SendMailAsync(message);
+        await smtp.AuthenticateAsync(cfg.Username, protector.Unprotect(cfg.EncryptedPassword), timeout.Token);
+    var message = new MimeKit.MimeMessage();
+    message.From.Add(MimeKit.MailboxAddress.Parse(cfg.From));
+    message.To.Add(MimeKit.MailboxAddress.Parse(recipient));
+    message.Subject = subject;
+    message.Body = new MimeKit.TextPart("plain") { Text = body };
+    await smtp.SendAsync(message, timeout.Token);
+    await smtp.DisconnectAsync(true, timeout.Token);
 }
 async Task SendOtp(string recipient, string code)
 {
@@ -671,9 +687,17 @@ app.MapPost("/admin/api/mail/test", async (HttpContext ctx) =>
         await Audit(Actor(ctx), "SMTP_DELIVERY_TEST_SUCCEEDED", new { cfg.Host, recipient = admin.Email });
         return Results.Ok(new { tested = true, recipient = admin.Email, note = "SMTP relay accepted message; confirm it arrived" });
     }
-    catch
+    catch (Exception ex)
     {
-        await Audit(Actor(ctx), "SMTP_DELIVERY_TEST_FAILED");
+        // Diagnostics are intentionally limited to exception TYPES, never the
+        // untrusted error message: SMTP libraries can include credentials,
+        // server banners, usernames or recipient addresses in exception text.
+        var failureType = ex.GetType().Name;
+        var innerType = ex.InnerException?.GetType().Name ?? "None";
+        var smtpStatus = ex is MailKit.Net.Smtp.SmtpCommandException smtpException ? (int)smtpException.StatusCode : -1;
+        app.Logger.LogWarning("SMTP_DELIVERY_TEST_FAILED errorType={ErrorType} innerType={InnerType} smtpStatus={SmtpStatus}",
+            failureType, innerType, smtpStatus);
+        await Audit(Actor(ctx), "SMTP_DELIVERY_TEST_FAILED", new { failureType, innerType, smtpStatus });
         return Results.Json(new { code = "SMTP_RELAY_UNAVAILABLE", error = "SMTP relay test failed. Check reachability, STARTTLS certificate trust, credentials and relay permissions. No OTP settings were enabled." }, statusCode: 503);
     }
 }).RequireRateLimiting("mailtest").RequireAuthorization(p => p.RequireRole("Administrator"));
