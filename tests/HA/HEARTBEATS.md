@@ -9,6 +9,13 @@ Each process started by the test writes its own CSV every **100 milliseconds**:
 `heartbeat-gateway-2.csv`, `heartbeat-health-aware-ingress.csv`
 and files for any restarted gateways/ingress variants.
 
+Each heartbeat is written by a **dedicated OS thread** rather than a
+ThreadPool task. The first executed Windows run showed 6.8–11.0-second
+*harness-only* ThreadPool-timer heartbeat gaps while separate child processes
+continued to tick. That observation is compatible with local harness
+ThreadPool starvation, not proof of a whole-runner pause. The dedicated thread
+provides a less ThreadPool-dependent clock for the next repetition.
+
 The CSV includes UTC milliseconds, *independent monotonic stopwatch ticks*,
 stopwatch frequency, process ID, live ThreadPool thread count, pending work
 items, and cumulative process CPU milliseconds. Flushing happens on each tick
