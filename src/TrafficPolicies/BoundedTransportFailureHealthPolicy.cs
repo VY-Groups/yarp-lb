@@ -43,7 +43,7 @@ public sealed class BoundedTransportFailureHealthPolicy : IPassiveHealthCheckPol
         var cap=EjectionBudget.Allowed(total,configuredPercent,minimumRemaining);
         if (cap<=0) return;
         var cooldown = cluster.Model.Config.HealthCheck?.Passive?.ReactivationPeriod ??
-            TimeSpan.FromSeconds(2);
+            TimeSpan.FromSeconds(15);
         if (cooldown <= TimeSpan.Zero || cooldown > TimeSpan.FromMinutes(10)) return;
         var now=Stopwatch.GetTimestamp();
         var next=now+Math.Max(1,(long)(cooldown.TotalSeconds*Stopwatch.Frequency));
