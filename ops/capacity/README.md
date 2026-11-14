@@ -7,4 +7,6 @@ These scripts reject absent measured traffic/hardware numbers, enforce **separat
 Run fail-closed report: `python3 ops/capacity/report.py --scenario actual.json --results /real/raw --gateway-csv /real/metrics.csv --out /real/gate.json`.
 Run actual connection limits: `python3 ops/capacity/limits.py --scenario actual.json --profile actual-systemd-and-kestrel.json --out limits.json`. This validates `MaxConcurrentConnections>=ceil(1.5*peak_concurrent_connections)`, and `LimitNOFILE>=ceil(2.5*ACTUAL_MaxConcurrentConnections+4096)`, not hardcoded 10,000/65,536.
 
+The report also independently verifies each `window-NNN-profile-NAME.json` emitted by `oha` against its manifest, aggregate HTTP/transport counters, exact response-body bytes and conservative maximum profile p99. Missing or inconsistent raw files are **NO-GO** even when the aggregate JSON claims success. A passing synthetic fixture validates the rejection logic only; it is not independent proof of real-site traffic.
+
 Both require real, source-linked evidence. The template contains intentionally null input fields and cannot pass.
