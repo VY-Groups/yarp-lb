@@ -63,6 +63,28 @@ Relevant tests and workflows:
 
 **Verified source reference:** the test.10 application includes the fixes from [PR #68](../../pull/68), whose exact-source CI passed **9/9**. The [post-fix main L7 run](../../actions/runs/43602455405) passed all **7/7** jobs; the [test.10 Windows release workflow](../../actions/runs/43602276788) passed. These refer to their recorded commits, **not** an automatic all-green assertion about future commits. Check the [latest Actions status](../../actions) before testing another revision.
 
+## SMTP providers and security verification
+
+The **Mail & OTP** console supports strict STARTTLS relay/application-password
+submission as well as provider-specific **Google and Microsoft OAuth2/XOAUTH2**
+token acquisition. Presets include Gmail/Google Workspace, Microsoft 365,
+Outlook.com, Exchange Server on-premises, Zoho India, Yahoo, iCloud, Fastmail
+and custom SMTP. **An SMTP preset is not an OAuth consent screen or a promise
+that an account is permitted to send.** OAuth applications, tenant consent,
+mailbox access and any provider app passwords must be configured separately.
+Integrated Exchange Windows/NTLM authentication and implicit TLS port 465
+are not supported in the current package.
+
+Security controls include pinned OAuth token endpoints, provider-bound SMTP
+token destinations, protected secrets, CSRF/role validation, and an enforced
+save → test → enable-OTP sequence. The
+[dedicated security CI workflow](.github/workflows/security-acceptance.yml)
+runs real administrative API/authorization checks and cross-platform
+provider/OAuth security tests; the
+[mail provider setup guide](control-center/docs/MAIL_PROVIDER_SETUP.md)
+describes per-provider prerequisites and known limitations. External provider
+delivery and OAuth consent still require a real authorized acceptance test.
+
 ## Zoho Mail India: SMTP and OTP testing
 
 **`https://mail.zoho.in/` is webmail, not an SMTP server.** Choose the outgoing SMTP host from the account's **Zoho Mail → Server Configuration Details**. Typical India-region options are:
