@@ -208,13 +208,33 @@ def visible_destinations() -> set[str]:
     return set(re.findall(r'yarp_control_destination_active_health\{destination="ec2/([^"]+)"\}', metrics()))
 
 
-def wait_configuration(expect: set[str], timeout: float = 12) -> None:
+def loaded_runtime() -> dict:
+    opener = build_opener(ProxyHandler({}))
+    with opener.open(GATEWAY + "/gateway/ec2-lab/loaded-config", timeout=3) as response:
+        require(response.status == 200, "Read-only runtime load-balancing state unavailable")
+        return json.loads(response.read(16384))
+
+
+def wait_configuration(expect: set[str], timeout: float = 12,
+                       expected_policy: str | None = None,
+                       expected_weights: dict[str, str] | None = None) -> None:
     until = time.monotonic() + timeout
+    observed: dict = {}
     while time.monotonic() < until:
-        if visible_destinations() == expect:
-            return
-        time.sleep(.3)
-    raise Failure(f"Live YARP reload timed out: wanted {sorted(expect)}, actual {sorted(visible_destinations())}")
+        try:
+            observed = loaded_runtime()
+            actual = set(observed.get("destinations", {}))
+            if actual == expect and (expected_policy is None or
+                    observed.get("policy") == expected_policy) and (
+                    expected_weights is None or
+                    observed.get("destinations") == expected_weights):
+                return
+        except Exception:
+            pass
+        time.sleep(.25)
+    raise Failure("Live in-memory YARP config did not converge in 12 seconds: "
+                  f"wanted IDs {sorted(expect)}, policy={expected_policy}, "
+                  f"weights={expected_weights}; observed={observed}")
 
 
 class Gateway:
@@ -311,7 +331,13 @@ def run(out: Path, root: Path, dll: Path) -> None:
 
     def apply(cfg: dict, destinations: set[str]) -> None:
         write_config(config_path, cfg)
-        wait_configuration(destinations)
+        cluster = cfg["ReverseProxy"]["Clusters"]["ec2"]
+        loaded_weights = {
+            key: val["Metadata"]["Weight"]
+            for key, val in cluster["Destinations"].items()
+        }
+        wait_configuration(destinations, expected_policy=cluster["LoadBalancingPolicy"],
+                           expected_weights=loaded_weights)
 
     def assert_all(rows: list[dict], label: str) -> None:
         invalid = [x for x in rows if not identity_ok(x, expected)]
