@@ -787,19 +787,23 @@ function topologyInputUpdate(el) {
 }
 $('content').addEventListener('input', e => { const el = e.target; if (el.matches('[data-setup-field],[data-setup-array]'))
     topologyInputUpdate(el); });
-$('content').addEventListener('change', e => { const el = e.target; if (el.matches('#smtp-preset')) {
-    const host = el.value === 'zoho-in-org' ? 'smtppro.zoho.in' : el.value === 'zoho-in-standard' ? 'smtp.zoho.in' : '';
-    const form = $('mail-config');
-    if (host && form) {
-        form.elements.namedItem('host').value = host;
-        form.elements.namedItem('port').value = '587';
-        form.elements.namedItem('startTls').checked = true;
-        form.elements.namedItem('enabled').checked = false;
-        show('Zoho India SMTP preset selected. Save with OTP off, test real delivery, then enable OTP. Never paste account passwords into GitHub.');
+$('content').addEventListener('change', e => {
+    const el = e.target;
+    if (el.matches('#smtp-preset')) {
+        const host = el.value === 'zoho-in-org' ? 'smtppro.zoho.in' : el.value === 'zoho-in-standard' ? 'smtp.zoho.in' : '';
+        const form = $('mail-config');
+        if (host && form) {
+            form.elements.namedItem('host').value = host;
+            form.elements.namedItem('port').value = '587';
+            form.elements.namedItem('startTls').checked = true;
+            form.elements.namedItem('enabled').checked = false;
+            show('Zoho India SMTP preset selected. Save with OTP off, test real delivery, then enable OTP. Never paste account passwords into GitHub.');
+        }
+        return;
     }
-    return;
-} if (el.matches('[data-setup-field],[data-setup-array]'))
-    topologyInputUpdate(el); });
+    if (el.matches('[data-setup-field],[data-setup-array]'))
+        topologyInputUpdate(el);
+});
 document.querySelectorAll('.nav').forEach(el => el.onclick = () => { view = el.dataset.view || 'overview'; render(); });
 $('page-back').onclick = () => navigateBack();
 $('modal-close').onclick = () => $('modal').close();
