@@ -4,7 +4,7 @@ This is diagnostic instrumentation for the disposable HA fault-injection suite,
 not a production health-check mechanism and not proof of fast active detection.
 
 Each process started by the test writes its own CSV every **100 milliseconds**:
-`heartbeat-harness.csv`, `heartbeat-backend-a.csv`,
+`heartbeat-ha-harness.csv`, `heartbeat-backend-a.csv`,
 `heartbeat-backend-b.csv`, `heartbeat-gateway-1.csv`,
 `heartbeat-gateway-2.csv`, `heartbeat-health-aware-ingress.csv`
 and files for any restarted gateways/ingress variants.
