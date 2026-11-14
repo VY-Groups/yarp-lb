@@ -183,7 +183,7 @@ MailSettings ReadMail() => File.Exists(mailPath)
     ? JsonSerializer.Deserialize<MailSettings>(File.ReadAllText(mailPath), jsonOptions) ?? new MailSettings()
     : new MailSettings();
 string MailFingerprint(MailSettings cfg) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(
-    $"{cfg.Host.ToLowerInvariant()}|{cfg.Port}|{cfg.From.ToLowerInvariant()}|{cfg.Username}|{cfg.StartTls}|{cfg.EncryptedPassword}")));
+    $"{cfg.Host.ToLowerInvariant()}|{cfg.Port}|{cfg.From.ToLowerInvariant()}|{cfg.Username}|{cfg.StartTls}|{cfg.EncryptedPassword}|{cfg.AuthMode}|{cfg.OAuthClientId}|{cfg.OAuthTenant}|{cfg.EncryptedOAuthClientSecret}|{cfg.EncryptedOAuthRefreshToken}")));
 bool MailDeliveryVerified(MailSettings cfg) => File.Exists(mailProofPath) &&
     CryptographicOperations.FixedTimeEquals(Encoding.UTF8.GetBytes(File.ReadAllText(mailProofPath).Trim()),
         Encoding.UTF8.GetBytes(MailFingerprint(cfg)));
@@ -208,7 +208,25 @@ async Task SendMailMessage(string recipient, string subject, string body)
         return errors == System.Net.Security.SslPolicyErrors.None;
     };
     await smtp.ConnectAsync(cfg.Host, cfg.Port, MailKit.Security.SecureSocketOptions.StartTls, timeout.Token);
-    if (!string.IsNullOrWhiteSpace(cfg.Username))
+    var mode = cfg.AuthMode;
+    if (MailProviderAuth.UsesOAuth(mode))
+    {
+        // Reject untrusted SMTP hosts BEFORE fetching or sending an OAuth token.
+        var validation = MailProviderAuth.Validate(mode, cfg.Host, cfg.Username,
+            cfg.OAuthTenant, cfg.OAuthClientId,
+            !string.IsNullOrEmpty(cfg.EncryptedOAuthClientSecret),
+            !string.IsNullOrEmpty(cfg.EncryptedOAuthRefreshToken));
+        if (validation != null) throw new InvalidOperationException(validation);
+        using var handler = new HttpClientHandler { AllowAutoRedirect = false };
+        using var client = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(9) };
+        var token = await MailProviderAuth.FetchAccessTokenAsync(
+            mode, cfg.OAuthTenant, cfg.OAuthClientId,
+            protector.Unprotect(cfg.EncryptedOAuthClientSecret),
+            mode == MailProviderAuth.MicrosoftApp ? "" : protector.Unprotect(cfg.EncryptedOAuthRefreshToken),
+            client, timeout.Token);
+        await smtp.AuthenticateAsync(new MailKit.Security.SaslMechanismOAuth2(cfg.Username, token), timeout.Token);
+    }
+    else if (!string.IsNullOrWhiteSpace(cfg.Username))
         await smtp.AuthenticateAsync(cfg.Username, protector.Unprotect(cfg.EncryptedPassword), timeout.Token);
     var message = new MimeKit.MimeMessage();
     message.From.Add(MimeKit.MailboxAddress.Parse(cfg.From));
@@ -654,7 +672,11 @@ app.MapPost("/admin/api/users/{username}/enable", async (HttpContext ctx, string
 app.MapGet("/admin/api/mail", () => {
     var m = ReadMail();
     return Results.Ok(new { m.Enabled, m.Host, m.Port, m.From, m.Username, m.StartTls,
-        passwordConfigured = !string.IsNullOrEmpty(m.EncryptedPassword), deliveryVerified = MailDeliveryVerified(m) });
+        m.AuthMode, m.OAuthClientId, m.OAuthTenant,
+        passwordConfigured = !string.IsNullOrEmpty(m.EncryptedPassword),
+        oauthClientSecretConfigured = !string.IsNullOrEmpty(m.EncryptedOAuthClientSecret),
+        oauthRefreshTokenConfigured = !string.IsNullOrEmpty(m.EncryptedOAuthRefreshToken),
+        deliveryVerified = MailDeliveryVerified(m) });
 }).RequireAuthorization(p => p.RequireRole("Administrator"));
 app.MapPost("/admin/api/mail", async (HttpContext ctx, MailSettingsInput input) =>
 {
@@ -663,8 +685,34 @@ app.MapPost("/admin/api/mail", async (HttpContext ctx, MailSettingsInput input) 
         (input.Enabled && (string.IsNullOrWhiteSpace(input.Host) || !ValidEmail(input.From) || !input.StartTls)))
         return Results.BadRequest(new { code = "SMTP_INVALID_SETTINGS", error = "Check SMTP host, port (465 unsupported), sender address, and STARTTLS before enabling OTP." });
     var existing = ReadMail();
-    var encrypted = string.IsNullOrEmpty(input.Password) ? existing.EncryptedPassword : protector.Protect(input.Password);
-    var mail = new MailSettings(input.Enabled, input.Host, input.Port, input.From, input.Username, encrypted, input.StartTls);
+    var mode = string.IsNullOrEmpty(input.AuthMode) ? MailProviderAuth.PasswordMode : input.AuthMode;
+    var sameOAuthIdentity = string.Equals(existing.AuthMode, mode, StringComparison.Ordinal)
+        && string.Equals(existing.Host, input.Host, StringComparison.OrdinalIgnoreCase)
+        && string.Equals(existing.Username, input.Username, StringComparison.OrdinalIgnoreCase)
+        && string.Equals(existing.OAuthClientId, input.OAuthClientId, StringComparison.Ordinal)
+        && string.Equals(existing.OAuthTenant, input.OAuthTenant, StringComparison.Ordinal);
+    var encrypted = string.IsNullOrEmpty(input.Password)
+        ? string.Equals(existing.Username, input.Username, StringComparison.OrdinalIgnoreCase)
+          && string.Equals(existing.Host, input.Host, StringComparison.OrdinalIgnoreCase)
+          && mode == MailProviderAuth.PasswordMode ? existing.EncryptedPassword : ""
+        : protector.Protect(input.Password);
+    var oauthSecret = !string.IsNullOrEmpty(input.OAuthClientSecret)
+        ? protector.Protect(input.OAuthClientSecret)
+        : sameOAuthIdentity ? existing.EncryptedOAuthClientSecret : "";
+    var oauthRefresh = !string.IsNullOrEmpty(input.OAuthRefreshToken)
+        ? protector.Protect(input.OAuthRefreshToken)
+        : sameOAuthIdentity ? existing.EncryptedOAuthRefreshToken : "";
+    var validation = MailProviderAuth.Validate(mode, input.Host, input.Username,
+        input.OAuthTenant, input.OAuthClientId, !string.IsNullOrEmpty(oauthSecret),
+        !string.IsNullOrEmpty(oauthRefresh));
+    if (validation != null)
+        return Results.BadRequest(new { code = "MAIL_AUTH_INVALID", error = validation });
+    if (mode == MailProviderAuth.PasswordMode && !string.IsNullOrWhiteSpace(input.Username)
+        && string.IsNullOrEmpty(encrypted))
+        return Results.BadRequest(new { code = "SMTP_PASSWORD_REQUIRED", error = "Supply an app password for authenticated SMTP or remove the username for a trusted relay." });
+    var mail = new MailSettings(input.Enabled, input.Host, input.Port, input.From,
+        input.Username, encrypted, input.StartTls, mode, input.OAuthClientId,
+        oauthSecret, oauthRefresh, input.OAuthTenant);
     if (input.Enabled && !MailDeliveryVerified(mail))
         return Results.Json(new { code = "SMTP_TEST_REQUIRED", error = "Save SMTP settings with OTP disabled, send a successful test to the administrator email, then enable OTP." }, statusCode: 409);
     File.WriteAllText(mailPath + ".tmp", JsonSerializer.Serialize(mail)); File.Move(mailPath + ".tmp", mailPath, true);
@@ -1344,8 +1392,10 @@ static bool ValidPassword(string? password) => password is not null && password.
 record LoginInput(string Username, string Password, string? Email = null, string Provider = "local");
 record VerifyOtpInput(string ChallengeId, string Code);
 record OtpChallenge(string Username, string Nonce, string Hash, DateTimeOffset ExpiresAt, int Attempts);
-record MailSettings(bool Enabled = false, string Host = "", int Port = 25, string From = "", string Username = "", string EncryptedPassword = "", bool StartTls = false);
-record MailSettingsInput(bool Enabled, string Host, int Port, string From, string Username, string Password, bool StartTls);
+record MailSettings(bool Enabled = false, string Host = "", int Port = 25, string From = "", string Username = "", string EncryptedPassword = "", bool StartTls = false,
+    string AuthMode = "password", string OAuthClientId = "", string EncryptedOAuthClientSecret = "", string EncryptedOAuthRefreshToken = "", string OAuthTenant = "");
+record MailSettingsInput(bool Enabled, string Host, int Port, string From, string Username, string Password, bool StartTls,
+    string AuthMode = "password", string OAuthClientId = "", string OAuthClientSecret = "", string OAuthRefreshToken = "", string OAuthTenant = "");
 record UserInput(string Username, string Role, string Password, string? Email);
 record PasswordInput(string Password);
 record ChangeDecision(string Decision, string? Reason);
