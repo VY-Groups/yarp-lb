@@ -40,16 +40,16 @@ sealed class DirectoryAuthService
     private readonly IDataProtector _protector;
     private readonly object _saveLock = new();
 
-    public DirectoryAuthService(IDataProtectionProvider provider)
+    public DirectoryAuthService(IDataProtectionProvider provider, string stateDirectory)
     {
-        // Linux uses the same explicit private 0700 root validated by the product bootstrap.
-        // Never fall back to /usr/share or create a second unprotected identity store.
-        var directory = OperatingSystem.IsLinux()
-            ? LinuxKeyProtection.InitializeStateDirectory()
-            : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
-                "SpeedSignYarp", "ControlPlane");
-        Directory.CreateDirectory(directory);
-        _configPath = Path.Combine(directory, "active-directory.json");
+        // Use the SAME already-validated state root as the control plane.
+        // Linux production, disposable EC2 CI and Windows each select their
+        // own root before DI starts; never create a second identity store.
+        if (string.IsNullOrWhiteSpace(stateDirectory) || !Path.IsPathFullyQualified(stateDirectory))
+            throw new ArgumentException("Directory state root must be an absolute path", nameof(stateDirectory));
+        if (!Directory.Exists(stateDirectory))
+            throw new DirectoryNotFoundException("Control plane state root missing: " + stateDirectory);
+        _configPath = Path.Combine(stateDirectory, "active-directory.json");
         _protector = provider.CreateProtector("SpeedSignYarp.DirectoryBindPassword.v1");
     }
 

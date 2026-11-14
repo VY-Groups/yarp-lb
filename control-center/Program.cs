@@ -105,7 +105,8 @@ builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationSc
         options.Events.OnRedirectToAccessDenied = ctx => { ctx.Response.StatusCode = 403; return Task.CompletedTask; };
     });
 builder.Services.AddAuthorization();
-builder.Services.AddSingleton<DirectoryAuthService>();
+builder.Services.AddSingleton<DirectoryAuthService>(sp =>
+    new DirectoryAuthService(sp.GetRequiredService<IDataProtectionProvider>(), privateDir));
 builder.Services.AddRateLimiter(options =>
 {
     options.RejectionStatusCode = 429;
