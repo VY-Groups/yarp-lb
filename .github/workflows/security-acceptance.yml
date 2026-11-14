@@ -1,0 +1,62 @@
+name: Security acceptance - mail providers and administrator workflows
+on:
+  pull_request:
+    paths:
+      - "control-center/**"
+      - "tests/E2E/real_control_center.py"
+      - "tests/E2E/real_smtp_otp.py"
+      - ".github/workflows/security-acceptance.yml"
+  push:
+    branches: [main]
+    paths:
+      - "control-center/**"
+      - "tests/E2E/real_control_center.py"
+      - "tests/E2E/real_smtp_otp.py"
+      - ".github/workflows/security-acceptance.yml"
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: security-acceptance-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  mail-provider-policy:
+    name: Mail OAuth2/token security contracts - ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2022]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - name: Run isolated Google/Microsoft OAuth2 host and token security tests
+        run: dotnet run --project control-center/tests/MailProviderSecurityTests/MailProviderSecurityTests.csproj --configuration Release
+      - name: Build actual shipping Control Center
+        run: dotnet build control-center/GatewayCoreYarp.csproj --configuration Release
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Test unauthorized sessions and role denials in browser logic
+        run: node control-center/tests/test_auth_ui.mjs
+  real-admin-security:
+    name: Real process sessions, CSRF, admin roles, approval and rollback
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      CI: "true"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build production-mode application
+        run: dotnet build control-center/GatewayCoreYarp.csproj --configuration Release
+      - name: Exercise real authenticated administrative HTTP API and security gates
+        run: python tests/E2E/real_control_center.py --root control-center
