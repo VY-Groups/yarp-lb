@@ -13,5 +13,6 @@
     <Compile Include="../../../src/TrafficPolicies/EjectionBudget.cs" Link="EjectionBudget.cs" />
     <Compile Include="../../../control-center/NonBlockingConsoleLogging.cs" Link="NonBlockingConsoleLogging.cs" />
     <Compile Include="../../../control-center/GatewayLoggingConfiguration.cs" Link="GatewayLoggingConfiguration.cs" />
+    <Compile Include="../../HA/Heartbeat/HaProcessHeartbeat.cs" Link="HaProcessHeartbeat.cs" />
   </ItemGroup>
 </Project>
