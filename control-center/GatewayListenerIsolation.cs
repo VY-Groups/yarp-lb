@@ -5,6 +5,7 @@ using System.Text.Json;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
 using Microsoft.AspNetCore.Server.Kestrel.Https;
 using Microsoft.AspNetCore.Hosting;
+using Yarp.ReverseProxy;
 using Yarp.ReverseProxy.Model;
 using Yarp.ReverseProxy.Health;
 
@@ -73,7 +74,7 @@ public sealed class GatewayListenerIsolation
     {
         if (!IPAddress.TryParse(input, out var ip) ||
             ip.Equals(IPAddress.Any) || ip.Equals(IPAddress.IPv6Any) ||
-            ip.IsIPv6Multicast || ip.IsIPv6LinkLocal || IPAddress.IsLoopback(ip) && role == "never")
+            ip.IsIPv6Multicast || ip.IsIPv6LinkLocal)
             throw new InvalidOperationException(role + " listener may not bind wildcard/invalid IP");
         return ip;
     }
