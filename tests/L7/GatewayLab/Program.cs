@@ -9,6 +9,8 @@ using Yarp.ReverseProxy.LoadBalancing;
 using Yarp.ReverseProxy.Health;
 using Yarp.ReverseProxy.Forwarder;
 
+// Enabled only by the HA fault-injection harness, not general k6 traffic.
+using var haHeartbeat = HaProcessHeartbeat.StartFromEnvironment();
 var builder = WebApplication.CreateBuilder(args);
 // Ephemeral loopback-only TLS identity. Never deploy this certificate for real clients.
 using var tlsKey = RSA.Create(2048);
