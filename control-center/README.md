@@ -27,8 +27,13 @@ credential purposes. All have been changed to neutral GatewayCore names.
 A same-path in-place upgrade **will not automatically decrypt old
 administrator, mail, or directory binding secrets**, and an old key-ring
 copy does not repair a changed Data Protection application/purpose.
-New installation on fresh test state is supported by CI; for any
-existing installation, **STOP**, snapshot the entire original state
+New installation on fresh test state is supported by CI. On Windows,
+startup additionally refuses to create a fresh neutral administrator
+identity if a prior sibling ProgramData YARP control plane still has users,
+protected credentials or key-ring material. This detection is read-only;
+it does **not** migrate or delete either installation. A separately
+initialized neutral test instance may retain old state for rollback.
+For any existing installation, **STOP**, snapshot the entire original state
 and obtain a separately approved, verified credential re-enrollment
 and configuration/keys migration procedure before switching processes.
 No production system is modified by this renaming PR. This rename is
