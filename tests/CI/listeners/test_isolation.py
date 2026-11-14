@@ -115,7 +115,7 @@ with tempfile.TemporaryDirectory(prefix='gateway-sockets-') as td:
         'YARP_LISTENERS_CONFIG_FILE':str(config)})
         env.pop('YARP_EC2_LAB_MODE',None)
         proc=subprocess.Popen(['dotnet',str(args.dll.resolve())],env=env,
-            cwd=str(args.dll.resolve().parent),stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+            cwd=str(Path(__file__).resolve().parents[3] / 'control-center'),stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
         ca_context=ssl.create_default_context(cafile=str(ca_crt))
         client_context=ssl.create_default_context(cafile=str(ca_crt))
         client_context.load_cert_chain(str(client_crt),str(client_key))
@@ -165,7 +165,7 @@ with tempfile.TemporaryDirectory(prefix='gateway-sockets-') as td:
             (args.out/'product-stderr.txt').write_text(stderr[-6000:])
         if failure is None:
             bad=dict(settings);bad['managementIp']='0.0.0.0';write_config(bad)
-            badproc=subprocess.Popen(['dotnet',str(args.dll.resolve())],cwd=str(args.dll.resolve().parent),
+            badproc=subprocess.Popen(['dotnet',str(args.dll.resolve())],cwd=str(Path(__file__).resolve().parents[3] / 'control-center'),
                 env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
             try:
                 _,baderr=badproc.communicate(timeout=12)
