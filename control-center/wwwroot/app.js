@@ -1,5 +1,20 @@
 "use strict";
 let data = { name: 'YARP Control Center', gateway: 'unknown', time: '', routes: {}, clusters: {}, disabled: {}, mode: 'Local testing', telemetry: '', revision: '' };
+let viewHistory = [];
+let lastRenderedView = 'setup';
+let restoringNavigation = false;
+function navigateBack() {
+    if (viewHistory.length) {
+        restoringNavigation = true;
+        view = viewHistory.pop();
+        render();
+    }
+    else if (view !== 'setup') {
+        restoringNavigation = true;
+        view = 'setup';
+        render();
+    }
+}
 let view = 'setup';
 let dirty = false;
 let probes = [];
@@ -207,7 +222,7 @@ ${topoInput('notes', 'Change or architecture notes', p.notes, 'Document existing
     return `<h2>Review and confirm architecture design</h2><p class="subtle">Confirmation stores reviewed topology metadata. It does not make your gateway fleet active or modify production traffic.</p><div class="setup-review-grid"><div class="card"><h3>Traffic topology</h3><strong>${esc(topologyModeName(p.mode))}</strong><p class="subtle">${esc((p.gateways || []).length)} YARP gateway(s), ${(p.workloads || []).length} backend destination(s)</p></div><div class="card"><h3>Controller / persistence</h3><strong>${esc(p.controlPlane)} · ${esc(p.dataStore)}</strong><p class="subtle">Local file-backed design record in this release</p></div></div><div class="setup-entry"><h3>Gateway inventory</h3>${(p.gateways || []).map((g) => `<div class="rowline"><span>${esc(g.id)}</span><span class="mono">${esc(g.hostname || 'Hostname missing')}</span></div>`).join('')}</div><div class="setup-entry"><h3>Application destinations</h3>${(p.workloads || []).map((w) => `<div class="rowline"><span>${esc(w.application || 'Unspecified')} / ${esc(w.id)}</span><span class="mono">${esc(w.url || 'URL missing')}</span></div>`).join('')}</div><div class="setup-entry"><h3>Validation</h3>${topologyChecks.length ? topologyChecks.map(x => `<div class="setup-check-error">${esc(x)}</div>`).join('') : '<p class="green">No schema/design-blocking errors reported. Operational readiness has NOT been verified.</p>'}</div><div class="setup-entry"><h3>Operational limitations</h3>${topologyWarnings.map(x => `<p class="subtle">• ${esc(x)}</p>`).join('')}</div>`;
 }
 function topoArrayInput(kind, index, property, label, value, placeholder = '') { return `<label class="setup-field"><span>${esc(label)}</span><input data-setup-array="${esc(kind)}" data-setup-index="${index}" data-setup-property="${esc(property)}" value="${esc(value || '')}" placeholder="${esc(placeholder)}" autocomplete="off"></label>`; }
-function topologyPage() { const status = topologyResponse?.status || 'not-started'; return `<div class="setup-heading"><div><h2>Gateway onboarding</h2><p class="subtle">For laptop testing, use the quick standalone template; advanced HA planning is optional. Status: <span class="chip">${esc(status)}</span></p></div><span class="chip">DESIGN ONLY</span></div><div class="healthbanner"><b>Quick start:</b> IIS, Apache, Nginx, or another HTTP(S) website can serve as a backend. <button class="ghost mini" type="button" data-action="setup-quick-lab">Fill single-server test draft</button> This fills design fields only and never changes live routes.</div><div class="setup-steps">${topologySteps.map((t, i) => `<button class="setup-step ${i === topologyStep ? 'current' : ''}" data-action="setup-step" data-id="${i}" type="button"><span>${i + 1}</span><b>${esc(t)}</b></button>`).join('')}</div><div class="setup-panel">${topologyStepHtml()}</div><div class="setup-actions"><button class="ghost" type="button" data-action="setup-prev" ${topologyStep === 0 ? 'disabled' : ''}>Back</button><span class="subtle">Step ${topologyStep + 1} of ${topologySteps.length}</span><div><button class="ghost" type="button" data-action="setup-save" ${currentRole !== 'Administrator' ? 'disabled' : ''}>Save draft</button> ${topologyStep < 5 ? '<button class="primary" type="button" data-action="setup-next">Continue</button>' : `<button class="primary" type="button" data-action="setup-confirm" ${currentRole !== 'Administrator' ? 'disabled' : ''}>Confirm design</button>`}</div></div><div class="healthbanner">No firewall, service, CA key, Pgpool, PostgreSQL, IIS or live YARP configuration change is performed by this wizard. Gateway connectivity and deployment are separate approved workflows.</div>`; }
+function topologyPage() { const status = topologyResponse?.status || 'not-started'; return `<div class="setup-heading"><div><h2>Gateway onboarding</h2><p class="subtle">For laptop testing, use the quick standalone template; advanced HA planning is optional. Status: <span class="chip">${esc(status)}</span></p></div><span class="chip">DESIGN ONLY</span></div><div class="healthbanner"><b>Quick start:</b> IIS, Apache, Nginx, or another HTTP(S) website can serve as a backend. <button class="ghost mini" type="button" data-action="setup-quick-lab">Fill single-server test draft</button> This fills design fields only and never changes live routes.</div><div class="setup-steps">${topologySteps.map((t, i) => `<button class="setup-step ${i === topologyStep ? 'current' : ''}" data-action="setup-step" data-id="${i}" type="button"><span>${i + 1}</span><b>${esc(t)}</b></button>`).join('')}</div><div class="setup-panel">${topologyStepHtml()}</div><div class="setup-actions"><button class="ghost" type="button" data-action="setup-prev">${topologyStep === 0 ? '← Exit to Setup Center' : '← Previous step'}</button><span class="subtle">Step ${topologyStep + 1} of ${topologySteps.length}</span><div><button class="ghost" type="button" data-action="setup-save" ${currentRole !== 'Administrator' ? 'disabled' : ''}>Save draft</button> ${topologyStep < 5 ? '<button class="primary" type="button" data-action="setup-next">Continue</button>' : `<button class="primary" type="button" data-action="setup-confirm" ${currentRole !== 'Administrator' ? 'disabled' : ''}>Confirm design</button>`}</div></div><div class="healthbanner">No firewall, service, CA key, Pgpool, PostgreSQL, IIS or live YARP configuration change is performed by this wizard. Gateway connectivity and deployment are separate approved workflows.</div>`; }
 async function topologyValidate() { if (!topologyDraft || currentRole !== 'Administrator')
     return; try {
     const r = await api('/admin/api/onboarding/validate', 'POST', { plan: topologyDraft });
@@ -293,7 +308,15 @@ async function setupFreeze(frozen) {
     }
 }
 function updateTopologyNavigation() { const finished = topologyResponse?.status === 'design-confirmed'; const prereqViews = ['organization', 'setup', 'onboarding', 'users', 'mail', 'directory']; document.querySelectorAll('.nav').forEach(b => { const dest = b.dataset.view || ''; const adminOnly = ['users', 'mail', 'directory'].includes(dest); b.hidden = (!finished && !prereqViews.includes(dest)) || (dest === 'fleet' && finished && topologyResponse?.plan?.mode === 'standalone') || (adminOnly && currentRole !== 'Administrator'); }); $('save').hidden = !finished || currentRole === 'Viewer' || view === 'onboarding' || view === 'setup'; }
-function render() { const names = { organization: 'Organization profile', setup: 'Setup Center · 0.1', onboarding: 'Architecture & setup', overview: 'Overview', routes: 'Routing rules', clusters: 'Backend clusters', backends: 'Backend management', health: 'Health and diagnostics', backups: 'Backups and audit', inventory: 'Infrastructure inventory', users: 'Administrators and roles', mail: 'Mail & OTP', directory: 'Active Directory (LDAPS)', approvals: 'Change approvals', metrics: 'Gateway metrics', fleet: 'Gateway fleet', capabilities: 'YARP capabilities', featurematrix: 'Traffic Engine & platform modules' }; $('page-title').textContent = names[view]; $('page-subtitle').textContent = dirty ? 'Unsaved configuration changes — submit for approval' : 'Control and inspect your gateway'; $('gateway-pill').textContent = '● Gateway online'; $('save').textContent = dirty ? '● Submit change request' : 'Submit change request'; document.querySelectorAll('.nav').forEach(n => n.classList.toggle('active', n.dataset.view === view)); const pages = { overview, routes, clusters, backends, health, capabilities }; updateTopologyNavigation(); if (view === 'organization')
+function render() {
+    if (view !== lastRenderedView) {
+        if (!restoringNavigation)
+            viewHistory.push(lastRenderedView);
+        lastRenderedView = view;
+    }
+    restoringNavigation = false;
+    $('page-back').hidden = view === 'setup' && viewHistory.length === 0;
+    const names = { organization: 'Organization profile', setup: 'Setup Center · 0.1', onboarding: 'Architecture & setup', overview: 'Overview', routes: 'Routing rules', clusters: 'Backend clusters', backends: 'Backend management', health: 'Health and diagnostics', backups: 'Backups and audit', inventory: 'Infrastructure inventory', users: 'Administrators and roles', mail: 'Mail & OTP', directory: 'Active Directory (LDAPS)', approvals: 'Change approvals', metrics: 'Gateway metrics', fleet: 'Gateway fleet', capabilities: 'YARP capabilities', featurematrix: 'Traffic Engine & platform modules' }; $('page-title').textContent = names[view]; $('page-subtitle').textContent = dirty ? 'Unsaved configuration changes — submit for approval' : 'Control and inspect your gateway'; $('gateway-pill').textContent = '● Gateway online'; $('save').textContent = dirty ? '● Submit change request' : 'Submit change request'; document.querySelectorAll('.nav').forEach(n => n.classList.toggle('active', n.dataset.view === view)); const pages = { overview, routes, clusters, backends, health, capabilities }; updateTopologyNavigation(); if (view === 'organization')
     void organizationPage();
 else if (view === 'featurematrix')
     void featureMatrix();
@@ -519,8 +542,8 @@ function act(type, id) {
         return;
     }
     if (type === 'setup-prev') {
-        topologyStep = Math.max(0, topologyStep - 1);
-        render();
+        if (topologyStep === 0) { view = 'setup'; render(); }
+        else { topologyStep--; render(); }
         return;
     }
     if (type === 'setup-step') {
@@ -746,6 +769,8 @@ $('content').addEventListener('input', e => { const el = e.target; if (el.matche
 $('content').addEventListener('change', e => { const el = e.target; if (el.matches('[data-setup-field],[data-setup-array]'))
     topologyInputUpdate(el); });
 document.querySelectorAll('.nav').forEach(el => el.onclick = () => { view = el.dataset.view || 'overview'; render(); });
+$('page-back').onclick = () => navigateBack();
+$('modal-close').onclick = () => $('modal').close();
 $('refresh').onclick = () => void reload();
 $('save').onclick = () => void save();
 $('logout').onclick = () => void api('/admin/api/logout', 'POST', {}).then(() => showLogin(false)).catch(e => show(String(e), true));
