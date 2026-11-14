@@ -24,6 +24,11 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p artifacts/eod-750
+          # Compose interpolates all services, even though Grafana is not started here.
+          ci_secret=$(openssl rand -hex 24)
+          echo "::add-mask::$ci_secret"
+          export GRAFANA_CI_PASSWORD="$ci_secret"
+          echo "GRAFANA_CI_PASSWORD=$ci_secret" >> "$GITHUB_ENV"
           docker compose -f tests/CI/stack/compose.yml config --quiet
           docker compose -f tests/CI/stack/compose.yml up -d --build backend-a backend-b gateway-a
           ready=0
@@ -65,6 +70,7 @@ jobs:
         shell: bash
         run: |
           set +e
+          export GRAFANA_CI_PASSWORD="${GRAFANA_CI_PASSWORD:-CI-only-cleanup-placeholder}"
           docker compose -f tests/CI/stack/compose.yml ps -a > artifacts/eod-750/compose-ps.txt 2>&1
           docker compose -f tests/CI/stack/compose.yml logs --no-color > artifacts/eod-750/compose.log 2>&1
           docker compose -f tests/CI/stack/compose.yml down -v --remove-orphans
