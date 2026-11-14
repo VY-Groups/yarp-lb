@@ -41,6 +41,14 @@ public static class BackendMutualTls
 
     public static void Configure(ForwarderHttpClientContext context, SocketsHttpHandler handler)
     {
+        if (Environment.GetEnvironmentVariable("YARP_EC2_LAB_ALLOW_INSECURE_BACKEND_TLS") == "1")
+        {
+            if (!Ec2WorkflowLab.RelaxedBackendTls())
+                throw new InvalidOperationException("Explicit test-only self-signed TLS gate was not met.");
+            handler.SslOptions.RemoteCertificateValidationCallback = (_, _, _, _) => true;
+            Console.Error.WriteLine(
+                "WARNING: CI-ONLY loopback EC2 TLS negative-control test: upstream certificate verification disabled for two allowlisted hosts. Never deploy this mode.");
+        }
         if (context.NewMetadata is null ||
             !context.NewMetadata.TryGetValue(MetadataKey, out var thumbprint) ||
             string.IsNullOrWhiteSpace(thumbprint)) return;
