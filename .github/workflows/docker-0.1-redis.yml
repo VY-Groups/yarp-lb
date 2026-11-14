@@ -48,6 +48,7 @@ jobs:
           mkdir -p artifacts/ci-redis
           docker compose -f tests/CI/redis/compose.yml ps -a > artifacts/ci-redis/containers.txt 2>&1 || true
           docker compose -f tests/CI/redis/compose.yml logs --no-color > artifacts/ci-redis/containers.log 2>&1 || true
+          docker compose -f tests/CI/redis/compose.yml unpause redis-primary || true
           docker compose -f tests/CI/redis/compose.yml down -v --remove-orphans || true
           rm -rf tests/CI/redis/certs
       - uses: actions/upload-artifact@v4

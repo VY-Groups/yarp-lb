@@ -48,8 +48,11 @@ for i in $(seq 1 40); do
 done
 [[ "$sync" == 1 ]] || { echo "FAIL: Redis replica missing revision"; exit 1; }
 echo "PASS: replica contains versioned config"
-"${compose[@]}" kill -s SIGKILL redis-primary
-echo "FAULT: primary SIGKILL delivered"
+# Keep the Docker DNS/IP attached while making Redis unresponsive; killing
+# the whole container removes the hostname and causes Sentinel to repeatedly
+# fail DNS resolution and enter TILT instead of electing a new leader.
+"${compose[@]}" pause redis-primary
+echo "FAULT: primary cgroup frozen (IP still resolvable), awaiting Sentinel quorum promotion"
 promoted=0
 for i in $(seq 1 75); do
   role=$(rcli redis-replica ROLE 2>/dev/null | head -1 || true)

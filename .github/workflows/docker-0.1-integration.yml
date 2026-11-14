@@ -73,6 +73,22 @@ jobs:
           docker compose -f tests/CI/stack/compose.yml kill -s SIGKILL gateway-a
           python tests/CI/stack/acceptance.py --phase gateway-loss --out artifacts/ci-01/gateway-loss.json
           docker compose -f tests/CI/stack/compose.yml up -d --no-deps gateway-a
+      - name: Require full gateway reintegration before the separate ingress fault
+        shell: bash
+        run: |
+          set -euo pipefail
+          health=0
+          for attempt in $(seq 1 60); do
+            if docker compose -f tests/CI/stack/compose.yml exec -T gateway-a \
+              curl --noproxy '*' --connect-timeout 1 --max-time 2 -fsS http://127.0.0.1:8080/gateway/health >/dev/null; then
+              health=1
+              break
+            fi
+            sleep 1
+          done
+          test "$health" = 1
+          sleep 3
+          python tests/CI/stack/acceptance.py --phase recovered --out artifacts/ci-01/gateway-rejoined.json
       - name: Kill one ingress, continue through independent second ingress container
         shell: bash
         run: |
