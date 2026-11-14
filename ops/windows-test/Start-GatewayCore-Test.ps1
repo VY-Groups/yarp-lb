@@ -3,7 +3,8 @@
 param(
   [Parameter(Mandatory=$true)][string]$IisBackendUrl,
   [ValidateRange(1024,65535)][int]$Port=8080,
-  [switch]$PrepareOnly
+  [switch]$PrepareOnly,
+  [switch]$ReuseExistingTestState
 )
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
@@ -23,14 +24,25 @@ $existingConfig=Join-Path $app 'appsettings.json'
 # In-place upgrades or an existing control plane require explicit migration.
 if (Test-Path -LiteralPath $state) {
   $entries=@(Get-ChildItem -LiteralPath $state -Force -ErrorAction Stop)
-  if ($entries.Count -gt 0) {
-    throw "Existing GatewayCore control-plane state found at $state. STOP: back up and use a disposable test machine; do not overwrite encrypted identities."
+  if ($entries.Count -gt 0 -and -not $ReuseExistingTestState) {
+    throw "Existing GatewayCore control-plane state found at $state. STOP: back up first, then use -ReuseExistingTestState only for the same GatewayCore v0.1 test installation."
+  }
+  if ($entries.Count -gt 0 -and $ReuseExistingTestState) {
+    Write-Warning 'REUSING existing v0.1 test identity store; no migration or backup is performed by this launcher. Confirm your independent backup and ownership before using this flag.'
   }
 }
-if (Test-Path -LiteralPath $existingConfig) {
-  throw "appsettings.json already exists at $existingConfig. Refusing to overwrite a previous installation."
-}
 $destination=$uri.AbsoluteUri
+if (Test-Path -LiteralPath $existingConfig) {
+  if (-not $ReuseExistingTestState) { throw "appsettings.json already exists at $existingConfig. Refusing to overwrite a previous installation." }
+  try {
+    $current=Get-Content -LiteralPath $existingConfig -Raw | ConvertFrom-Json
+    $savedOrigin=[string]$current.ReverseProxy.Clusters.iis.Destinations.iis01.Address
+    $savedPath=[string]$current.ReverseProxy.Routes.iis.Match.Path
+    if ($savedOrigin -ne $destination -or $savedPath -ne '/proxy/{**catch-all}') {
+      throw 'Existing config does not match the requested test IIS origin and route; refusing to replace it.'
+    }
+  } catch { throw "Existing config is incompatible with test launcher and will not be replaced: $($_.Exception.Message)" }
+}
 $config=[ordered]@{
   AllowedHosts='localhost;127.0.0.1'
   Logging=@{LogLevel=@{Default='Warning';'Microsoft.AspNetCore'='Warning'}}
@@ -52,11 +64,13 @@ $config=[ordered]@{
 }
 $utf8=New-Object System.Text.UTF8Encoding($false)
 $generated=$config | ConvertTo-Json -Depth 20
-[System.IO.File]::WriteAllText($existingConfig,$generated,$utf8)
+if (-not (Test-Path -LiteralPath $existingConfig)) {
+  [System.IO.File]::WriteAllText($existingConfig,$generated,$utf8)
+}
 Write-Host "Test gateway configured: http://127.0.0.1:$Port/proxy/" -ForegroundColor Cyan
 Write-Host "IIS upstream: $destination" -ForegroundColor Cyan
 Write-Host "IIS sites, application pools, bindings and firewall are UNCHANGED."
-Write-Host "APP STATE: $state (a new test identity store; never migrate by copying ciphertext)"
+Write-Host "APP STATE: $state (test identity store; preserved when -ReuseExistingTestState is supplied)"
 if ($PrepareOnly) { Write-Host 'PREPARE PASS'; exit 0 }
 $env:ASPNETCORE_URLS="http://127.0.0.1:$Port"
 $env:ASPNETCORE_ENVIRONMENT='Production'
