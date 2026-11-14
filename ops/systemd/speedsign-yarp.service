@@ -1,0 +1,42 @@
+[Unit]
+Description=SpeedSign YARP v0.1 separated listener on-prem gateway
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
+[Service]
+Type=exec
+User=speedsg-gateway
+Group=speedsg-gateway
+WorkingDirectory=/opt/speedsign-yarp/current
+ExecStart=/usr/bin/dotnet /opt/speedsign-yarp/current/SpeedSignYarp.dll
+Environment=ASPNETCORE_ENVIRONMENT=Production
+Environment=YARP_LISTENERS_CONFIG_FILE=/etc/speedsign-yarp/listeners.json
+Environment=YARP_CONTROL_PLANE_DIR=/var/lib/speedsign-yarp/control-plane
+Environment=YARP_RUNTIME_CONFIG_PATH=/var/lib/speedsign-yarp/control-plane/config/appsettings.json
+Environment=YARP_LINUX_DP_CERT_PFX_PATH=/etc/speedsign-yarp/secrets/dp-protection.pfx
+Environment=YARP_LINUX_DP_CERT_PASSWORD_FILE=/etc/speedsign-yarp/secrets/dp-pfx-password
+# Direct low-port binds without running as root. No CAP_NET_ADMIN.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+Restart=on-failure
+RestartSec=5s
+TimeoutStartSec=60s
+TimeoutStopSec=60s
+KillSignal=SIGTERM
+# No made-up LimitNOFILE. Set measured validated override; see ops/capacity/limits.py
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+ReadWritePaths=/var/lib/speedsign-yarp /var/log/speedsign-yarp
+
+[Install]
+WantedBy=multi-user.target
