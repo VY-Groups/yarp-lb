@@ -45,6 +45,27 @@ class HeartbeatContract(unittest.TestCase):
         program = (Path(__file__).parent / "Acceptance" / "Program.cs").read_text()
         self.assertIn('Path.Combine(artifacts,"heartbeat-ha-harness.csv"),"ha-harness"',program)
 
+    def test_independent_heartbeat_does_not_use_threadpool(self):
+        source = (Path(__file__).parent / "Heartbeat" / "HaProcessHeartbeat.cs").read_text()
+        self.assertIn("new Thread(Pump)", source)
+        self.assertIn("stopping.Wait(100)", source)
+        self.assertNotIn("Task.Run", source)
+
+    def test_isolated_harness_gap_flagged_without_claiming_runner_pause(self):
+        with tempfile.TemporaryDirectory() as t:
+            root=Path(t)
+            for role in EXPECTED_EARLY:
+                times=[1000,1100,1700,1800] if role=="ha-harness" else [
+                    1000,1100,1200,1300,1400,1500,1600,1700,1800]
+                make_samples(root,role,times)
+            report=analyze(root)
+            self.assertTrue(report["diagnostics_complete"])
+            self.assertEqual(report["cross_process_gap_candidates"],[])
+            isolated=report["isolated_gap_candidates"]
+            self.assertEqual(len(isolated),1)
+            self.assertEqual(isolated[0]["role"],"ha-harness")
+            self.assertEqual(isolated[0]["duration_ms"],600)
+
     def test_no_data_is_never_diagnostic_success(self):
         with tempfile.TemporaryDirectory() as t:
             report = analyze(Path(t))
