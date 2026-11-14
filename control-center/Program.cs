@@ -11,6 +11,7 @@ using System.Security.Cryptography;
 using System.Text;
 using Yarp.ReverseProxy;
 using Yarp.ReverseProxy.Model;
+using Yarp.ReverseProxy.Health;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.Authorization;
@@ -48,6 +49,8 @@ builder.Services.AddReverseProxy()
 // Custom policies are registered on every serving YARP instance, never on the UI alone.
 builder.Services.AddSingleton<ILoadBalancingPolicy, WeightedRandomPolicy>();
 builder.Services.AddSingleton<ILoadBalancingPolicy, SourceIpHashPolicy>();
+// Opt-in by cluster.HealthCheck.Passive.Policy only. No request replay.
+builder.Services.AddSingleton<IPassiveHealthCheckPolicy, BoundedTransportFailureHealthPolicy>();
 builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme)
     .AddCookie(options =>
     {
