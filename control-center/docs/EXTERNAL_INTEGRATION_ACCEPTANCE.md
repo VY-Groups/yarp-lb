@@ -56,6 +56,27 @@ hardcode this account's credentials in the repository or CI.
 Official SMTP source: https://www.zoho.com/mail/help/zoho-smtp.html
 India data center notice: https://help.zoho.com/portal/en/community/topic/important-notice-to-zoho-mail-indian-datacentre-in-dc-deployment-users
 
+## Authorized one-time Zoho SMTP test
+
+The repository includes a **manual**, credential-safe test tool. From an
+approved machine with internet access and Python 3:
+
+    python tests/E2E/zoho_india_authenticated_mail_test.py --host smtppro.zoho.in --username your-test-address@example.invalid --send-to-self
+
+Use the hostname shown in the Zoho account's SMTP Server Configuration
+Details; personal/free mailboxes may need smtp.zoho.in instead. This command
+asks for the temporary app-specific password using a hidden prompt. It never
+puts a password in command-line arguments, a GitHub Action, a file or a CI
+artifact. It enforces STARTTLS/certificate hostname verification and sends
+exactly one short test email **to the same account**, never a third party.
+Output confirms SMTP *acceptance*, not delivery; check the matching subject
+in the Zoho webmail inbox manually.
+
+A password shared in a screenshot is exposed even when it belongs to a
+temporary test mailbox. Rotate or revoke it after the test; do not re-use it
+for any production account. This tool is not run automatically in CI or
+on an unattended production host.
+
 ## GO/NO-GO rule
 
 - SOURCE/CI GO only after exact-SHA build and all required real-process tests.
