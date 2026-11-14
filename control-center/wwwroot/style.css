@@ -26,6 +26,16 @@
 @media(max-width:1120px){.setup-stage-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.setup-summary{grid-template-columns:repeat(2,minmax(0,1fr))}}@media(max-width:650px){.setup-stage-grid{grid-template-columns:1fr}.setup-hero{display:block}.setup-score{border:0;border-top:1px solid #2d6670;padding:12px 0 0;text-align:left;min-width:0}}
 
 
+/* The navigation contains more actions than fit on short laptop displays.
+   It must scroll independently of the fixed-height sidebar; without min-height:0,
+   CSS flexbox leaves lower items outside the usable viewport. */
+.sidebar{min-height:0}
+.sidebar nav{display:grid;flex:1 1 auto;min-height:0;overflow-y:auto;overflow-x:hidden;overscroll-behavior:contain;align-content:start;scrollbar-width:thin;scrollbar-color:#496078 #101b2c}
+.sidebar nav .nav{flex-shrink:0}
+.sidebar nav .nav:focus-visible{outline:2px solid #5ce2d1;outline-offset:-2px}
+.sidebar .sidefoot{flex:0 0 auto;margin-top:8px}
+@media(max-height:720px){.sidebar{padding-top:12px;padding-bottom:10px}.sidebar .brand{padding-bottom:9px}.sidebar .tag{margin-bottom:8px}.sidebar nav .nav{padding-top:9px;padding-bottom:9px}}
+
 /* Modal and navigation affordances: scroll within the dialog, keep actions visible. */
 #page-back{margin-bottom:9px;padding:7px 12px;min-height:34px}
 #modal{max-height:min(86vh,840px);overflow:auto;overscroll-behavior:contain;padding:20px}

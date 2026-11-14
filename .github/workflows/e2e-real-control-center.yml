@@ -1,0 +1,72 @@
+name: Real Control Center E2E - browser and API
+on:
+  pull_request:
+    paths:
+      - "control-center/**"
+      - "tests/E2E/**"
+      - ".github/workflows/e2e-real-control-center.yml"
+  push:
+    branches: [main]
+    paths:
+      - "control-center/**"
+      - "tests/E2E/**"
+      - ".github/workflows/e2e-real-control-center.yml"
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: real-control-center-e2e-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  authenticated-api:
+    name: Real .NET API + protected state + two-person approval
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      CI: "true"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build shipping production-mode Control Center
+        run: dotnet build control-center/GatewayCoreYarp.csproj --configuration Release
+      - name: Execute REAL HTTP backend flow against isolated local .NET process
+        run: python tests/E2E/real_control_center.py --root control-center
+
+  real-chromium:
+    name: Real Chromium GUI + live Kestrel API (no mocks)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      CI: "true"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build shipping production-mode Control Center
+        run: dotnet build control-center/GatewayCoreYarp.csproj --configuration Release
+      - name: Install pinned Playwright test package
+        run: npm install --prefix tests/E2E --no-package-lock --ignore-scripts
+      - name: Install real Chromium with OS dependencies
+        run: cd tests/E2E && npx playwright install --with-deps chromium
+      - name: Browser acceptance on real localhost GatewayCore Kestrel
+        run: cd tests/E2E && npm test
+      - name: Keep screenshots, traces and browser reports for failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: real-chromium-e2e-evidence
+          path: tests/E2E/test-results/
+          retention-days: 7
+          if-no-files-found: ignore
