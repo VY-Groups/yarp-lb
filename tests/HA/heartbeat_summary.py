@@ -46,8 +46,10 @@ def analyze(root: Path) -> dict:
                 if any(b <= a for a, b in zip(ticks, ticks[1:])):
                     raise ValueError("nonmonotonic heartbeat clock")
                 events = []
+                all_durations = []
                 for i in range(1, len(rows)):
                     duration = (ticks[i] - ticks[i - 1]) * 1000.0 / freq[i]
+                    all_durations.append(duration)
                     if duration >= GAP_MS:
                         event = {
                             "role": role,
