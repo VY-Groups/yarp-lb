@@ -134,6 +134,8 @@ be copied to the new installation and assumed to decrypt. Existing
 installations must be inventoried, backed up and migrated through
 approved credential re-enrollment with fail-closed verification.
 A new empty CI install **does not test upgrades from legacy state**.
-Treat live state conversion and restoration as **NOT RUN**, and do not
-Windows runtime additionally fails closed on a prior YARP ProgramData\ncontrol plane before it can create new keys/users; this is a detection\ncheck, not verified migration or rollback. Never\ndeploy a replacement over an existing service without an approved
-migration and rollback record.
+Treat live state conversion and restoration as **NOT RUN**. The Windows
+runtime now fails closed when prior YARP ProgramData identity material is
+found before creating a neutral identity. This read-only guard is not
+verified migration or rollback. Do not deploy a replacement over an existing
+service without an approved migration and rollback record.
