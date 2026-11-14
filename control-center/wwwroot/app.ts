@@ -304,7 +304,12 @@ function topologyInputUpdate(el:HTMLInputElement|HTMLSelectElement){if(!topology
  if(arr&&prop&&Number.isInteger(index)&&topologyDraft[arr]?.[index])topologyDraft[arr][index][prop]=value;
 }
 $('content').addEventListener('input',e=>{const el=e.target as HTMLInputElement;if(el.matches('[data-setup-field],[data-setup-array]'))topologyInputUpdate(el)});
-$('content').addEventListener('change',e=>{const el=e.target as HTMLInputElement;if(el.matches('[data-setup-field],[data-setup-array]'))topologyInputUpdate(el)});
+$('content').addEventListener('change',e=>{const el=e.target as HTMLInputElement;if(el.matches('#smtp-preset')){
+      const host=el.value==='zoho-in-org'?'smtppro.zoho.in':el.value==='zoho-in-standard'?'smtp.zoho.in':'';
+      const form=$('mail-config') as HTMLFormElement;
+      if(host&&form){(form.elements.namedItem('host') as HTMLInputElement).value=host;(form.elements.namedItem('port') as HTMLInputElement).value='587';(form.elements.namedItem('startTls') as HTMLInputElement).checked=true;(form.elements.namedItem('enabled') as HTMLInputElement).checked=false;show('Zoho India SMTP preset selected. Save with OTP off, test real delivery, then enable OTP. Never paste account passwords into GitHub.')}
+      return;
+    }if(el.matches('[data-setup-field],[data-setup-array]'))topologyInputUpdate(el)});
 document.querySelectorAll<HTMLButtonElement>('.nav').forEach(el=>el.onclick=()=>{view=el.dataset.view||'overview';render()});$('page-back').onclick=()=>navigateBack();$('modal-close').onclick=()=>($('modal') as HTMLDialogElement).close();$('refresh').onclick=()=>void reload();$('save').onclick=()=>void save();$('logout').onclick=()=>void api('/admin/api/logout','POST',{}).then(()=>showLogin(false)).catch(e=>show(String(e),true));void initSession();
 
 async function initSession(){
@@ -370,6 +375,12 @@ async function mailPage(){
   const m=await api('/admin/api/mail');
   $('content').innerHTML=`<div class="toolbar"><div><h2>Mail relay & email OTP</h2><p class="subtle">Step 1: save relay settings with OTP off. Step 2: test delivery to the administrator email. Step 3: enable OTP only after the test passes. An optional SMTP relay is not needed for local gateway traffic.</p></div><span class="chip ${m.deliveryVerified?'good':'bad'}">${m.deliveryVerified?'SMTP test accepted':'Test required'}</span></div>
   <div class="settings-columns"><div class="card"><h3>SMTP connection</h3><form id="mail-config" class="settings-form">
+   <label>SMTP provider / region<select id="smtp-preset">
+    <option value="">Custom SMTP server (keep existing settings)</option>
+    <option value="zoho-in-org">Zoho Mail India — organization (smtppro.zoho.in)</option>
+    <option value="zoho-in-standard">Zoho Mail India — personal/free (smtp.zoho.in)</option>
+   </select></label>
+   <p class="subtle">mail.zoho.in is the webmail website, not the SMTP endpoint. Confirm the exact server in Zoho Mail → Server Configuration Details. Selecting a preset changes only host, port, STARTTLS and disables OTP until re-tested; it never populates or transmits a password.</p>
    <label>SMTP DNS host<input name="host" value="${esc(m.host||'')}" placeholder="smtp.internal.example.com" required></label>
    <label>Port<input name="port" type="number" value="${esc(m.port||587)}" min="1" max="65535" required></label>
    <label>Sender address<input name="from" type="email" value="${esc(m.from||'')}" placeholder="yarp-alerts@example.com" required></label>
