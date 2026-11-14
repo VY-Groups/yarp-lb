@@ -305,7 +305,7 @@ function topologyInputUpdate(el:HTMLInputElement|HTMLSelectElement){if(!topology
 }
 $('content').addEventListener('input',e=>{const el=e.target as HTMLInputElement;if(el.matches('[data-setup-field],[data-setup-array]'))topologyInputUpdate(el)});
 $('content').addEventListener('change',e=>{const el=e.target as HTMLInputElement;if(el.matches('[data-setup-field],[data-setup-array]'))topologyInputUpdate(el)});
-document.querySelectorAll<HTMLButtonElement>('.nav').forEach(el=>el.onclick=()=>{view=el.dataset.view||'overview';render()});$('page-back').onclick=()=>navigateBack();$('modal-close').onclick=()=>($('modal') as HTMLDialogElement).close();$('refresh').onclick=()=>void reload();$('save').onclick=()=>void save();$('logout').onclick=()=>void api('/admin/api/logout','POST',{}).then(()=>showLogin(false)).catch(e=>show(String(e),true));void initSession();
+document.querySelectorAll<HTMLButtonElement>('.nav').forEach(el=>el.onclick=()=>{const next=el.dataset.view||'overview';if(view===next)return;view=next;render()});$('page-back').onclick=()=>navigateBack();$('modal-close').onclick=()=>($('modal') as HTMLDialogElement).close();$('refresh').onclick=()=>void reload();$('save').onclick=()=>void save();$('logout').onclick=()=>void api('/admin/api/logout','POST',{}).then(()=>showLogin(false)).catch(e=>show(String(e),true));void initSession();
 
 async function initSession(){
   try {
