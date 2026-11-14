@@ -3,18 +3,16 @@ let data = { name: 'YARP Control Center', gateway: 'unknown', time: '', routes: 
 let viewHistory = [];
 let lastRenderedView = 'setup';
 let restoringNavigation = false;
-function navigateBack() {
-    if (viewHistory.length) {
-        restoringNavigation = true;
-        view = viewHistory.pop();
-        render();
-    }
-    else if (view !== 'setup') {
-        restoringNavigation = true;
-        view = 'setup';
-        render();
-    }
+function navigateBack() { if (viewHistory.length) {
+    restoringNavigation = true;
+    view = viewHistory.pop();
+    render();
 }
+else if (view !== 'setup') {
+    restoringNavigation = true;
+    view = 'setup';
+    render();
+} }
 let view = 'setup';
 let dirty = false;
 let probes = [];
@@ -317,32 +315,41 @@ function render() {
     }
     restoringNavigation = false;
     $('page-back').hidden = view === 'setup' && viewHistory.length === 0;
-    const names = { organization: 'Organization profile', setup: 'Setup Center · 0.1', onboarding: 'Architecture & setup', overview: 'Overview', routes: 'Routing rules', clusters: 'Backend clusters', backends: 'Backend management', health: 'Health and diagnostics', backups: 'Backups and audit', inventory: 'Infrastructure inventory', users: 'Administrators and roles', mail: 'Mail & OTP', directory: 'Active Directory (LDAPS)', approvals: 'Change approvals', metrics: 'Gateway metrics', fleet: 'Gateway fleet', capabilities: 'YARP capabilities', featurematrix: 'Traffic Engine & platform modules' }; $('page-title').textContent = names[view]; $('page-subtitle').textContent = dirty ? 'Unsaved configuration changes — submit for approval' : 'Control and inspect your gateway'; $('gateway-pill').textContent = '● Gateway online'; $('save').textContent = dirty ? '● Submit change request' : 'Submit change request'; document.querySelectorAll('.nav').forEach(n => n.classList.toggle('active', n.dataset.view === view)); const pages = { overview, routes, clusters, backends, health, capabilities }; updateTopologyNavigation(); if (view === 'organization')
-    void organizationPage();
-else if (view === 'featurematrix')
-    void featureMatrix();
-else if (view === 'setup')
-    void setupPage();
-else if (view === 'onboarding')
-    $('content').innerHTML = topologyPage();
-else if (view === 'approvals')
-    void approvals();
-else if (view === 'metrics')
-    void metrics();
-else if (view === 'backups')
-    void backups();
-else if (view === 'inventory')
-    void inventory();
-else if (view === 'fleet')
-    void fleet();
-else if (view === 'users')
-    void users();
-else if (view === 'mail')
-    void mailPage();
-else if (view === 'directory')
-    void directoryPage();
-else
-    $('content').innerHTML = pages[view](); }
+    const names = { organization: 'Organization profile', setup: 'Setup Center · 0.1', onboarding: 'Architecture & setup', overview: 'Overview', routes: 'Routing rules', clusters: 'Backend clusters', backends: 'Backend management', health: 'Health and diagnostics', backups: 'Backups and audit', inventory: 'Infrastructure inventory', users: 'Administrators and roles', mail: 'Mail & OTP', directory: 'Active Directory (LDAPS)', approvals: 'Change approvals', metrics: 'Gateway metrics', fleet: 'Gateway fleet', capabilities: 'YARP capabilities', featurematrix: 'Traffic Engine & platform modules' };
+    $('page-title').textContent = names[view];
+    $('page-subtitle').textContent = dirty ? 'Unsaved configuration changes — submit for approval' : 'Control and inspect your gateway';
+    $('gateway-pill').textContent = '● Gateway online';
+    $('save').textContent = dirty ? '● Submit change request' : 'Submit change request';
+    document.querySelectorAll('.nav').forEach(n => n.classList.toggle('active', n.dataset.view === view));
+    const pages = { overview, routes, clusters, backends, health, capabilities };
+    updateTopologyNavigation();
+    if (view === 'organization')
+        void organizationPage();
+    else if (view === 'featurematrix')
+        void featureMatrix();
+    else if (view === 'setup')
+        void setupPage();
+    else if (view === 'onboarding')
+        $('content').innerHTML = topologyPage();
+    else if (view === 'approvals')
+        void approvals();
+    else if (view === 'metrics')
+        void metrics();
+    else if (view === 'backups')
+        void backups();
+    else if (view === 'inventory')
+        void inventory();
+    else if (view === 'fleet')
+        void fleet();
+    else if (view === 'users')
+        void users();
+    else if (view === 'mail')
+        void mailPage();
+    else if (view === 'directory')
+        void directoryPage();
+    else
+        $('content').innerHTML = pages[view]();
+}
 function modal(title, help, fields, cb, confirmLabel = 'Apply to draft') { $('confirm').textContent = confirmLabel; $('modal-title').textContent = title; $('modal-help').textContent = help; $('modal-fields').innerHTML = fields.map(f => `<div class="field"><label for="f-${esc(f.name)}">${esc(f.label)}</label>${f.options ? `<select id="f-${esc(f.name)}">${f.options.map(o => `<option value="${esc(o)}" ${o === f.value ? 'selected' : ''}>${esc(o)}</option>`).join('')}</select>` : `<input id="f-${esc(f.name)}" value="${esc(f.value)}" type="${f.kind || 'text'}" autocomplete="off" ${f.optional ? '' : 'required'} ${f.minLength ? `minlength="${f.minLength}"` : ''}>`}</div>`).join(''); const dlg = $('modal'); const form = $('editor'); form.onsubmit = e => { if (e.submitter?.getAttribute('value') === 'cancel')
     return; e.preventDefault(); const vals = {}; for (const f of fields)
     vals[f.name] = $('f-' + f.name).value; try {
@@ -544,8 +551,14 @@ function act(type, id) {
         return;
     }
     if (type === 'setup-prev') {
-        if (topologyStep === 0) { view = 'setup'; render(); }
-        else { topologyStep--; render(); }
+        if (topologyStep === 0) {
+            view = 'setup';
+            render();
+        }
+        else {
+            topologyStep--;
+            render();
+        }
         return;
     }
     if (type === 'setup-step') {
