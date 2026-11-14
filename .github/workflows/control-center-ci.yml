@@ -56,6 +56,9 @@ jobs:
         run: dotnet run --project tests/EngineConfigSecurityTests/EngineConfigSecurityTests.csproj --configuration Release
       - name: Test backend mTLS certificate contract
         run: dotnet run --project tests/BackendMtlsTests/BackendMtlsTests.csproj --configuration Release
+      - name: Verify Linux production Data Protection RSA encryption and rotation
+        if: runner.os == 'Linux'
+        run: dotnet run --project tests/LinuxKeyProtectionTests/LinuxKeyProtectionTests.csproj --configuration Release
       - name: Verify real Control Center EC2 CI-only TLS safety and allowlist
         run: dotnet run --project tests/Ec2LabSafetyTests/Ec2LabSafetyTests.csproj --configuration Release
       - name: Offline functional smoke of the real Control Center and two local backends
