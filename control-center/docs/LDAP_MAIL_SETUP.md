@@ -23,7 +23,7 @@ Transfer the `.nupkg` using your approved transfer channel to `C:\YARP-Packages`
 Use **Mail & OTP** (not the old settings modal):
 
 - SMTP FQDN: a relay reachable from the gateway, e.g. `mail.internal.example.com`
-- TCP port: normally 587 or 25 with STARTTLS. `.NET SmtpClient` in this version does **not** support implicit-TLS port 465.
+- TCP port: normally 587 or 25 with STARTTLS. `MailKit` in this version intentionally requires STARTTLS and does **not** support implicit-TLS port 465; Google and Microsoft OAuth2 modes are described in [MAIL_PROVIDER_SETUP.md](MAIL_PROVIDER_SETUP.md).
 - Sender: an allowed mailbox (`yarp-noreply@yourdomain.example`)
 - Credentials: optional for an approved anonymous relay, otherwise use a dedicated restricted SMTP account
 - Check **Require STARTTLS**. Leave **Require email OTP** unchecked.
