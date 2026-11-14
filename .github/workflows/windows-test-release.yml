@@ -1,25 +1,27 @@
 name: Windows x64 IIS test pre-release
 on:
-  push:
-    branches: ["refactor/neutral-gateway-branding-20261114"]
+  pull_request:
     paths:
       - "ops/windows-test/**"
       - ".github/workflows/windows-test-release.yml"
-  workflow_dispatch:
+ workflow_dispatch:
 permissions:
   contents: write
 concurrency:
   group: gatewaycore-windows-test-release
-  cancel-in-progress: false
+  cancel-in-progress: true
 jobs:
   build-test-publish:
-    if: github.ref == 'refs/heads/refactor/neutral-gateway-branding-20261114'
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'refactor/neutral-gateway-branding-20261114'
     runs-on: windows-2022
     timeout-minutes: 35
+    env:
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha }}
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '10.0.x'
@@ -42,7 +44,7 @@ jobs:
           Copy-Item ops/windows-test/Start-GatewayCore-Test.ps1 $stage
           Copy-Item ops/windows-test/README.md $stage
           if (-not (Test-Path (Join-Path $stage 'app/GatewayCoreYarp.exe'))) { throw 'Windows exe missing' }
-          "SOURCE_COMMIT=$env:GITHUB_SHA" | Set-Content -Encoding ascii (Join-Path $stage 'SOURCE_COMMIT.txt')
+          "SOURCE_COMMIT=$env:HEAD_SHA" | Set-Content -Encoding ascii (Join-Path $stage 'SOURCE_COMMIT.txt')
           "PRERELEASE — local IIS reverse-proxy testing only; production NO-GO." | Add-Content (Join-Path $stage 'SOURCE_COMMIT.txt')
           echo "STAGE=$stage" >> $env:GITHUB_ENV
       - name: Real executable: local IIS-like backend and gateway proxy smoke
@@ -95,8 +97,8 @@ jobs:
           $tag='v0.1.0-test.1'
           gh release view $tag --repo $env:GITHUB_REPOSITORY *> $null
           if ($LASTEXITCODE -eq 0) { throw "Tag $tag already published; refuse to silently replace an immutable test release." }
-          $notes='**TEST PRE-RELEASE ONLY**. Windows x64 self-contained GatewayCore .NET 10 build with localhost IIS upstream launcher. No Apache. No production approval. Source SHA: '+$env:GITHUB_SHA+'. See README.md inside the ZIP. Requires an isolated Windows test machine and an existing IIS test site.'
-          gh release create $tag $env:RELEASE_ZIP (Join-Path $env:RUNNER_TEMP 'SHA256SUMS.txt') --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA --title 'GatewayCore v0.1.0 Windows x64 IIS TEST' --prerelease --notes $notes
+          $notes='**TEST PRE-RELEASE ONLY**. Windows x64 self-contained GatewayCore .NET 10 build with localhost IIS upstream launcher. No Apache. No production approval. Source SHA: '+$env:HEAD_SHA+'. See README.md inside the ZIP. Requires an isolated Windows test machine and an existing IIS test site.'
+          gh release create $tag $env:RELEASE_ZIP (Join-Path $env:RUNNER_TEMP 'SHA256SUMS.txt') --repo $env:GITHUB_REPOSITORY --target $env:HEAD_SHA --title 'GatewayCore v0.1.0 Windows x64 IIS TEST' --prerelease --notes $notes
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Keep build evidence if release step fails
         if: always()
