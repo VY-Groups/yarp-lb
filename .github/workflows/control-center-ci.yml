@@ -55,6 +55,10 @@ jobs:
         run: dotnet run --project tests/EngineConfigSecurityTests/EngineConfigSecurityTests.csproj --configuration Release
       - name: Test backend mTLS certificate contract
         run: dotnet run --project tests/BackendMtlsTests/BackendMtlsTests.csproj --configuration Release
+      - name: Verify real Control Center EC2 CI-only TLS safety and allowlist
+        run: dotnet run --project tests/Ec2LabSafetyTests/Ec2LabSafetyTests.csproj --configuration Release
+      - name: Verify EC2 request caps and read-only harness without network access
+        run: python -m unittest discover -s ../tests/EC2Functional -p 'test_*.py' -v
       - name: Test TLS certificate inventory status logic
         run: dotnet run --project tests/TlsInventoryTests/TlsInventoryTests.csproj --configuration Release
       - name: Check frontend compile reproducibility
