@@ -32,10 +32,11 @@ services:
       - "../../tests/CI/stack/ingress.conf:/etc/nginx/nginx.conf:ro"
       - "./certs:/etc/labcert:ro"
     depends_on: [gateway-a, gateway-b]
-    networks: [lab]
+    networks: [lab, hostaccess]
 volumes:
   gateway_a_state: {}
   gateway_b_state: {}
 networks:
   lab:
     internal: true
+  hostaccess: {}
