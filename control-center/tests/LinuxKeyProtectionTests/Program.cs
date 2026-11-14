@@ -153,6 +153,7 @@ try
         Assert(provider.GetRequiredService<IDataProtectionProvider>()
             .CreateProtector("session-probe").Unprotect(beforeRotation)=="before-rotation",
             "old session decrypts with previous certificate during rotation overlap");
+    await ProductLinuxStartupSmoke.RunAsync();
     Console.WriteLine("LINUX DATA PROTECTION ACCEPTANCE PASSED");
 }
 finally
