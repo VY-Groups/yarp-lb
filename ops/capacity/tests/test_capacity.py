@@ -113,6 +113,31 @@ class CapacityEvidence(unittest.TestCase):
         self.scenario["gateway_nodes"]=["node-1","node-2"]
         r,d=self.report();self.assertNotEqual(r.returncode,0)
         self.assertIn("ONE_NODE_REQUIRED",str(d["error_reasons"]))
+    def test_weighted_oha_commands_are_parallel_profiles(self):
+        self.scenario["requests_per_second_per_host"]=1600
+        self.scenario["connections_per_host"]=128
+        self.scenario["threads"]=4
+        self.write_scenario()
+        r=subprocess.run([sys.executable,str(BASE/"run_oha.py"),"--scenario",str(self.scenario_path),
+             "--host-id","h1","--out",str(self.p/"dry"),"--dry-run"],
+             capture_output=True,text=True)
+        self.assertEqual(r.returncode,0,r.stderr)
+        out=json.loads(r.stdout)
+        self.assertEqual(len(out["commands"]),2)
+        self.assertEqual(sum(out["rates"]),1600)
+        self.assertEqual(sum(out["connections"]),128)
+        self.assertTrue(all("oha"==x[0] for x in out["commands"]))
+        self.assertEqual({x[-1] for x in out["commands"]},{m["url"] for m in self.scenario["response_mix"]})
+    def test_oha_missing_rate_fails_closed(self):
+        self.scenario["connections_per_host"]=128
+        self.scenario["threads"]=4
+        self.write_scenario()
+        r=subprocess.run([sys.executable,str(BASE/"run_oha.py"),"--scenario",str(self.scenario_path),
+             "--host-id","h1","--out",str(self.p/"dry"),"--dry-run"],
+             capture_output=True,text=True)
+        self.assertNotEqual(r.returncode,0)
+        self.assertIn("requests_per_second_per_host",r.stderr)
+
     def test_nofile_ceil_and_kestrel_ceil(self):
         f=self.p/"actual.json";f.write_text(json.dumps({"kestrel_max_concurrent_connections":1500,"limit_nofile":7846}))
         out=self.p/"limits.json";self.write_scenario()
