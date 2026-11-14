@@ -18,7 +18,7 @@ try:
     assert type(maxcon) is int and maxcon>0, 'REQUIRED_INPUT maxConcurrentConnections'
     required_concurrency=math.ceil(1.5*peak)
     if maxcon<required_concurrency:errors.append(f'CONNECTION_CAP_INSUFFICIENT:{maxcon} < {required_concurrency}')
-    matches=re.findall(r'^LimitNOFILE=(\\d+)$',a.limits_dropin.read_text(),re.M)
+    matches=re.findall(r'^LimitNOFILE=(\d+)$',a.limits_dropin.read_text(),re.M)
     assert len(matches)==1, 'REQUIRED_INPUT systemd LimitNOFILE exactly once'
     nofile=int(matches[0])
     required_nofile=math.ceil(2.5*maxcon+4096)
@@ -29,6 +29,6 @@ try:
 except (OSError,ValueError,TypeError,KeyError,AssertionError) as e:
     report={'decision':'NO-GO','errors':errors+['MISSING_OR_INVALID_INPUT:'+str(e)]}
 a.out.parent.mkdir(parents=True,exist_ok=True)
-a.out.write_text(json.dumps(report,indent=2)+'\\n')
+a.out.write_text(json.dumps(report,indent=2)+'\n')
 print(json.dumps(report,indent=2))
 sys.exit(0 if report['decision']=='GO' else 1)

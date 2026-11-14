@@ -46,6 +46,8 @@ jobs:
             --alerts control-center/ops/prometheus/gateway-alerts.yml \
             --dashboard tests/CI/stack/grafana/dashboard.json \
             --out artifacts/listeners/metric-contract-result.json
+      - name: Validate measured client concurrency and actual systemd NOFILE drop-in
+        run: python3 -m unittest discover -s tests/CI/listeners -p 'test_connection_limits.py' -v
       - uses: actions/upload-artifact@v4
         if: always()
         with:
