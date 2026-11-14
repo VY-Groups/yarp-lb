@@ -256,7 +256,7 @@ async function setupPage() {
         $('content').innerHTML = `<div class="setup-hero card"><div><div class="setup-eyebrow">FIRST-RUN BOOTSTRAP & OPERATIONS</div><h2>Set up your YARP gateway</h2><p>Choose deployment architecture, verify services and identity, then approve changes before routing traffic. All checks show actual server-side configuration state.</p><span class="chip">Version ${esc(x.version)} · ${esc(x.channel)}</span><span class="chip">${esc(x.gateway)}</span></div><div class="setup-score"><strong>${configured}/${x.stages.length}</strong><span>Configured setup controls, not a production-readiness score</span></div></div>
    <div class="setup-alert">${x.freeze.frozen ? `<b>Routing change freeze is ON.</b> ${esc(x.freeze.reason)}` : `<b>Routing changes are allowed with approval.</b> A local emergency freeze can stop route/change operations.`} ${currentRole === 'Administrator' ? `<button class="ghost mini" data-action="setup-toggle-freeze" data-id="${x.freeze.frozen ? 'off' : 'on'}">${x.freeze.frozen ? 'Unfreeze' : 'Freeze routing changes'}</button>` : ''}</div>
    <div class="setup-summary"><div class="card"><b>${x.routeCount}</b><span>Routes</span></div><div class="card"><b>${x.clusterCount}</b><span>Clusters</span></div><div class="card"><b>${x.destinationCount}</b><span>Enabled backend entries</span></div><div class="card"><b>${x.fleetEntries}</b><span>Gateway agent records</span></div></div>
-   <div class="toolbar"><div><h2>Bootstrap checklist</h2><p class="subtle">“Configured” is not the same as operationally tested or production certified.</p></div><div><button class="primary" data-action="setup-add-application">+ Onboard public application</button> <button class="ghost" data-action="setup-refresh">Refresh evidence</button></div></div>
+   <div class="toolbar"><div><h2>Bootstrap checklist</h2><p class="subtle">“Configured” is not the same as operationally tested or production certified.</p></div><div><button class="primary" data-action="setup-add-application">+ Onboard public application</button> <button class="ghost" data-action="setup-local-web">+ Local IIS / Apache / Nginx test</button> <button class="ghost" data-action="setup-refresh">Refresh evidence</button></div></div>
    <div class="setup-stage-grid">${x.stages.map((s, i) => `<div class="card setup-stage"><div class="setup-stage-head"><span class="setup-number">${String(i + 1).padStart(2, '0')}</span><span class="chip ${readyClass(s.status)}">${esc(s.status.replace(/-/g, ' '))}</span></div><h3>${esc(s.title)}</h3><p>${esc(s.evidence)}</p><button class="ghost mini" data-action="setup-open" data-id="${esc(s.action)}">${esc(setupActionText(s))} →</button></div>`).join('')}</div>
    <div class="grid2"><div class="card"><h3>Live YARP health states</h3><p class="subtle">Queries YARP's internal active/passive destination states. Unknown means the policy has not classified the backend.</p><button class="primary" data-action="setup-live-health">Inspect live destinations</button><div id="setup-live-output" class="setup-live-output">No runtime query made yet.</div></div><div class="card"><h3>Production safety gates</h3><p class="subtle">The following are not magically provisioned by this setup page:</p><ul class="setup-bullets"><li>Remote gateway agents, mTLS and network admission</li><li>AD/SMTP delivery and phishing-resistant SSO</li><li>Independent immutable audit retention</li><li>OCSP/CRL and CA issuance failover acceptance</li></ul><p class="subtle">The console deliberately refuses to call this instance production certified.</p></div></div>`;
     }
@@ -419,6 +419,40 @@ function addApplicationWizard() {
         show('Application added to unsaved draft. Validate both readiness endpoints before enabling active health, then submit for independent approval.');
     });
 }
+
+function addLocalWebWizard() {
+    if (currentRole === 'Viewer')
+        return show('Viewer accounts cannot submit routing changes', true);
+    if (topologyResponse?.status !== 'design-confirmed')
+        return show('Confirm the standalone architecture draft first. This will not deploy or modify IIS.', true);
+    if (topologyResponse?.plan?.mode !== 'standalone')
+        return show('The local HTTP test wizard is available only for a standalone gateway.', true);
+    modal('Local web-server test (IIS, Apache, Nginx, or other HTTP origin)', 'Creates an approval-required /lab/ draft. Only loopback HTTP targets are allowed. This does not modify IIS or your web server.', [
+        { name: 'id', label: 'Test route ID', value: 'local-web-test' },
+        { name: 'origin', label: 'Local test website URL', value: 'http://127.0.0.1/' }
+    ], v => {
+        const id = String(v.id).trim();
+        if (!validId(id))
+            throw Error('Invalid route ID');
+        let u;
+        try {
+            u = new URL(String(v.origin));
+        }
+        catch {
+            throw Error('Provide a valid local HTTP URL');
+        }
+        if (u.protocol !== 'http:' || !['127.0.0.1', 'localhost', '[::1]'].includes(u.hostname) || u.username || u.password || u.search || u.hash || u.pathname !== '/')
+            throw Error('Local test requires loopback HTTP root URL only. Remote web servers require HTTPS and independent approval.');
+        const clusterId = id + '-cluster', routeId = id + '-route';
+        if (data.clusters[clusterId] || data.routes[routeId])
+            throw Error('Test route already exists');
+        data.clusters[clusterId] = { LoadBalancingPolicy: 'RoundRobin', Destinations: { 'web-01': { Address: u.href } } };
+        data.routes[routeId] = { ClusterId: clusterId, Match: { Path: '/lab/{**catch-all}' }, Transforms: [{ PathRemovePrefix: '/lab' }] };
+        edit();
+        show('Local website added to draft. Submit for independent approval; no live traffic changed.');
+    });
+}
+
 function updateRoute(id = '') { const old = data.routes[id] || { Match: { Path: '/api/{**catch-all}', Hosts: [] }, ClusterId: keys(data.clusters)[0] || '' }; modal(id ? 'Edit route' : 'Add route', 'Use comma-separated hostnames or leave blank for any hostname. Avoid exposing internal routes publicly.', [{ name: 'id', label: 'Route ID', value: id || '' }, { name: 'cluster', label: 'Target cluster', value: old.ClusterId || '', options: keys(data.clusters) }, { name: 'path', label: 'Route path', value: old.Match?.Path || '/{**catch-all}' }, { name: 'hosts', label: 'Hostnames (comma-separated, optional)', value: (old.Match?.Hosts || []).join(', ') }], v => { if (!validId(v.id) || !data.clusters[v.cluster] || !v.path.startsWith('/'))
     throw Error('Check route ID, cluster, and /path'); if (v.id !== id && data.routes[v.id])
     throw Error('Route ID already exists'); const x = { ...old, ClusterId: v.cluster, Match: { ...old.Match, Path: v.path, Hosts: v.hosts.split(',').map((s) => s.trim()).filter(Boolean) } }; if (x.Match.Hosts.length === 0)
@@ -449,6 +483,10 @@ function act(type, id) {
     }
     if (type === 'setup-add-application') {
         addApplicationWizard();
+        return;
+    }
+    if (type === 'setup-local-web') {
+        addLocalWebWizard();
         return;
     }
     if (type === 'setup-refresh') {
