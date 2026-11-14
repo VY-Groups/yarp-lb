@@ -49,8 +49,7 @@ YARP's built-in `HealthyOrPanic` is available only on **explicit configuration**
 on an all-down condition it can send requests to nodes known unhealthy, which
 may yield 502 and duplicate *business* attempts if callers independently
 retry. Never select that mode for CA/RA/eSign signing or other high-integrity
-operations without risk approval. The HA CI lab toggles between the two
-policies and validates the failure result.
+operations without risk approval. The HA CI lab starts a fresh isolated ingress for each all-down policy to avoid treating an unverified live policy reload as proven. It validates the different failure results (503 fail-closed versus 502/504 explicit panic).
 
 ## Evidence and deployment gates
 
