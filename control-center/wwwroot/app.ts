@@ -304,13 +304,8 @@ function topologyInputUpdate(el:HTMLInputElement|HTMLSelectElement){if(!topology
  if(arr&&prop&&Number.isInteger(index)&&topologyDraft[arr]?.[index])topologyDraft[arr][index][prop]=value;
 }
 $('content').addEventListener('input',e=>{const el=e.target as HTMLInputElement;if(el.matches('[data-setup-field],[data-setup-array]'))topologyInputUpdate(el)});
-$('content').addEventListener('change',e=>{const el=e.target as HTMLInputElement;if(el.matches('#smtp-preset')){
-      const host=el.value==='zoho-in-org'?'smtppro.zoho.in':el.value==='zoho-in-standard'?'smtp.zoho.in':'';
-      const form=$('mail-config') as HTMLFormElement;
-      if(host&&form){(form.elements.namedItem('host') as HTMLInputElement).value=host;(form.elements.namedItem('port') as HTMLInputElement).value='587';(form.elements.namedItem('startTls') as HTMLInputElement).checked=true;(form.elements.namedItem('enabled') as HTMLInputElement).checked=false;show('Zoho India SMTP preset selected. Save with OTP off, test real delivery, then enable OTP. Never paste account passwords into GitHub.')}
-      return;
-    }if(el.matches('[data-setup-field],[data-setup-array]'))topologyInputUpdate(el)});
-document.querySelectorAll<HTMLButtonElement>('.nav').forEach(el=>el.onclick=()=>{view=el.dataset.view||'overview';render()});$('page-back').onclick=()=>navigateBack();$('modal-close').onclick=()=>($('modal') as HTMLDialogElement).close();$('refresh').onclick=()=>void reload();$('save').onclick=()=>void save();$('logout').onclick=()=>void api('/admin/api/logout','POST',{}).then(()=>showLogin(false)).catch(e=>show(String(e),true));void initSession();
+$('content').addEventListener('change',e=>{const el=e.target as HTMLInputElement;if(el.matches('[data-setup-field],[data-setup-array]'))topologyInputUpdate(el)});
+document.querySelectorAll<HTMLButtonElement>('.nav').forEach(el=>el.onclick=()=>{const next=el.dataset.view||'overview';if(view===next)return;view=next;render()});$('page-back').onclick=()=>navigateBack();$('modal-close').onclick=()=>($('modal') as HTMLDialogElement).close();$('refresh').onclick=()=>void reload();$('save').onclick=()=>void save();$('logout').onclick=()=>void api('/admin/api/logout','POST',{}).then(()=>showLogin(false)).catch(e=>show(String(e),true));void initSession();
 
 async function initSession(){
   try {
@@ -369,10 +364,25 @@ function resetPassword(username:string){modal('Reset '+username+' password','Exi
 {name:'password',label:'New password (16+ characters)',value:'',kind:'password',minLength:16}
 ],async v=>{try{await api('/admin/api/users/'+encodeURIComponent(username)+'/password','POST',v);show('Password changed');await users()}catch(e){show(String(e),true)}},'Reset password')}
 
+function applyZohoMailPreset(select:HTMLSelectElement){
+ const host=select.value==='zoho-in-org'?'smtppro.zoho.in':select.value==='zoho-in-standard'?'smtp.zoho.in':'';
+ if(!host)return;
+ const form=select.closest('form');
+ const hostInput=form?.querySelector<HTMLInputElement>('input[name="host"]');
+ const portInput=form?.querySelector<HTMLInputElement>('input[name="port"]');
+ const tlsInput=form?.querySelector<HTMLInputElement>('input[name="startTls"]');
+ const enabledInput=form?.querySelector<HTMLInputElement>('input[name="enabled"]');
+ if(!hostInput||!portInput||!tlsInput||!enabledInput){show('Mail form could not be updated; reopen Mail & OTP.',true);return}
+ hostInput.value=host;portInput.value='587';tlsInput.checked=true;enabledInput.checked=false;
+ show('Zoho India SMTP preset selected. Save with OTP off, test real delivery, then enable OTP. Never paste account passwords into GitHub.');
+}
+let mailPageRender=0;
 async function mailPage(){
  if(currentRole!=='Administrator')return;
+ const token=++mailPageRender;
  try{
   const m=await api('/admin/api/mail');
+  if(view!=='mail'||token!==mailPageRender)return;
   $('content').innerHTML=`<div class="toolbar"><div><h2>Mail relay & email OTP</h2><p class="subtle">Step 1: save relay settings with OTP off. Step 2: test delivery to the administrator email. Step 3: enable OTP only after the test passes. An optional SMTP relay is not needed for local gateway traffic.</p></div><span class="chip ${m.deliveryVerified?'good':'bad'}">${m.deliveryVerified?'SMTP test accepted':'Test required'}</span></div>
   <div class="settings-columns"><div class="card"><h3>SMTP connection</h3><form id="mail-config" class="settings-form">
    <label>SMTP provider / region<select id="smtp-preset">
@@ -390,6 +400,9 @@ async function mailPage(){
    <label class="setting-check"><input name="enabled" type="checkbox" ${m.enabled?'checked':''} ${!m.deliveryVerified?'disabled':''}> Require email OTP at sign-in</label>${!m.deliveryVerified?'<p class="subtle">OTP remains unavailable until the saved SMTP settings pass the delivery test. Save with OTP off, test, then return here.</p>':''}
    <div class="action-strip"><button type="submit" class="primary">Save SMTP settings</button><button type="button" class="ghost" data-action="mail-test" data-id="">Send test to my account</button></div>
   </form></div><div class="card"><h3>Secure setup sequence</h3><p class="subtle">1. Save the mail server with OTP disabled.</p><p class="subtle">2. Send a test to your registered administrator email.</p><p class="subtle">3. Confirm the email arrived.</p><p class="subtle">4. Enable OTP and save again. Next login will require a code.</p><div class="healthbanner">Authenticated mail requires STARTTLS and a trusted SMTP certificate. This version supports authenticated STARTTLS (usually port 587); implicit TLS on 465 is intentionally disabled in this version. Email OTP is not phishing-resistant MFA.</div></div></div>`;
+  const preset=$('smtp-preset') as HTMLSelectElement;
+  // Bind to the rendered select, not a stale delegated event target.
+  preset.onchange=()=>applyZohoMailPreset(preset);
  }catch(e){show(String(e),true)}
 }
 async function directoryPage(){
