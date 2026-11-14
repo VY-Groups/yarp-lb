@@ -313,8 +313,10 @@ def preflight(out: Path) -> dict:
         tests = [curl(f"http://{host}/") for _ in range(5)]
         rows.extend(tests)
         found = {x["backend"] for x in tests if x["status"] == 200 and x["backend"]}
-        require(len(found) == 1 and all(x["status"] == 200 and x["backend"] for x in tests),
-                f"BACKEND_UNREACHABLE: {host}: expected five HTTP 200 pages formatted 'backend <hostname> <time>'; got {[(x['status'], x['error']) for x in tests]}")
+        if not (len(found) == 1 and all(x["status"] == 200 and x["backend"] for x in tests)):
+            csv_output(out, "T0_preflight", rows)  # retain partial evidence
+            raise Failure(f"BACKEND_UNREACHABLE: {host}: expected five HTTP 200 pages formatted "
+                          f"'backend <hostname> <time>'; got {[(x['status'], x['error']) for x in tests]}")
         names[key] = found.pop()
     require(names["A"] != names["B"], "BACKEND_UNREACHABLE: two EC2 hosts return the same backend identity")
     csv_output(out, "T0_preflight", rows)
@@ -452,7 +454,7 @@ def run(out: Path, root: Path, dll: Path) -> None:
                 detected = time.monotonic() - start
                 for future in futures:
                     before.append(future.result())
-            require(detected <= deadline + 0.5 and
+            require(detected <= deadline and
                     re.search(r'yarp_control_destination_active_health\{destination="ec2/bad"\}\s+-1', metrics()),
                     f"{label}: unhealthy destination not ejected within {deadline}s (observed {detected:.2f}s)")
             csv_output(out, label + "_before", before)
@@ -467,7 +469,7 @@ def run(out: Path, root: Path, dll: Path) -> None:
         # TLS verification ON: self-signed EC2 HTTPS servers should be rejected.
         apply(config(backend_addresses(a, b, "https"), active=False), {"A","B"})
         strict = request_many("T5_tls_strict", budget, out, GATEWAY + "/ec2/", 8)
-        require(all(x["status"] in (502,503) and not x["backend"] for x in strict),
+        require(all(x["status"] == 502 and not x["backend"] for x in strict),
                 f"T5: unexpected accepted TLS identity / unexpected HTTP response {[(x['status'],x['backend']) for x in strict]}")
         gateway.stop()
         strict_logs = gateway.log_path.read_text(errors="replace")
