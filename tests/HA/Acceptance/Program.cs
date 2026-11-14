@@ -12,9 +12,14 @@ var artifacts = Path.Combine(repo, "artifacts", "ha");
 Directory.CreateDirectory(artifacts);
 var temp = Path.Combine(Path.GetTempPath(), "yarp-ha-" + Guid.NewGuid().ToString("N"));
 Directory.CreateDirectory(temp);
+// Independent host/harness heartbeat: a simultaneous gap in multiple
+// processes suggests a shared scheduler pause, but is not proof of cause.
+using var harnessHeartbeat = HaProcessHeartbeat.Start(
+    Path.Combine(artifacts,"heartbeat-harness.csv"),"ha-harness");
 var processes = new List<Process>();
 var outputReaders = new List<Task>();
 var checks = new List<object>();
+var sampleRows = new ConcurrentQueue<(string Phase,long StartUtcMs,long EndUtcMs,int Status,string Error)>();
 using var client = new HttpClient(new SocketsHttpHandler { UseProxy = false,
     PooledConnectionLifetime = TimeSpan.FromSeconds(2) }) { Timeout = TimeSpan.FromSeconds(8) };
 
@@ -103,6 +108,10 @@ Process Start(string label, string dll, string[] argv, Dictionary<string,string>
     start.ArgumentList.Add(dll);
     foreach (var arg in argv) start.ArgumentList.Add(arg);
     if (env is not null) foreach (var (key,value) in env) start.Environment[key] = value;
+    // Explicit per-process timestamp streams, flushed every 100ms. No network
+    // endpoints and no production config changes. Capture also after process kill.
+    start.Environment["YARP_HA_HEARTBEAT_ROLE"] = label;
+    start.Environment["YARP_HA_HEARTBEAT_FILE"] = Path.Combine(artifacts,"heartbeat-"+label+".csv");
     var process = Process.Start(start) ?? throw new Exception("Process launch failed: " + label);
     processes.Add(process);
     outputReaders.Add(DrainChild(process.StandardOutput,
@@ -126,24 +135,33 @@ async Task WaitFor(string description, Func<Task<bool>> condition, int seconds =
     }
     throw new Exception("Timed out: " + description);
 }
-async Task<(int Ok,int Fail)> Sample(int n)
+async Task<(int Ok,int Fail)> Sample(int n, string phase = "sample")
 {
     var ok=0; var failed=0;
     await Parallel.ForEachAsync(Enumerable.Range(0,n),
         new ParallelOptions { MaxDegreeOfParallelism=15 },async (_,ct) =>
         {
+            var started=DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            var status=0;
+            var error="";
             try
             {
                 using var res=await client.GetAsync("http://127.0.0.1:19080/api/identity",ct);
+                status=(int)res.StatusCode;
                 if (res.IsSuccessStatusCode)
                 {
                     var body=await res.Content.ReadAsStringAsync(ct);
-                    if (body.Contains("\"node\":\"A\"") || body.Contains("\"node\":\"B\""))
+                    if (body.Contains("\\"node\\":\\"A\\"") || body.Contains("\\"node\\":\\"B\\""))
                     { Interlocked.Increment(ref ok); return; }
                 }
             }
-            catch (HttpRequestException) {}
-            catch (TaskCanceledException) {}
+            catch (HttpRequestException ex) {error="http:"+ex.GetType().Name;}
+            catch (TaskCanceledException ex) {error="timeout:"+ex.GetType().Name;}
+            finally
+            {
+                sampleRows.Enqueue((phase,started,
+                    DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),status,error));
+            }
             Interlocked.Increment(ref failed);
         });
     return (ok,failed);
@@ -201,7 +219,7 @@ try
     using(var slow=await client.GetAsync("http://127.0.0.1:19080/api/slow"))
         Require(slow.StatusCode==HttpStatusCode.OK,
             "700ms slow but healthy upstream response is not misclassified as failed");
-    Require((await Sample(100)).Ok==100,
+    Require((await Sample(100,"post-slow-healthy")).Ok==100,
         "healthy edge remains routable after slow upstream response");
 
     // A production-like MAINTENANCE stop is a two-step sequence: mark gateway
@@ -500,6 +518,16 @@ finally
         catch {}
     }
     try { await Task.WhenAll(outputReaders); } catch {}
+    // Write complete request evidence EVEN if the test fails before process kill.
+    // A no-data run is never counted as success or silently omitted.
+    await using (var sampleFile = new StreamWriter(Path.Combine(artifacts,"prekill-request-timeline.csv"),
+        false, new UTF8Encoding(false)))
+    {
+        await sampleFile.WriteLineAsync("phase,start_utc_ms,end_utc_ms,status,error");
+        foreach(var x in sampleRows.OrderBy(x=>x.StartUtcMs))
+            await sampleFile.WriteLineAsync(string.Join(",",
+                x.Phase,x.StartUtcMs,x.EndUtcMs,x.Status,x.Error));
+    }
     File.WriteAllText(Path.Combine(artifacts,"ha-results.json"),
         JsonSerializer.Serialize(new { passed=success,checks,finishedUtc=DateTimeOffset.UtcNow },
             new JsonSerializerOptions {WriteIndented=true}));
