@@ -95,6 +95,26 @@ builder.Services.AddRateLimiter(options =>
 });
 builder.Services.AddHttpClient("probe").ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
 var app = builder.Build();
+if (ec2Lab)
+{
+    // Read-only, loopback-only snapshot of the actual in-memory YARP model,
+    // not merely the latest on-disk test configuration. Never mapped in
+    // production or on a remote public management listener.
+    app.MapGet("/gateway/ec2-lab/loaded-config", (HttpContext ctx, IProxyStateLookup state) =>
+    {
+        if (ctx.Connection.RemoteIpAddress is not { } addr || !IPAddress.IsLoopback(addr))
+            return Results.StatusCode(403);
+        var cluster = state.GetClusters().FirstOrDefault(c => c.ClusterId == "ec2");
+        if (cluster is null) return Results.StatusCode(503);
+        return Results.Ok(new {
+            policy = cluster.Model.Config.LoadBalancingPolicy,
+            destinations = cluster.Destinations.Values.ToDictionary(
+                d => d.DestinationId,
+                d => d.Model.Config.Metadata is { } md &&
+                     md.TryGetValue("Weight", out var weight) ? weight : "1")
+        });
+    });
+}
 // Strictly loopback/admin-only readout. A non-zero drop count is an ALERT,
 // never an alternative to the separately persisted security audit trail.
 app.MapGet("/admin/api/logging-health", () => Results.Ok(new {
