@@ -691,17 +691,20 @@ app.MapPost("/admin/api/mail", async (HttpContext ctx, MailSettingsInput input) 
         && string.Equals(existing.Username, input.Username, StringComparison.OrdinalIgnoreCase)
         && string.Equals(existing.OAuthClientId, input.OAuthClientId, StringComparison.Ordinal)
         && string.Equals(existing.OAuthTenant, input.OAuthTenant, StringComparison.Ordinal);
-    var encrypted = string.IsNullOrEmpty(input.Password)
-        ? string.Equals(existing.Username, input.Username, StringComparison.OrdinalIgnoreCase)
-          && string.Equals(existing.Host, input.Host, StringComparison.OrdinalIgnoreCase)
-          && mode == MailProviderAuth.PasswordMode ? existing.EncryptedPassword : ""
-        : protector.Protect(input.Password);
-    var oauthSecret = !string.IsNullOrEmpty(input.OAuthClientSecret)
-        ? protector.Protect(input.OAuthClientSecret)
-        : sameOAuthIdentity ? existing.EncryptedOAuthClientSecret : "";
-    var oauthRefresh = !string.IsNullOrEmpty(input.OAuthRefreshToken)
-        ? protector.Protect(input.OAuthRefreshToken)
-        : sameOAuthIdentity ? existing.EncryptedOAuthRefreshToken : "";
+    var encrypted = mode != MailProviderAuth.PasswordMode ? ""
+        : string.IsNullOrEmpty(input.Password)
+          ? string.Equals(existing.Username, input.Username, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(existing.Host, input.Host, StringComparison.OrdinalIgnoreCase)
+            ? existing.EncryptedPassword : ""
+          : protector.Protect(input.Password);
+    var oauthSecret = !MailProviderAuth.UsesOAuth(mode) ? ""
+        : !string.IsNullOrEmpty(input.OAuthClientSecret)
+          ? protector.Protect(input.OAuthClientSecret)
+          : sameOAuthIdentity ? existing.EncryptedOAuthClientSecret : "";
+    var oauthRefresh = !MailProviderAuth.UsesOAuth(mode) || mode == MailProviderAuth.MicrosoftApp ? ""
+        : !string.IsNullOrEmpty(input.OAuthRefreshToken)
+          ? protector.Protect(input.OAuthRefreshToken)
+          : sameOAuthIdentity ? existing.EncryptedOAuthRefreshToken : "";
     var validation = MailProviderAuth.Validate(mode, input.Host, input.Username,
         input.OAuthTenant, input.OAuthClientId, !string.IsNullOrEmpty(oauthSecret),
         !string.IsNullOrEmpty(oauthRefresh));
@@ -711,8 +714,9 @@ app.MapPost("/admin/api/mail", async (HttpContext ctx, MailSettingsInput input) 
         && string.IsNullOrEmpty(encrypted))
         return Results.BadRequest(new { code = "SMTP_PASSWORD_REQUIRED", error = "Supply an app password for authenticated SMTP or remove the username for a trusted relay." });
     var mail = new MailSettings(input.Enabled, input.Host, input.Port, input.From,
-        input.Username, encrypted, input.StartTls, mode, input.OAuthClientId,
-        oauthSecret, oauthRefresh, input.OAuthTenant);
+        input.Username, encrypted, input.StartTls, mode,
+        MailProviderAuth.UsesOAuth(mode) ? input.OAuthClientId : "",
+        oauthSecret, oauthRefresh, MailProviderAuth.UsesOAuth(mode) ? input.OAuthTenant : "");
     if (input.Enabled && !MailDeliveryVerified(mail))
         return Results.Json(new { code = "SMTP_TEST_REQUIRED", error = "Save SMTP settings with OTP disabled, send a successful test to the administrator email, then enable OTP." }, statusCode: 409);
     File.WriteAllText(mailPath + ".tmp", JsonSerializer.Serialize(mail)); File.Move(mailPath + ".tmp", mailPath, true);
