@@ -77,6 +77,19 @@ def acceptance(root:Path, dll:Path, appdir:Path):
                 "password":"Second-Password-Long-9394!","email":"second-admin@example.invalid"})
             reviewer=Client(gateway_url)
             reviewer.login("second_admin","Second-Password-Long-9394!")
+            current=user.request("GET","/admin/api/onboarding")
+            plan={"mode":"standalone","controlPlane":"local","dataStore":"local-file",
+                  "accessPattern":"segmented",
+                  "gateways":[{"id":"gateway-01","hostname":"127.0.0.1","agentUrl":""}],
+                  "workloads":[{"id":"nginx-origin","application":"origin-test",
+                      "url":f"http://127.0.0.1:{nginxport}/",
+                      "zone":"public","hostingEngine":"nginx"},
+                     {"id":"apache-origin","application":"origin-test",
+                      "url":f"http://127.0.0.1:{apacheport}/",
+                      "zone":"public","hostingEngine":"apache"}]}
+            user.request("POST","/admin/api/onboarding",{"plan":plan,
+                "confirmDesign":True,"expectedRevision":current["revision"]})
+            check(True,"Confirmed standalone architecture before changing YARP routing")
             eventually(user,"/fixture/index.html","NGINX_REAL_ORIGIN_OK")
             initial=user.request("GET","/admin/api/state")
             clusters=dict(initial["clusters"])
