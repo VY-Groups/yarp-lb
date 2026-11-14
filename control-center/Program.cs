@@ -20,13 +20,17 @@ using Microsoft.AspNetCore.RateLimiting;
 using System.Threading.RateLimiting;
 using Yarp.ReverseProxy.LoadBalancing;
 
-// Never change the production ProgramData path. The disposable GitHub EC2
-// functional rig uses a private workspace with no persisted identities.
+// Windows neutral-identity deployments use a new ProgramData root. Refuse
+// silent re-bootstrap when another YARP control plane already has identities.
+// Disposable EC2 CI uses a private workspace; production Linux state is
+// explicitly selected and owned through YARP_CONTROL_PLANE_DIR.
 var ec2Lab = Ec2WorkflowLab.Enabled;
 var privateDir = ec2Lab ? Ec2WorkflowLab.PrivateDirectory()
     : OperatingSystem.IsLinux() ? LinuxKeyProtection.InitializeStateDirectory()
     : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
         "GatewayCoreYarp", "ControlPlane");
+if (OperatingSystem.IsWindows() && !ec2Lab)
+    LegacyStateGuard.RejectUnmigratedWindowsState(privateDir);
 if (!OperatingSystem.IsLinux() || ec2Lab)
     Directory.CreateDirectory(privateDir);
 var keyDir = Path.Combine(privateDir, "data-protection-keys");
