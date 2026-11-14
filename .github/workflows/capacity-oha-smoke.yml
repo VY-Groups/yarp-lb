@@ -42,7 +42,7 @@ jobs:
           for bytes in 1024 4096; do
             docker run --rm --network host "$OHA_IMAGE" \
               -z 3s -q 20 -c 5 --worker-threads 2 \
-              --latency-correction --disable-compression --no-tui \
+              --wait-ongoing-requests-after-deadline --latency-correction --disable-compression --no-tui \
               --output-format json --http-version 1.1 \
               "http://127.0.0.1:18888/bench/$bytes" \
               >"artifacts/oha-smoke/$bytes.json"
