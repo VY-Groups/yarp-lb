@@ -15,7 +15,7 @@ Directory.CreateDirectory(temp);
 // Independent host/harness heartbeat: a simultaneous gap in multiple
 // processes suggests a shared scheduler pause, but is not proof of cause.
 using var harnessHeartbeat = HaProcessHeartbeat.Start(
-    Path.Combine(artifacts,"heartbeat-harness.csv"),"ha-harness");
+    Path.Combine(artifacts,"heartbeat-ha-harness.csv"),"ha-harness");
 var processes = new List<Process>();
 var outputReaders = new List<Task>();
 var checks = new List<object>();
