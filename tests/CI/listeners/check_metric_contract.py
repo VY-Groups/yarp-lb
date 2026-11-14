@@ -5,14 +5,14 @@ import json
 import re
 from pathlib import Path
 
-REQUIRED_TYPE = re.compile(r'^# TYPE ([a-zA-Z_:][a-zA-Z0-9_:]*)\\s', re.M)
-SERIES = re.compile(r'^([a-zA-Z_:][a-zA-Z0-9_:]*)\\s*(?:\\{|\\s)', re.M)
-PROMQL_YARP = re.compile(r'\\b(yarp_[a-zA-Z0-9_:]+)\\b')
-PROMQL_EXTERNAL = re.compile(r'\\b(probe_[a-zA-Z0-9_:]+)\\b')
+REQUIRED_TYPE = re.compile(r'^# TYPE ([a-zA-Z_:][a-zA-Z0-9_:]*)\s', re.M)
+SERIES = re.compile(r'^([a-zA-Z_:][a-zA-Z0-9_:]*)\s*(?:\{|\s)', re.M)
+PROMQL_YARP = re.compile(r'\b(yarp_[a-zA-Z0-9_:]+)\b')
+PROMQL_EXTERNAL = re.compile(r'\b(probe_[a-zA-Z0-9_:]+)\b')
 
 def parse_contract(source):
-    required=set(re.findall(r'^- \\x60(yarp_[a-zA-Z0-9_]+)\\x60$',source,re.M))
-    external=set(re.findall(r'^- \\x60(probe_[a-zA-Z0-9_]+|up)\\x60$',source,re.M))
+    required=set(re.findall(r'^- \x60(yarp_[a-zA-Z0-9_]+)\x60$',source,re.M))
+    external=set(re.findall(r'^- \x60(probe_[a-zA-Z0-9_]+|up)\x60$',source,re.M))
     if len(required)<10:raise ValueError('METRIC_CONTRACT is incomplete: expected >=10 real metrics')
     if not external:raise ValueError('METRIC_CONTRACT missing explicitly scoped external series')
     return required,external
@@ -23,7 +23,7 @@ def evaluate(metrics,contract,alerts,dashboard):
     for raw in metrics.splitlines():
         line=raw.strip()
         if not line or line.startswith('#'):continue
-        m=re.match(r'([a-zA-Z_:][a-zA-Z0-9_:]*)\\s*(?:\\{|\\s)',line)
+        m=re.match(r'([a-zA-Z_:][a-zA-Z0-9_:]*)\s*(?:\{|\s)',line)
         if m:actual.add(m.group(1))
     missing=sorted(expected-actual)
     unapproved=set()
@@ -61,7 +61,7 @@ def main():
     try: result=evaluate(a.metrics.read_text(),a.contract.read_text(),a.alerts.read_text(),a.dashboard.read_text())
     except (OSError,ValueError) as exc:result={'decision':'NO-GO','errors':['MISSING_OR_INVALID_INPUT:'+str(exc)]}
     a.out.parent.mkdir(parents=True,exist_ok=True)
-    a.out.write_text(json.dumps(result,indent=2)+'\\n')
+    a.out.write_text(json.dumps(result,indent=2)+'\n')
     print(json.dumps(result,indent=2))
     if result['decision']!='GO':raise SystemExit(1)
 
