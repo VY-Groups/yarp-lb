@@ -7,6 +7,8 @@ import sys
 import threading
 
 node = sys.argv[1]
+# Fixed 1 MiB bytes, deliberately synthetic and not claimed as live traffic mix.
+CI_BODY_1M = b"x" * 1048576
 counts = Counter()
 lock = threading.Lock()
 
@@ -24,6 +26,8 @@ class Backend(BaseHTTPRequestHandler):
             return self.respond(200, {"healthy": True, "node": node})
         if self.path == "/api/identity":
             return self.respond(200, {"node": node})
+        if self.path == "/api/body/1048576":
+            return self.respond(200, CI_BODY_1M, "application/octet-stream")
         if self.path.startswith("/lab/count/"):
             key = self.path.rsplit("/", 1)[-1]
             with lock:
