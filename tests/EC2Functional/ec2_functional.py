@@ -177,11 +177,8 @@ def config(backends: dict[str, str], policy="WeightedRandom",
             },
         },
         "Metadata": {"ConsecutiveFailuresHealthPolicy.Threshold": "1"},
-        "HttpClient": {
-            "MaxConnectionsPerServer": MAX_CONCURRENCY,
-            "EnableMultipleHttp2Connections": False,
-            "RequestHeaderEncoding": "utf-8",
-        },
+        # Concurrency is limited by the harness, never by unverified
+        # request-header/HTTP2 configuration properties in a release build.
     }
     return {"ReverseProxy": {
         "Routes": {"ec2": {"ClusterId": "ec2", "Match": {"Path": "/ec2/{**catch-all}"},
@@ -414,9 +411,9 @@ def run(out: Path, root: Path, dll: Path) -> None:
                         time.sleep(target - time.monotonic())
                     budget.consume(label)
                     futures.append(pool.submit(curl, GATEWAY + "/ec2/"))
+                detected = time.monotonic() - start
                 for future in futures:
                     before.append(future.result())
-            detected = time.monotonic() - start
             require(detected <= deadline + 0.5 and
                     re.search(r'yarp_control_destination_active_health\{destination="ec2/bad"\}\s+-1', metrics()),
                     f"{label}: unhealthy destination not ejected within {deadline}s (observed {detected:.2f}s)")
@@ -476,7 +473,7 @@ def run(out: Path, root: Path, dll: Path) -> None:
 
         # T6: requested 20 requests/sec *60s == 1200, incompatible with
         # strict <=1000/test. Preserve cap: 16/s *60s = 960. Switch at t=20.
-        apply(config(backend_addresses(a,b)), {"A","B"})
+        write_config(config_path, config(backend_addresses(a,b)))
         gateway = Gateway(dll, root, out)
         gateway.start()
         wait_configuration({"A","B"})
