@@ -47,7 +47,7 @@ jobs:
           "SOURCE_COMMIT=$env:HEAD_SHA" | Set-Content -Encoding ascii (Join-Path $stage 'SOURCE_COMMIT.txt')
           "PRERELEASE — local IIS reverse-proxy testing only; production NO-GO." | Add-Content (Join-Path $stage 'SOURCE_COMMIT.txt')
           echo "STAGE=$stage" >> $env:GITHUB_ENV
-      - name: Real executable: local IIS-like backend and gateway proxy smoke
+      - name: 'Real executable - local IIS-like backend and gateway proxy smoke'
         shell: pwsh
         run: |
           $ErrorActionPreference='Stop'
