@@ -1,0 +1,122 @@
+{
+  "uid": "yarp-ci-01",
+  "title": "YARP v0.1 Disposable CI Gateway",
+  "tags": [
+    "ci-only",
+    "0.1"
+  ],
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "5s",
+  "time": {
+    "from": "now-15m",
+    "to": "now"
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Gateway A request rate",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "ci-prom-a"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "rate(yarp_control_http_requests_total[1m])"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Gateway B request rate",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "ci-prom-b"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "rate(yarp_control_http_requests_total[1m])"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Gateway A 5xx",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "ci-prom-a"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 8,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "rate(yarp_control_http_responses_total{status_class=\"5xx\"}[1m])"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Gateway B p99 (bucket estimate)",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "ci-prom-b"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 8,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.99,sum by(le)(rate(yarp_control_http_duration_seconds_bucket[1m])))"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Dropped gateway logs",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "ci-prom-a"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 16,
+        "w": 12,
+        "h": 7
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "yarp_logging_dropped_total"
+        }
+      ]
+    }
+  ]
+}

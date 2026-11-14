@@ -1,0 +1,23 @@
+name: v0.1 synthetic OCSP CRL contract
+on:
+  pull_request:
+    paths:
+      - "tests/CI/ca/**"
+      - ".github/workflows/docker-0.1-ca.yml"
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  synthetic-ca-protocol:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create synthetic CA, verify good/revoked OCSP and signed DER CRL
+        run: bash tests/CI/ca/run.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ca-01-synthetic-contract
+          path: artifacts/ci-ca/
+          retention-days: 14

@@ -64,6 +64,20 @@ services:
     volumes:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
     depends_on: [gateway-b]
+  grafana:
+    image: grafana/grafana:11.6.1
+    environment:
+      GF_SECURITY_ADMIN_USER: "ci_operator"
+      GF_SECURITY_ADMIN_PASSWORD: "CI_ONLY_NOT_PRODUCTION_01"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    ports:
+      - "127.0.0.1:13000:3000"
+    volumes:
+      - ./grafana/datasources.yml:/etc/grafana/provisioning/datasources/ci.yml:ro
+      - ./grafana/dashboards.yml:/etc/grafana/provisioning/dashboards/ci.yml:ro
+      - ./grafana/dashboard.json:/var/lib/grafana/dashboards/ci.json:ro
+    depends_on: [prom-a, prom-b]
+    networks: [lab]
 volumes:
   state_a: {}
   state_b: {}

@@ -35,6 +35,22 @@ jobs:
         run: docker compose -f tests/CI/stack/compose.yml up -d --build
       - name: Real HTTP, real HTTPS with chain trust, RBAC boundary, no-replay, metrics and collector
         run: python tests/CI/stack/acceptance.py --phase baseline --out artifacts/ci-01/baseline.json
+      - name: Verify CI Grafana provisioned dashboards and two datasources
+        shell: bash
+        run: |
+          set -euo pipefail
+          ready=0
+          for i in $(seq 1 60); do
+            if curl --connect-timeout 1 --max-time 3 -fsS http://127.0.0.1:13000/api/health > artifacts/ci-01/grafana-health.json; then ready=1; break; fi
+            sleep 1
+          done
+          test "$ready" = 1
+          curl --fail --silent --show-error -u 'ci_operator:CI_ONLY_NOT_PRODUCTION_01' \
+            http://127.0.0.1:13000/api/dashboards/uid/yarp-ci-01 > artifacts/ci-01/grafana-dashboard.json
+          python -c 'import json; a=json.load(open("artifacts/ci-01/grafana-dashboard.json")); assert a["dashboard"]["uid"]=="yarp-ci-01"; assert len(a["dashboard"]["panels"])==5'
+          curl --fail --silent --show-error -u 'ci_operator:CI_ONLY_NOT_PRODUCTION_01' \
+            http://127.0.0.1:13000/api/datasources > artifacts/ci-01/grafana-datasources.json
+          python -c 'import json; a=json.load(open("artifacts/ci-01/grafana-datasources.json")); assert {"ci-prom-a","ci-prom-b"}.issubset({x["uid"] for x in a})'
       - name: Kill a gateway, keep both ingress endpoints available
         shell: bash
         run: |
