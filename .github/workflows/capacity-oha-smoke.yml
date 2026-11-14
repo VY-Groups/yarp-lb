@@ -1,0 +1,61 @@
+name: v0.1 real oha JSON and fixed-body smoke (CI only)
+on:
+  pull_request:
+    paths:
+      - "ops/capacity/**"
+      - ".github/workflows/capacity-oha-smoke.yml"
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  official-oha-transport-smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start a disposable fixed-size loopback test backend
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/oha-smoke
+          python3 ops/capacity/tests/oha_smoke_backend.py >artifacts/oha-smoke/backend.log 2>&1 &
+          echo $! > artifacts/oha-smoke/backend.pid
+          ready=0
+          for attempt in $(seq 1 30); do
+            if curl --noproxy '*' -fsS --max-time 2 http://127.0.0.1:18888/bench/1024 -o /dev/null; then ready=1; break; fi
+            sleep 0.2
+          done
+          test "$ready" = 1
+      - name: Exercise real oha v1.16.0 JSON, HTTP version and exact-size bodies
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker pull ghcr.io/hatoo/oha:v1.16.0
+          for bytes in 1024 4096; do
+            docker run --rm --network host ghcr.io/hatoo/oha:v1.16.0 \
+              -z 3s -q 20 -c 5 --worker-threads 2 \
+              --latency-correction --disable-compression --no-tui \
+              --output-format json --http-version 1.1 \
+              "http://127.0.0.1:18888/bench/$bytes" \
+              >"artifacts/oha-smoke/$bytes.json"
+          done
+          python3 - <<'PY'
+          import json
+          for body_size in (1024,4096):
+              raw=json.load(open(f'artifacts/oha-smoke/{body_size}.json'))
+              codes=raw['statusCodeDistribution']
+              count=codes.get('200',0)
+              assert count>0 and sum(codes.values())==count, codes
+              assert not raw['errorDistribution'], raw['errorDistribution']
+              assert raw['summary']['totalData']==count*body_size, (raw['summary']['totalData'],count,body_size)
+              assert raw['summary']['successRate']==1, raw['summary']
+              assert raw['latencyPercentiles']['p99']>=0
+              print(f'OHA_REAL_HTTP_PASS size={body_size} requests={count} bodyBytes={raw["summary"]["totalData"]}')
+          PY
+      - name: Upload actual raw generator JSON and CI version evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: oha-01-fixed-body-raw-json
+          path: artifacts/oha-smoke/
+          retention-days: 14
