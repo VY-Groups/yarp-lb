@@ -1,0 +1,26 @@
+# Template only. Physical failover and VIP movement: NOT RUN.
+global_defs {
+  router_id YARP_B
+  enable_script_security
+  script_user yarp-vrrp yarp-vrrp
+}
+vrrp_script chk_yarp {
+  script "/usr/local/sbin/check-yarp-ready.sh"
+  interval 2
+  timeout 2
+  fall 2
+  rise 2
+  weight 0
+}
+vrrp_instance VI_YARP {
+  state BACKUP
+  interface ${VIP_INTERFACE}
+  virtual_router_id ${VRID}
+  priority 100
+  advert_int 1
+  nopreempt
+  unicast_src_ip ${NODE_B_IP}
+  unicast_peer { ${NODE_A_IP} }
+  virtual_ipaddress { ${GATEWAY_VIP}/32 dev ${VIP_INTERFACE} }
+  track_script { chk_yarp }
+}
