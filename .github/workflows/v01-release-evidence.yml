@@ -1,0 +1,42 @@
+name: v0.1 exact-commit release evidence (CI only)
+on:
+  pull_request:
+    paths:
+      - "ops/release/**"
+      - "control-center/docs/ONPREM_PRODUCTION_GO_GATES.md"
+      - "ops/systemd/**"
+      - "control-center/ops/systemd/**"
+      - ".github/workflows/v01-release-evidence.yml"
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: v01-evidence-${{ github.event.pull_request.head.sha || github.sha }}
+  cancel-in-progress: true
+jobs:
+  exact-sha:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 19
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate release verdict with synthetic negative tests
+        run: python3 -m unittest discover -s ops/release/tests -p 'test_*.py' -v
+      - name: Compare all required GitHub Actions against exact PR head SHA
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          EXACT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          REPOSITORY: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 ops/release/poll_github.py \
+            --repo "$REPOSITORY" --sha "$EXACT_SHA" \
+            --out artifacts/release/evidence.json --deadline-seconds 900
+      - name: Upload GO/NO-GO evidence (never deploy)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: v01-exact-commit-ci-release-evidence
+          path: artifacts/release/
+          retention-days: 30
