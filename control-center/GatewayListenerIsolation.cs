@@ -63,7 +63,7 @@ public sealed class GatewayListenerIsolation
         _trafficCertificate = LoadPfx(config.TrafficPfxPath, config.TrafficPfxPasswordFile);
         _managementCertificate = LoadPfx(config.ManagementPfxPath, config.ManagementPfxPasswordFile);
         CheckRegular(config.ClientCaPemPath, false);
-        _clientCa = X509Certificate2.CreateFromPemFile(config.ClientCaPemPath);
+        _clientCa = X509CertificateLoader.LoadCertificateFromFile(config.ClientCaPemPath);
         if (!_clientCa.Extensions.OfType<X509BasicConstraintsExtension>().Any(e => e.CertificateAuthority))
             throw new InvalidOperationException("Management client trust anchor must be a CA certificate");
     }
