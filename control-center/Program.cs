@@ -87,7 +87,7 @@ builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationSc
         {
             try
             {
-                var path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "SpeedSignYarp", "ControlPlane", "admin-users.json");
+                var path = Path.Combine(privateDir, "admin-users.json");
                 var users = JsonSerializer.Deserialize<List<AdminUser>>(await File.ReadAllTextAsync(path)) ?? new();
                 var active = users.FirstOrDefault(u => u.Username.Equals(ctx.Principal?.Identity?.Name, StringComparison.OrdinalIgnoreCase));
                 var role = ctx.Principal?.FindFirst(ClaimTypes.Role)?.Value;
@@ -304,6 +304,20 @@ app.MapGet("/gateway/metrics", (HttpContext ctx) =>
     output.AppendLine("# HELP yarp_control_gc_heap_bytes Current managed heap bytes estimated by GC");
     output.AppendLine("# TYPE yarp_control_gc_heap_bytes gauge");
     output.Append("yarp_control_gc_heap_bytes ").Append(GC.GetTotalMemory(false)).Append('\n');
+    output.AppendLine("# HELP yarp_control_gc_collections_total GC collection count by generation since process start");
+    output.AppendLine("# TYPE yarp_control_gc_collections_total counter");
+    for (var gen=0; gen<=2; gen++)
+        output.Append("yarp_control_gc_collections_total{generation=\"").Append(gen)
+            .Append("\"} ").Append(GC.CollectionCount(gen)).Append('\n');
+    output.AppendLine("# HELP yarp_logging_dropped_total Low/high priority nonblocking console messages dropped");
+    output.AppendLine("# TYPE yarp_logging_dropped_total counter");
+    output.Append("yarp_logging_dropped_total ").Append(boundedConsole.DroppedMessages).Append('\n');
+    output.AppendLine("# HELP yarp_logging_dropped_high_priority_total Warning/Error console messages dropped");
+    output.AppendLine("# TYPE yarp_logging_dropped_high_priority_total counter");
+    output.Append("yarp_logging_dropped_high_priority_total ").Append(boundedConsole.DroppedHighPriorityMessages).Append('\n');
+    output.AppendLine("# HELP yarp_logging_write_errors_total Console writer failures");
+    output.AppendLine("# TYPE yarp_logging_write_errors_total counter");
+    output.Append("yarp_logging_write_errors_total ").Append(boundedConsole.WriteErrors).Append('\n');
     output.AppendLine("# HELP yarp_control_destination_inflight_requests YARP in-flight requests by destination");
     output.AppendLine("# TYPE yarp_control_destination_inflight_requests gauge");
     output.AppendLine("# HELP yarp_control_destination_active_health YARP active health 1 healthy, 0 unknown, -1 unhealthy");
