@@ -19,6 +19,9 @@ import re
 import subprocess
 import sys
 import time
+import tempfile
+import shutil
+import uuid
 from urllib.request import build_opener, ProxyHandler
 
 HOST_A = "ec2-3-108-65-15.ap-south-1.compute.amazonaws.com"
@@ -244,15 +247,19 @@ class Gateway:
         self.insecure, self.ack = insecure, ack
         self.process = None
         self.logfile = None
+        # Ephemeral Data Protection keys MUST NOT be uploaded with evidence.
+        # Use a separate 0700 directory in the disposable runner's temp path.
+        self.private_dir = Path(tempfile.gettempdir()) / ("yarp-ec2-private-" + uuid.uuid4().hex)
         self.log_path = out / ("gateway-relaxed.log" if ack else
                                "gateway-without-ack.log" if insecure else "gateway-strict.log")
 
     def start(self) -> None:
         env = os.environ.copy()
+        self.private_dir.mkdir(mode=0o700, parents=False, exist_ok=False)
         env.update({
             "ASPNETCORE_URLS": GATEWAY,
             "YARP_EC2_LAB_MODE": "1",
-            "YARP_EC2_LAB_PRIVATE_DIR": str((self.out / "control-plane-private").resolve()),
+            "YARP_EC2_LAB_PRIVATE_DIR": str(self.private_dir.resolve()),
         })
         env.pop("YARP_EC2_LAB_ALLOW_INSECURE_BACKEND_TLS", None)
         env.pop("YARP_EC2_LAB_TLS_RISK_ACK", None)
@@ -289,6 +296,9 @@ class Gateway:
         if self.logfile:
             self.logfile.flush()
             self.logfile.close()
+            self.logfile = None
+        if self.private_dir.is_dir():
+            shutil.rmtree(self.private_dir)
 
 
 def backend_addresses(a: str, b: str, scheme="http") -> dict[str, str]:
@@ -321,6 +331,8 @@ def run(out: Path, root: Path, dll: Path) -> None:
     names = info["identities"]
     expected = set(names.values())
     config_path = root / "appsettings.json"
+    require(not config_path.exists(),
+            "Refusing to overwrite existing real Control Center appsettings.json")
     budget = Budget(initial=info["requests_used"])
     results: list[dict] = []
     gateway: Gateway | None = None
@@ -542,6 +554,7 @@ def run(out: Path, root: Path, dll: Path) -> None:
     finally:
         if gateway is not None:
             gateway.stop()
+        config_path.unlink(missing_ok=True)
         summary = {
             "tests": results,
             "request_budget_used": budget.total,
