@@ -1,0 +1,41 @@
+name: gatewaycore-test-server
+services:
+  backend-a:
+    image: python:3.12-alpine
+    command: ["python", "-u", "/lab/backend.py", "A"]
+    volumes: ["../../tests/CI/stack/backend.py:/lab/backend.py:ro"]
+    networks: [lab]
+  backend-b:
+    image: python:3.12-alpine
+    command: ["python", "-u", "/lab/backend.py", "B"]
+    volumes: ["../../tests/CI/stack/backend.py:/lab/backend.py:ro"]
+    networks: [lab]
+  gateway-a:
+    build:
+      context: ../..
+      dockerfile: tests/CI/stack/Dockerfile.gateway
+    image: gatewaycore-test-local:0.1
+    volumes: [gateway_a_state:/state]
+    depends_on: [backend-a, backend-b]
+    networks: [lab]
+  gateway-b:
+    image: gatewaycore-test-local:0.1
+    volumes: [gateway_b_state:/state]
+    depends_on: [backend-a, backend-b]
+    networks: [lab]
+  ingress:
+    image: nginx:1.27-alpine
+    ports:
+      - "${TEST_BIND_IP:-127.0.0.1}:18080:8080"
+      - "127.0.0.1:18443:8443"
+    volumes:
+      - "../../tests/CI/stack/ingress.conf:/etc/nginx/nginx.conf:ro"
+      - "./certs:/etc/labcert:ro"
+    depends_on: [gateway-a, gateway-b]
+    networks: [lab]
+volumes:
+  gateway_a_state: {}
+  gateway_b_state: {}
+networks:
+  lab:
+    internal: true
