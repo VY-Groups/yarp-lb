@@ -198,6 +198,15 @@ async Task SendMailMessage(string recipient, string subject, string body)
     if (!cfg.StartTls) throw new InvalidOperationException("STARTTLS is required for management OTP mail.");
     using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
     using var smtp = new MailKit.Net.Smtp.SmtpClient();
+    // Standard certificate/hostname checks remain MANDATORY. The callback
+    // only records safe TLS policy and chain error categories on rejection.
+    smtp.ServerCertificateValidationCallback = (_, _, chain, errors) =>
+    {
+        if (errors != System.Net.Security.SslPolicyErrors.None)
+            app.Logger.LogWarning("SMTP_TLS_CERT_REJECTED policy={Policy} chain={Chain}",
+                errors, string.Join(",", chain?.ChainStatus.Select(x => x.Status.ToString()) ?? Enumerable.Empty<string>()));
+        return errors == System.Net.Security.SslPolicyErrors.None;
+    };
     await smtp.ConnectAsync(cfg.Host, cfg.Port, MailKit.Security.SecureSocketOptions.StartTls, timeout.Token);
     if (!string.IsNullOrWhiteSpace(cfg.Username))
         await smtp.AuthenticateAsync(cfg.Username, protector.Unprotect(cfg.EncryptedPassword), timeout.Token);
