@@ -151,7 +151,7 @@ async Task<(int Ok,int Fail)> Sample(int n, string phase = "sample")
                 if (res.IsSuccessStatusCode)
                 {
                     var body=await res.Content.ReadAsStringAsync(ct);
-                    if (body.Contains("\\"node\\":\\"A\\"") || body.Contains("\\"node\\":\\"B\\""))
+                    if (body.Contains("\"node\":\"A\"") || body.Contains("\"node\":\"B\""))
                     { Interlocked.Increment(ref ok); return; }
                 }
             }
