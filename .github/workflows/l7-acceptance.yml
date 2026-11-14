@@ -132,6 +132,12 @@ jobs:
           dotnet build tests/HA/Acceptance/Acceptance.csproj -c Release
       - name: Kill gateway, verify last-known config and health-aware ingress recovery
         run: dotnet run --project tests/HA/Acceptance/Acceptance.csproj -c Release --no-build -- "${{ github.workspace }}"
+      - name: Analyze 100ms per-process heartbeats even when HA fails
+        if: always()
+        run: python tests/HA/heartbeat_summary.py artifacts/ha
+      - name: Unit test heartbeat diagnostic summaries
+        if: always()
+        run: python -m unittest discover -s tests/HA -p 'test_heartbeat_summary.py' -v
       - name: Upload HA failure injection evidence
         if: always()
         uses: actions/upload-artifact@v4
