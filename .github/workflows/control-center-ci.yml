@@ -57,6 +57,8 @@ jobs:
         run: dotnet run --project tests/BackendMtlsTests/BackendMtlsTests.csproj --configuration Release
       - name: Verify real Control Center EC2 CI-only TLS safety and allowlist
         run: dotnet run --project tests/Ec2LabSafetyTests/Ec2LabSafetyTests.csproj --configuration Release
+      - name: Offline functional smoke of the real Control Center and two local backends
+        run: python ../tests/EC2Functional/smoke.py --root . --dll bin/Release/net10.0/SpeedSignYarp.dll
       - name: Verify EC2 request caps and read-only harness without network access
         run: python -m unittest discover -s ../tests/EC2Functional -p 'test_*.py' -v
       - name: Test TLS certificate inventory status logic
