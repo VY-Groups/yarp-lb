@@ -1,31 +1,125 @@
-# On-prem production release gate (single tenant)
+# Single-tenant on-prem production release gates — **NO-GO**
 
-First deployment is single-tenant, on-prem. Issue #36 remains P0; future SaaS tenant isolation #39 remains P2. Issue #40's harness-only starvation fix is already merged, and its original strict 1.5-second upstream activity timeout and 2-second gateway kill window must not be relaxed.
+This document describes the shipping candidate on the draft
+[PR #60](https://github.com/VY-Groups/yarp-lb/pull/60) and replaces
+the obsolete loopback-only/Redis-as-P0 guidance. **No production
+deployment has happened from CI.** An auditor must not convert a green
+GitHub Actions suite into physical operational approval.
 
-## Actual CI evidence, 2026-11-14
+## Two different decisions — do not merge them
 
-- Revision: https://github.com/VY-Groups/yarp-lb/commit/bc0bd60440e0702dd7549c70b80f9961e559ddf4
-- Complete Windows 2022 and Ubuntu 24.04 Control Center source checks SUCCESS: https://github.com/VY-Groups/yarp-lb/actions/runs/43554184563 . Ubuntu real production-mode startup with RSA X509 key wrapping, encrypted persisted Data Protection keys, permission and password negative cases, old-certificate overlap and loopback Gen2/log-drop metrics PASS in that runner. No on-prem service was tested.
-- Windows HA matrix SUCCESS, 10/10 independent CI jobs: https://github.com/VY-Groups/yarp-lb/actions/runs/43553809750 . Worst logged last observed failed response after abrupt kill was 1538.0 ms (trial 7); worst failed request count was 26. Abrupt-kill CI allows short bounded 502/504 failures; this does NOT satisfy the separate zero-error load gate.
-- Windows/Ubuntu L7, HA, performance profiling and short 75-client k6 SUCCESS: https://github.com/VY-Groups/yarp-lb/actions/runs/43554184556 . This is NOT a 60-minute multi-host capacity test.
-
-## Mandatory gates — nothing can be skipped
-
-| Gate | Release criterion | Current |
+| Decision | Requirement | Evidence |
 | --- | --- | --- |
-| Source/build/security | Build exact deployed commit, encrypted Linux DP secrets, cross-restart and rotation decryption | CI PASS; on-prem NOT RUN |
-| Capacity | Each surviving gateway alone: >= peak x 1.30 or x 1.50 for >= 3600s; every 60s window meets target; 0 HTTP/transport errors; every p99 strictly below precommitted cap; real GC/RAM/CPU/NIC evidence | NOT RUN |
-| #36 P0 independent HA | >=2 independent ingress hosts plus >=2 YARP hosts; VIP/ECMP ejection, SIGTERM with 0 failed requests, SIGKILL, blackhole and partition scenarios, rolling upgrade, safe fail-closed CA signing | NOT RUN |
-| Redis/shared state | TLS + ACL HA, coherent revision/lease semantics, split-brain-safe behavior, non-idempotent transaction no-replay, Redis outage does not block ordinary traffic | NOT IMPLEMENTED / NOT RUN |
-| Monitoring | Real loopback /gateway/metrics scrape, active destination, 5xx, p99, external cert probe under 14 days, log drops, alert delivery and dashboard | Source counters CI PASS; live operations NOT RUN |
-| Control and trust | DP key backup/restore, trusted TLS hostname/SNI, restricted management, proper OCSP/CRL, CAB/CA authorization, real rollback and recovery | NOT RUN |
+| **v0.1 development/CI GO** | All 14 named GitHub Actions workflows must complete SUCCESS on **the exact same head SHA**. The verifier rejects missing, failed, pending and stale checks. | `ops/release/assess_ci.py` and `v01-release-evidence.yml` |
+| **Production GO** | All measured, physical, operational and authorized CA/CAB gates below must independently pass. | **NOT RUN / NO-GO**: do not bypass with CI fixtures |
 
-Release answer is NO-GO while any mandatory gate is unknown, failed, skipped or not independently reviewed. Never claim a production GO from CI, a generated script, or synthetic data.
+The earlier exact head `000b7e7fd1c593b8b3ba6f2173b85771c3184996`
+completed **14/14** workflows, which is a software-only GO for
+continued controlled development. The source changes that follow this
+revision require fresh CI evidence; never recycle that historical
+verdict for a new commit.
 
-## Source-specific caveats
+## Listener and security reality
 
-The shipping application exports yarp_control_http_requests_total, yarp_control_http_responses_total (status_class), yarp_control_http_duration_seconds_bucket, yarp_control_destination_active_health, yarp_control_gc_collections_total and yarp_logging_dropped_total. External monitoring must NOT assume nonexistent gateway_* series. /gateway/metrics accepts only loopback clients; use a local collector with authenticated central forwarding. /gateway/health is process liveness; there is no /gateway/health/ready and ingress should require a real proxied backend readiness probe.
+- `control-center/GatewayListenerIsolation.cs` and the current
+  `Program.cs` provide opt-in explicit **traffic IP 80/443** and
+  separate **management IP admin/metrics ports**, with pinned
+  client certificates, management source-CIDR allowlist and rejection
+  of wildcard management binds.
+- `GET /gateway/health/ready` is the existing data-plane readiness
+  endpoint; it returns **503** unless at least one active destination
+  is healthy. `GET /gateway/health` is liveness only.
+- The production systemd template binds 80/443 with
+  `CAP_NET_BIND_SERVICE`, not an assumed NAT/L4 port forward.
+  `MaxConcurrentConnections` and `LimitNOFILE` have **no guessed
+  universal values**: derive from *measured* peak concurrency.
+- Production management certificate verification explicitly uses a
+  custom trusted CA and pinned leaf but has
+  `X509RevocationMode.NoCheck` in the current source. **Real PKI
+  revocation/OCSP/CRL acceptance remains unverified. Do not use the
+  synthetic CI CA run to approve it.**
+- Real fleet config signatures use the signed protocol v2, but
+  full two-node rollout atomicity, loss of a control plane, secure
+  shared/backup DP key rings and physical failover are **not proven**.
 
-Linux production requires YARP_CONTROL_PLANE_DIR, YARP_RUNTIME_CONFIG_PATH, YARP_LINUX_DP_CERT_PFX_PATH and YARP_LINUX_DP_CERT_PASSWORD_FILE pointing at private directories and regular files. The current shipping Linux implementation enforces 0700 state/key directories and 0600 PFX/password files. Do not copy a conflicting generic systemd secret recipe or alter Windows DPAPI defaults.
+## Observed site traffic: reported max 500 Mbps
 
-No deployment steps execute automatically from this document.
+**Units and measurement source must be verified**. If 500 megabits/s is
+the real observed peak, the unchanged **50% headroom** body-byte gate
+is **750 Mbps = 0.75 Gbps** for each *surviving* gateway operating
+alone. The optional existing 30% choice would be 650 Mbps and must
+be explicitly preapproved — it cannot replace an approved 50% gate.
+If the user's figure is instead **500 MB/s**, the corresponding 50%
+target is **6 Gbps**, not 750 Mbps.
+
+Link nameplate: 10 GbE; the previously approved single-node feasibility
+rule rejects any target above **90% of the measured link capacity**.
+Wire/switch throughput is not identical to HTTP response-body Gbps.
+Use actual response sizes, weighted routes, HTTP/HTTPS split,
+peak RPS, new connections/s and concurrent client count.
+
+The isolated GitHub-hosted
+[20-second canary](https://github.com/VY-Groups/yarp-lb/actions/runs/43576670237)
+at the older head recorded **1.006572 Gbps** of HTTP body throughput
+via the real .NET 10 YARP, 2,400 HTTP 200 responses, zero transport/HTTP
+errors and **2.051 ms p99** using **synthetic 1 MiB plain HTTP**.
+It is **not** a physical-site, 60-minute, real-mix acceptance result.
+
+The different GitHub-hosted
+[one-hour k6 soak](https://github.com/VY-Groups/yarp-lb/actions/runs/43568270365)
+recorded 34,010,745 requests, zero request failures and 32.29 ms
+overall p99, **but 993,610 dropped low-priority log messages**.
+Those dropped messages violate a zero-log-loss production operations
+gate; its CI availability PASS does not authorize production.
+
+## Mandatory evidence, unchanged thresholds
+
+1. Source-linked switch/ISP graph proving units and direction, actual
+   peak body Gbps and RPS, weighted response sizes, HTTPS share,
+   concurrent clients, new connections/s, CPU/RAM/NIC models and
+   speed, and the **precommitted** p99. **STOP** on any missing value.
+2. Direct generator-to-backend baseline, matching-ALPN ECDSA TLS and
+   keep-alive HAProxy reference, then individual NIC/OS tuning with
+   recorded ethtool RSS/rings/queues/offloads, IRQ, rmem/wmem,
+   netdev backlog, conntrack and packet-drop deltas. **STOP** on errors,
+   drops, saturation or regressions.
+3. Exploratory wrk/h2load to find maximum safe rates. Enforce
+   `Kestrel.MaxConcurrentConnections >= ceil(1.5 * measured peak
+   clients)` and `LimitNOFILE >= ceil(2.5 * actual Kestrel cap +
+   4096)` from actual deployment values. **STOP** if unmet.
+4. **Each separate physical gateway alone** must complete at least
+   3,600 seconds and all 60 60-second windows with **body Gbps >=
+   required peak * (1+headroom)**, **RPS >= measured peak RPS *
+   (1+headroom)**, **zero HTTP/transport errors**, every p99
+   **strictly below approved cap**, no NIC drops/GC/log loss and
+   complete genuine telemetry. Never claim combined half-load on
+   two nodes passes the solo-node requirement.
+5. Two truly independent gateway hosts behind validated VRRP/ECMP,
+   with the same trusted signed config revision. Prove graceful drain
+   **zero failures**, SIGKILL with actual absolute fail counts and
+   windows, physical host failure, VIP movement/ARP, split network,
+   rolling replacement, config rollback, per-node DP keys/restore,
+   safe CA signing and **no replay** of non-idempotent requests.
+   Do not reuse the ~1.5-second Windows lab time as a physical SLA.
+6. Real external TLS expiry probe, Prometheus exporter, Grafana
+   dashboards and **delivered** notifications after injected backend
+   faults, 5xx, p99, log loss and certificate expiry. Signed rotating
+   leaf certificate proof and CA/PKI approval, controlled rollback,
+   on-prem operators' change/CAB authorization.
+7. Production GO only when ALL the above are independently verified
+   and approved by an authorized human. Until then **NO-GO**.
+
+## Architecture and policy
+
+- v1 P0 [#36](https://github.com/VY-Groups/yarp-lb/issues/36):
+  two independent gateway hosts and identical signed configs behind
+  proven VRRP or ECMP, **no Redis requirement**.
+- Redis/Sentinel is the separate post-v1 research
+  [#61](https://github.com/VY-Groups/yarp-lb/issues/61).
+- Single-tenant only; future SaaS multi-tenancy [#39] is P2.
+- Follow `ops/automation/ONPREM_RUN_ORDER.md` and
+  `ops/capacity/EOD_500MBPS_RELEASE_PLAN.md`.
+  All real hardware operations are **NOT RUN** here and nothing in
+  GitHub Actions has permission to touch the private production network.
+
+**Release status: SOFTWARE CI GO on its verified SHA; PRODUCTION NO-GO.**

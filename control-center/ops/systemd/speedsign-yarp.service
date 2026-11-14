@@ -1,7 +1,7 @@
 [Unit]
-Description=SpeedSign YARP single-tenant on-prem v1 gateway (two-node test profile)
-Wants=network-online.target
+Description=SpeedSign YARP v0.1 separated listener on-prem gateway
 After=network-online.target
+Wants=network-online.target
 StartLimitIntervalSec=120
 StartLimitBurst=5
 
@@ -12,18 +12,20 @@ Group=speedsg-gateway
 WorkingDirectory=/opt/speedsign-yarp/current
 ExecStart=/usr/bin/dotnet /opt/speedsign-yarp/current/SpeedSignYarp.dll
 Environment=ASPNETCORE_ENVIRONMENT=Production
+Environment=YARP_LISTENERS_CONFIG_FILE=/etc/speedsign-yarp/listeners.json
 Environment=YARP_CONTROL_PLANE_DIR=/var/lib/speedsign-yarp/control-plane
 Environment=YARP_RUNTIME_CONFIG_PATH=/var/lib/speedsign-yarp/control-plane/config/appsettings.json
 Environment=YARP_LINUX_DP_CERT_PFX_PATH=/etc/speedsign-yarp/secrets/dp-protection.pfx
 Environment=YARP_LINUX_DP_CERT_PASSWORD_FILE=/etc/speedsign-yarp/secrets/dp-pfx-password
-Environment=YARP_LISTENERS_CONFIG_FILE=/etc/speedsign-yarp/listeners.json
-# Exact measured LimitNOFILE is REQUIRED in an approved drop-in:
-# /etc/systemd/system/speedsign-yarp.service.d/limits.conf
-# Must be >= 2.5*Kestrel.MaxConcurrentConnections + 4096.
+# Direct low-port binds without running as root. No CAP_NET_ADMIN.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 Restart=on-failure
 RestartSec=5s
+TimeoutStartSec=60s
 TimeoutStopSec=60s
 KillSignal=SIGTERM
+# No made-up LimitNOFILE. Set measured validated override; see ops/capacity/limits.py
 UMask=0077
 NoNewPrivileges=yes
 PrivateTmp=yes
@@ -33,12 +35,8 @@ ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes
 RestrictSUIDSGID=yes
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE
-AmbientCapabilities=CAP_NET_BIND_SERVICE
+LockPersonality=yes
 ReadWritePaths=/var/lib/speedsign-yarp /var/log/speedsign-yarp
-# A validated listener JSON binds traffic only on the explicit data IP:
-# HTTP 80 and ECDSA HTTPS 443; admin/metrics on explicit management IP only.
-# No NAT/port-forwarding for 443 is assumed or required.
 
 [Install]
 WantedBy=multi-user.target
