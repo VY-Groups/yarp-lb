@@ -38,6 +38,13 @@ class HeartbeatContract(unittest.TestCase):
                 for e in report["cross_process_gap_candidates"]))
             self.assertIn("Neither alone proves cause",report["interpretation"])
 
+    def test_wired_harness_filename_matches_recorded_role(self):
+        # Regression for the first executed Ubuntu artifact, where a file named
+        # heartbeat-harness.csv contained role=ha-harness and was treated as
+        # missing even though the underlying 100ms samples existed.
+        program = (Path(__file__).parent / "Acceptance" / "Program.cs").read_text()
+        self.assertIn('Path.Combine(artifacts,"heartbeat-ha-harness.csv"),"ha-harness"',program)
+
     def test_no_data_is_never_diagnostic_success(self):
         with tempfile.TemporaryDirectory() as t:
             report = analyze(Path(t))
