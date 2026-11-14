@@ -143,6 +143,10 @@ test('browser: bootstrap, navigation, onboarding, websites, route edit, users an
     await expect(page.locator('#smtp-preset')).toBeVisible();
     await page.locator('#smtp-preset').selectOption('zoho-in-org');
     await expect(page.locator('#mail-config [name="host"]')).toHaveValue('smtppro.zoho.in');
+    // Re-clicking the already active page must not start a competing API
+    // request that replaces a user's unsaved form edits.
+    await page.locator('button.nav[data-view="mail"]').click();
+    await expect(page.locator('#mail-config [name="host"]')).toHaveValue('smtppro.zoho.in');
     await expect(page.locator('#mail-config [name="port"]')).toHaveValue('587');
     await expect(page.locator('#mail-config [name="startTls"]')).toBeChecked();
     await expect(page.locator('#mail-config [name="password"]')).toHaveValue('');
