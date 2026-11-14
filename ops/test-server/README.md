@@ -15,7 +15,7 @@ not two physically independent HA hosts and not a production installation.
 - Checkout the reviewed Git SHA or the testing PR branch and run:
 
 ```bash
-git clone https://github.com/VY-Groups/yarp-lb.git
+git clone "$REPOSITORY_URL"
 cd yarp-lb
 git fetch origin refactor/neutral-gateway-branding-20261114
 git checkout refactor/neutral-gateway-branding-20261114
