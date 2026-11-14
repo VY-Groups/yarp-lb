@@ -84,8 +84,10 @@ builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationSc
         options.Cookie.HttpOnly = true;
         options.Cookie.SameSite = SameSiteMode.Strict;
         options.Cookie.SecurePolicy = CookieSecurePolicy.SameAsRequest; // local HTTP TEST only; mandate HTTPS for remote administration
-        options.ExpireTimeSpan = TimeSpan.FromMinutes(20);
-        options.SlidingExpiration = false;
+        // Inactivity timeout for interactive local administration. Renew only on
+        // authenticated user requests (never via background polling).
+        options.ExpireTimeSpan = TimeSpan.FromMinutes(30);
+        options.SlidingExpiration = true;
         options.Events.OnValidatePrincipal = async ctx =>
         {
             try
