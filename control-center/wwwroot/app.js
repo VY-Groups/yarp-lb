@@ -934,24 +934,43 @@ function resetPassword(username) {
         show(String(e), true);
     } }, 'Reset password');
 }
-function applyZohoMailPreset(select) {
-    const host = select.value === 'zoho-in-org' ? 'smtppro.zoho.in' : select.value === 'zoho-in-standard' ? 'smtp.zoho.in' : '';
-    if (!host)
+function updateMailAuthFields(form) {
+    const mode = form.querySelector('select[name="authMode"]')?.value || 'password';
+    form.querySelectorAll('[data-mail-oauth]').forEach(el => el.hidden = mode === 'password');
+    const refresh = form.querySelector('[data-mail-refresh]');
+    if (refresh)
+        refresh.hidden = mode === 'password' || mode === 'microsoft-app';
+}
+function applyMailProviderPreset(select) {
+    const presets = {
+        'zoho-in-org': ['smtppro.zoho.in', 'password'], 'zoho-in-standard': ['smtp.zoho.in', 'password'],
+        'gmail': ['smtp.gmail.com', 'google-oauth'], 'microsoft365': ['smtp.office365.com', 'microsoft-oauth'],
+        'outlook': ['smtp-mail.outlook.com', 'microsoft-oauth'],
+        'exchange': ['', 'password'], 'yahoo': ['smtp.mail.yahoo.com', 'password'],
+        'icloud': ['smtp.mail.me.com', 'password'], 'fastmail': ['smtp.fastmail.com', 'password']
+    };
+    const preset = presets[select.value];
+    if (!preset)
         return;
     const form = select.closest('form');
     const hostInput = form?.querySelector('input[name="host"]');
     const portInput = form?.querySelector('input[name="port"]');
     const tlsInput = form?.querySelector('input[name="startTls"]');
     const enabledInput = form?.querySelector('input[name="enabled"]');
-    if (!hostInput || !portInput || !tlsInput || !enabledInput) {
+    const modeInput = form?.querySelector('select[name="authMode"]');
+    if (!form || !hostInput || !portInput || !tlsInput || !enabledInput || !modeInput) {
         show('Mail form could not be updated; reopen Mail & OTP.', true);
         return;
     }
-    hostInput.value = host;
+    if (preset[0])
+        hostInput.value = preset[0];
     portInput.value = '587';
     tlsInput.checked = true;
     enabledInput.checked = false;
-    show('Zoho India SMTP preset selected. Save with OTP off, test real delivery, then enable OTP. Never paste account passwords into GitHub.');
+    enabledInput.disabled = true;
+    modeInput.value = preset[1];
+    updateMailAuthFields(form);
+    show('SMTP provider selected. Confirm its exact host, authentication and approved sender; save with OTP off, test real delivery, then enable OTP. No credentials were autofilled.');
 }
 let mailPageRender = 0;
 async function mailPage() {
@@ -968,19 +987,44 @@ async function mailPage() {
     <option value="">Custom SMTP server (keep existing settings)</option>
     <option value="zoho-in-org">Zoho Mail India — organization (smtppro.zoho.in)</option>
     <option value="zoho-in-standard">Zoho Mail India — personal/free (smtp.zoho.in)</option>
+    <option value="gmail">Gmail / Google Workspace — OAuth2</option>
+    <option value="microsoft365">Microsoft 365 / Exchange Online — delegated OAuth2</option>
+    <option value="outlook">Outlook.com / Hotmail — delegated OAuth2</option>
+    <option value="exchange">Exchange Server on-premises — approved internal SMTP relay</option>
+    <option value="yahoo">Yahoo Mail — application password</option>
+    <option value="icloud">Apple iCloud Mail — application password</option>
+    <option value="fastmail">Fastmail — application password</option>
    </select></label>
-   <p class="subtle">mail.zoho.in is the webmail website, not the SMTP endpoint. Confirm the exact server in Zoho Mail → Server Configuration Details. Selecting a preset changes only host, port, STARTTLS and disables OTP until re-tested; it never populates or transmits a password.</p>
+   <p class="subtle">Presets suggest server settings; they do not install mail services or grant OAuth permissions. Confirm host and mailbox authentication in your provider's console. mail.zoho.in is webmail, not SMTP. Gmail and Microsoft 365 recommend OAuth2; Exchange on-premises can use a policy-approved STARTTLS relay. Password and OAuth secrets are never autofilled.</p>
    <label>SMTP DNS host<input name="host" value="${esc(m.host || '')}" placeholder="smtp.internal.example.com" required></label>
    <label>Port<input name="port" type="number" value="${esc(m.port || 587)}" min="1" max="65535" required></label>
    <label>Sender address<input name="from" type="email" value="${esc(m.from || '')}" placeholder="yarp-alerts@example.com" required></label>
    <label>SMTP login (optional)<input name="username" autocomplete="off" value="${esc(m.username || '')}"></label>
-   <label>SMTP password (leave blank to preserve)<input name="password" autocomplete="new-password" type="password" placeholder="${m.passwordConfigured ? 'A credential is stored' : ''}"></label>
+   <label>Authentication mode<select name="authMode" id="mail-auth-mode">
+    <option value="password" ${(m.authMode || 'password') === 'password' ? 'selected' : ''}>SMTP app password / trusted relay</option>
+    <option value="google-oauth" ${m.authMode === 'google-oauth' ? 'selected' : ''}>Google OAuth2 (delegated refresh token)</option>
+    <option value="microsoft-oauth" ${m.authMode === 'microsoft-oauth' ? 'selected' : ''}>Microsoft OAuth2 (delegated refresh token)</option>
+    <option value="microsoft-app" ${m.authMode === 'microsoft-app' ? 'selected' : ''}>Microsoft 365 OAuth2 (app-only permissions)</option>
+   </select></label>
+   <label>SMTP application password (leave blank to preserve)<input name="password" autocomplete="new-password" type="password" placeholder="${m.passwordConfigured ? 'A credential is stored' : ''}"></label>
+   <label data-mail-oauth>OAuth application/client ID<input name="oauthClientId" value="${esc(m.oAuthClientId || '')}" autocomplete="off" placeholder="Registered OAuth application ID"></label>
+   <label data-mail-oauth>OAuth tenant ID (Microsoft only)<input name="oauthTenant" value="${esc(m.oAuthTenant || '')}" autocomplete="off" placeholder="Tenant GUID, organizations, or consumers"></label>
+   <label data-mail-oauth>OAuth client secret (blank keeps stored secret for same identity)<input name="oauthClientSecret" autocomplete="new-password" type="password" placeholder="${m.oauthClientSecretConfigured ? 'Stored secret available' : ''}"></label>
+   <label data-mail-oauth data-mail-refresh>OAuth refresh token (blank keeps stored token for same identity)<input name="oauthRefreshToken" autocomplete="new-password" type="password" placeholder="${m.oauthRefreshTokenConfigured ? 'Stored token available' : ''}"></label>
+   <p class="subtle">OAuth application registration and consent must be completed externally. Google uses Gmail delegated SMTP permission. Microsoft delegated mode requires SMTP.Send consent; app-only mode requires Exchange Online service principal/mailbox authorization. Tokens and secrets are encrypted at rest, never displayed here.</p>
    <label class="setting-check"><input name="startTls" type="checkbox" ${m.startTls ? 'checked' : ''}> Require STARTTLS (recommended: 587)</label>
    <label class="setting-check"><input name="enabled" type="checkbox" ${m.enabled ? 'checked' : ''} ${!m.deliveryVerified ? 'disabled' : ''}> Require email OTP at sign-in</label>${!m.deliveryVerified ? '<p class="subtle">OTP remains unavailable until the saved SMTP settings pass the delivery test. Save with OTP off, test, then return here.</p>' : ''}
    <div class="action-strip"><button type="submit" class="primary">Save SMTP settings</button><button type="button" class="ghost" data-action="mail-test" data-id="">Send test to my account</button></div>
   </form></div><div class="card"><h3>Secure setup sequence</h3><p class="subtle">1. Save the mail server with OTP disabled.</p><p class="subtle">2. Send a test to your registered administrator email.</p><p class="subtle">3. Confirm the email arrived.</p><p class="subtle">4. Enable OTP and save again. Next login will require a code.</p><div class="healthbanner">Authenticated mail requires STARTTLS and a trusted SMTP certificate. This version supports authenticated STARTTLS (usually port 587); implicit TLS on 465 is intentionally disabled in this version. Email OTP is not phishing-resistant MFA.</div></div></div>`;
         const preset = $('smtp-preset');
-        preset.onchange = () => applyZohoMailPreset(preset);
+        const form = $('mail-config');
+        const mode = $('mail-auth-mode');
+        preset.onchange = () => applyMailProviderPreset(preset);
+        mode.onchange = () => { const enabled = form.querySelector('input[name="enabled"]'); if (enabled) {
+            enabled.checked = false;
+            enabled.disabled = true;
+        } updateMailAuthFields(form); };
+        updateMailAuthFields(form);
     }
     catch (e) {
         show(String(e), true);
