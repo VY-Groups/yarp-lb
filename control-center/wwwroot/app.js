@@ -789,7 +789,8 @@ $('content').addEventListener('input', e => { const el = e.target; if (el.matche
     topologyInputUpdate(el); });
 $('content').addEventListener('change', e => { const el = e.target; if (el.matches('[data-setup-field],[data-setup-array]'))
     topologyInputUpdate(el); });
-document.querySelectorAll('.nav').forEach(el => el.onclick = () => { view = el.dataset.view || 'overview'; render(); });
+document.querySelectorAll('.nav').forEach(el => el.onclick = () => { const next = el.dataset.view || 'overview'; if (view === next)
+    return; view = next; render(); });
 $('page-back').onclick = () => navigateBack();
 $('modal-close').onclick = () => $('modal').close();
 $('refresh').onclick = () => void reload();
