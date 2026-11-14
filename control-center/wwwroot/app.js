@@ -979,7 +979,6 @@ async function mailPage() {
    <div class="action-strip"><button type="submit" class="primary">Save SMTP settings</button><button type="button" class="ghost" data-action="mail-test" data-id="">Send test to my account</button></div>
   </form></div><div class="card"><h3>Secure setup sequence</h3><p class="subtle">1. Save the mail server with OTP disabled.</p><p class="subtle">2. Send a test to your registered administrator email.</p><p class="subtle">3. Confirm the email arrived.</p><p class="subtle">4. Enable OTP and save again. Next login will require a code.</p><div class="healthbanner">Authenticated mail requires STARTTLS and a trusted SMTP certificate. This version supports authenticated STARTTLS (usually port 587); implicit TLS on 465 is intentionally disabled in this version. Email OTP is not phishing-resistant MFA.</div></div></div>`;
         const preset = $('smtp-preset');
-        // Bind to the rendered select, not a stale delegated event target.
         preset.onchange = () => applyZohoMailPreset(preset);
     }
     catch (e) {
