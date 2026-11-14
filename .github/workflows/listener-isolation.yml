@@ -1,0 +1,56 @@
+name: v0.1 real-socket listener isolation and actual metrics
+on:
+  pull_request:
+    paths:
+      - "control-center/**"
+      - "tests/CI/listeners/**"
+      - ".github/workflows/listener-isolation.yml"
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  real-sockets:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+      - name: Build actual shipping gateway
+        run: dotnet build control-center/SpeedSignYarp.csproj -c Release
+      - name: Exercise 4 real sockets with mTLS and wildcard rejection
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tests/CI/listeners/test_isolation.py \
+            --dll control-center/bin/Release/net10.0/SpeedSignYarp.dll \
+            --out artifacts/listeners
+      - name: Diff real exported metric families against contract and alert/dashboard expressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tests/CI/listeners/check_actual_metrics.py \
+            --metrics artifacts/listeners/metrics.txt \
+            --contract control-center/ops/prometheus/METRIC_CONTRACT.md \
+            --alerts control-center/ops/prometheus/gateway-alerts.yml \
+            --dashboard tests/CI/stack/grafana/dashboard.json | tee artifacts/listeners/metrics-contract-check.json
+      - name: Diff the real /gateway/metrics response against metric contract, alerts and dashboard
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m unittest discover -s tests/CI/listeners -p 'test_metric_contract.py' -v
+          python3 tests/CI/listeners/check_metric_contract.py \
+            --metrics artifacts/listeners/metrics.txt \
+            --contract control-center/ops/prometheus/METRIC_CONTRACT.md \
+            --alerts control-center/ops/prometheus/gateway-alerts.yml \
+            --dashboard tests/CI/stack/grafana/dashboard.json \
+            --out artifacts/listeners/metric-contract-result.json
+      - name: Validate measured client concurrency and actual systemd NOFILE drop-in
+        run: python3 -m unittest discover -s tests/CI/listeners -p 'test_connection_limits.py' -v
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v01-listener-socket-metrics-evidence
+          path: artifacts/listeners/
+          retention-days: 14

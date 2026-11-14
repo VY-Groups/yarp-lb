@@ -33,6 +33,9 @@ var keyDir = Path.Combine(privateDir, "data-protection-keys");
 if (!OperatingSystem.IsLinux() || ec2Lab)
     Directory.CreateDirectory(keyDir);
 var builder = WebApplication.CreateBuilder(args);
+// Explicit v0.1 multi-socket mode; legacy loopback remains CI migration-only.
+var isolatedListeners = GatewayListenerIsolation.FromEnvironment();
+isolatedListeners?.Configure(builder.WebHost);
 // Production and the GatewayLab use the same nonblocking registration.
 var boundedConsole = GatewayLoggingConfiguration.Install(builder.Logging, Console.Out);
 var dataProtection = builder.Services.AddDataProtection()
@@ -105,7 +108,8 @@ builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationSc
         options.Events.OnRedirectToAccessDenied = ctx => { ctx.Response.StatusCode = 403; return Task.CompletedTask; };
     });
 builder.Services.AddAuthorization();
-builder.Services.AddSingleton<DirectoryAuthService>();
+builder.Services.AddSingleton<DirectoryAuthService>(sp =>
+    new DirectoryAuthService(sp.GetRequiredService<IDataProtectionProvider>(), privateDir));
 builder.Services.AddRateLimiter(options =>
 {
     options.RejectionStatusCode = 429;
@@ -206,9 +210,13 @@ app.Use(async (ctx, next) =>
 {
     var path = ctx.Request.Path;
     var adminPath = path.StartsWithSegments("/admin") || path.StartsWithSegments("/dashboard") || path == "/";
+    if (isolatedListeners is not null && !isolatedListeners.Permit(ctx))
+    {
+        ctx.Response.StatusCode = 403; return;
+    }
     if (adminPath)
     {
-        if (ctx.Connection.RemoteIpAddress is null || !IPAddress.IsLoopback(ctx.Connection.RemoteIpAddress))
+        if (isolatedListeners is null && (ctx.Connection.RemoteIpAddress is null || !IPAddress.IsLoopback(ctx.Connection.RemoteIpAddress)))
         {
             ctx.Response.StatusCode = 403; return;
         }
@@ -281,7 +289,8 @@ app.MapGet("/admin/api/metrics", () =>
 // A local collector can scrape and forward to a separately secured metrics backend.
 app.MapGet("/gateway/metrics", (HttpContext ctx) =>
 {
-    if (ctx.Connection.RemoteIpAddress is not { } address || !IPAddress.IsLoopback(address))
+    if (isolatedListeners is null &&
+        (ctx.Connection.RemoteIpAddress is not { } address || !IPAddress.IsLoopback(address)))
         return (IResult)Results.StatusCode(403);
     var output = new StringBuilder();
     output.AppendLine("# HELP yarp_control_http_requests_total Non-admin HTTP requests observed by this process");
@@ -743,6 +752,11 @@ app.MapGet("/dashboard", () => Results.File(Path.Combine(root, "wwwroot", "index
 app.MapGet("/dashboard/app.js", () => Results.File(Path.Combine(root, "wwwroot", "app.js"), "text/javascript; charset=utf-8"));
 app.MapGet("/dashboard/style.css", () => Results.File(Path.Combine(root, "wwwroot", "style.css"), "text/css; charset=utf-8"));
 app.MapGet("/gateway/health", () => Results.Ok(new { status = "healthy", gateway = Environment.MachineName, utc = DateTimeOffset.UtcNow }));
+// Readiness is on the DATA listener only in isolated mode; unknown/empty backends fail closed.
+app.MapGet("/gateway/health/ready", (IProxyStateLookup proxy) =>
+    GatewayListenerIsolation.AnyDestinationHealthy(proxy)
+        ? Results.Ok(new { ready = true })
+        : Results.StatusCode(503));
 
 JsonObject ReadConfig() => JsonNode.Parse(File.ReadAllText(configPath))!.AsObject();
 JsonObject ReadProxy() => (ReadConfig()["ReverseProxy"]?.DeepClone() as JsonObject) ?? new JsonObject();

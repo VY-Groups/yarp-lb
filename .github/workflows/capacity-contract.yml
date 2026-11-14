@@ -1,0 +1,29 @@
+name: v0.1 capacity strict measured input contracts
+on:
+  pull_request:
+    paths:
+      - "ops/capacity/**"
+      - ".github/workflows/capacity-contract.yml"
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  synthetic-negative-gates:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile fail-closed Python contracts
+        run: python3 -m compileall -q ops/capacity/
+      - name: Execute complete-hour fixture and negative gate tests
+        run: python3 -m unittest discover -s ops/capacity/tests -p 'test_*.py' -v
+      - name: Refuse to approve unpopulated production example
+        shell: bash
+        run: |
+          set -euo pipefail
+          output=$(mktemp)
+          if python3 ops/capacity/limits.py --scenario ops/capacity/scenario.example.json --profile ops/capacity/scenario.example.json --out "$output"; then
+            echo "FAIL: example with null measured traffic somehow received GO"
+            exit 1
+          fi
+          grep -q 'REQUIRED_INPUT' "$output"

@@ -1,0 +1,22 @@
+name: v0.1 GitHub Actions definitions lint
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/**"
+      - ".github/actionlint.yaml"
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  actionlint:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate every workflow definition and embedded shell
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v "$PWD:/repo:ro" -w /repo \
+            rhysd/actionlint:1.7.12 -color

@@ -1,0 +1,24 @@
+# Disposable CI container, not a production deployment image.
+FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
+WORKDIR /src
+COPY . .
+RUN dotnet publish control-center/SpeedSignYarp.csproj -c Release -o /published
+
+FROM mcr.microsoft.com/dotnet/aspnet:10.0
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends openssl ca-certificates curl && rm -rf /var/lib/apt/lists/* \
+ && useradd --uid 10001 --home-dir /state --create-home --shell /usr/sbin/nologin yarpci \
+ && mkdir -p /app /state && chown -R yarpci:yarpci /state
+WORKDIR /app
+COPY --from=build /published/ /app/
+COPY tests/CI/stack/entrypoint.sh /entrypoint.sh
+RUN chmod 0755 /entrypoint.sh
+USER 10001
+ENV ASPNETCORE_ENVIRONMENT=Production \
+    ASPNETCORE_URLS=http://0.0.0.0:8080 \
+    YARP_CONTROL_PLANE_DIR=/state \
+    YARP_RUNTIME_CONFIG_PATH=/state/config/appsettings.json \
+    YARP_LINUX_DP_CERT_PFX_PATH=/state/secrets/current.pfx \
+    YARP_LINUX_DP_CERT_PASSWORD_FILE=/state/secrets/pfx-password
+EXPOSE 8080
+ENTRYPOINT ["/entrypoint.sh"]

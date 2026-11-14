@@ -1,0 +1,18 @@
+{
+  "_instructions": "DO NOT DEPLOY: replace every null using measured, verified values; unknown fields also fail",
+  "trafficIp": null,
+  "trafficHttpPort": 80,
+  "trafficHttpsPort": 443,
+  "managementIp": null,
+  "adminPort": 9443,
+  "metricsPort": 9100,
+  "trafficPfxPath": null,
+  "trafficPfxPasswordFile": null,
+  "managementPfxPath": null,
+  "managementPfxPasswordFile": null,
+  "clientCaPemPath": null,
+  "clientThumbprints": [],
+  "allowedAdminCidrs": [],
+  "maxConcurrentConnections": null,
+  "httpVersion": null
+}

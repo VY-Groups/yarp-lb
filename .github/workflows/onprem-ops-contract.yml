@@ -1,0 +1,19 @@
+name: On-prem operations source contract
+on:
+  push:
+    branches: ["ops/**"]
+    paths: ["control-center/ops/**", "control-center/tests/test_onprem_ops_contracts.py", ".github/workflows/onprem-ops-contract.yml"]
+  pull_request:
+    paths: ["control-center/ops/**", "control-center/tests/test_onprem_ops_contracts.py", ".github/workflows/onprem-ops-contract.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  source-metric-contract:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check source metric names, loopback scope and external TLS dependency
+        run: python -m unittest discover -s control-center/tests -p "test_onprem_ops_contracts.py" -v
