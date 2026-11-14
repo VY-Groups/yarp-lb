@@ -671,9 +671,16 @@ app.MapPost("/admin/api/mail/test", async (HttpContext ctx) =>
         await Audit(Actor(ctx), "SMTP_DELIVERY_TEST_SUCCEEDED", new { cfg.Host, recipient = admin.Email });
         return Results.Ok(new { tested = true, recipient = admin.Email, note = "SMTP relay accepted message; confirm it arrived" });
     }
-    catch
+    catch (Exception ex)
     {
-        await Audit(Actor(ctx), "SMTP_DELIVERY_TEST_FAILED");
+        // Diagnostics are intentionally limited to exception TYPES, never the
+        // untrusted error message: SMTP libraries can include credentials,
+        // server banners, usernames or recipient addresses in exception text.
+        var failureType = ex.GetType().Name;
+        var innerType = ex.InnerException?.GetType().Name ?? "None";
+        app.Logger.LogWarning("SMTP_DELIVERY_TEST_FAILED errorType={ErrorType} innerType={InnerType}",
+            failureType, innerType);
+        await Audit(Actor(ctx), "SMTP_DELIVERY_TEST_FAILED", new { failureType, innerType });
         return Results.Json(new { code = "SMTP_RELAY_UNAVAILABLE", error = "SMTP relay test failed. Check reachability, STARTTLS certificate trust, credentials and relay permissions. No OTP settings were enabled." }, statusCode: 503);
     }
 }).RequireRateLimiting("mailtest").RequireAuthorization(p => p.RequireRole("Administrator"));
