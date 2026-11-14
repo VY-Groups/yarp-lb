@@ -69,6 +69,27 @@ void Config(string path, IEnumerable<(string Id, string Address)> destinations,
     };
     File.WriteAllText(path, JsonSerializer.Serialize(config), Encoding.UTF8);
 }
+// Independently drain every child stdout/stderr stream. Unlike ReadToEndAsync,
+// this does NOT accumulate megabytes of logs in the test harness heap, which
+// itself can introduce GC pauses during a tight failover observation window.
+async Task DrainChild(TextReader input, string path)
+{
+    const long maxRecordedChars = 16L * 1024 * 1024;
+    var recorded = 0L;
+    await using var file = new FileStream(path, FileMode.Create, FileAccess.Write,
+        FileShare.Read, 65536, FileOptions.Asynchronous);
+    await using var writer = new StreamWriter(file);
+    string? line;
+    while ((line = await input.ReadLineAsync()) is not null)
+    {
+        // Keep consuming even when the bounded artifact budget is exhausted.
+        if(recorded >= maxRecordedChars) continue;
+        var clipped = line.Length > 4096 ? line[..4096] + "[LINE TRUNCATED]" : line;
+        recorded += clipped.Length + 1;
+        await writer.WriteLineAsync(clipped);
+    }
+    await writer.FlushAsync();
+}
 Process Start(string label, string dll, string[] argv, Dictionary<string,string>? env = null)
 {
     var start = new ProcessStartInfo("dotnet")
@@ -84,10 +105,10 @@ Process Start(string label, string dll, string[] argv, Dictionary<string,string>
     if (env is not null) foreach (var (key,value) in env) start.Environment[key] = value;
     var process = Process.Start(start) ?? throw new Exception("Process launch failed: " + label);
     processes.Add(process);
-    outputReaders.Add(Task.Run(async () => await File.WriteAllTextAsync(
-        Path.Combine(artifacts,label+".out.log"), await process.StandardOutput.ReadToEndAsync())));
-    outputReaders.Add(Task.Run(async () => await File.WriteAllTextAsync(
-        Path.Combine(artifacts,label+".err.log"), await process.StandardError.ReadToEndAsync())));
+    outputReaders.Add(DrainChild(process.StandardOutput,
+        Path.Combine(artifacts,label+".out.log")));
+    outputReaders.Add(DrainChild(process.StandardError,
+        Path.Combine(artifacts,label+".err.log")));
     return process;
 }
 async Task<bool> Responds(string url, int code = 200)
