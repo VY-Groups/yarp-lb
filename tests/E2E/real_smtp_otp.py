@@ -102,7 +102,7 @@ def acceptance(root:Path):
     with local_smtp(root,mailport) as (mailbox,ca):
         # Probe the fixture with a strict, real Python STARTTLS SMTP client
         # first. This distinguishes fixture defects from product defects.
-        with smtplib.SMTP("localhost",mailport,timeout=8) as client:
+        with smtplib.SMTP("127.0.0.1",mailport,timeout=8) as client:
             client.ehlo()
             client.starttls(context=ssl.create_default_context(cafile=str(ca)))
             client.ehlo()
@@ -123,7 +123,7 @@ def acceptance(root:Path):
                 admin.bootstrap("mail_admin",ADMIN_PASSWORD,"admin@example.invalid")
                 admin.request("GET","/admin/api/mail")
                 config={
-                    "enabled":False,"host":"localhost","port":mailport,
+                    "enabled":False,"host":"127.0.0.1","port":mailport,
                     "from":"admin@example.invalid","username":MAIL_USER,
                     "password":MAIL_PASSWORD,"startTls":True
                 }
