@@ -6,14 +6,14 @@ A **single-tenant, on-premises HTTP(S) L7 reverse proxy and management control c
 
 ## Latest Windows test build
 
-**[GatewayCore v0.1.0-test.10 — GitHub Release](https://github.com/VY-Groups/yarp-lb/releases/tag/v0.1.0-test.10)**
+**[GatewayCore v0.1.0-test.10 — GitHub Release](../../releases/tag/v0.1.0-test.10)**
 
 - Self-contained **Windows x64** test application; no local .NET SDK installation is required to launch the published executable.
 - Includes fixes for Mail & OTP / Zoho India SMTP preset selection, repeated same-page navigation overwriting unsaved edits, and the scrollable sidebar on shorter screens.
 - Built and tested with real Windows executable/proxy smoke, frontend TypeScript parity, real-process API acceptance, and headless Chromium browser tests.
 - The test release is not a Windows Service installer or code-signed production release. Windows Smart App Control or organizational application-control policy may block an unsigned executable. **Do not disable endpoint protection** to work around it.
 
-[Windows test installation and precautions](ops/windows-test/README.md) · [Windows release workflow](.github/workflows/windows-test-release.yml) · [Release SHA-256 checksums](https://github.com/VY-Groups/yarp-lb/releases/download/v0.1.0-test.10/SHA256SUMS.txt)
+[Windows test installation and precautions](ops/windows-test/README.md) · [Windows release workflow](.github/workflows/windows-test-release.yml) · [Release SHA-256 checksums](../../releases/download/v0.1.0-test.10/SHA256SUMS.txt)
 
 ### First test on a disposable Windows server
 
@@ -61,7 +61,7 @@ Relevant tests and workflows:
 - [L7 HTTP traffic and failover tests](tests/L7/)
 - [External integration evidence and manual acceptance ledger](control-center/docs/EXTERNAL_INTEGRATION_ACCEPTANCE.md)
 
-**Verified source reference:** the test.10 application includes the fixes from [PR #68](https://github.com/VY-Groups/yarp-lb/pull/68), whose exact-source CI passed **9/9**. The [post-fix main L7 run](https://github.com/VY-Groups/yarp-lb/actions/runs/43602455405) passed all **7/7** jobs; the [test.10 Windows release workflow](https://github.com/VY-Groups/yarp-lb/actions/runs/43602276788) passed. These refer to their recorded commits, **not** an automatic all-green assertion about future commits. Check the [latest Actions status](https://github.com/VY-Groups/yarp-lb/actions) before testing another revision.
+**Verified source reference:** the test.10 application includes the fixes from [PR #68](../../pull/68), whose exact-source CI passed **9/9**. The [post-fix main L7 run](../../actions/runs/43602455405) passed all **7/7** jobs; the [test.10 Windows release workflow](../../actions/runs/43602276788) passed. These refer to their recorded commits, **not** an automatic all-green assertion about future commits. Check the [latest Actions status](../../actions) before testing another revision.
 
 ## Zoho Mail India: SMTP and OTP testing
 
@@ -101,7 +101,7 @@ A production decision requires **all** relevant gates to pass on the **actual de
 - Validate real SMTP delivery, AD/LDAPS, upstream TLS/PKI, operator monitoring and independent change approval as appropriate.
 - Do **not** overwrite or copy old encrypted identity stores: renamed application/cookie/Data Protection purposes need a separately approved migration and rollback.
 
-[Single-tenant on-prem production GO/NO-GO gates](control-center/docs/ONPREM_PRODUCTION_GO_GATES.md) · [Control Center architecture and detailed installation](control-center/README.md) · [Repository Actions](https://github.com/VY-Groups/yarp-lb/actions)
+[Single-tenant on-prem production GO/NO-GO gates](control-center/docs/ONPREM_PRODUCTION_GO_GATES.md) · [Control Center architecture and detailed installation](control-center/README.md) · [Repository Actions](../../actions)
 
 ## Repository layout
 
