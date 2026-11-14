@@ -19,17 +19,28 @@ using Microsoft.AspNetCore.RateLimiting;
 using System.Threading.RateLimiting;
 using Yarp.ReverseProxy.LoadBalancing;
 
-var privateDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "SpeedSignYarp", "ControlPlane");
+// Never change the production ProgramData path. The disposable GitHub EC2
+// functional rig uses a private workspace with no persisted identities.
+var ec2Lab = Ec2WorkflowLab.Enabled;
+var privateDir = ec2Lab ? Ec2WorkflowLab.PrivateDirectory()
+    : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+        "SpeedSignYarp", "ControlPlane");
 Directory.CreateDirectory(privateDir);
 var keyDir = Path.Combine(privateDir, "data-protection-keys");
 Directory.CreateDirectory(keyDir);
 var builder = WebApplication.CreateBuilder(args);
 // Production and the GatewayLab use the same nonblocking registration.
 var boundedConsole = GatewayLoggingConfiguration.Install(builder.Logging, Console.Out);
-builder.Services.AddDataProtection()
+var dataProtection = builder.Services.AddDataProtection()
     .SetApplicationName("SpeedSignYarpControlCenter")
-    .PersistKeysToFileSystem(new DirectoryInfo(keyDir))
-    .ProtectKeysWithDpapi(protectToLocalMachine: true);
+    .PersistKeysToFileSystem(new DirectoryInfo(keyDir));
+if (OperatingSystem.IsWindows())
+    dataProtection.ProtectKeysWithDpapi(protectToLocalMachine: true);
+else if (!ec2Lab)
+    throw new PlatformNotSupportedException(
+        "Windows DPAPI protection is required outside the disposable CI-only EC2 test mode.");
+else
+    Console.Error.WriteLine("WARNING: CI-only EC2 lab uses temporary, unencrypted local Data Protection keys. Never use in production.");
 builder.Configuration.AddJsonFile("appsettings.json", optional: false, reloadOnChange: true);
 builder.Services.AddReverseProxy()
     .LoadFromConfig(builder.Configuration.GetSection("ReverseProxy"))
