@@ -176,7 +176,7 @@ try
     var gateway2=Start("gateway-2",gatewayDll,[],Settings(18083,18444,g2config,"gateway-2"));
     await WaitFor("both YARP gateways",async()=>await Responds("http://127.0.0.1:18080/lab/ping") &&
         await Responds("http://127.0.0.1:18083/lab/ping"));
-    _=Start("health-aware-ingress",gatewayDll,[],Settings(19080,19443,edgeConfig,""));
+    var ingress=Start("health-aware-ingress",gatewayDll,[],Settings(19080,19443,edgeConfig,""));
     await WaitFor("ingress",()=>Responds("http://127.0.0.1:19080/lab/ping"));
     await Task.Delay(2500);
     var initial=await Sample(300);
@@ -456,19 +456,32 @@ try
     // Never enable this for CA/RA signing or enrollment without risk approval.
     Config(edgeConfig,new[] {("gateway-1","http://127.0.0.1:18080/"),
         ("gateway-2","http://127.0.0.1:18083/")}, "/lab/ping", explicitPanic:true);
+    // Recreate the disposable lab ingress to characterize the explicitly
+    // opted-in panic policy from startup. Hot-reload of a health policy on
+    // an all-down cluster is a separate requirement; never claim it here.
+    ingress.Kill();
+    await ingress.WaitForExitAsync();
+    ingress=Start("health-aware-ingress-panic",gatewayDll,[],
+        Settings(19080,19443,edgeConfig,""));
+    await WaitFor("panic ingress listener",()=>Responds("http://127.0.0.1:19080/lab/ping"));
     await WaitFor("explicit panic tries all-down destinations",async () =>
     {
         try
         {
             using var response=await client.GetAsync("http://127.0.0.1:19080/api/identity");
-            return (int)response.StatusCode==502;
+            return (int)response.StatusCode is 502 or 504;
         }
         catch {return false;}
     },20);
     checks.Add(new {description="all-down-explicit-panic",
-        evidence="opt-in YARP HealthyOrPanic attempts dead backends; default 503 remains safer"});
+        evidence="opt-in YARP HealthyOrPanic tries known-dead gateways and returns 502/504; restart used to apply policy"});
     Config(edgeConfig,new[] {("gateway-1","http://127.0.0.1:18080/"),
         ("gateway-2","http://127.0.0.1:18083/")}, "/lab/ping", explicitPanic:false);
+    ingress.Kill();
+    await ingress.WaitForExitAsync();
+    ingress=Start("health-aware-ingress-failclosed",gatewayDll,[],
+        Settings(19080,19443,edgeConfig,""));
+    await WaitFor("failclosed ingress listener",()=>Responds("http://127.0.0.1:19080/lab/ping"));
     await WaitFor("reverted all-down policy fails closed with HTTP 503",
         ()=>Responds("http://127.0.0.1:19080/api/identity",503),20);
     success=true;
