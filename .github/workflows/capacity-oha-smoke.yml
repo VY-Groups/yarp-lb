@@ -2,6 +2,7 @@ name: v0.1 real oha JSON and fixed-body smoke (CI only)
 on:
   pull_request:
     paths:
+      - "tests/CI/branding/**"
       - "ops/capacity/**"
       - ".github/workflows/capacity-oha-smoke.yml"
   workflow_dispatch:

@@ -1,4 +1,4 @@
-// SpeedSign administration: Active Directory over LDAPS only.
+// GatewayCore administration: Active Directory over LDAPS only.
 // Group membership is checked at sign-in AND on each authenticated request.
 // A domain account must match an explicitly configured AD group to receive access.
 using System.DirectoryServices.Protocols;
@@ -50,7 +50,7 @@ sealed class DirectoryAuthService
         if (!Directory.Exists(stateDirectory))
             throw new DirectoryNotFoundException("Control plane state root missing: " + stateDirectory);
         _configPath = Path.Combine(stateDirectory, "active-directory.json");
-        _protector = provider.CreateProtector("SpeedSignYarp.DirectoryBindPassword.v1");
+        _protector = provider.CreateProtector("GatewayCoreYarp.DirectoryBindPassword.v1");
     }
 
     public DirectorySettings Read() => File.Exists(_configPath)

@@ -20,11 +20,28 @@ A **single-organization**, Windows-first YARP management application. The operat
 
 This release currently assumes ONE organization per controller. Different industries can deploy independent instances. **It is not SaaS multi-tenant safe**: profiles do not enforce per-tenant authorization or storage segregation.
 
-**Legacy migration compatibility:** the existing Windows project path `C:\YARP\SpeedSignYarp`, .NET assembly name, cookie name, ASP.NET Data Protection application name and `C:\ProgramData\SpeedSignYarp\ControlPlane` store remain unchanged. Renaming them without an explicit migration would break current accounts/cookies/encrypted SMTP settings. New installations will receive a separate path migration in a future validated release.
+**BREAKING IDENTIFIER MIGRATION:** the pre-production project previously
+used organization-branded .NET assembly names, Windows ProgramData roots,
+ASP.NET Data Protection application isolation, cookies, and protected
+credential purposes. All have been changed to neutral GatewayCore names.
+A same-path in-place upgrade **will not automatically decrypt old
+administrator, mail, or directory binding secrets**, and an old key-ring
+copy does not repair a changed Data Protection application/purpose.
+New installation on fresh test state is supported by CI. On Windows,
+startup additionally refuses to create a fresh neutral administrator
+identity if a prior sibling ProgramData YARP control plane still has users,
+protected credentials or key-ring material. This detection is read-only;
+it does **not** migrate or delete either installation. A separately
+initialized neutral test instance may retain old state for rollback.
+For any existing installation, **STOP**, snapshot the entire original state
+and obtain a separately approved, verified credential re-enrollment
+and configuration/keys migration procedure before switching processes.
+No production system is modified by this renaming PR. This rename is
+**not** evidence of successful legacy migration or production signoff.
 
 ## Install on offline test server
 
-1. Stop existing `SpeedSignYarp` process, obtain a separate verified backup of both the project and `C:\ProgramData\SpeedSignYarp\ControlPlane`.
+1. Stop existing `GatewayCoreYarp` process, obtain a separate verified backup of both the project and `C:\ProgramData\GatewayCoreYarp\ControlPlane`.
 2. Extract ZIP to Desktop or another folder **outside** the C# project, open PowerShell as Administrator.
 3. Run one command at a time:
 
@@ -37,7 +54,7 @@ cd "C:\Users\Administrator\Desktop\YARP-Control-Center-0.1-Universal"
 4. If the installer reports PASS:
 
 ```powershell
-cd C:\YARP\SpeedSignYarp
+cd C:\YARP\GatewayCoreYarp
 dotnet run --no-build --no-launch-profile
 ```
 

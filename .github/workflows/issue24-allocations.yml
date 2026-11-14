@@ -3,6 +3,7 @@ name: Issue 24 - direct vs proxy allocation comparison
 on:
   pull_request:
     paths:
+      - "tests/CI/branding/**"
       - ".github/workflows/issue24-allocations.yml"
       - "control-center/LoadBalancingCore.cs"
       - "control-center/LoadBalancingExtensions.cs"

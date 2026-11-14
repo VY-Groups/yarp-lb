@@ -63,6 +63,50 @@ for host in s.get("hosts",[]):
                 if got["url"]!=configured["url"] or got["count"]<=0 or got["body_bytes"]!=got["count"]*configured["response_bytes"]:
                     raise ValueError("response_mix exact path/size evidence invalid")
                 if abs(got["count"]/count-configured["weight"])>.035:raise ValueError("response_mix weights differ >3.5pp")
+            # A generated aggregate is not evidence by itself. Validate every
+            # underlying oha JSON against its manifest and the aggregate.
+            parts=w.get("profiles")
+            if not isinstance(parts,list) or len(parts)!=len(s["response_mix"]):
+                raise ValueError("missing raw oha manifest profiles")
+            by_part={x["name"]:x for x in parts}
+            if len(by_part)!=len(parts) or set(by_part)!=set(by):
+                raise ValueError("raw oha manifest profile identities mismatch")
+            reconstructed_codes={};reconstructed_errors={};max_raw_p99=0
+            raw_count=0;raw_body=0
+            for configured in s["response_mix"]:
+                name=configured["name"];entry=by_part[name];got=by[name]
+                expected_name=f"window-{i:03d}-profile-{name}.json"
+                if entry.get("raw")!=expected_name or got.get("raw_artifact")!=expected_name or entry.get("returncode")!=0:
+                    raise ValueError("raw oha filename/exit mismatch")
+                raw=json.loads((folder/expected_name).read_text())
+                raw_summary=raw["summary"];raw_codes=raw["statusCodeDistribution"]
+                raw_errors=raw["errorDistribution"]
+                if not isinstance(raw_codes,dict) or not isinstance(raw_errors,dict):
+                    raise ValueError("raw oha counters missing")
+                n=0
+                for code,qty in raw_codes.items():
+                    if not isinstance(code,str) or not code.isdigit() or type(qty) is not int or qty<0:
+                        raise ValueError("invalid raw HTTP count")
+                    n+=qty;reconstructed_codes[code]=reconstructed_codes.get(code,0)+qty
+                for reason,qty in raw_errors.items():
+                    if type(qty) is not int or qty<0:raise ValueError("invalid raw transport count")
+                    reconstructed_errors[reason]=reconstructed_errors.get(reason,0)+qty
+                bytes_sent=num(raw_summary["totalData"])
+                raw_duration=num(raw_summary["total"])
+                if raw_duration<=0 or not n or num(raw_summary["successRate"])!=1:
+                    raise ValueError("invalid raw oha summary")
+                if n!=got["count"] or bytes_sent!=got["body_bytes"] or bytes_sent!=n*configured["response_bytes"]:
+                    raise ValueError("aggregate disagrees with raw oha bodies/counts")
+                if abs(n/raw_duration-num(raw_summary["requestsPerSec"]))>max(1,n/raw_duration*.01):
+                    raise ValueError("raw oha rate inconsistent")
+                max_raw_p99=max(max_raw_p99,num(raw["latencyPercentiles"]["p99"]))
+                raw_count+=n;raw_body+=bytes_sent
+            if (reconstructed_codes!=codes or reconstructed_errors!=faults or
+                raw_count!=count or raw_body!=body or
+                abs(max_raw_p99-p99/1000)>1e-9):
+                raise ValueError("aggregate disagrees with raw oha counters/p99")
+            if abs(count/duration-rps)>max(1,rps*.01):
+                raise ValueError("aggregate rate inconsistent with raw oha counts")
             rows.append({"start":first,"end":last,"rps":rps,"body_gbps":body*8/(duration*1e9),"p99_ms":p99,"errors":bad})
         all_hosts[host]=rows
     except (OSError,KeyError,ValueError,TypeError,ZeroDivisionError) as e:errors.append(f"{host}: missing/unusable generator evidence {e}")

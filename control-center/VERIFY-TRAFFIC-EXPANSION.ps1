@@ -1,7 +1,7 @@
 # Read-only validation of the 0.1 traffic-engine expansion.
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
-$project = 'C:\YARP\SpeedSignYarp'
+$project = 'C:\YARP\GatewayCoreYarp'
 if (-not (Test-Path (Join-Path $project 'LoadBalancingExtensions.cs'))) { throw 'Traffic expansion not installed' }
 Push-Location $project
 try {

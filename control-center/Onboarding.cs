@@ -143,6 +143,8 @@ public static class OnboardingApi
                 if (!seen.Add(w.Id)) issues.Add($"Duplicate application destination ID: {w.Id}");
                 if ((w.Application?.Length ?? 0) > 100) issues.Add("Application name exceeds 100 characters.");
                 if (w.Zone is not ("public" or "restricted" or "trust")) issues.Add($"Invalid exposure zone for {w.Id}");
+                if (w.HostingEngine is not ("http" or "iis" or "apache" or "nginx" or "caddy" or "tomcat" or "kestrel" or "node" or "kubernetes-ingress" or "other"))
+                    issues.Add($"Invalid hosting engine classification for {w.Id}");
                 if (!string.IsNullOrWhiteSpace(w.Url) && !ValidBackendUrl(w.Url)) issues.Add($"{w.Id}: invalid HTTP(S) backend URL.");
             }
         }
@@ -159,13 +161,20 @@ public static class OnboardingApi
             issues.Add("Gateway hostnames are required to confirm the design.");
         if (p.Mode != "standalone" && p.Gateways != null && p.Gateways.Any(g => g is null || string.IsNullOrWhiteSpace(g.AgentUrl)))
             issues.Add("Every remote gateway needs a planned HTTPS agent origin.");
-        if (p.Workloads == null || p.Workloads.Count < 2)
-            issues.Add("At least two application destinations are required for the selected Active–Active application design.");
+        // A single-node laptop or standalone gateway can be tested against one IIS,
+        // Apache, Nginx or other HTTP(S) origin. Multi-gateway designs retain
+        // their two-destination Active-Active contract.
+        var minimumWorkloads = p.Mode == "standalone" ? 1 : 2;
+        if (p.Workloads == null || p.Workloads.Count < minimumWorkloads)
+            issues.Add(p.Mode == "standalone"
+                ? "Standalone requires at least one HTTP(S) application destination."
+                : "At least two application destinations are required for the selected Active–Active application design.");
         else
         {
             if (p.Workloads.Any(w => w is null || string.IsNullOrWhiteSpace(w.Application) || string.IsNullOrWhiteSpace(w.Url)))
                 issues.Add("Every application destination requires an application name and URL.");
-            if (!p.Workloads.Where(w => w is not null).GroupBy(w => w.Application ?? "", StringComparer.OrdinalIgnoreCase).Any(g => g.Count() >= 2))
+            if (p.Mode != "standalone" &&
+                !p.Workloads.Where(w => w is not null).GroupBy(w => w.Application ?? "", StringComparer.OrdinalIgnoreCase).Any(g => g.Count() >= 2))
                 issues.Add("At least one application group must have two destinations for Active–Active serving.");
         }
         return issues;
@@ -247,4 +256,6 @@ public sealed class OnboardingWorkload
     public string Application { get; set; } = "";
     public string Url { get; set; } = "";
     public string Zone { get; set; } = "public";
+    // Display-only origin classification. Does not provision or reconfigure the server.
+    public string HostingEngine { get; set; } = "http";
 }

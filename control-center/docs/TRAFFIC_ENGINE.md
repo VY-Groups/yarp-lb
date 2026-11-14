@@ -1,4 +1,4 @@
-# SpeedSign 0.1 — Traffic engine and platform boundary
+# GatewayCore 0.1 — Traffic engine and platform boundary
 
 ## Scope of this engineering update
 
@@ -48,9 +48,9 @@ The custom `SourceIpHash` only uses `context.Connection.RemoteIpAddress`, **not 
 
 YARP's available destination list is already filtered through configured health policies before the load-balancing selection is called. Neither custom policy repairs stateful applications or implements failover for in-flight requests.
 
-## Install in existing SpeedSign 0.1 lab
+## Install in existing GatewayCore 0.1 lab
 
-1. Back up `C:\YARP\SpeedSignYarp` and `C:\ProgramData\SpeedSignYarp\ControlPlane` securely.
+1. Back up `C:\YARP\GatewayCoreYarp` and `C:\ProgramData\GatewayCoreYarp\ControlPlane` securely.
 2. Stop the running .NET gateway and open elevated Windows PowerShell.
 3. Extract this ZIP, review `PRECHECK.ps1` and `INSTALL.ps1`, then run them. The installer does not overwrite `appsettings.json`, and it backs up source under `C:\YARP\Backups`.
 4. If the C# compilation passes, run `VERIFY-TRAFFIC-EXPANSION.ps1` **before** starting the gateway. It runs the pure algorithm tests too; the unauthenticated HTTP check only runs if a gateway is separately started.
@@ -63,9 +63,9 @@ YARP's available destination list is already filtered through configured health 
 ## Validate from Windows Server (runtime compilation required)
 
 ```powershell
-cd C:\YARP\SpeedSignYarp
+cd C:\YARP\GatewayCoreYarp
 dotnet build --no-restore
-cd C:\Users\Administrator\Desktop\SpeedSign-YARP-ControlCenter-0.1-Traffic-Expansion
+cd C:\Users\Administrator\Desktop\GatewayCore-YARP-ControlCenter-0.1-Traffic-Expansion
 dotnet restore .\tests\LoadBalancingCoreTests\LoadBalancingCoreTests.csproj --ignore-failed-sources
 dotnet run --project .\tests\LoadBalancingCoreTests\LoadBalancingCoreTests.csproj --no-restore
 ```

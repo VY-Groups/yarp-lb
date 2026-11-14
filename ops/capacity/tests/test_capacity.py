@@ -44,6 +44,17 @@ class CapacityEvidence(unittest.TestCase):
                                     "count":24000,"body_bytes":24576000},
                                    {"name":"large","url":"http://127.0.0.1:8080/bench/4096",
                                     "count":24000,"body_bytes":98304000}]}
+                parts=[]
+                for profile in data["perProfile"]:
+                    name=profile["name"];raw_name=f"window-{i:03d}-profile-{name}.json"
+                    raw={"summary":{"total":60,"requestsPerSec":profile["count"]/60,
+                                    "totalData":profile["body_bytes"],"successRate":1},
+                         "latencyPercentiles":{"p50":0.01,"p95":0.025,"p99":0.05},
+                         "statusCodeDistribution":{"200":profile["count"]},"errorDistribution":{}}
+                    (folder/raw_name).write_text(json.dumps(raw))
+                    profile["raw_artifact"]=raw_name
+                    parts.append({"name":name,"raw":raw_name,"returncode":0})
+                manifest["windows"][-1]["profiles"]=parts
                 (folder/f"window-{i:03d}.json").write_text(json.dumps(data))
             (folder/"manifest.json").write_text(json.dumps(manifest))
         self.csv=self.p/"node-1.csv"
@@ -100,6 +111,23 @@ class CapacityEvidence(unittest.TestCase):
         doc["perProfile"][0]["body_bytes"]-=1;f.write_text(json.dumps(doc))
         r,d=self.report();self.assertNotEqual(r.returncode,0)
         self.assertIn("mixed body/count",str(d["error_reasons"]))
+    def test_missing_raw_subprofile_fails_closed(self):
+        (self.p/"results"/"h1"/"window-007-profile-small.json").unlink()
+        r,d=self.report();self.assertNotEqual(r.returncode,0)
+        self.assertIn("missing/unusable generator evidence",str(d["error_reasons"]))
+    def test_aggregate_fabricated_with_consistent_counts_fails(self):
+        f=self.p/"results"/"h1"/"window-008.json";doc=json.loads(f.read_text())
+        doc["latencyPercentiles"]["p99"]=0.035
+        f.write_text(json.dumps(doc))
+        r,d=self.report();self.assertNotEqual(r.returncode,0)
+        self.assertIn("aggregate disagrees with raw oha",str(d["error_reasons"]))
+    def test_raw_http_failure_cannot_be_hidden_by_aggregate(self):
+        f=self.p/"results"/"h1"/"window-009-profile-small.json"
+        doc=json.loads(f.read_text())
+        doc["statusCodeDistribution"]={"200":23999,"502":1}
+        f.write_text(json.dumps(doc))
+        r,d=self.report();self.assertNotEqual(r.returncode,0)
+        self.assertIn("aggregate disagrees with raw oha",str(d["error_reasons"]))
     def test_http_502_fails(self):
         f=self.p/"results"/"h1"/"window-006.json";doc=json.loads(f.read_text())
         doc["statusCodeDistribution"]["502"]=1;f.write_text(json.dumps(doc))

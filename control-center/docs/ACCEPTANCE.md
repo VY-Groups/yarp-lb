@@ -17,8 +17,8 @@ Stop an old YARP process before building. Run installer from elevated PowerShell
 5. Introduce duplicate IDs; server validation must reject them.
 6. Submit two saves with the same outdated revision; the second must return HTTP 409.
 7. Confirm design with all fields valid; navigate to dashboard. Verify the design is shown but no gateway claims verified health.
-8. Verify no changes to the SHA-256 checksum of `C:\YARP\SpeedSignYarp\appsettings.json` after onboarding.
-9. Verify the audit event and topology backups under `%ProgramData%\SpeedSignYarp\ControlPlane`.
+8. Verify no changes to the SHA-256 checksum of `C:\YARP\GatewayCoreYarp\appsettings.json` after onboarding.
+9. Verify the audit event and topology backups under `%ProgramData%\GatewayCoreYarp\ControlPlane`.
 10. Sign in with an Operator or Viewer; attempts to POST onboarding configuration must return 403. Unauthenticated calls must return 401.
 11. Choose Standalone, confirm, and verify POST fleet registration/rollout is blocked with 409. A HA design permits reaching the agent mTLS validation (not proof of agent enrollment).
 12. Confirm that no administration endpoint is accessible from a remote machine; the current console is localhost-only.

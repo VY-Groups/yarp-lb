@@ -11,7 +11,7 @@ public static class ProductLinuxStartupSmoke
     public static async Task RunAsync()
     {
         if (!OperatingSystem.IsLinux()) return;
-        var dll=Path.Combine(Directory.GetCurrentDirectory(),"bin","Release","net10.0","SpeedSignYarp.dll");
+        var dll=Path.Combine(Directory.GetCurrentDirectory(),"bin","Release","net10.0","GatewayCoreYarp.dll");
         if (!File.Exists(dll))
             throw new FileNotFoundException("Build shipping Control Center before smoke test",dll);
         const UnixFileMode privateDir=UnixFileMode.UserRead|UnixFileMode.UserWrite|UnixFileMode.UserExecute;

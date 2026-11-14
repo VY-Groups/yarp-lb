@@ -40,4 +40,4 @@ if [ ! -f /state/config/appsettings.json ]; then
 EOF
 fi
 chmod 0600 /state/config/appsettings.json
-exec dotnet /app/SpeedSignYarp.dll
+exec dotnet /app/GatewayCoreYarp.dll

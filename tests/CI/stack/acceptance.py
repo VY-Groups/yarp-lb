@@ -113,7 +113,7 @@ print('ok',len(sys.argv)-1)
 
 def verify_prometheus():
     for gateway in ("gateway-a", "gateway-b"):
-        url = "http://" + gateway + ":9090/api/v1/query?query=up%7Bjob%3D%22speedsign-gateway%22%7D"
+        url = "http://" + gateway + ":9090/api/v1/query?query=up%7Bjob%3D%22gatewaycore-gateway%22%7D"
         # Query from the other gateway, which has curl; cannot directly reach private Docker network from host.
         other = "gateway-b" if gateway == "gateway-a" else "gateway-a"
         response = compose_exec(other, "curl", "-fsS", url)

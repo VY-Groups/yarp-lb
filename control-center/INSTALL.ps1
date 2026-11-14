@@ -4,14 +4,14 @@
 # IMPORTANT: staging/local-only installation, NOT a production go-live procedure.
 [CmdletBinding()]
 param(
-    [string]$ProjectRoot = 'C:\YARP\SpeedSignYarp',
+    [string]$ProjectRoot = 'C:\YARP\GatewayCoreYarp',
     [string]$BackupRoot = 'C:\YARP\Backups',
     [switch]$SkipBuild
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 $source = $PSScriptRoot
-$originals = @('Program.cs','LoadBalancingCore.cs','LoadBalancingExtensions.cs','CapabilityRegistry.cs','OrganizationProfile.cs','Onboarding.cs','DirectoryAuth.cs','SetupCenter.cs','SpeedSignYarp.csproj','wwwroot\index.html','wwwroot\style.css','wwwroot\app.js','wwwroot\app.ts','wwwroot\tsconfig.json')
+$originals = @('Program.cs','LoadBalancingCore.cs','LoadBalancingExtensions.cs','CapabilityRegistry.cs','OrganizationProfile.cs','Onboarding.cs','DirectoryAuth.cs','SetupCenter.cs','GatewayCoreYarp.csproj','wwwroot\index.html','wwwroot\style.css','wwwroot\app.js','wwwroot\app.ts','wwwroot\tsconfig.json')
 
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     throw 'Open PowerShell as Administrator before running INSTALL.ps1.'
@@ -44,14 +44,14 @@ $manifest | ConvertTo-Json -Depth 8 | Set-Content -Path (Join-Path $backup 'mani
 Write-Host "Saved restricted rollback backup at: $backup" -ForegroundColor Cyan
 
 try {
-    foreach ($relative in @($originals | Where-Object { $_ -ne 'SpeedSignYarp.csproj' })) {
+    foreach ($relative in @($originals | Where-Object { $_ -ne 'GatewayCoreYarp.csproj' })) {
         $copyFrom = Join-Path $source $relative
         $copyTo = Join-Path $ProjectRoot $relative
         New-Item -ItemType Directory -Path (Split-Path $copyTo -Parent) -Force | Out-Null
         Copy-Item -LiteralPath $copyFrom -Destination $copyTo -Force
     }
     # Preserve the original project references: add only the missing AD LDAP package.
-    $projectFile = Join-Path $ProjectRoot 'SpeedSignYarp.csproj'
+    $projectFile = Join-Path $ProjectRoot 'GatewayCoreYarp.csproj'
     $projectText = Get-Content -LiteralPath $projectFile -Raw
     if ($projectText -notmatch 'System.DirectoryServices.Protocols') {
         if ($projectText -notmatch '</ItemGroup>') { throw 'Unable to locate project package references' }
@@ -81,7 +81,7 @@ try {
     if ($configHashAfter -ne $manifest.configHashBefore) { throw 'appsettings.json was unexpectedly modified; reverting.' }
     Write-Host 'PASS: 0.1 Setup Center, directory and mail installed; appsettings.json unchanged; build passed (unless -SkipBuild was requested).' -ForegroundColor Green
     Write-Host "ROLLBACK BACKUP: $backup"
-    Write-Host 'NEXT: cd C:\YARP\SpeedSignYarp'
+    Write-Host 'NEXT: cd C:\YARP\GatewayCoreYarp'
     Write-Host '      dotnet run --no-build --no-launch-profile'
     Write-Host '      (In a SECOND PowerShell window) run VERIFY-RUNNING.ps1'
 }

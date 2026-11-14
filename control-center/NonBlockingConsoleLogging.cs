@@ -30,7 +30,7 @@ public sealed class NonBlockingConsoleLoggerProvider : ILoggerProvider, ISupport
         this.output = output ?? throw new ArgumentNullException(nameof(output));
         this.maxLineChars = maxLineChars;
         queue = new BlockingCollection<string>(new ConcurrentQueue<string>(), capacity);
-        meter = new Meter("SpeedSignYarp.Logging", "0.1");
+        meter = new Meter("GatewayCoreYarp.Logging", "0.1");
         meter.CreateObservableCounter<long>("yarp_logging_dropped_total",
             () => DroppedMessages, "messages", "Console log messages discarded when the bounded writer queue is full");
         meter.CreateObservableCounter<long>("yarp_logging_dropped_low_priority_total",

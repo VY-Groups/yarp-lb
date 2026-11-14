@@ -19,7 +19,7 @@ On the user's Windows Server run:
 ```powershell
 .\PRECHECK.ps1
 .\INSTALL.ps1
-# After launching SpeedSignYarp in a first terminal:
+# After launching GatewayCoreYarp in a first terminal:
 .\VERIFY-RUNNING.ps1
 .\VERIFY-SETUP.ps1
 ```

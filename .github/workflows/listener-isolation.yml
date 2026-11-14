@@ -18,13 +18,13 @@ jobs:
         with:
           dotnet-version: "10.0.x"
       - name: Build actual shipping gateway
-        run: dotnet build control-center/SpeedSignYarp.csproj -c Release
+        run: dotnet build control-center/GatewayCoreYarp.csproj -c Release
       - name: Exercise 4 real sockets with mTLS and wildcard rejection
         shell: bash
         run: |
           set -euo pipefail
           python3 tests/CI/listeners/test_isolation.py \
-            --dll control-center/bin/Release/net10.0/SpeedSignYarp.dll \
+            --dll control-center/bin/Release/net10.0/GatewayCoreYarp.dll \
             --out artifacts/listeners
       - name: Diff real exported metric families against contract and alert/dashboard expressions
         shell: bash

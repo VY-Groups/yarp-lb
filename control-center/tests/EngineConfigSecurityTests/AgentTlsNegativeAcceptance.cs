@@ -14,7 +14,7 @@ public static class AgentTlsNegativeAcceptance
     public static async Task RunAsync()
     {
         var agentDll = Path.Combine(Directory.GetCurrentDirectory(), "GatewayAgent", "bin",
-            "Release", "net10.0", "SpeedSignGatewayAgent.dll");
+            "Release", "net10.0", "GatewayCoreGatewayAgent.dll");
         if (!File.Exists(agentDll))
             throw new FileNotFoundException("Build GatewayAgent before TLS acceptance", agentDll);
         var folder = Path.Combine(Path.GetTempPath(), "yarp-agent-tls-"+Guid.NewGuid().ToString("N"));

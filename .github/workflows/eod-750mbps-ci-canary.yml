@@ -2,6 +2,7 @@ name: v0.1 EOD 750 Mbps single-gateway diagnostic (nonproduction)
 on:
   pull_request:
     paths:
+      - "tests/CI/branding/**"
       - "tests/CI/stack/backend.py"
       - "tests/CI/eod/**"
       - ".github/workflows/eod-750mbps-ci-canary.yml"

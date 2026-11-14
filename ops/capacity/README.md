@@ -2,9 +2,11 @@
 
 These scripts reject absent measured traffic/hardware numbers, enforce **separate minimum body Gbps and RPS** in EACH complete minute, zero HTTP/transport errors, exact weighted response body bytes and p99 strictly below the approved ceiling. Gbps is HTTP *body*, not Ethernet wire Gbps. Each surviving gateway is tested **alone** for 60 minutes at the precommitted 30% or 50% headroom. 90% of single NIC rating is a feasibility cap; 10GbE *rated capacity* must not be substituted for observed peak load.
 
-Full generator tooling for concurrent oha response profiles, real NIC collection, reference HAProxy template, and run order are in the downloadable v6 operator kit; their execution on physical hardware is NOT RUN.
+**GitHub is the source of truth; no separate operator ZIP or download is required.** The checked-in capacity driver is `ops/capacity/run_oha.py`; the capacity gates are `ops/capacity/report.py` and `ops/capacity/limits.py`; the read-only NIC collector is `ops/tuning/collect_nic_baseline.sh`; and the approved operating sequence is `ops/automation/ONPREM_RUN_ORDER.md` (with site-specific steps in `ops/capacity/EOD_500MBPS_RELEASE_PLAN.md`). A complete, executable HAProxy reference environment and physical generator/collector orchestration are **not established by these checked-in files**: verify and commit any missing components with tests before claiming an end-to-end on-prem kit. No physical load or HA acceptance has been run by GitHub Actions.
 
 Run fail-closed report: `python3 ops/capacity/report.py --scenario actual.json --results /real/raw --gateway-csv /real/metrics.csv --out /real/gate.json`.
 Run actual connection limits: `python3 ops/capacity/limits.py --scenario actual.json --profile actual-systemd-and-kestrel.json --out limits.json`. This validates `MaxConcurrentConnections>=ceil(1.5*peak_concurrent_connections)`, and `LimitNOFILE>=ceil(2.5*ACTUAL_MaxConcurrentConnections+4096)`, not hardcoded 10,000/65,536.
+
+The report also independently verifies each `window-NNN-profile-NAME.json` emitted by `oha` against its manifest, aggregate HTTP/transport counters, exact response-body bytes and conservative maximum profile p99. Missing or inconsistent raw files are **NO-GO** even when the aggregate JSON claims success. A passing synthetic fixture validates the rejection logic only; it is not independent proof of real-site traffic.
 
 Both require real, source-linked evidence. The template contains intentionally null input fields and cannot pass.

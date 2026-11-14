@@ -8,7 +8,7 @@ if (-not (Test-Path $manifestPath)) {throw 'Backup manifest missing; refusing un
 $m=Get-Content $manifestPath -Raw | ConvertFrom-Json
 if ($m.version -ne '0.1') { throw 'Not a 0.1 installer backup.' }
 $target=[string]$m.projectRoot
-if ((@(Get-CimInstance Win32_Process -Filter "Name='SpeedSignYarp.exe' OR Name='dotnet.exe'" -ErrorAction SilentlyContinue | Where-Object {$_.CommandLine -and $_.CommandLine.IndexOf($target,[StringComparison]::OrdinalIgnoreCase) -ge 0})).Count) { throw 'Stop YARP process before rollback.' }
+if ((@(Get-CimInstance Win32_Process -Filter "Name='GatewayCoreYarp.exe' OR Name='dotnet.exe'" -ErrorAction SilentlyContinue | Where-Object {$_.CommandLine -and $_.CommandLine.IndexOf($target,[StringComparison]::OrdinalIgnoreCase) -ge 0})).Count) { throw 'Stop YARP process before rollback.' }
 if ($PSCmdlet.ShouldProcess($target,'Restore application source files')) {
     foreach($rel in @($m.files)) {
         $dest=Join-Path $target $rel

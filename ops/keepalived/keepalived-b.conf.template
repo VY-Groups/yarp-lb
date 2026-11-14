@@ -1,10 +1,10 @@
 global_defs {
     router_id YARP_B
     enable_script_security
-    script_user speedsg-vrrp
+    script_user gateway-vrrp
 }
 vrrp_script chk_yarp {
-    script "/usr/local/sbin/check-speedsign-yarp.sh"
+    script "/usr/local/sbin/check-gatewaycore-yarp.sh"
     interval 2
     timeout 2
     fall 2

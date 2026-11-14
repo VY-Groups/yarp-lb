@@ -1,6 +1,6 @@
 # Read-only Windows Server 2022/.NET 10 validation. Run after INSTALL.ps1.
 [CmdletBinding()]
-param([string]$ProjectRoot='C:\YARP\SpeedSignYarp', [string]$GatewayUrl='http://127.0.0.1:8080')
+param([string]$ProjectRoot='C:\YARP\GatewayCoreYarp', [string]$GatewayUrl='http://127.0.0.1:8080')
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
 if (!(Test-Path (Join-Path $ProjectRoot 'OrganizationProfile.cs'))) { throw 'OrganizationProfile.cs missing from installed source' }

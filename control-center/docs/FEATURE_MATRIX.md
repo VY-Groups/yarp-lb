@@ -1,4 +1,4 @@
-# Feature coverage — SpeedSign YARP Control Center 0.1
+# Feature coverage — GatewayCore YARP Control Center 0.1
 
 Status definitions:
 - **Browser-configurable**: an authenticated frontend action writes a *draft*, or updates a non-routing control; routing changes still require independent approval.

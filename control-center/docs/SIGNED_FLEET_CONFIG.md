@@ -7,7 +7,7 @@ The gateway agent already requires a trusted mTLS client certificate. **Config p
 From a trusted administration shell with .NET 10 installed:
 
 ```powershell
-dotnet run --project control-center/tools/FleetKeyTool/FleetKeyTool.csproj -- "C:\ProgramData\SpeedSignYarp\ControlPlane\fleet-signing-private.pem" "C:\ProgramData\SpeedSignYarp\ControlPlane\fleet-signing-public.pem"
+dotnet run --project control-center/tools/FleetKeyTool/FleetKeyTool.csproj -- "C:\ProgramData\GatewayCoreYarp\ControlPlane\fleet-signing-private.pem" "C:\ProgramData\GatewayCoreYarp\ControlPlane\fleet-signing-public.pem"
 ```
 
 Never check in or email the private PEM. Restrict filesystem ACLs to the controller service identity and administrators; review backups and key rotation policy. Copy **only** the public PEM to `Agent:ControllerSigningPublicKeyPath` on each gateway. Agent config deployments remain disabled unless the absolute public key path is present. Separate agent server certificates and TLS client thumbprint trust are still required.

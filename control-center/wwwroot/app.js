@@ -1,5 +1,18 @@
 "use strict";
 let data = { name: 'YARP Control Center', gateway: 'unknown', time: '', routes: {}, clusters: {}, disabled: {}, mode: 'Local testing', telemetry: '', revision: '' };
+let viewHistory = [];
+let lastRenderedView = 'setup';
+let restoringNavigation = false;
+function navigateBack() { if (viewHistory.length) {
+    restoringNavigation = true;
+    view = viewHistory.pop();
+    render();
+}
+else if (view !== 'setup') {
+    restoringNavigation = true;
+    view = 'setup';
+    render();
+} }
 let view = 'setup';
 let dirty = false;
 let probes = [];
@@ -60,11 +73,16 @@ async function api(url, method = 'GET', body) { const opts = { method, credentia
     opts.headers['X-CSRF-Token'] = csrf;
     opts.body = JSON.stringify(body ?? {});
 } const r = await fetch(url, opts); if (r.status === 401) {
-    if (!url.endsWith('/session') && !url.endsWith('/login/verify')) {
-        showLogin(false);
+    if (!['/admin/api/session', '/admin/api/login', '/admin/api/bootstrap', '/admin/api/login/verify'].includes(url)) {
+        if (!$('app-shell').hidden) {
+            showLogin(false);
+            $('auth-message').textContent = 'Your administrator session has expired or was invalidated. Sign in again. No security settings were changed.';
+        }
+        throw Error('Administrator session expired; please sign in again');
     }
-    throw Error('Session expired; log in again');
-} if (!r.ok) {
+    throw Error('Authentication failed. Check your credentials or verification code.');
+} if (r.status === 403)
+    throw Error('Access denied. This action requires an authorized role or valid CSRF token.'); if (!r.ok) {
     let e = 'HTTP ' + r.status;
     try {
         e = (await r.json()).error ?? e;
@@ -171,9 +189,10 @@ let topologyDraft = null;
 let topologyStep = 0;
 let topologyChecks = [];
 let topologyWarnings = [];
-const topologySteps = ['Deployment mode', 'YARP gateways', 'Application nodes', 'Ingress & isolation', 'Management & data', 'Review'];
+const topologySteps = ['Deployment mode', 'YARP gateways', 'Web & app servers', 'Ingress & isolation', 'Management & data', 'Review'];
+const hostingEngines = [['http', 'Generic HTTP(S)'], ['iis', 'Microsoft IIS'], ['apache', 'Apache httpd'], ['nginx', 'Nginx'], ['caddy', 'Caddy'], ['tomcat', 'Apache Tomcat'], ['kestrel', 'ASP.NET Kestrel'], ['node', 'Node.js'], ['kubernetes-ingress', 'Kubernetes Ingress (external)'], ['other', 'Other HTTP(S) server']];
 function topologyModeName(mode) { return { standalone: 'Single gateway', 'ha-pair': 'Two active gateways', fleet: 'Managed fleet' }[mode] || 'Unselected'; }
-function topologyDefaults() { return { mode: 'standalone', controlPlane: 'local', dataStore: 'local-file', accessPattern: 'segmented', publicVip: '', upstreamHealthAware: false, requireIndependentApproval: true, offlineEnvironment: true, pgpoolEndpoint: '', postgresEndpoint: '', notes: '', gateways: [{ id: 'yarp-01', hostname: '', agentUrl: '' }], workloads: [{ id: 'api-01', application: 'example-api', url: '', zone: 'public' }, { id: 'api-02', application: 'example-api', url: '', zone: 'public' }] }; }
+function topologyDefaults() { return { mode: 'standalone', controlPlane: 'local', dataStore: 'local-file', accessPattern: 'segmented', publicVip: '', upstreamHealthAware: false, requireIndependentApproval: true, offlineEnvironment: true, pgpoolEndpoint: '', postgresEndpoint: '', notes: '', gateways: [{ id: 'yarp-01', hostname: '', agentUrl: '' }], workloads: [{ id: 'web-01', application: 'web-site', url: '', zone: 'public', hostingEngine: 'http' }] }; }
 async function loadTopology() { const result = await api('/admin/api/onboarding'); topologyResponse = result; topologyDraft = JSON.parse(JSON.stringify(result.plan || topologyDefaults())); if (result.status === 'not-started')
     topologyDraft = topologyDefaults(); topologyChecks = result.issues || []; topologyWarnings = result.warnings || []; }
 const chosen = (a, b) => a === b ? 'checked' : '';
@@ -191,7 +210,7 @@ function topologyStepHtml() {
     if (topologyStep === 1)
         return `<h2>Register gateway topology</h2><p class="subtle">Record the gateway hosts. Agent origins are plans only until independently enrolled with mTLS certificates.</p><div class="setup-array">${(p.gateways || []).map((g, i) => `<div class="setup-entry"><div class="setup-entry-title"><b>YARP gateway ${i + 1}</b>${(p.gateways || []).length > 1 ? `<button type="button" class="danger-btn mini" data-action="setup-gateway-remove" data-id="${i}">Remove</button>` : ''}</div><div class="setup-grid">${topoArrayInput('gateways', i, 'id', 'Gateway ID', g.id, 'yarp-01')}${topoArrayInput('gateways', i, 'hostname', 'Windows hostname / IP', g.hostname, 'YARP-ND-01')}${mode !== 'standalone' ? topoArrayInput('gateways', i, 'agentUrl', 'HTTPS agent origin (planned)', g.agentUrl, 'https://yarp-01.internal:8443/') : '<p class="subtle">Local gateway does not require a remote agent.</p>'}</div></div>`).join('')}</div><button class="ghost" type="button" data-action="setup-gateway-add">+ Add gateway</button><div class="healthbanner">Physical gateway identity is not verified by typing a hostname. Remote onboarding later requires certificate enrollment, ACLs and an agent handshake.</div>`;
     if (topologyStep === 2)
-        return `<h2>Application server inventory</h2><p class="subtle">Add both active .NET API nodes under the same application name. Add separate entries later for eKYC, websites, RA, or OCSP. This does not create live proxy routes.</p><div class="setup-array">${(p.workloads || []).map((w, i) => `<div class="setup-entry"><div class="setup-entry-title"><b>Destination ${i + 1}</b><button class="danger-btn mini" type="button" data-action="setup-workload-remove" data-id="${i}">Remove</button></div><div class="setup-grid">${topoArrayInput('workloads', i, 'id', 'Destination ID', w.id, 'api-01')}${topoArrayInput('workloads', i, 'application', 'Application / cluster name', w.application, 'example-api')}${topoArrayInput('workloads', i, 'url', 'Internal backend URL', w.url, 'https://api01.internal:5001/')}
+        return `<h2>Application server inventory</h2><p class="subtle">Add one HTTP(S) website, or multiple origins for load balancing. IIS, Apache, Nginx, Tomcat, Kestrel, Node.js and external ingress can be destinations. This inventory does not create live proxy routes.</p><div class="setup-array">${(p.workloads || []).map((w, i) => `<div class="setup-entry"><div class="setup-entry-title"><b>Destination ${i + 1}</b><button class="danger-btn mini" type="button" data-action="setup-workload-remove" data-id="${i}">Remove</button></div><div class="setup-grid">${topoArrayInput('workloads', i, 'id', 'Destination ID', w.id, 'api-01')}${topoArrayInput('workloads', i, 'application', 'Application / cluster name', w.application, 'example-api')}${topoArrayInput('workloads', i, 'url', 'Website / API origin URL', w.url, 'http://127.0.0.1/')}<label class="setup-field"><span>Hosting engine</span><select data-setup-array="workloads" data-setup-index="${i}" data-setup-property="hostingEngine">${hostingEngines.map(([k, label]) => `<option value="${k}" ${(w.hostingEngine || 'http') === k ? 'selected' : ''}>${esc(label)}</option>`).join('')}</select><small>Classification only; GatewayCore does not deploy or manage the hosting engine.</small></label>
 <label class="setup-field"><span>Service exposure</span><select data-setup-array="workloads" data-setup-index="${i}" data-setup-property="zone">${[['public', 'Public website / API'], ['restricted', 'RA / internal tools'], ['trust', 'OCSP / CRL']].map(([k, v]) => `<option value="${k}" ${w.zone === k ? 'selected' : ''}>${v}</option>`).join('')}</select></label></div></div>`).join('')}</div><button class="ghost" type="button" data-action="setup-workload-add">+ Add backend destination</button><div class="healthbanner">Application binaries and sessions must be safe for Active–Active operation. PostgreSQL replication/Pgpool does not synchronize ASP.NET in-memory sessions or local files.</div>`;
     if (topologyStep === 3)
         return `<h2>Ingress and network isolation</h2><p class="subtle">Separate public and restricted application access. A public hostname alone is not an access-control boundary.</p><div class="setup-grid">${topoInput('publicVip', 'Firewall virtual service / VIP (design)', p.publicVip, 'api.example.com or firewall VIP', 'Required for a gateway pair or fleet; this is not a DNS or firewall configuration action.')}
@@ -204,10 +223,10 @@ ${topoInput('pgpoolEndpoint', 'Existing data tier (optional) endpoint (inventory
 ${topoToggle('offlineEnvironment', 'Air-gapped / offline servers', 'Installers and package dependencies will be transferred through an approved offline process.', !!p.offlineEnvironment)}
 ${topoToggle('requireIndependentApproval', 'Mandatory independent change approval', 'CA-sensitive changes require a second authorized administrator.', true, true)}
 ${topoInput('notes', 'Change or architecture notes', p.notes, 'Document existing HA, firewall and CA boundaries')}`;
-    return `<h2>Review and confirm architecture design</h2><p class="subtle">Confirmation stores reviewed topology metadata. It does not make your gateway fleet active or modify production traffic.</p><div class="setup-review-grid"><div class="card"><h3>Traffic topology</h3><strong>${esc(topologyModeName(p.mode))}</strong><p class="subtle">${esc((p.gateways || []).length)} YARP gateway(s), ${(p.workloads || []).length} backend destination(s)</p></div><div class="card"><h3>Controller / persistence</h3><strong>${esc(p.controlPlane)} · ${esc(p.dataStore)}</strong><p class="subtle">Local file-backed design record in this release</p></div></div><div class="setup-entry"><h3>Gateway inventory</h3>${(p.gateways || []).map((g) => `<div class="rowline"><span>${esc(g.id)}</span><span class="mono">${esc(g.hostname || 'Hostname missing')}</span></div>`).join('')}</div><div class="setup-entry"><h3>Application destinations</h3>${(p.workloads || []).map((w) => `<div class="rowline"><span>${esc(w.application || 'Unspecified')} / ${esc(w.id)}</span><span class="mono">${esc(w.url || 'URL missing')}</span></div>`).join('')}</div><div class="setup-entry"><h3>Validation</h3>${topologyChecks.length ? topologyChecks.map(x => `<div class="setup-check-error">${esc(x)}</div>`).join('') : '<p class="green">No schema/design-blocking errors reported. Operational readiness has NOT been verified.</p>'}</div><div class="setup-entry"><h3>Operational limitations</h3>${topologyWarnings.map(x => `<p class="subtle">• ${esc(x)}</p>`).join('')}</div>`;
+    return `<h2>Review and confirm architecture design</h2><p class="subtle">Confirmation stores reviewed topology metadata. It does not make your gateway fleet active or modify production traffic.</p><div class="setup-review-grid"><div class="card"><h3>Traffic topology</h3><strong>${esc(topologyModeName(p.mode))}</strong><p class="subtle">${esc((p.gateways || []).length)} YARP gateway(s), ${(p.workloads || []).length} backend destination(s)</p></div><div class="card"><h3>Controller / persistence</h3><strong>${esc(p.controlPlane)} · ${esc(p.dataStore)}</strong><p class="subtle">Local file-backed design record in this release</p></div></div><div class="setup-entry"><h3>Gateway inventory</h3>${(p.gateways || []).map((g) => `<div class="rowline"><span>${esc(g.id)}</span><span class="mono">${esc(g.hostname || 'Hostname missing')}</span></div>`).join('')}</div><div class="setup-entry"><h3>Application destinations</h3>${(p.workloads || []).map((w) => `<div class="rowline"><span>${esc(w.application || 'Unspecified')} / ${esc(w.id)} · ${esc(hostingEngines.find(([k]) => k === (w.hostingEngine || 'http'))?.[1] || 'Generic HTTP(S)')}</span><span class="mono">${esc(w.url || 'URL missing')}</span></div>`).join('')}</div><div class="setup-entry"><h3>Validation</h3>${topologyChecks.length ? topologyChecks.map(x => `<div class="setup-check-error">${esc(x)}</div>`).join('') : '<p class="green">No schema/design-blocking errors reported. Operational readiness has NOT been verified.</p>'}</div><div class="setup-entry"><h3>Operational limitations</h3>${topologyWarnings.map(x => `<p class="subtle">• ${esc(x)}</p>`).join('')}</div>`;
 }
 function topoArrayInput(kind, index, property, label, value, placeholder = '') { return `<label class="setup-field"><span>${esc(label)}</span><input data-setup-array="${esc(kind)}" data-setup-index="${index}" data-setup-property="${esc(property)}" value="${esc(value || '')}" placeholder="${esc(placeholder)}" autocomplete="off"></label>`; }
-function topologyPage() { const status = topologyResponse?.status || 'not-started'; return `<div class="setup-heading"><div><h2>Gateway onboarding</h2><p class="subtle">Plan your deployment before creating traffic routes. Status: <span class="chip">${esc(status)}</span></p></div><span class="chip">DESIGN ONLY</span></div><div class="setup-steps">${topologySteps.map((t, i) => `<button class="setup-step ${i === topologyStep ? 'current' : ''}" data-action="setup-step" data-id="${i}" type="button"><span>${i + 1}</span><b>${esc(t)}</b></button>`).join('')}</div><div class="setup-panel">${topologyStepHtml()}</div><div class="setup-actions"><button class="ghost" type="button" data-action="setup-prev" ${topologyStep === 0 ? 'disabled' : ''}>Back</button><span class="subtle">Step ${topologyStep + 1} of ${topologySteps.length}</span><div><button class="ghost" type="button" data-action="setup-save" ${currentRole !== 'Administrator' ? 'disabled' : ''}>Save draft</button> ${topologyStep < 5 ? '<button class="primary" type="button" data-action="setup-next">Continue</button>' : `<button class="primary" type="button" data-action="setup-confirm" ${currentRole !== 'Administrator' ? 'disabled' : ''}>Confirm design</button>`}</div></div><div class="healthbanner">No firewall, service, CA key, Pgpool, PostgreSQL, IIS or live YARP configuration change is performed by this wizard. Gateway connectivity and deployment are separate approved workflows.</div>`; }
+function topologyPage() { const status = topologyResponse?.status || 'not-started'; return `<div class="setup-heading"><div><h2>Gateway onboarding</h2><p class="subtle">For laptop testing, use the quick standalone template; advanced HA planning is optional. Status: <span class="chip">${esc(status)}</span></p></div><span class="chip">DESIGN ONLY</span></div><div class="healthbanner"><b>Quick start:</b> IIS, Apache, Nginx, or another HTTP(S) website can serve as a backend. <button class="ghost mini" type="button" data-action="setup-quick-lab">Fill single-server test draft</button> This fills design fields only and never changes live routes.</div><div class="setup-steps">${topologySteps.map((t, i) => `<button class="setup-step ${i === topologyStep ? 'current' : ''}" data-action="setup-step" data-id="${i}" type="button"><span>${i + 1}</span><b>${esc(t)}</b></button>`).join('')}</div><div class="setup-panel">${topologyStepHtml()}</div><div class="setup-actions"><button class="ghost" type="button" data-action="setup-prev">${topologyStep === 0 ? '← Exit to Setup Center' : '← Previous step'}</button><span class="subtle">Step ${topologyStep + 1} of ${topologySteps.length}</span><div><button class="ghost" type="button" data-action="setup-save" ${currentRole !== 'Administrator' ? 'disabled' : ''}>Save draft</button> ${topologyStep < 5 ? '<button class="primary" type="button" data-action="setup-next">Continue</button>' : `<button class="primary" type="button" data-action="setup-confirm" ${currentRole !== 'Administrator' ? 'disabled' : ''}>Confirm design</button>`}</div></div><div class="healthbanner">No firewall, service, CA key, Pgpool, PostgreSQL, IIS or live YARP configuration change is performed by this wizard. Gateway connectivity and deployment are separate approved workflows.</div>`; }
 async function topologyValidate() { if (!topologyDraft || currentRole !== 'Administrator')
     return; try {
     const r = await api('/admin/api/onboarding/validate', 'POST', { plan: topologyDraft });
@@ -256,7 +275,7 @@ async function setupPage() {
         $('content').innerHTML = `<div class="setup-hero card"><div><div class="setup-eyebrow">FIRST-RUN BOOTSTRAP & OPERATIONS</div><h2>Set up your YARP gateway</h2><p>Choose deployment architecture, verify services and identity, then approve changes before routing traffic. All checks show actual server-side configuration state.</p><span class="chip">Version ${esc(x.version)} · ${esc(x.channel)}</span><span class="chip">${esc(x.gateway)}</span></div><div class="setup-score"><strong>${configured}/${x.stages.length}</strong><span>Configured setup controls, not a production-readiness score</span></div></div>
    <div class="setup-alert">${x.freeze.frozen ? `<b>Routing change freeze is ON.</b> ${esc(x.freeze.reason)}` : `<b>Routing changes are allowed with approval.</b> A local emergency freeze can stop route/change operations.`} ${currentRole === 'Administrator' ? `<button class="ghost mini" data-action="setup-toggle-freeze" data-id="${x.freeze.frozen ? 'off' : 'on'}">${x.freeze.frozen ? 'Unfreeze' : 'Freeze routing changes'}</button>` : ''}</div>
    <div class="setup-summary"><div class="card"><b>${x.routeCount}</b><span>Routes</span></div><div class="card"><b>${x.clusterCount}</b><span>Clusters</span></div><div class="card"><b>${x.destinationCount}</b><span>Enabled backend entries</span></div><div class="card"><b>${x.fleetEntries}</b><span>Gateway agent records</span></div></div>
-   <div class="toolbar"><div><h2>Bootstrap checklist</h2><p class="subtle">“Configured” is not the same as operationally tested or production certified.</p></div><div><button class="primary" data-action="setup-add-application">+ Onboard public application</button> <button class="ghost" data-action="setup-refresh">Refresh evidence</button></div></div>
+   <div class="toolbar"><div><h2>Bootstrap checklist</h2><p class="subtle">“Configured” is not the same as operationally tested or production certified.</p></div><div><button class="primary" data-action="setup-add-application">+ Advanced public HTTPS application</button> <button class="ghost" data-action="setup-local-web">+ Local IIS / Apache / Nginx test</button> <button class="ghost" data-action="setup-refresh">Refresh evidence</button></div></div>
    <div class="setup-stage-grid">${x.stages.map((s, i) => `<div class="card setup-stage"><div class="setup-stage-head"><span class="setup-number">${String(i + 1).padStart(2, '0')}</span><span class="chip ${readyClass(s.status)}">${esc(s.status.replace(/-/g, ' '))}</span></div><h3>${esc(s.title)}</h3><p>${esc(s.evidence)}</p><button class="ghost mini" data-action="setup-open" data-id="${esc(s.action)}">${esc(setupActionText(s))} →</button></div>`).join('')}</div>
    <div class="grid2"><div class="card"><h3>Live YARP health states</h3><p class="subtle">Queries YARP's internal active/passive destination states. Unknown means the policy has not classified the backend.</p><button class="primary" data-action="setup-live-health">Inspect live destinations</button><div id="setup-live-output" class="setup-live-output">No runtime query made yet.</div></div><div class="card"><h3>Production safety gates</h3><p class="subtle">The following are not magically provisioned by this setup page:</p><ul class="setup-bullets"><li>Remote gateway agents, mTLS and network admission</li><li>AD/SMTP delivery and phishing-resistant SSO</li><li>Independent immutable audit retention</li><li>OCSP/CRL and CA issuance failover acceptance</li></ul><p class="subtle">The console deliberately refuses to call this instance production certified.</p></div></div>`;
     }
@@ -293,33 +312,50 @@ async function setupFreeze(frozen) {
     }
 }
 function updateTopologyNavigation() { const finished = topologyResponse?.status === 'design-confirmed'; const prereqViews = ['organization', 'setup', 'onboarding', 'users', 'mail', 'directory']; document.querySelectorAll('.nav').forEach(b => { const dest = b.dataset.view || ''; const adminOnly = ['users', 'mail', 'directory'].includes(dest); b.hidden = (!finished && !prereqViews.includes(dest)) || (dest === 'fleet' && finished && topologyResponse?.plan?.mode === 'standalone') || (adminOnly && currentRole !== 'Administrator'); }); $('save').hidden = !finished || currentRole === 'Viewer' || view === 'onboarding' || view === 'setup'; }
-function render() { const names = { organization: 'Organization profile', setup: 'Setup Center · 0.1', onboarding: 'Architecture & setup', overview: 'Overview', routes: 'Routing rules', clusters: 'Backend clusters', backends: 'Backend management', health: 'Health and diagnostics', backups: 'Backups and audit', inventory: 'Infrastructure inventory', users: 'Administrators and roles', mail: 'Mail & OTP', directory: 'Active Directory (LDAPS)', approvals: 'Change approvals', metrics: 'Gateway metrics', fleet: 'Gateway fleet', capabilities: 'YARP capabilities', featurematrix: 'Traffic Engine & platform modules' }; $('page-title').textContent = names[view]; $('page-subtitle').textContent = dirty ? 'Unsaved configuration changes — submit for approval' : 'Control and inspect your gateway'; $('gateway-pill').textContent = '● Gateway online'; $('save').textContent = dirty ? '● Submit change request' : 'Submit change request'; document.querySelectorAll('.nav').forEach(n => n.classList.toggle('active', n.dataset.view === view)); const pages = { overview, routes, clusters, backends, health, capabilities }; updateTopologyNavigation(); if (view === 'organization')
-    void organizationPage();
-else if (view === 'featurematrix')
-    void featureMatrix();
-else if (view === 'setup')
-    void setupPage();
-else if (view === 'onboarding')
-    $('content').innerHTML = topologyPage();
-else if (view === 'approvals')
-    void approvals();
-else if (view === 'metrics')
-    void metrics();
-else if (view === 'backups')
-    void backups();
-else if (view === 'inventory')
-    void inventory();
-else if (view === 'fleet')
-    void fleet();
-else if (view === 'users')
-    void users();
-else if (view === 'mail')
-    void mailPage();
-else if (view === 'directory')
-    void directoryPage();
-else
-    $('content').innerHTML = pages[view](); }
-function modal(title, help, fields, cb) { $('modal-title').textContent = title; $('modal-help').textContent = help; $('modal-fields').innerHTML = fields.map(f => `<div class="field"><label for="f-${esc(f.name)}">${esc(f.label)}</label>${f.options ? `<select id="f-${esc(f.name)}">${f.options.map(o => `<option value="${esc(o)}" ${o === f.value ? 'selected' : ''}>${esc(o)}</option>`).join('')}</select>` : `<input id="f-${esc(f.name)}" value="${esc(f.value)}" type="${f.kind || 'text'}" autocomplete="off" required>`}</div>`).join(''); const dlg = $('modal'); const form = $('editor'); form.onsubmit = e => { if (e.submitter?.getAttribute('value') === 'cancel')
+function render() {
+    if (view !== lastRenderedView) {
+        if (!restoringNavigation)
+            viewHistory.push(lastRenderedView);
+        lastRenderedView = view;
+    }
+    restoringNavigation = false;
+    $('page-back').hidden = view === 'setup' && viewHistory.length === 0;
+    const names = { organization: 'Organization profile', setup: 'Setup Center · 0.1', onboarding: 'Architecture & setup', overview: 'Overview', routes: 'Routing rules', clusters: 'Backend clusters', backends: 'Backend management', health: 'Health and diagnostics', backups: 'Backups and audit', inventory: 'Infrastructure inventory', users: 'Administrators and roles', mail: 'Mail & OTP', directory: 'Active Directory (LDAPS)', approvals: 'Change approvals', metrics: 'Gateway metrics', fleet: 'Gateway fleet', capabilities: 'YARP capabilities', featurematrix: 'Traffic Engine & platform modules' };
+    $('page-title').textContent = names[view];
+    $('page-subtitle').textContent = dirty ? 'Unsaved configuration changes — submit for approval' : 'Control and inspect your gateway';
+    $('gateway-pill').textContent = '● Gateway online';
+    $('save').textContent = dirty ? '● Submit change request' : 'Submit change request';
+    document.querySelectorAll('.nav').forEach(n => n.classList.toggle('active', n.dataset.view === view));
+    const pages = { overview, routes, clusters, backends, health, capabilities };
+    updateTopologyNavigation();
+    if (view === 'organization')
+        void organizationPage();
+    else if (view === 'featurematrix')
+        void featureMatrix();
+    else if (view === 'setup')
+        void setupPage();
+    else if (view === 'onboarding')
+        $('content').innerHTML = topologyPage();
+    else if (view === 'approvals')
+        void approvals();
+    else if (view === 'metrics')
+        void metrics();
+    else if (view === 'backups')
+        void backups();
+    else if (view === 'inventory')
+        void inventory();
+    else if (view === 'fleet')
+        void fleet();
+    else if (view === 'users')
+        void users();
+    else if (view === 'mail')
+        void mailPage();
+    else if (view === 'directory')
+        void directoryPage();
+    else
+        $('content').innerHTML = pages[view]();
+}
+function modal(title, help, fields, cb, confirmLabel = 'Apply to draft') { $('confirm').textContent = confirmLabel; $('modal-title').textContent = title; $('modal-help').textContent = help; $('modal-fields').innerHTML = fields.map(f => `<div class="field"><label for="f-${esc(f.name)}">${esc(f.label)}</label>${f.options ? `<select id="f-${esc(f.name)}">${f.options.map(o => `<option value="${esc(o)}" ${o === f.value ? 'selected' : ''}>${esc(o)}</option>`).join('')}</select>` : `<input id="f-${esc(f.name)}" value="${esc(f.value)}" type="${f.kind || 'text'}" autocomplete="off" ${f.optional ? '' : 'required'} ${f.minLength ? `minlength="${f.minLength}"` : ''}>`}</div>`).join(''); const dlg = $('modal'); const form = $('editor'); form.onsubmit = e => { if (e.submitter?.getAttribute('value') === 'cancel')
     return; e.preventDefault(); const vals = {}; for (const f of fields)
     vals[f.name] = $('f-' + f.name).value; try {
     cb(vals);
@@ -384,9 +420,10 @@ function addApplicationWizard() {
         return show('Viewer accounts cannot submit configuration changes', true);
     if (topologyResponse?.status !== 'design-confirmed')
         return show('Confirm the architecture design first', true);
-    modal('Onboard public application', 'Creates a route, cluster and TWO backend destinations in a draft. Requires an independent administrator approval. Internal/RA/OCSP services need a separately validated network zone.', [
+    modal('Advanced public HTTPS application', 'Creates a route, cluster and TWO independently reachable HTTPS backend destinations in a draft. Requires an independent administrator approval. Internal/RA/OCSP services need a separately validated network zone.', [
         { name: 'id', label: 'Application ID (letters, digits, - or _)', value: 'example-api' },
-        { name: 'service', label: 'Application category', value: 'Partner API', options: ['Public website', 'Partner API', 'eKYC'] },
+        { name: 'service', label: 'Application category', value: 'Public website', options: ['Public website', 'REST API', 'Partner API', 'eKYC'] },
+        { name: 'hosting', label: 'Backend hosting platform', value: 'Generic HTTP(S)', options: ['Generic HTTP(S)', 'Microsoft IIS', 'Apache httpd', 'Nginx', 'Caddy', 'Apache Tomcat', 'ASP.NET Kestrel', 'Node.js', 'Kubernetes Ingress (external)', 'Other HTTP(S) server'] },
         { name: 'hostname', label: 'Public hostname (FQDN)', value: 'api.example.com' },
         { name: 'path', label: 'Route path', value: '/{**catch-all}' },
         { name: 'backend1', label: 'API Server 1 HTTPS URL', value: 'https://api01.internal.example.com:5001/' },
@@ -413,13 +450,46 @@ function addApplicationWizard() {
             throw Error('Application already exists');
         data.clusters[clusterId] = { LoadBalancingPolicy: 'RoundRobin', Destinations: { 'api-01': { Address: b1 }, 'api-02': { Address: b2 } },
             HealthCheck: { AvailableDestinationsPolicy: 'HealthyAndUnknown', Active: { Enabled: false, Interval: '00:00:15', Timeout: '00:00:05', Policy: 'ConsecutiveFailures', Path: v.ready } },
-            Metadata: { 'YARP.ApplicationCategory': v.service } };
+            Metadata: { 'YARP.ApplicationCategory': v.service, 'GatewayCore.HostingEngine': v.hosting } };
         data.routes[routeId] = { ClusterId: clusterId, Match: { Hosts: [host], Path: v.path } };
         edit();
         show('Application added to unsaved draft. Validate both readiness endpoints before enabling active health, then submit for independent approval.');
     });
 }
-function updateRoute(id = '') { const old = data.routes[id] || { Match: { Path: '/api/{**catch-all}', Hosts: [] }, ClusterId: keys(data.clusters)[0] || '' }; modal(id ? 'Edit route' : 'Add route', 'Use comma-separated hostnames or leave blank for any hostname. Avoid exposing internal routes publicly.', [{ name: 'id', label: 'Route ID', value: id || '' }, { name: 'cluster', label: 'Target cluster', value: old.ClusterId || '', options: keys(data.clusters) }, { name: 'path', label: 'Route path', value: old.Match?.Path || '/{**catch-all}' }, { name: 'hosts', label: 'Hostnames (comma-separated, optional)', value: (old.Match?.Hosts || []).join(', ') }], v => { if (!validId(v.id) || !data.clusters[v.cluster] || !v.path.startsWith('/'))
+function addLocalWebWizard() {
+    if (currentRole === 'Viewer')
+        return show('Viewer accounts cannot submit routing changes', true);
+    if (topologyResponse?.status !== 'design-confirmed')
+        return show('Confirm the standalone architecture draft first. This will not deploy or modify IIS.', true);
+    if (topologyResponse?.plan?.mode !== 'standalone')
+        return show('The local HTTP test wizard is available only for a standalone gateway.', true);
+    modal('Local web-server test (IIS, Apache, Nginx, or other HTTP origin)', 'Creates an approval-required /lab/ draft. Only loopback HTTP targets are allowed. This does not modify IIS or your web server.', [
+        { name: 'id', label: 'Test route ID', value: 'local-web-test' },
+        { name: 'hosting', label: 'Hosting software', value: 'Microsoft IIS', options: ['Microsoft IIS', 'Apache httpd', 'Nginx', 'Caddy', 'Apache Tomcat', 'ASP.NET Kestrel', 'Node.js', 'Other HTTP(S)'] },
+        { name: 'origin', label: 'Local test website URL', value: 'http://127.0.0.1/' }
+    ], v => {
+        const id = String(v.id).trim();
+        if (!validId(id))
+            throw Error('Invalid route ID');
+        let u;
+        try {
+            u = new URL(String(v.origin));
+        }
+        catch {
+            throw Error('Provide a valid local HTTP URL');
+        }
+        if (u.protocol !== 'http:' || !['127.0.0.1', 'localhost', '[::1]'].includes(u.hostname) || u.username || u.password || u.search || u.hash || u.pathname !== '/')
+            throw Error('Local test requires loopback HTTP root URL only. Remote web servers require HTTPS and independent approval.');
+        const clusterId = id + '-cluster', routeId = id + '-route';
+        if (data.clusters[clusterId] || data.routes[routeId])
+            throw Error('Test route already exists');
+        data.clusters[clusterId] = { LoadBalancingPolicy: 'RoundRobin', Destinations: { 'web-01': { Address: u.href } }, Metadata: { 'GatewayCore.HostingEngine': String(v.hosting) } };
+        data.routes[routeId] = { ClusterId: clusterId, Match: { Path: '/lab/{**catch-all}' }, Transforms: [{ PathRemovePrefix: '/lab' }] };
+        edit();
+        show('Local website added to draft. Submit for independent approval; no live traffic changed.');
+    });
+}
+function updateRoute(id = '') { const old = data.routes[id] || { Match: { Path: '/api/{**catch-all}', Hosts: [] }, ClusterId: keys(data.clusters)[0] || '' }; modal(id ? 'Edit route' : 'Add route', 'Use comma-separated hostnames or leave blank for any hostname. Avoid exposing internal routes publicly.', [{ name: 'id', label: 'Route ID', value: id || '' }, { name: 'cluster', label: 'Target cluster', value: old.ClusterId || '', options: keys(data.clusters) }, { name: 'path', label: 'Route path', value: old.Match?.Path || '/{**catch-all}' }, { name: 'hosts', label: 'Hostnames (comma-separated, optional)', value: (old.Match?.Hosts || []).join(', '), optional: true }], v => { if (!validId(v.id) || !data.clusters[v.cluster] || !v.path.startsWith('/'))
     throw Error('Check route ID, cluster, and /path'); if (v.id !== id && data.routes[v.id])
     throw Error('Route ID already exists'); const x = { ...old, ClusterId: v.cluster, Match: { ...old.Match, Path: v.path, Hosts: v.hosts.split(',').map((s) => s.trim()).filter(Boolean) } }; if (x.Match.Hosts.length === 0)
     delete x.Match.Hosts; if (id && id !== v.id)
@@ -451,6 +521,10 @@ function act(type, id) {
         addApplicationWizard();
         return;
     }
+    if (type === 'setup-local-web') {
+        addLocalWebWizard();
+        return;
+    }
     if (type === 'setup-refresh') {
         void setupPage();
         return;
@@ -468,6 +542,12 @@ function act(type, id) {
         render();
         return;
     }
+    if (type === 'setup-quick-lab') {
+        topologyDraft = { ...topologyDefaults(), gateways: [{ id: 'gateway-01', hostname: '127.0.0.1', agentUrl: '' }], workloads: [{ id: 'web-01', application: 'local-test', url: 'http://127.0.0.1/', zone: 'public', hostingEngine: 'iis' }], notes: 'Local lab-only IIS/Apache/Nginx test; no public exposure or deployment' };
+        topologyStep = 5;
+        void topologyValidate().then(() => render());
+        return;
+    }
     if (type === 'setup-next') {
         topologyStep = Math.min(5, topologyStep + 1);
         if (topologyStep === 5)
@@ -477,8 +557,14 @@ function act(type, id) {
         return;
     }
     if (type === 'setup-prev') {
-        topologyStep = Math.max(0, topologyStep - 1);
-        render();
+        if (topologyStep === 0) {
+            view = 'setup';
+            render();
+        }
+        else {
+            topologyStep--;
+            render();
+        }
         return;
     }
     if (type === 'setup-step') {
@@ -504,7 +590,7 @@ function act(type, id) {
     if (type === 'setup-workload-add') {
         if ((topologyDraft?.workloads || []).length >= 80)
             return show('Maximum 80 application destinations', true);
-        topologyDraft?.workloads.push({ id: '', application: 'example-api', url: '', zone: 'public' });
+        topologyDraft?.workloads.push({ id: '', application: 'web-site', url: '', zone: 'public', hostingEngine: 'http' });
         render();
         return;
     }
@@ -652,7 +738,7 @@ function act(type, id) {
         return;
     }
     if (type === 'mail-test') {
-        void api('/admin/api/mail/test', 'POST', {}).then(r => { show('SMTP accepted test message for ' + r.recipient); void mailPage(); }).catch(e => show(String(e), true));
+        void api('/admin/api/mail/test', 'POST', {}).then(r => { show('SMTP accepted test message for ' + r.recipient); void mailPage(); }).catch(e => show('Mail test failed: ' + String(e) + '. Save a relay configuration first; verify administrator email and STARTTLS.', true));
         return;
     }
     if (type === 'directory-test') {
@@ -704,6 +790,8 @@ $('content').addEventListener('input', e => { const el = e.target; if (el.matche
 $('content').addEventListener('change', e => { const el = e.target; if (el.matches('[data-setup-field],[data-setup-array]'))
     topologyInputUpdate(el); });
 document.querySelectorAll('.nav').forEach(el => el.onclick = () => { view = el.dataset.view || 'overview'; render(); });
+$('page-back').onclick = () => navigateBack();
+$('modal-close').onclick = () => $('modal').close();
 $('refresh').onclick = () => void reload();
 $('save').onclick = () => void save();
 $('logout').onclick = () => void api('/admin/api/logout', 'POST', {}).then(() => showLogin(false)).catch(e => show(String(e), true));
@@ -814,7 +902,7 @@ async function users() {
     try {
         const list = await api('/admin/api/users');
         const rows = list.map((x) => `<tr><td><b>${esc(x.username)}</b></td><td>${esc(x.email || '—')}</td><td>${esc(x.role)}</td><td>${esc(x.provider || 'Local')}</td><td><span class="chip ${x.enabled ? 'good' : 'bad'}">${x.enabled ? 'Enabled' : 'Disabled'}</span></td><td>${x.provider === 'AD' ? 'AD password managed by directory' : actionBtn('Reset password', 'password-reset', x.username)} ${actionBtn(x.enabled ? 'Offboard' : 'Re-enable', x.enabled ? 'user-disable' : 'user-enable', x.username)}</td></tr>`).join('');
-        $('content').innerHTML = `<div class="toolbar"><div><h2>Administrator accounts</h2><p class="subtle">Administrators onboard/offboard users; Operators manage routes; Viewers read only. Disabling an account blocks new sign-ins; current sessions expire by timeout.</p></div>${actionBtn('+ Add account', 'user-add', '')} ${actionBtn('Mail & OTP', 'switch', 'mail')} ${actionBtn('Active Directory', 'switch', 'directory')}</div><div class="tablewrap"><table><thead><tr><th>Username</th><th>Email</th><th>Role</th><th>Authentication</th><th>Status</th><th>Action</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+        $('content').innerHTML = `<div class="toolbar"><div><h2>Administrator accounts</h2><p class="subtle">Administrators onboard/offboard users; Operators manage routes; Viewers read only. Disabling an account blocks new sign-ins and invalidates existing sessions. Inactive sessions expire after 30 minutes.</p></div>${actionBtn('+ Add account', 'user-add', '')} ${actionBtn('Mail & OTP', 'switch', 'mail')} ${actionBtn('Active Directory', 'switch', 'directory')}</div><div class="tablewrap"><table><thead><tr><th>Username</th><th>Email</th><th>Role</th><th>Authentication</th><th>Status</th><th>Action</th></tr></thead><tbody>${rows}</tbody></table></div>`;
     }
     catch (e) {
         show(String(e), true);
@@ -823,7 +911,7 @@ async function users() {
 function addUser() {
     modal('Create management user', 'Passwords must contain 16 to 256 characters.', [
         { name: 'username', label: 'Username', value: '' }, { name: 'role', label: 'Role', value: 'Viewer', options: ['Viewer', 'Operator', 'Administrator'] },
-        { name: 'email', label: 'Email address for login OTP', value: '' }, { name: 'password', label: 'Temporary password (16+ chars)', value: '', kind: 'password' }
+        { name: 'email', label: 'Email address for login OTP (required)', value: '' }, { name: 'password', label: 'Temporary password (16+ chars)', value: '', kind: 'password', minLength: 16 }
     ], async (v) => { try {
         await api('/admin/api/users', 'POST', v);
         show('Account created');
@@ -831,11 +919,11 @@ function addUser() {
     }
     catch (e) {
         show(String(e), true);
-    } });
+    } }, 'Create account');
 }
 function resetPassword(username) {
     modal('Reset ' + username + ' password', 'Existing sessions should be treated as active until expired; coordinate with users.', [
-        { name: 'password', label: 'New password (16+ characters)', value: '', kind: 'password' }
+        { name: 'password', label: 'New password (16+ characters)', value: '', kind: 'password', minLength: 16 }
     ], async (v) => { try {
         await api('/admin/api/users/' + encodeURIComponent(username) + '/password', 'POST', v);
         show('Password changed');
@@ -843,14 +931,14 @@ function resetPassword(username) {
     }
     catch (e) {
         show(String(e), true);
-    } });
+    } }, 'Reset password');
 }
 async function mailPage() {
     if (currentRole !== 'Administrator')
         return;
     try {
         const m = await api('/admin/api/mail');
-        $('content').innerHTML = `<div class="toolbar"><div><h2>Mail relay & email OTP</h2><p class="subtle">Configure the internal SMTP relay, test delivery, then enable OTP. A local admin account is kept for disaster recovery.</p></div><span class="chip ${m.deliveryVerified ? 'good' : 'bad'}">${m.deliveryVerified ? 'SMTP test accepted' : 'Test required'}</span></div>
+        $('content').innerHTML = `<div class="toolbar"><div><h2>Mail relay & email OTP</h2><p class="subtle">Step 1: save relay settings with OTP off. Step 2: test delivery to the administrator email. Step 3: enable OTP only after the test passes. An optional SMTP relay is not needed for local gateway traffic.</p></div><span class="chip ${m.deliveryVerified ? 'good' : 'bad'}">${m.deliveryVerified ? 'SMTP test accepted' : 'Test required'}</span></div>
   <div class="settings-columns"><div class="card"><h3>SMTP connection</h3><form id="mail-config" class="settings-form">
    <label>SMTP DNS host<input name="host" value="${esc(m.host || '')}" placeholder="smtp.internal.example.com" required></label>
    <label>Port<input name="port" type="number" value="${esc(m.port || 587)}" min="1" max="65535" required></label>
@@ -858,7 +946,7 @@ async function mailPage() {
    <label>SMTP login (optional)<input name="username" autocomplete="off" value="${esc(m.username || '')}"></label>
    <label>SMTP password (leave blank to preserve)<input name="password" autocomplete="new-password" type="password" placeholder="${m.passwordConfigured ? 'A credential is stored' : ''}"></label>
    <label class="setting-check"><input name="startTls" type="checkbox" ${m.startTls ? 'checked' : ''}> Require STARTTLS (recommended: 587)</label>
-   <label class="setting-check"><input name="enabled" type="checkbox" ${m.enabled ? 'checked' : ''}> Require email OTP at sign-in</label>
+   <label class="setting-check"><input name="enabled" type="checkbox" ${m.enabled ? 'checked' : ''} ${!m.deliveryVerified ? 'disabled' : ''}> Require email OTP at sign-in</label>${!m.deliveryVerified ? '<p class="subtle">OTP remains unavailable until the saved SMTP settings pass the delivery test. Save with OTP off, test, then return here.</p>' : ''}
    <div class="action-strip"><button type="submit" class="primary">Save SMTP settings</button><button type="button" class="ghost" data-action="mail-test" data-id="">Send test to my account</button></div>
   </form></div><div class="card"><h3>Secure setup sequence</h3><p class="subtle">1. Save the mail server with OTP disabled.</p><p class="subtle">2. Send a test to your registered administrator email.</p><p class="subtle">3. Confirm the email arrived.</p><p class="subtle">4. Enable OTP and save again. Next login will require a code.</p><div class="healthbanner">Authenticated mail requires STARTTLS and a trusted SMTP certificate. Implicit TLS on port 465 is not supported by the current .NET SmtpClient implementation. Email OTP is not phishing-resistant MFA.</div></div></div>`;
     }

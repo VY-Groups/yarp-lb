@@ -1,4 +1,4 @@
-# API contract — SpeedSign Control Center 0.1
+# API contract — GatewayCore Control Center 0.1
 
 All `/admin/api/*` endpoints are **loopback restricted** by `Program.cs` and are not internet APIs. Cookie authentication, CSRF and server role checks apply. The response shapes below describe current behavior, not remote production guarantees.
 

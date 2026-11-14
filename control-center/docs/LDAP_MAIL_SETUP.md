@@ -1,4 +1,4 @@
-# SpeedSign YARP 0.1 — Active Directory (LDAPS) and SMTP/OTP setup
+# GatewayCore YARP 0.1 — Active Directory (LDAPS) and SMTP/OTP setup
 
 ## First run and sign-in
 
@@ -61,7 +61,7 @@ Open **Active Directory** and enter: DC hostname, port 636, search base DN, bind
 
 Only AD users mapped to an authorized group can sign in. Direct and nested membership is evaluated through the AD LDAP matching rule `1.2.840.113556.1.4.1941` (standard `memberOf` transitive rule). AD primary-group membership is not inferred by this check: configure dedicated explicit security groups instead.
 
-Then sign out, choose **Active Directory / LDAPS** on the login form, supply the AD `sAMAccountName` and password, and verify the email OTP code. AD credentials are bound to the domain controller via LDAPS; the password is not stored by SpeedSign.
+Then sign out, choose **Active Directory / LDAPS** on the login form, supply the AD `sAMAccountName` and password, and verify the email OTP code. AD credentials are bound to the domain controller via LDAPS; the password is not stored by GatewayCore.
 
 If an AD account is disabled, membership is removed, the DC is unavailable, or its certificate fails validation, existing AD console sessions fail closed on revalidation. An AD user can also be offboarded in the **Admin accounts** page; to fully offboard, remove the user from the AD security group or disable the AD account in AD.
 
@@ -70,7 +70,7 @@ If an AD account is disabled, membership is removed, the DC is unavailable, or i
 - These features are **code delivered for a local test listener**, NOT production-verified. Run Windows `dotnet build`, SMTP acceptance tests, LDAP sign-in tests, cookie/session tests, and a security assessment.
 - Email OTP is *not phishing-resistant MFA*. For CA production, use approved identity federation (e.g. enterprise IdP with FIDO2/passkeys/smart-card) and audited break-glass procedures.
 - Admin console remains bound to `127.0.0.1:8080` in the existing test `appsettings.json`. Do not expose it as HTTP to any network. Configure HTTPS and admin-only network access in a separate production deployment.
-- The LDAP bind password and SMTP secret are encrypted at rest by Windows DPAPI-bound Data Protection. Use a restricted Windows Service identity and ACLs on `C:\ProgramData\SpeedSignYarp\ControlPlane`. Keep backups and recovery keys protected. DPAPI secrets on one gateway cannot simply be copied to another.
+- The LDAP bind password and SMTP secret are encrypted at rest by Windows DPAPI-bound Data Protection. Use a restricted Windows Service identity and ACLs on `C:\ProgramData\GatewayCoreYarp\ControlPlane`. Keep backups and recovery keys protected. DPAPI secrets on one gateway cannot simply be copied to another.
 - This is Active Directory DS (not generic OpenLDAP), Windows credentials over **LDAPS**, not Kerberos integrated SSO.
 - Authentication and admin configuration remain local to one management instance. Multi-controller shared state and SSO are not implemented here.
 - Do not enable unauthenticated management endpoints, use inline scripts/styles, or turn off certificate validation to troubleshoot.

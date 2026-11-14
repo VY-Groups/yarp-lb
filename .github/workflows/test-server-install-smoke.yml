@@ -1,0 +1,41 @@
+name: GatewayCore test-server installer smoke
+on:
+  pull_request:
+    paths:
+      - "ops/test-server/**"
+      - "tests/CI/stack/**"
+      - "control-center/**"
+      - ".github/workflows/test-server-install-smoke.yml"
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  install-and-smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate shell scripts and Docker Compose
+        run: |
+          bash -n ops/test-server/install.sh ops/test-server/smoke.sh
+          docker compose -f ops/test-server/compose.yml config --quiet
+      - name: Install actual GatewayCore lab stack from source
+        run: bash ops/test-server/install.sh
+      - name: Verify HTTP and trusted ECDSA HTTPS and restricted paths
+        run: bash ops/test-server/smoke.sh
+      - name: Collect logs and current SHA
+        if: always()
+        run: |
+          mkdir -p artifacts/test-server
+          printf '%s\n' "${GITHUB_SHA}" > artifacts/test-server/source-sha.txt
+          docker compose -f ops/test-server/compose.yml ps > artifacts/test-server/containers.txt || true
+          docker compose -f ops/test-server/compose.yml logs --no-color --tail 200 > artifacts/test-server/stack.log 2>&1 || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: gatewaycore-test-server-install-smoke
+          path: artifacts/test-server/
+          retention-days: 7
+      - name: Remove disposable services
+        if: always()
+        run: docker compose -f ops/test-server/compose.yml down --volumes || true

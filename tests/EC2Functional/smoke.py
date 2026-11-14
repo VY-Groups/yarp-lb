@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline startup / hot-reload smoke for the actual SpeedSignYarp.dll.
+"""Offline startup / hot-reload smoke for the actual GatewayCoreYarp.dll.
 
 Uses two local disposable HTTP servers. No EC2 network requests are made.
 """

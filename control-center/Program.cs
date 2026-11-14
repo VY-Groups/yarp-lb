@@ -20,13 +20,17 @@ using Microsoft.AspNetCore.RateLimiting;
 using System.Threading.RateLimiting;
 using Yarp.ReverseProxy.LoadBalancing;
 
-// Never change the production ProgramData path. The disposable GitHub EC2
-// functional rig uses a private workspace with no persisted identities.
+// Windows neutral-identity deployments use a new ProgramData root. Refuse
+// silent re-bootstrap when another YARP control plane already has identities.
+// Disposable EC2 CI uses a private workspace; production Linux state is
+// explicitly selected and owned through YARP_CONTROL_PLANE_DIR.
 var ec2Lab = Ec2WorkflowLab.Enabled;
 var privateDir = ec2Lab ? Ec2WorkflowLab.PrivateDirectory()
     : OperatingSystem.IsLinux() ? LinuxKeyProtection.InitializeStateDirectory()
     : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
-        "SpeedSignYarp", "ControlPlane");
+        "GatewayCoreYarp", "ControlPlane");
+if (OperatingSystem.IsWindows() && !ec2Lab)
+    LegacyStateGuard.RejectUnmigratedWindowsState(privateDir);
 if (!OperatingSystem.IsLinux() || ec2Lab)
     Directory.CreateDirectory(privateDir);
 var keyDir = Path.Combine(privateDir, "data-protection-keys");
@@ -39,7 +43,7 @@ isolatedListeners?.Configure(builder.WebHost);
 // Production and the GatewayLab use the same nonblocking registration.
 var boundedConsole = GatewayLoggingConfiguration.Install(builder.Logging, Console.Out);
 var dataProtection = builder.Services.AddDataProtection()
-    .SetApplicationName("SpeedSignYarpControlCenter")
+    .SetApplicationName("GatewayCoreYarpControlCenter")
     .PersistKeysToFileSystem(new DirectoryInfo(keyDir));
 if (OperatingSystem.IsWindows())
     dataProtection.ProtectKeysWithDpapi(protectToLocalMachine: true);
@@ -80,12 +84,14 @@ builder.Services.AddSingleton<IPassiveHealthCheckPolicy, BoundedTransportFailure
 builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme)
     .AddCookie(options =>
     {
-        options.Cookie.Name = "SpeedSignYarpAdmin";
+        options.Cookie.Name = "GatewayCoreYarpAdmin";
         options.Cookie.HttpOnly = true;
         options.Cookie.SameSite = SameSiteMode.Strict;
         options.Cookie.SecurePolicy = CookieSecurePolicy.SameAsRequest; // local HTTP TEST only; mandate HTTPS for remote administration
-        options.ExpireTimeSpan = TimeSpan.FromMinutes(20);
-        options.SlidingExpiration = false;
+        // Inactivity timeout for interactive local administration. Renew only on
+        // authenticated user requests (never via background polling).
+        options.ExpireTimeSpan = TimeSpan.FromMinutes(30);
+        options.SlidingExpiration = true;
         options.Events.OnValidatePrincipal = async ctx =>
         {
             try
@@ -172,7 +178,7 @@ var loginGate = new SemaphoreSlim(1, 1);
 var pendingOtp = new ConcurrentDictionary<string, OtpChallenge>();
 var mailPath = Path.Combine(privateDir, "mail-settings.json");
 var mailProofPath = Path.Combine(privateDir, "mail-test-proof.sha256");
-var protector = app.Services.GetRequiredService<IDataProtectionProvider>().CreateProtector("SpeedSignYarp.AdminMail.v1");
+var protector = app.Services.GetRequiredService<IDataProtectionProvider>().CreateProtector("GatewayCoreYarp.AdminMail.v1");
 MailSettings ReadMail() => File.Exists(mailPath)
     ? JsonSerializer.Deserialize<MailSettings>(File.ReadAllText(mailPath), jsonOptions) ?? new MailSettings()
     : new MailSettings();
@@ -639,12 +645,12 @@ app.MapPost("/admin/api/mail", async (HttpContext ctx, MailSettingsInput input) 
     if (input.Host is null || input.From is null || input.Username is null || input.Password is null ||
         input.Port is < 1 or > 65535 || input.Port == 465 || input.Host.Length > 255 || input.From.Length > 254 || input.Username.Length > 254 ||
         (input.Enabled && (string.IsNullOrWhiteSpace(input.Host) || !ValidEmail(input.From) || !input.StartTls)))
-        return Results.BadRequest(new { error = "Invalid SMTP settings" });
+        return Results.BadRequest(new { code = "SMTP_INVALID_SETTINGS", error = "Check SMTP host, port (465 unsupported), sender address, and STARTTLS before enabling OTP." });
     var existing = ReadMail();
     var encrypted = string.IsNullOrEmpty(input.Password) ? existing.EncryptedPassword : protector.Protect(input.Password);
     var mail = new MailSettings(input.Enabled, input.Host, input.Port, input.From, input.Username, encrypted, input.StartTls);
     if (input.Enabled && !MailDeliveryVerified(mail))
-        return Results.BadRequest(new { error = "Send a successful test email using the saved settings before enabling OTP" });
+        return Results.Json(new { code = "SMTP_TEST_REQUIRED", error = "Save SMTP settings with OTP disabled, send a successful test to the administrator email, then enable OTP." }, statusCode: 409);
     File.WriteAllText(mailPath + ".tmp", JsonSerializer.Serialize(mail)); File.Move(mailPath + ".tmp", mailPath, true);
     await Audit(Actor(ctx), "MAIL_SETTINGS_UPDATED", new { input.Enabled, input.Host, input.Port, input.StartTls });
     return Results.Ok(new { saved = true, otpRequiredOnNextLogin = mail.Enabled });
@@ -653,10 +659,12 @@ app.MapPost("/admin/api/mail", async (HttpContext ctx, MailSettingsInput input) 
 app.MapPost("/admin/api/mail/test", async (HttpContext ctx) =>
 {
     var admin = ReadUsers().FirstOrDefault(x => x.Username.Equals(Actor(ctx), StringComparison.OrdinalIgnoreCase));
-    if (admin is null || !ValidEmail(admin.Email)) return Results.BadRequest(new { error = "Set a valid administrator email first" });
+    if (admin is null || !ValidEmail(admin.Email)) return Results.BadRequest(new { code = "SMTP_ADMIN_EMAIL_REQUIRED", error = "Set a valid administrator email under Administrators and roles before sending a test." });
     try
     {
         var cfg = ReadMail();
+        if (string.IsNullOrWhiteSpace(cfg.Host) || !ValidEmail(cfg.From) || !cfg.StartTls)
+            return Results.Json(new { code = "SMTP_NOT_CONFIGURED", error = "Save a valid SMTP relay, sender, and STARTTLS configuration with OTP disabled before testing." }, statusCode: 409);
         await SendMailMessage(admin.Email!, "YARP Control Center SMTP test", "This is a test message from your local YARP administration console.");
         File.WriteAllText(mailProofPath + ".tmp", MailFingerprint(cfg));
         File.Move(mailProofPath + ".tmp", mailProofPath, true);
@@ -666,7 +674,7 @@ app.MapPost("/admin/api/mail/test", async (HttpContext ctx) =>
     catch
     {
         await Audit(Actor(ctx), "SMTP_DELIVERY_TEST_FAILED");
-        return Results.Json(new { error = "SMTP test failed. Check STARTTLS, server certificate, credentials and relay permissions" }, statusCode: 503);
+        return Results.Json(new { code = "SMTP_RELAY_UNAVAILABLE", error = "SMTP relay test failed. Check reachability, STARTTLS certificate trust, credentials and relay permissions. No OTP settings were enabled." }, statusCode: 503);
     }
 }).RequireRateLimiting("mailtest").RequireAuthorization(p => p.RequireRole("Administrator"));
 
