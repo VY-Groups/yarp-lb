@@ -24,6 +24,24 @@ cd C:\GatewayCore-Test
 .\Start-GatewayCore-Test.ps1 -IisBackendUrl "http://127.0.0.1:80/"
 \`\`\`
 
+**Upgrade from the previous v0.1.0-test.1 or test.2 package:** stop its
+GatewayCore process first. Independently back up the old extracted app folder
+and `C:\ProgramData\GatewayCoreYarp\ControlPlane` (including keys, users and
+configuration). Extract the new release into its **own fresh directory**. On
+the same machine, with the **same locally verified IIS origin URL** and the
+same v0.1 test identity, use the explicit opt-in parameter:
+
+```powershell
+.\Start-GatewayCore-Test.ps1 -IisBackendUrl "http://127.0.0.1:80/" -ReuseExistingTestState
+```
+
+The switch does not copy, delete or rewrite old state and refuses to replace
+an existing mismatched `appsettings.json`. It permits the same development
+application to use its previous state; it is **not** a production migration
+tool or permission to merge unrelated credentials. If this is not the same
+test installation, use a disposable Windows VM instead. Existing v0.1
+management identity files remain sensitive.
+
 The program stays in the foreground until you press Ctrl+C. It binds
 **127.0.0.1:8080 only**, leaving IIS on 80/443 untouched. This is the
 first run on a **fresh test machine**. Existing appsettings or populated
