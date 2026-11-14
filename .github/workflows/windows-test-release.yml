@@ -12,7 +12,7 @@ concurrency:
   cancel-in-progress: true
 jobs:
   build-test-publish:
-    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'release/windows-e2e-tested-test8-20261114'
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'release/windows-mailkit-zoho-india-test9-20261114'
     runs-on: windows-2022
     timeout-minutes: 35
     env:
@@ -57,7 +57,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference='Stop'
-          $stage=Join-Path $env:RUNNER_TEMP 'GatewayCore-v0.1.0-test.8-win-x64'
+          $stage=Join-Path $env:RUNNER_TEMP 'GatewayCore-v0.1.0-test.9-win-x64'
           New-Item -ItemType Directory -Force -Path (Join-Path $stage 'app') | Out-Null
           dotnet publish control-center/GatewayCoreYarp.csproj -c Release -r win-x64 --self-contained true -p:PublishReadyToRun=false -o (Join-Path $stage 'app')
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -104,11 +104,11 @@ jobs:
       - name: Compress tested release payload and calculate SHA256
         shell: pwsh
         run: |
-          $zip=Join-Path $env:RUNNER_TEMP 'GatewayCore-v0.1.0-test.8-win-x64.zip'
+          $zip=Join-Path $env:RUNNER_TEMP 'GatewayCore-v0.1.0-test.9-win-x64.zip'
           Remove-Item (Join-Path $env:STAGE 'app/appsettings.json') -ErrorAction SilentlyContinue
           Compress-Archive -Path (Join-Path $env:STAGE '*') -DestinationPath $zip -CompressionLevel Optimal
           $hash=(Get-FileHash -Algorithm SHA256 $zip).Hash.ToLowerInvariant()
-          "$hash  GatewayCore-v0.1.0-test.8-win-x64.zip" | Set-Content -Encoding ascii (Join-Path $env:RUNNER_TEMP 'SHA256SUMS.txt')
+          "$hash  GatewayCore-v0.1.0-test.9-win-x64.zip" | Set-Content -Encoding ascii (Join-Path $env:RUNNER_TEMP 'SHA256SUMS.txt')
           echo "RELEASE_ZIP=$zip" >> $env:GITHUB_ENV
       - name: Publish GitHub test pre-release (never production)
         shell: pwsh
@@ -116,11 +116,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $ErrorActionPreference='Stop'
-          $tag='v0.1.0-test.8'
+          $tag='v0.1.0-test.9'
           gh release view $tag --repo $env:GITHUB_REPOSITORY *> $null
           if ($LASTEXITCODE -eq 0) { throw "Tag $tag already published; refuse to silently replace an immutable test release." }
-          $notes='**TEST PRE-RELEASE ONLY**. Windows x64 self-contained GatewayCore .NET 10 with localhost IIS, Apache, Nginx or other HTTP origin. The launcher parameter is still named -IisBackendUrl for backward compatibility; it never configures any origin server. Source SHA: '+$env:HEAD_SHA+'. Chromium/API E2E tests ran on the same application source tree before this packaging-only branch; Windows release workflow verifies real executable forwarding. No production approval. Requires an isolated Windows test machine and an existing local HTTP test site.'
-          gh release create $tag $env:RELEASE_ZIP (Join-Path $env:RUNNER_TEMP 'SHA256SUMS.txt') --repo $env:GITHUB_REPOSITORY --target $env:HEAD_SHA --title 'GatewayCore v0.1.0-test.8 Windows x64 HTTP origin TEST' --prerelease --notes $notes
+          $notes='**TEST PRE-RELEASE ONLY**. Windows x64 self-contained GatewayCore .NET 10 with localhost IIS, Apache, Nginx or other HTTP origin. The launcher parameter is still named -IisBackendUrl for backward compatibility; it never configures any origin server. Source SHA: '+$env:HEAD_SHA+'. This source passed exact-commit real Chromium/API, local authenticated STARTTLS email OTP with strict CRL validation, Apache/Nginx HTTP-origin E2E and 10-repeat Windows HA CI. Mail & OTP now offers Zoho India smtppro.zoho.in/smtp.zoho.in presets without credentials. This ZIP DOES NOT prove live Zoho delivery or physical production acceptance. No production approval. Requires an isolated Windows test machine and an existing local HTTP test site.'
+          gh release create $tag $env:RELEASE_ZIP (Join-Path $env:RUNNER_TEMP 'SHA256SUMS.txt') --repo $env:GITHUB_REPOSITORY --target $env:HEAD_SHA --title 'GatewayCore v0.1.0-test.9 Windows x64 HTTP origin TEST' --prerelease --notes $notes
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Keep build evidence if release step fails
         if: always()
