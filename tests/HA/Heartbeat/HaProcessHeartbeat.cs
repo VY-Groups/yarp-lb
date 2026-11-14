@@ -3,16 +3,15 @@ using System.Globalization;
 using System.Text;
 
 /// <summary>
-/// Diagnostics only: an independent 100ms managed-timer heartbeat in EACH
-/// HA lab process. This is never enabled for ordinary L7 or product runs.
-/// A missed heartbeat is evidence of a scheduling/pause gap, NOT by itself
-/// proof of either a YARP defect or a hosted-runner defect.
+/// Diagnostic-only heartbeat on a DEDICATED OS thread, independent of the
+/// request-handling ThreadPool. Enabled only by the disposable HA harness.
+/// A missed tick is not automatically a gateway fault or host-wide pause.
 /// </summary>
 public sealed class HaProcessHeartbeat : IDisposable
 {
-    private readonly CancellationTokenSource stop = new();
+    private readonly ManualResetEventSlim stopping = new(false);
     private readonly StreamWriter writer;
-    private readonly Task runner;
+    private readonly Thread thread;
     private readonly string role;
     private int disposed;
 
@@ -20,7 +19,15 @@ public sealed class HaProcessHeartbeat : IDisposable
     {
         this.writer = writer;
         this.role = role;
-        runner = Task.Run(PumpAsync);
+        // ThreadPool tasks can themselves starve under HA request load,
+        // producing false "runner paused" conclusions. An independent
+        // dedicated thread keeps sampling during ThreadPool backpressure.
+        thread = new Thread(Pump)
+        {
+            IsBackground = true,
+            Name = "ha-heartbeat-" + role,
+        };
+        thread.Start();
     }
 
     public static HaProcessHeartbeat? StartFromEnvironment()
@@ -45,13 +52,12 @@ public sealed class HaProcessHeartbeat : IDisposable
         return new HaProcessHeartbeat(writer, role);
     }
 
-    private async Task PumpAsync()
+    private void Pump()
     {
         try
         {
             using var proc = Process.GetCurrentProcess();
-            using var interval = new PeriodicTimer(TimeSpan.FromMilliseconds(100));
-            void WriteSample()
+            do
             {
                 var timestamp = Stopwatch.GetTimestamp();
                 var cpu = proc.TotalProcessorTime.TotalMilliseconds.ToString("F2", CultureInfo.InvariantCulture);
@@ -61,15 +67,11 @@ public sealed class HaProcessHeartbeat : IDisposable
                     timestamp, Stopwatch.Frequency,
                     ThreadPool.ThreadCount, ThreadPool.PendingWorkItemCount, cpu));
             }
-            WriteSample();
-            while (await interval.WaitForNextTickAsync(stop.Token))
-                WriteSample();
+            while (!stopping.Wait(100)); // 100 ms; not scheduled via ThreadPool.
         }
-        catch (OperationCanceledException) when (stop.IsCancellationRequested) { }
         catch (Exception ex)
         {
-            // Never let a diagnostic writer crash the gateway or change
-            // request/health logic; the analyzer flags the missing samples.
+            // Diagnostics must never terminate a gateway or change routing.
             Console.Error.WriteLine("HA HEARTBEAT DIAGNOSTIC FAILED: " + ex);
         }
     }
@@ -77,10 +79,9 @@ public sealed class HaProcessHeartbeat : IDisposable
     public void Dispose()
     {
         if (Interlocked.Exchange(ref disposed, 1) != 0) return;
-        stop.Cancel();
-        try { runner.GetAwaiter().GetResult(); }
-        catch (OperationCanceledException) { }
+        stopping.Set();
+        thread.Join();
         writer.Dispose();
-        stop.Dispose();
+        stopping.Dispose();
     }
 }
