@@ -117,7 +117,7 @@ class CapacityEvidence(unittest.TestCase):
         self.assertIn("missing/unusable generator evidence",str(d["error_reasons"]))
     def test_aggregate_fabricated_with_consistent_counts_fails(self):
         f=self.p/"results"/"h1"/"window-008.json";doc=json.loads(f.read_text())
-        doc["latencyPercentiles"]["p99"]=0.001
+        doc["latencyPercentiles"]["p99"]=0.035
         f.write_text(json.dumps(doc))
         r,d=self.report();self.assertNotEqual(r.returncode,0)
         self.assertIn("aggregate disagrees with raw oha",str(d["error_reasons"]))
