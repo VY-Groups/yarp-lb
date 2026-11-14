@@ -342,7 +342,7 @@ else if (view === 'directory')
     void directoryPage();
 else
     $('content').innerHTML = pages[view](); }
-function modal(title, help, fields, cb) { $('modal-title').textContent = title; $('modal-help').textContent = help; $('modal-fields').innerHTML = fields.map(f => `<div class="field"><label for="f-${esc(f.name)}">${esc(f.label)}</label>${f.options ? `<select id="f-${esc(f.name)}">${f.options.map(o => `<option value="${esc(o)}" ${o === f.value ? 'selected' : ''}>${esc(o)}</option>`).join('')}</select>` : `<input id="f-${esc(f.name)}" value="${esc(f.value)}" type="${f.kind || 'text'}" autocomplete="off" required>`}</div>`).join(''); const dlg = $('modal'); const form = $('editor'); form.onsubmit = e => { if (e.submitter?.getAttribute('value') === 'cancel')
+function modal(title, help, fields, cb, confirmLabel = 'Apply to draft') { $('confirm').textContent = confirmLabel; $('modal-title').textContent = title; $('modal-help').textContent = help; $('modal-fields').innerHTML = fields.map(f => `<div class="field"><label for="f-${esc(f.name)}">${esc(f.label)}</label>${f.options ? `<select id="f-${esc(f.name)}">${f.options.map(o => `<option value="${esc(o)}" ${o === f.value ? 'selected' : ''}>${esc(o)}</option>`).join('')}</select>` : `<input id="f-${esc(f.name)}" value="${esc(f.value)}" type="${f.kind || 'text'}" autocomplete="off" ${f.optional ? '' : 'required'} ${f.minLength ? `minlength="${f.minLength}"` : ''}>`}</div>`).join(''); const dlg = $('modal'); const form = $('editor'); form.onsubmit = e => { if (e.submitter?.getAttribute('value') === 'cancel')
     return; e.preventDefault(); const vals = {}; for (const f of fields)
     vals[f.name] = $('f-' + f.name).value; try {
     cb(vals);
@@ -474,7 +474,7 @@ function addLocalWebWizard() {
         show('Local website added to draft. Submit for independent approval; no live traffic changed.');
     });
 }
-function updateRoute(id = '') { const old = data.routes[id] || { Match: { Path: '/api/{**catch-all}', Hosts: [] }, ClusterId: keys(data.clusters)[0] || '' }; modal(id ? 'Edit route' : 'Add route', 'Use comma-separated hostnames or leave blank for any hostname. Avoid exposing internal routes publicly.', [{ name: 'id', label: 'Route ID', value: id || '' }, { name: 'cluster', label: 'Target cluster', value: old.ClusterId || '', options: keys(data.clusters) }, { name: 'path', label: 'Route path', value: old.Match?.Path || '/{**catch-all}' }, { name: 'hosts', label: 'Hostnames (comma-separated, optional)', value: (old.Match?.Hosts || []).join(', ') }], v => { if (!validId(v.id) || !data.clusters[v.cluster] || !v.path.startsWith('/'))
+function updateRoute(id = '') { const old = data.routes[id] || { Match: { Path: '/api/{**catch-all}', Hosts: [] }, ClusterId: keys(data.clusters)[0] || '' }; modal(id ? 'Edit route' : 'Add route', 'Use comma-separated hostnames or leave blank for any hostname. Avoid exposing internal routes publicly.', [{ name: 'id', label: 'Route ID', value: id || '' }, { name: 'cluster', label: 'Target cluster', value: old.ClusterId || '', options: keys(data.clusters) }, { name: 'path', label: 'Route path', value: old.Match?.Path || '/{**catch-all}' }, { name: 'hosts', label: 'Hostnames (comma-separated, optional)', value: (old.Match?.Hosts || []).join(', '), optional: true }], v => { if (!validId(v.id) || !data.clusters[v.cluster] || !v.path.startsWith('/'))
     throw Error('Check route ID, cluster, and /path'); if (v.id !== id && data.routes[v.id])
     throw Error('Route ID already exists'); const x = { ...old, ClusterId: v.cluster, Match: { ...old.Match, Path: v.path, Hosts: v.hosts.split(',').map((s) => s.trim()).filter(Boolean) } }; if (x.Match.Hosts.length === 0)
     delete x.Match.Hosts; if (id && id !== v.id)
@@ -890,7 +890,7 @@ async function users() {
 function addUser() {
     modal('Create management user', 'Passwords must contain 16 to 256 characters.', [
         { name: 'username', label: 'Username', value: '' }, { name: 'role', label: 'Role', value: 'Viewer', options: ['Viewer', 'Operator', 'Administrator'] },
-        { name: 'email', label: 'Email address for login OTP', value: '' }, { name: 'password', label: 'Temporary password (16+ chars)', value: '', kind: 'password' }
+        { name: 'email', label: 'Email address for login OTP (optional)', value: '', optional: true }, { name: 'password', label: 'Temporary password (16+ chars)', value: '', kind: 'password', minLength: 16 }
     ], async (v) => { try {
         await api('/admin/api/users', 'POST', v);
         show('Account created');
@@ -898,11 +898,11 @@ function addUser() {
     }
     catch (e) {
         show(String(e), true);
-    } });
+    } }, 'Create account');
 }
 function resetPassword(username) {
     modal('Reset ' + username + ' password', 'Existing sessions should be treated as active until expired; coordinate with users.', [
-        { name: 'password', label: 'New password (16+ characters)', value: '', kind: 'password' }
+        { name: 'password', label: 'New password (16+ characters)', value: '', kind: 'password', minLength: 16 }
     ], async (v) => { try {
         await api('/admin/api/users/' + encodeURIComponent(username) + '/password', 'POST', v);
         show('Password changed');
@@ -910,7 +910,7 @@ function resetPassword(username) {
     }
     catch (e) {
         show(String(e), true);
-    } });
+    } }, 'Reset password');
 }
 async function mailPage() {
     if (currentRole !== 'Administrator')
