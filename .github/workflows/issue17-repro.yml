@@ -1,0 +1,202 @@
+name: Issue 17 - bounded soak comparison and hang diagnostics
+on:
+  pull_request:
+    paths: [".github/workflows/issue17-repro.yml", "tests/L7/performance/issue17/**"]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: issue17-diagnostics-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  watchdog-contract:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 -m unittest discover -s tests/L7/performance/issue17 -p 'test_*.py' -v
+      - run: bash -n tests/L7/performance/issue17/capture_hang.sh
+
+  compare:
+    needs: watchdog-contract
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Prior comparison evidence is stored in run 43505217113.
+          # This repeat exercises ONLY the candidate fix to avoid burning 2
+          # additional 15-minute runners on already captured old failures.
+          - label: shipping-logger-shared-with-lab
+            source_sha: 09fea6710fa8580f0bb34b4032eecf1276bd7ffa
+    steps:
+      - uses: actions/checkout@v4
+      - name: Checkout pinned historical gateway revision
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.source_sha }}
+          path: source
+          persist-credentials: false
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+      - name: Install diagnostics tools on disposable runner
+        shell: bash
+        run: |
+          dotnet tool install --global dotnet-stack
+          dotnet tool install --global dotnet-dump
+          dotnet tool install --global dotnet-counters
+          echo "$HOME/.dotnet/tools" >> "$GITHUB_PATH"
+      - name: Compile pinned historical application binaries
+        run: |
+          dotnet build source/tests/L7/GatewayLab/GatewayLab.csproj -c Release
+          dotnet build source/tests/L7/BackendLab/BackendLab.csproj -c Release
+          dotnet build source/tests/L7/Acceptance/Acceptance.csproj -c Release
+      - name: Reproduce 75-VU load, capture dump and counters at first timeout
+        shell: bash
+        env:
+          RUN_LABEL: ${{ matrix.label }}
+          SOURCE_SHA: ${{ matrix.source_sha }}
+        run: |
+          set -euo pipefail
+          out="$GITHUB_WORKSPACE/artifacts/issue17/$RUN_LABEL"
+          mkdir -p "$out"
+          printf '%s\n' "$SOURCE_SHA" > "$out/source-sha.txt"
+          lab_pid=""
+          counters_pid=""
+          watchdog_pid=""
+          stats_pid=""
+          k6_pid=""
+          cleanup() {
+            for pid in "$k6_pid" "$watchdog_pid" "$counters_pid" "$stats_pid" "$lab_pid"; do
+              if [[ "$pid" =~ ^[0-9]+$ ]]; then kill "$pid" 2>/dev/null || true; fi
+            done
+            if [[ "$lab_pid" =~ ^[0-9]+$ ]]; then
+              wait "$lab_pid" 2>/dev/null || true
+            fi
+          }
+          trap cleanup EXIT
+          dotnet source/tests/L7/Acceptance/bin/Release/net10.0/Acceptance.dll "$GITHUB_WORKSPACE/source" --hold 22 > "$out/lab.log" 2>&1 &
+          lab_pid=$!
+          ready=0
+          for i in $(seq 1 100); do
+            if curl --noproxy '*' --connect-timeout 1 --max-time 2 -fsS \
+              http://127.0.0.1:18080/lab/stats > "$out/ready.json" 2>/dev/null &&
+              curl --noproxy '*' --connect-timeout 1 --max-time 2 -fsS \
+              http://127.0.0.1:18080/api/identity -o /dev/null 2>/dev/null; then
+              ready=1; break
+            fi
+            if ! kill -0 "$lab_pid" 2>/dev/null; then break; fi
+            sleep 0.5
+          done
+          if [[ "$ready" != 1 ]]; then
+            cat "$out/lab.log"; echo "REPRO_SETUP_FAIL: gateway not ready"; exit 1
+          fi
+          gateway_pid="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["processId"])' "$out/ready.json")"
+          if ! [[ "$gateway_pid" =~ ^[1-9][0-9]*$ ]] ||
+             ! tr '\0' ' ' < "/proc/$gateway_pid/cmdline" | grep -Fq 'GatewayLab.dll'; then
+            echo "Unsafe or absent gateway PID"; exit 1
+          fi
+          printf '%s\n' "$gateway_pid" > "$out/gateway-pid.txt"
+          # Pre-hang timeline: includes runtime thread pool, GC, lock contention,
+          # System.Net.Http connections/queue and ASP.NET Core hosting counters.
+          dotnet-counters collect --process-id "$gateway_pid" --format csv \
+            --refresh-interval 2 --counters System.Runtime,System.Net.Http,Microsoft.AspNetCore.Hosting \
+            --output "$out/runtime-counters.csv" > "$out/runtime-counters.log" 2>&1 &
+          counters_pid=$!
+          python3 tests/L7/performance/issue17/watchdog.py \
+            --pid "$gateway_pid" --gateway-url http://127.0.0.1:18080/api/identity \
+            --backend-url http://127.0.0.1:18081/health/ready \
+            --backend-url http://127.0.0.1:18082/health/ready \
+            --output "$out" \
+            --capture-script tests/L7/performance/issue17/capture_hang.sh \
+            --timeout 3 --interval 2 > "$out/watchdog.log" 2>&1 &
+          watchdog_pid=$!
+          # Runtime logging telemetry sampled through the same loopback stats
+          # endpoint the product's logger exposes. Retain before/after and
+          # intermediate counter values to detect increasing drop/error counts.
+          (
+            while kill -0 "$gateway_pid" 2>/dev/null; do
+              if sample="$(curl --noproxy '*' --connect-timeout 1 --max-time 2 \
+                -fsS http://127.0.0.1:18080/lab/stats 2>/dev/null)"; then
+                echo "$sample" >> "$out/stats-samples.jsonl"
+              else
+                echo "{\"probeFailureAtEpoch\":$(date +%s)}" >> "$out/stats-samples.jsonl"
+              fi
+              sleep 10
+            done
+          ) &
+          stats_pid=$!
+          stamp="$(($(date +%s) * 1000))"
+          timeout --signal=TERM --kill-after=10s 1050s \
+            docker run --rm --network host --user "$(id -u):$(id -g)" \
+              -e MODE=proxy -e TARGET=http://127.0.0.1:18080 \
+              -e VUS=75 -e DURATION=15m -e NO_REUSE=0 \
+              -e PAYLOAD_BYTES=0 -e SOAK_START_EPOCH_MS="$stamp" \
+              -v "$GITHUB_WORKSPACE:/workspace" -w /workspace \
+              grafana/k6:0.55.0 run \
+              --summary-export="/workspace/artifacts/issue17/$RUN_LABEL/k6-summary.json" \
+              /workspace/tests/L7/performance/load.js > "$out/k6.log" 2>&1 &
+          k6_pid=$!
+          while kill -0 "$k6_pid" 2>/dev/null; do
+            if [[ -f "$out/capture-complete" ]]; then
+              echo "HANG_CAPTURED: stopping load after diagnostics" | tee -a "$out/result.txt"
+              kill "$k6_pid" 2>/dev/null || true
+              break
+            fi
+            sleep 2
+          done
+          set +e
+          wait "$k6_pid"
+          k6_rc=$?
+          set -e
+          k6_pid=""
+          if [[ -f "$out/hang-trigger.json" && ! -f "$out/capture-complete" ]]; then
+            # Give the diagnostic collector a bounded opportunity to finish.
+            for i in $(seq 1 80); do
+              [[ -f "$out/capture-complete" ]] && break
+              sleep 2
+            done
+          fi
+          curl --noproxy '*' --connect-timeout 1 --max-time 3 -fsS \
+            http://127.0.0.1:18080/lab/stats > "$out/stats-after.json" 2>"$out/stats-final-error.txt" || true
+          python3 - "$out" <<'PY'
+          import json, pathlib, sys
+          folder=pathlib.Path(sys.argv[1])
+          before=json.loads((folder/"ready.json").read_text())
+          path=folder/"stats-after.json"
+          if not path.exists() or not path.stat().st_size:
+              print("FINAL_STATS_UNAVAILABLE: see watchdog snapshot or stats-final-error.txt")
+              sys.exit(1)
+          after=json.loads(path.read_text())
+          fields=("loggingDroppedTotal","loggingDroppedLowPriorityTotal",
+              "loggingDroppedHighPriorityTotal","loggingWriteErrorsTotal")
+          for field in fields:
+              if field not in after:
+                  print(f"LOGGING_METRIC_MISSING: {field}")
+                  sys.exit(1)
+              print(f"{field}: before={before.get(field,'unknown')} after={after[field]}")
+          if int(after["loggingDroppedTotal"]) != (int(after["loggingDroppedLowPriorityTotal"])
+              + int(after["loggingDroppedHighPriorityTotal"])):
+              print("LOGGING_METRICS_INCONSISTENT")
+              sys.exit(1)
+          PY
+          if [[ -f "$out/hang-trigger.json" ]]; then
+            echo "REPRODUCED_HANG: dump/stacks and counters attached; k6 exit=$k6_rc" | tee -a "$out/result.txt"
+            exit 1
+          fi
+          if [[ "$k6_rc" != 0 ]]; then
+            echo "REPRO_LOAD_FAILURE: k6 exit=$k6_rc" | tee -a "$out/result.txt"
+            exit 1
+          fi
+          echo "NO_HANG_OBSERVED: historical comparison only; not production qualification" | tee -a "$out/result.txt"
+      - name: Upload synthetic diagnostic evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: issue17-${{ matrix.label }}
+          path: artifacts/issue17/${{ matrix.label }}/
+          retention-days: 3
+          compression-level: 6
