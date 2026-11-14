@@ -23,7 +23,7 @@ a claim that safe-idempotent retry support has been implemented.
     "Passive": {
       "Enabled": true,
       "Policy": "BoundedTransportFailure",
-      "ReactivationPeriod": "00:00:02"
+      "ReactivationPeriod": "00:00:15"
     }
   },
   "Metadata": {
