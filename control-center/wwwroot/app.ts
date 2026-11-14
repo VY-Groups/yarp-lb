@@ -387,7 +387,7 @@ function applyMailProviderPreset(select:HTMLSelectElement){
  const enabledInput=form?.querySelector<HTMLInputElement>('input[name="enabled"]');
  const modeInput=form?.querySelector<HTMLSelectElement>('select[name="authMode"]');
  if(!form||!hostInput||!portInput||!tlsInput||!enabledInput||!modeInput){show('Mail form could not be updated; reopen Mail & OTP.',true);return}
- if(preset[0])hostInput.value=preset[0];
+ if(select.value==='exchange')hostInput.value='';else if(preset[0])hostInput.value=preset[0];
  portInput.value='587';tlsInput.checked=true;enabledInput.checked=false;enabledInput.disabled=true;
  modeInput.value=preset[1];updateMailAuthFields(form);
  show('SMTP provider selected. Confirm its exact host, authentication and approved sender; save with OTP off, test real delivery, then enable OTP. No credentials were autofilled.');
