@@ -67,7 +67,7 @@ def analyze(root: Path) -> dict:
                     "samples": len(rows),
                     "first_utc_ms": utc[0] if rows else None,
                     "last_utc_ms": utc[-1] if rows else None,
-                    "maximum_gap_ms": max((e["duration_ms"] for e in events), default=0),
+                    "maximum_gap_ms": round(max(all_durations, default=0), 2),
                     "gaps_ge_250ms": len(events),
                     "maximum_threadpool_pending": max(
                         (int(x["pending_work_items"]) for x in rows), default=0),
