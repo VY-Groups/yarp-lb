@@ -41,11 +41,15 @@ void Config(string path, IEnumerable<(string Id, string Address)> destinations,
             Clusters = new Dictionary<string, object> {
                 ["api"] = new {
                     LoadBalancingPolicy = "RoundRobin",
+                    // 1.5s activity timeout at the LOCAL ingress bounds
+                    // in-flight hangs after a killed gateway. The 700ms
+                    // slow-but-healthy backend regression guards over-ejection.
+                    HttpRequest = new { ActivityTimeout = "00:00:01.500" },
                     HealthCheck = new {
                         AvailableDestinationsPolicy = explicitPanic ? "HealthyOrPanic" : "HealthyAndUnknown", // never implicit panic,
                         Active = new {
-                            Enabled = true, Interval = probe == "/lab/ping" ? "00:00:00.500" : "00:00:01",
-                            Timeout = probe == "/lab/ping" ? "00:00:00.500" : "00:00:01",
+                            Enabled = true, Interval = probe == "/lab/ping" ? "00:00:00.250" : "00:00:01",
+                            Timeout = probe == "/lab/ping" ? "00:00:00.250" : "00:00:01",
                             Policy = "ConsecutiveFailures", Path = probe },
                         Passive = new {
                             Enabled = probe == "/lab/ping",
@@ -271,7 +275,7 @@ try
 
     // Continuous in-flight HTTP traffic spans the exact moment the gateway dies.
     // Every attempted request is counted, including exceptions and status >= 500.
-    var timeline = new ConcurrentQueue<(double StartMs, double CompletedMs, int Status, double LatencyMs)>();
+    var timeline = new ConcurrentQueue<(double StartMs, double CompletedMs, int Status, double LatencyMs, string Gateway)>();
     using var trafficStop = new CancellationTokenSource();
     var epoch = Stopwatch.GetTimestamp();
     var trafficWorkers = Enumerable.Range(0,24).Select(async _ =>
@@ -280,17 +284,20 @@ try
         {
             var started = Stopwatch.GetTimestamp();
             var status = 0;
+            var viaGateway = "";
             try
             {
                 using var response = await client.GetAsync(
                     "http://127.0.0.1:19080/api/identity", trafficStop.Token);
                 status = (int)response.StatusCode;
+                viaGateway = response.Headers.TryGetValues("X-Lab-Gateway", out var via)
+                    ? via.FirstOrDefault() ?? "" : "";
             }
             catch (OperationCanceledException) when (trafficStop.IsCancellationRequested) { break; }
             catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or IOException) { }
             timeline.Enqueue((Stopwatch.GetElapsedTime(epoch,started).TotalMilliseconds,
                 Stopwatch.GetElapsedTime(epoch).TotalMilliseconds,
-                status, Stopwatch.GetElapsedTime(started).TotalMilliseconds));
+                status, Stopwatch.GetElapsedTime(started).TotalMilliseconds, viaGateway));
             try { await Task.Delay(15,trafficStop.Token); }
             catch (OperationCanceledException) { break; }
         }
@@ -315,6 +322,17 @@ try
     trafficStop.Cancel();
     await Task.WhenAll(trafficWorkers);
     var measured = timeline.ToArray();
+    var rawTimeline = Path.Combine(artifacts, "fault-traffic-timeline.csv");
+    using (var timelineFile = new StreamWriter(rawTimeline, append: false, Encoding.UTF8))
+    {
+        await timelineFile.WriteLineAsync("started_ms,completed_ms,status,latency_ms,via_gateway");
+        foreach(var x in measured.OrderBy(x => x.CompletedMs))
+            await timelineFile.WriteLineAsync(string.Join(",",
+                x.StartMs.ToString("F3",System.Globalization.CultureInfo.InvariantCulture),
+                x.CompletedMs.ToString("F3",System.Globalization.CultureInfo.InvariantCulture),
+                x.Status.ToString(), x.LatencyMs.ToString("F3",System.Globalization.CultureInfo.InvariantCulture),
+                x.Gateway));
+    }
     // Use COMPLETION time so in-flight requests started before the kill but
     // aborted after it still count as post-fault failures.
     var preKill = measured.Where(x => x.CompletedMs < killAtMs).ToArray();
