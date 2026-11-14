@@ -1,0 +1,51 @@
+{
+  "name": "NOT_RUN_missing_measured_inputs",
+  "tool": "oha",
+  "http_version": "1.1",
+  "baseline_alpn": "http/1.1",
+  "keepalive": true,
+  "baseline_keepalive": true,
+  "tls_ca_file": "/secure/site-ca.pem",
+  "hosts": [
+    "GENERATOR_A",
+    "GENERATOR_B"
+  ],
+  "gateway_nodes": [
+    "NODE_A"
+  ],
+  "isolated_gateway": "NODE_A",
+  "windows": 60,
+  "window_seconds": 60,
+  "peak_gbps": null,
+  "peak_rps": null,
+  "link_gbps": null,
+  "peak_concurrent_connections": null,
+  "new_connections_per_second": null,
+  "https_share": null,
+  "headroom": 0.5,
+  "max_p99_ms": null,
+  "allowed_status": [
+    200
+  ],
+  "server_specs": {
+    "cpu_model": null,
+    "cpu_cores": null,
+    "ram_gb": null,
+    "nic_model": null,
+    "nic_speed_gbps": null
+  },
+  "response_mix": [
+    {
+      "name": "http_small",
+      "url": "http://example.invalid/bench/1024",
+      "response_bytes": 1024,
+      "weight": null
+    },
+    {
+      "name": "https_large",
+      "url": "https://example.invalid/bench/4096",
+      "response_bytes": 4096,
+      "weight": null
+    }
+  ]
+}
