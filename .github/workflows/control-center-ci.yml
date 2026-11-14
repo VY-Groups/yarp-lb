@@ -73,7 +73,7 @@ jobs:
           npx --yes --package typescript@5.9.3 tsc --project wwwroot/tsconfig.json
           git diff --exit-code -- wwwroot/app.js
       - name: Run frontend UI regression tests
-        run: node --test tests/test_onboarding_ui.mjs tests/test_setup_ui.mjs tests/test_auth_ui.mjs
+        run: node --test tests/test_onboarding_ui.mjs tests/test_setup_ui.mjs tests/test_auth_ui.mjs tests/test_five_screens.mjs
       - name: Verify repository-wide neutral branding and build target paths
         working-directory: .
         run: python -m unittest discover -s tests/CI/branding -p 'test_*.py' -v
