@@ -1,0 +1,40 @@
+rule_files:
+  - gateway-alerts.yml
+evaluation_interval: 1m
+tests:
+  - interval: 1m
+    input_series:
+      - series: 'up{job="speedsign-gateway",instance="gateway-01"}'
+        values: '0 0 0 0 0'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: YarpMetricsDown
+        exp_alerts:
+          - exp_labels: {job: speedsign-gateway, instance: gateway-01, severity: critical}
+  - interval: 1m
+    input_series:
+      - series: 'yarp_control_destination_active_health{job="speedsign-gateway",instance="gateway-01",destination="cluster-a/node-a"}'
+        values: '-1 -1 -1 -1'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: YarpUnhealthyDestination
+        exp_alerts:
+          - exp_labels: {job: speedsign-gateway, instance: gateway-01, destination: "cluster-a/node-a", severity: critical}
+  - interval: 1m
+    input_series:
+      - series: 'probe_ssl_earliest_cert_expiry{job="speedsign-tls-probe",instance="gateway-01"}'
+        values: '604800 604800 604800 604800 604800 604800 604800 604800'
+    alert_rule_test:
+      - eval_time: 7m
+        alertname: YarpTLSExpiringWithin14Days
+        exp_alerts:
+          - exp_labels: {job: speedsign-tls-probe, instance: gateway-01, severity: critical}
+  - interval: 1m
+    input_series:
+      - series: 'yarp_logging_dropped_total{job="speedsign-gateway",instance="gateway-01"}'
+        values: '0 0 1 1 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: YarpDroppedLogs
+        exp_alerts:
+          - exp_labels: {job: speedsign-gateway, instance: gateway-01, severity: critical}
