@@ -962,7 +962,9 @@ function applyMailProviderPreset(select) {
         show('Mail form could not be updated; reopen Mail & OTP.', true);
         return;
     }
-    if (preset[0])
+    if (select.value === 'exchange')
+        hostInput.value = '';
+    else if (preset[0])
         hostInput.value = preset[0];
     portInput.value = '587';
     tlsInput.checked = true;
