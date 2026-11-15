@@ -30,11 +30,14 @@ public sealed class AutonomousRecoveryObserver : BackgroundService
                 {
                     foreach (var destination in cluster.Destinations.Values)
                     {
-                        if (destination.Health.Active is DestinationHealth.Healthy)
-                            TrafficLifecycle.ObserveActiveHealth(destination, true);
-                        else if (destination.Health.Active is DestinationHealth.Unhealthy)
-                            TrafficLifecycle.ObserveActiveHealth(destination, false);
-                        // Unknown is not a successful probe; do not start the ramp.
+                        // A healthy active probe does not override an existing
+                        // passive ejection. Unknown is not affirmative recovery
+                        // evidence. Keep draining destinations out of warmup.
+                        TrafficLifecycle.ObserveActiveHealth(destination,
+                            RecoveryHealthGate.Eligible(
+                                destination.Health.Active,
+                                destination.Health.Passive,
+                                TrafficLifecycle.IsDraining(destination)));
                     }
                 }
             }
