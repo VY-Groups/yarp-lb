@@ -1,4 +1,4 @@
-using Yarp.ReverseProxy.Health;
+using Yarp.ReverseProxy.Model;
 
 /// <summary>
 /// The autonomous recovery observer may restart a ramp only for a destination
