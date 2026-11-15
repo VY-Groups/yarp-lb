@@ -123,3 +123,5 @@ Console.WriteLine($"PASS: all algorithm, allocation and ejection tests. Remapped
 await ProxyConcurrencyTests.RunAsync();
 
 PeerRateTableTests.Run();
+
+RiseFallTests.Run();
