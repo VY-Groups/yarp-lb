@@ -1,0 +1,6 @@
+# Disposable CI extension: trust the ephemeral lab Redis CA only.
+FROM gatewaycore-test-local:0.1
+USER root
+COPY redis-certs/ca.crt /usr/local/share/ca-certificates/gatewaycore-sharedquota-test.crt
+RUN update-ca-certificates
+USER 10001

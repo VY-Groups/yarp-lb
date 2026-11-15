@@ -1,0 +1,53 @@
+# Combine with compose.yml ONLY in disposable CI.
+services:
+  redis-quota:
+    image: redis:7.4-alpine
+    environment:
+      REDIS_TEST_PASSWORD: "${SHARED_TEST_PASSWORD:?Must supply temporary Redis password}"
+    command:
+      - /bin/sh
+      - -ec
+      - |
+        exec redis-server --port 0 --tls-port 6379 \
+          --tls-cert-file /testcert/redis.crt --tls-key-file /testcert/redis.key \
+          --tls-ca-cert-file /testcert/ca.crt --tls-auth-clients no \
+          --requirepass "$$REDIS_TEST_PASSWORD" \
+          --save "" --appendonly no
+    volumes: ["./redis-certs:/testcert:ro"]
+    healthcheck:
+      test: ["CMD-SHELL", 'redis-cli --tls -h redis-quota --cacert /testcert/ca.crt -a "$$REDIS_TEST_PASSWORD" ping 2>/dev/null | grep -qx PONG']
+      interval: 1s
+      timeout: 3s
+      retries: 30
+    networks: [lab]
+  gateway-a:
+    build:
+      context: .
+      dockerfile: Dockerfile.sharedquota
+    image: gatewaycore-sharedquota-test:ci
+    environment:
+      GATEWAY_PROXY_SHARED_REDIS: "redis-quota:6379,ssl=true,sslHost=redis-quota,password=${SHARED_TEST_PASSWORD:?}"
+      GATEWAY_PROXY_SHARED_HMAC_KEY: "${SHARED_TEST_HMAC:?}"
+      GATEWAY_PROXY_IP_RATE_PER_MINUTE: "7"
+      GATEWAY_PROXY_IP_TABLE_CAPACITY: "8"
+      GATEWAY_PROXY_SHARED_NAMESPACE: "ci:dualnode:quota"
+    depends_on:
+      redis-quota:
+        condition: service_healthy
+  gateway-b:
+    image: gatewaycore-sharedquota-test:ci
+    environment:
+      GATEWAY_PROXY_SHARED_REDIS: "redis-quota:6379,ssl=true,sslHost=redis-quota,password=${SHARED_TEST_PASSWORD:?}"
+      GATEWAY_PROXY_SHARED_HMAC_KEY: "${SHARED_TEST_HMAC:?}"
+      GATEWAY_PROXY_IP_RATE_PER_MINUTE: "7"
+      GATEWAY_PROXY_IP_TABLE_CAPACITY: "8"
+      GATEWAY_PROXY_SHARED_NAMESPACE: "ci:dualnode:quota"
+    depends_on:
+      redis-quota:
+        condition: service_healthy
+  quota-client:
+    image: python:3.12-alpine
+    entrypoint: ["python", "/test/test_gateway_integration.py"]
+    volumes:
+      - "../../tests/SharedQuota/test_gateway_integration.py:/test/test_gateway_integration.py:ro"
+    networks: [lab]
