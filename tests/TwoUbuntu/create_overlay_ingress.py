@@ -8,8 +8,9 @@ def build(a,b):
     a=str(ipaddress.IPv4Address(a)); b=str(ipaddress.IPv4Address(b))
     if a==b:
         raise ValueError("two distinct private peer IPs required")
-    if not (ipaddress.ip_address(a).is_private and ipaddress.ip_address(b).is_private):
-        raise ValueError("refuse public peer address")
+    tailnet=ipaddress.IPv4Network("100.64.0.0/10")
+    if ipaddress.IPv4Address(a) not in tailnet or ipaddress.IPv4Address(b) not in tailnet:
+        raise ValueError("require both Tailscale CGNAT 100.64/10 peer addresses")
     return f"""global
     log stdout format raw local0
     maxconn 4096
