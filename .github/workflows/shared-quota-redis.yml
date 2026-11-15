@@ -1,0 +1,34 @@
+name: Experimental shared rate quota - Redis atomicity and source build
+on:
+  pull_request:
+    paths:
+      - "control-center/SharedPeerRateLimiter.cs"
+      - "control-center/GatewayCoreYarp.csproj"
+      - "control-center/Program.cs"
+      - "tests/SharedQuota/**"
+      - ".github/workflows/shared-quota-redis.yml"
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+      - name: Verify shipping application compiles
+        run: dotnet build control-center/GatewayCoreYarp.csproj -c Release
+      - name: Run disposable Redis with explicit loopback-only binding
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq redis-server redis-tools
+          redis-server --daemonize yes --port 16379 --bind 127.0.0.1 --protected-mode yes --save "" --appendonly no
+          redis-cli -h 127.0.0.1 -p 16379 ping
+      - name: Concurrent atomic quota tests against real Redis Lua
+        run: python3 -m unittest discover -s tests/SharedQuota -p 'test_*.py' -v
+      - name: Shut down disposable Redis
+        if: always()
+        run: redis-cli -h 127.0.0.1 -p 16379 shutdown nosave || true
