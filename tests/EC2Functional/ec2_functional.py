@@ -28,7 +28,7 @@ from urllib.request import build_opener, ProxyHandler
 # Fixtures used only by offline tests; NEVER runtime allowlisted destinations.
 HOST_A = "ec2-54-10-20-30.ap-south-1.compute.amazonaws.com"
 HOST_B = "ec2-52-20-30-40.ap-south-1.compute.amazonaws.com"
-EC2_DNS_PATTERN = re.compile(r"ec2-(?:[0-9]{1,3}-){3}[0-9]{1,3}\\.ap-south-1\\.compute\\.amazonaws\\.com")
+EC2_DNS_PATTERN = re.compile(r"ec2-(?:[0-9]{1,3}-){3}[0-9]{1,3}\.ap-south-1\.compute\.amazonaws\.com")
 GATEWAY = "http://127.0.0.1:18088"
 BODY_PATTERN = re.compile(r"\bbackend\s+([a-zA-Z0-9_.-]+)\s+(\S+)", re.I)
 CSV_FIELDS = ["timestamp", "client_address", "status", "backend", "latency_ms", "error"]
