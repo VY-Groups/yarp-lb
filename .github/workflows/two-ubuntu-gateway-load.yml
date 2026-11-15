@@ -1,0 +1,151 @@
+name: Two independent Ubuntu VMs - GatewayCore synthetic website and body-throughput
+on:
+  pull_request:
+    paths:
+      - "tests/TwoUbuntu/**"
+      - ".github/workflows/two-ubuntu-gateway-load.yml"
+  workflow_dispatch:
+    inputs:
+      test_duration:
+        description: "15s smoke or independent 60-minute per-node synthetic load"
+        required: true
+        type: choice
+        options: [smoke_15s, sustained_60m]
+        default: smoke_15s
+      target_body_mbps:
+        description: "HTTP body Mbps required in EACH strict minute"
+        required: true
+        default: "750"
+        type: string
+      max_p99_ms:
+        description: "Maximum allowed p99 milliseconds in strict mode"
+        required: true
+        default: "250"
+        type: string
+permissions:
+  contents: read
+jobs:
+  contracts:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify evidence contracts
+        run: python3 -m unittest discover -s tests/TwoUbuntu -p 'test_*.py' -v
+  nodes:
+    name: "Independent Ubuntu VM ${{ matrix.site }}"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        site: [node-a, node-b]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build actual GatewayCore and disposable HTTP backend website stack
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker compose -f ops/test-server/compose.yml \
+            -f tests/TwoUbuntu/compose.one-gateway.yml \
+            up -d --build backend-a backend-b gateway-a
+      - name: Verify website and gateway forwarding on this VM
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/site
+          printf '<!doctype html><title>GatewayCore CI</title><h1>%s independent runner</h1>\n' \
+            "${{ matrix.site }}" > artifacts/site/index.html
+          python3 -m http.server 18082 --bind 127.0.0.1 --directory artifacts/site &
+          website_pid=$!
+          trap 'kill "$website_pid" 2>/dev/null || true' EXIT
+          website_ready=0
+          for ((attempt=0; attempt<15; attempt++)); do
+            if curl -fsS --max-time 3 http://127.0.0.1:18082/index.html 2>/dev/null |
+               grep -Fq "${{ matrix.site }}"; then website_ready=1; break; fi
+            sleep 1
+          done
+          [[ "$website_ready" -eq 1 ]] || { echo "Website failed to become ready" >&2; exit 1; }
+          ready=0
+          for ((attempt=0; attempt<60; attempt++)); do
+            if curl --noproxy '*' -fsS --max-time 3 \
+              http://127.0.0.1:18080/api/identity >/dev/null 2>&1; then ready=1; break; fi
+            sleep 1
+          done
+          if [[ "$ready" -ne 1 ]]; then
+            echo 'Gateway port binding and unfiltered HTTP diagnostics:' >&2
+            docker compose -f ops/test-server/compose.yml -f tests/TwoUbuntu/compose.one-gateway.yml ps >&2 || true
+            docker compose -f ops/test-server/compose.yml -f tests/TwoUbuntu/compose.one-gateway.yml port gateway-a 8080 >&2 || true
+            curl --noproxy '*' -si --max-time 3 http://127.0.0.1:18080/gateway/health >&2 || true
+            curl --noproxy '*' -si --max-time 3 http://127.0.0.1:18080/api/identity >&2 || true
+            docker compose -f ops/test-server/compose.yml -f tests/TwoUbuntu/compose.one-gateway.yml \
+              logs --tail 80 gateway-a backend-a backend-b
+            exit 1
+          fi
+          python3 - <<'PY'
+          import urllib.request
+          with urllib.request.urlopen("http://127.0.0.1:18080/api/body/1048576",timeout=10) as r:
+              assert r.status==200 and len(r.read())==1048576, "wrong proxied body"
+          print("PASS: GatewayCore forwarded exact 1MiB body")
+          PY
+      - name: Measure per-minute HTTP body throughput and p99
+        shell: bash
+        env:
+          TEST_DURATION: ${{ inputs.test_duration == 'sustained_60m' && '3600' || '15' }}
+          TARGET_MBPS: ${{ inputs.target_body_mbps || '750' }}
+          LIMIT_P99_MS: ${{ inputs.max_p99_ms || '250' }}
+        run: |
+          set -euo pipefail
+          args=()
+          if [[ "$TEST_DURATION" == "3600" ]]; then args+=(--strict); fi
+          python3 tests/TwoUbuntu/throughput_probe.py \
+            --site "${{ matrix.site }}" \
+            --url http://127.0.0.1:18080/api/body/1048576 \
+            --seconds "$TEST_DURATION" --workers 16 \
+            --target-mbps "$TARGET_MBPS" --p99-ms "$LIMIT_P99_MS" \
+            --out "artifacts/${{ matrix.site }}.json" "${args[@]}"
+      - name: Capture logs and exact commit
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p artifacts
+          docker compose -f ops/test-server/compose.yml -f tests/TwoUbuntu/compose.one-gateway.yml \
+            ps -a > artifacts/containers.txt 2>&1 || true
+          docker compose -f ops/test-server/compose.yml -f tests/TwoUbuntu/compose.one-gateway.yml \
+            logs --no-color --tail 60 > artifacts/containers.log 2>&1 || true
+          printf '%s\n' "$GITHUB_SHA" > artifacts/source-sha.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: two-ubuntu-${{ matrix.site }}
+          path: artifacts/
+          retention-days: 14
+      - name: Destroy disposable services
+        if: always()
+        run: docker compose -f ops/test-server/compose.yml -f tests/TwoUbuntu/compose.one-gateway.yml down -v --remove-orphans || true
+  evidence:
+    name: Verify two distinct Ubuntu runner artifacts
+    runs-on: ubuntu-24.04
+    needs: [contracts, nodes]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: two-ubuntu-node-*
+          path: artifacts/two
+      - name: Reject missing, duplicate or failed host evidence
+        shell: bash
+        env:
+          STRICT: ${{ inputs.test_duration == 'sustained_60m' && 'true' || 'false' }}
+        run: |
+          set -euo pipefail
+          args=()
+          if [[ "$STRICT" == "true" ]]; then args+=(--strict); fi
+          python3 tests/TwoUbuntu/verify_two_evidence.py \
+            --a artifacts/two/two-ubuntu-node-a/node-a.json \
+            --b artifacts/two/two-ubuntu-node-b/node-b.json \
+            --sha "$GITHUB_SHA" --out artifacts/two-ubuntu-report.json "${args[@]}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: two-ubuntu-independent-cloud-evidence
+          path: artifacts/two-ubuntu-report.json
+          retention-days: 14
