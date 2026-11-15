@@ -182,8 +182,17 @@ test('browser: bootstrap, navigation, onboarding, websites, route edit, users an
   });
 
   await test.step('Sign out, reject invalid password, and restore session',async()=>{
+    let confirmedDiscard=false;
+    page.once('dialog',async dialog=>{
+      expect(dialog.message()).toContain('unsubmitted configuration draft');
+      confirmedDiscard=true;
+      await dialog.accept();
+    });
     await page.locator('#logout').click();
+    expect(confirmedDiscard,'Unsaved drafts require explicit confirmation').toBe(true);
     await expect(page.locator('#auth-screen')).toBeVisible();
+    await expect(page.locator('#auth-username')).toHaveValue('');
+    await expect(page.locator('#auth-password')).toHaveValue('');
     await expect(page.locator('#app-shell')).toBeHidden();
     await page.locator('#auth-username').fill('browseradmin');
     await page.locator('#auth-password').fill('Not-the-right-password-123!');

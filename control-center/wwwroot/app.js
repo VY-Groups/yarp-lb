@@ -20,6 +20,10 @@ let csrf = '';
 let currentRole = '';
 let currentUser = '';
 let otpChallenge = '';
+let authGeneration = 0;
+let gatewayReadyLabel = '● Backend readiness not checked';
+let gatewayReadyWarn = true;
+let readinessGeneration = 0;
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const keys = (o) => Object.keys(o || {});
@@ -72,7 +76,8 @@ async function api(url, method = 'GET', body) { const opts = { method, credentia
     opts.headers['Content-Type'] = 'application/json';
     opts.headers['X-CSRF-Token'] = csrf;
     opts.body = JSON.stringify(body ?? {});
-} const r = await fetch(url, opts); if (r.status === 401) {
+} const generation = authGeneration; const r = await fetch(url, opts); if (generation !== authGeneration)
+    throw Error('Management session changed. Outdated response ignored.'); if (r.status === 401) {
     if (!['/admin/api/session', '/admin/api/login', '/admin/api/bootstrap', '/admin/api/login/verify'].includes(url)) {
         if (!$('app-shell').hidden) {
             showLogin(false);
@@ -89,12 +94,14 @@ async function api(url, method = 'GET', body) { const opts = { method, credentia
     }
     catch { }
     throw Error(e);
-} return await r.json(); }
+} const json = await r.json(); if (generation !== authGeneration)
+    throw Error('Management session changed. Outdated response ignored.'); return json; }
 async function reload() { if (dirty && !confirm('Discard unsaved changes and reload?'))
     return; try {
     data = await api('/admin/api/state');
     dirty = false;
     render();
+    void refreshGatewayReadiness();
     show('Latest configuration loaded');
 }
 catch (e) {
@@ -126,7 +133,11 @@ function destinationRows() { const arr = []; for (const cid of keys(data.cluster
     const [cid, did] = id.split('::');
     arr.push({ cid, did, address: data.disabled[id].Address, enabled: false });
 } return arr; }
-function summary() { return `<div class="stats"><div class="card"><h3>Gateway status</h3><div class="stat-number green">ONLINE</div><div class="stat-desc">Local application responding</div></div><div class="card"><h3>Configured routes</h3><div class="stat-number">${keys(data.routes).length}</div><div class="stat-desc">Saved / draft HTTP routing rules</div></div><div class="card"><h3>Backend clusters</h3><div class="stat-number">${keys(data.clusters).length}</div><div class="stat-desc">Independent balancing policies</div></div><div class="card"><h3>Enabled destinations</h3><div class="stat-number">${destinationRows().filter(x => x.enabled).length}</div><div class="stat-desc">Configured, not necessarily healthy</div></div></div>`; }
+function summary() {
+    const ready = !gatewayReadyWarn && gatewayReadyLabel.includes('Backend readiness observed');
+    const status = ready ? 'BACKEND READY' : gatewayReadyLabel.includes('No healthy backend reported') ? 'NO BACKEND' : 'NOT VERIFIED';
+    return `<div class="stats"><div class="card"><h3>Backend readiness</h3><div class="stat-number ${ready ? 'green' : 'yellow'}">${status}</div><div class="stat-desc">${ready ? 'At least one configured destination ready; not full fleet health' : esc(gatewayReadyLabel.replace('● ', ''))}</div></div><div class="card"><h3>Configured routes</h3><div class="stat-number">${keys(data.routes).length}</div><div class="stat-desc">Saved / draft HTTP routing rules</div></div><div class="card"><h3>Backend clusters</h3><div class="stat-number">${keys(data.clusters).length}</div><div class="stat-desc">Independent balancing policies</div></div><div class="card"><h3>Enabled destinations</h3><div class="stat-number">${destinationRows().filter(x => x.enabled).length}</div><div class="stat-desc">Configured, not necessarily healthy</div></div></div>`;
+}
 function overview() { let routes = keys(data.routes).slice(0, 5).map(id => `<div class="rowline"><div><b>${esc(id)}</b><div class="subtle mono">${esc(data.routes[id]?.Match?.Path || '—')}</div></div><span class="chip">${esc(data.routes[id]?.ClusterId || '—')}</span></div>`).join('') || '<div class="empty">No routes configured</div>'; let nodes = destinationRows().slice(0, 6).map(d => `<div class="rowline"><div><b>${esc(d.did)}</b><div class="subtle mono">${esc(d.address)}</div></div><span class="chip ${d.enabled ? '' : 'bad'}">${d.enabled ? 'Configured' : 'Disabled'}</span></div>`).join('') || '<div class="empty">No destinations configured</div>'; return summary() + `<div class="grid2"><div class="card"><div class="flex"><h2 class="section-title">Traffic architecture</h2><span class="chip">Design view</span></div><div class="arch"><div class="archnode">Clients / Public & internal ingress</div><div class="arrow">↓</div><div class="archnode">Firewall / upstream HA VIP</div><div class="arrow">↓</div><div class="archnode accent">${esc(topologyModeName(topologyResponse?.plan?.mode || 'standalone'))} (design topology)</div><div class="arrow">↓</div><div class="twonodes"><div class="archnode">Backend node 01</div><div class="archnode">Backend node 02</div></div><div class="arrow">↓</div><div class="archnode">Application-specific data services (optional)</div></div><div class="healthbanner">This gateway is one running instance. The onboarding design is metadata, not proof that a gateway fleet, VIP or backend is healthy.</div></div><div><div class="card"><h2 class="section-title">Route snapshot</h2>${routes}${actionBtn('Manage routes', 'switch', 'routes')}</div><div class="card card-spaced"><h2 class="section-title">Destinations</h2>${nodes}${actionBtn('Manage backends', 'switch', 'backends')}</div></div></div>`; }
 function routes() { const rows = keys(data.routes).map(id => { const r = data.routes[id]; return `<tr><td><b>${esc(id)}</b></td><td class="mono">${esc((r.Match?.Hosts || []).join(', ') || 'Any host')}</td><td class="mono">${esc(r.Match?.Path)}</td><td>${esc(r.ClusterId)}</td><td>${actionBtn('Edit', 'route-edit', id)} ${actionBtn('Advanced', 'route-advanced', id)} ${actionBtn('Delete', 'route-delete', id, 'danger-btn mini')}</td></tr>`; }).join(''); return `<div class="toolbar"><div><h2>Routes</h2><p class="subtle">Map incoming host/path matches to clusters.</p></div>${actionBtn('+ Add route', 'route-add', '')}</div><div class="tablewrap"><table><thead><tr><th>Route ID</th><th>Hosts</th><th>Path</th><th>Cluster</th><th>Actions</th></tr></thead><tbody>${rows || '<tr><td colspan="5" class="empty">No routes configured</td></tr>'}</tbody></table></div>`; }
 function clusters() { const rows = keys(data.clusters).map(id => { const c = data.clusters[id]; return `<tr><td><b>${esc(id)}</b></td><td>${esc(c.LoadBalancingPolicy || 'Default')}</td><td>${keys(c.Destinations || {}).length}</td><td>${c.HealthCheck?.Active?.Enabled ? '<span class="chip good">Enabled</span>' : '<span class="chip">Disabled</span>'}</td><td>${actionBtn('Edit', 'cluster-edit', id)} ${actionBtn('Advanced', 'cluster-advanced', id)} ${actionBtn('Delete', 'cluster-delete', id, 'danger-btn mini')}</td></tr>`; }).join(''); return `<div class="toolbar"><div><h2>Clusters</h2><p class="subtle">Balance and health-check each application separately.</p></div>${actionBtn('+ Add cluster', 'cluster-add', '')}</div><div class="tablewrap"><table><thead><tr><th>Cluster</th><th>Policy</th><th>Active backends</th><th>Health checks</th><th>Actions</th></tr></thead><tbody>${rows || '<tr><td colspan="5" class="empty">No clusters configured</td></tr>'}</tbody></table></div>`; }
@@ -345,6 +356,29 @@ async function setupFreeze(frozen) {
         show('Freeze operation denied: ' + String(e), true);
     }
 }
+async function refreshGatewayReadiness() {
+    if ($('app-shell').hidden)
+        return;
+    const generation = ++readinessGeneration;
+    try {
+        const r = await fetch('/gateway/health/ready', { credentials: 'same-origin', cache: 'no-store' });
+        if (generation !== readinessGeneration || $('app-shell').hidden)
+            return;
+        gatewayReadyLabel = r.ok ? '● Backend readiness observed' : r.status === 503 ? '● No healthy backend reported' : '● Readiness unavailable';
+        gatewayReadyWarn = !r.ok;
+    }
+    catch {
+        if (generation !== readinessGeneration || $('app-shell').hidden)
+            return;
+        gatewayReadyLabel = '● Readiness unavailable';
+        gatewayReadyWarn = true;
+    }
+    const pill = $('gateway-pill');
+    pill.textContent = gatewayReadyLabel;
+    pill.className = gatewayReadyWarn ? 'pill warn' : 'pill';
+    if (view === 'overview')
+        $('content').innerHTML = overview();
+}
 function updateTopologyNavigation() { const finished = topologyResponse?.status === 'design-confirmed'; const prereqViews = ['organization', 'setup', 'onboarding', 'users', 'mail', 'directory']; document.querySelectorAll('.nav').forEach(b => { const dest = b.dataset.view || ''; const adminOnly = ['users', 'mail', 'directory'].includes(dest); b.hidden = (!finished && !prereqViews.includes(dest)) || (dest === 'fleet' && finished && topologyResponse?.plan?.mode === 'standalone') || (adminOnly && currentRole !== 'Administrator'); }); $('save').hidden = !finished || currentRole === 'Viewer' || view === 'onboarding' || view === 'setup'; }
 function render() {
     if (view !== lastRenderedView) {
@@ -360,7 +394,8 @@ function render() {
     const names = { organization: 'Organization profile', setup: 'Setup Center · 0.1', onboarding: 'Architecture & setup', overview: 'Overview', routes: 'Routing rules', clusters: 'Backend clusters', backends: 'Backend management', health: 'Health and diagnostics', backups: 'Backups and audit', inventory: 'Infrastructure inventory', users: 'Administrators and roles', mail: 'Mail & OTP', directory: 'Active Directory (LDAPS)', approvals: 'Change approvals', metrics: 'Gateway metrics', fleet: 'Gateway fleet', capabilities: 'YARP capabilities', featurematrix: 'Traffic Engine & platform modules', peers: 'Peer synchronization' };
     $('page-title').textContent = names[view];
     $('page-subtitle').textContent = dirty ? 'Unsaved configuration changes — submit for approval' : 'Control and inspect your gateway';
-    $('gateway-pill').textContent = '● Control plane responding';
+    $('gateway-pill').textContent = gatewayReadyLabel;
+    $('gateway-pill').className = gatewayReadyWarn ? 'pill warn' : 'pill';
     $('save').textContent = dirty ? '● Submit change request' : 'Submit change request';
     document.querySelectorAll('.nav').forEach(n => { const selected = n.dataset.view === view; n.classList.toggle('active', selected); if (selected)
         n.setAttribute('aria-current', 'page');
@@ -837,7 +872,10 @@ $('page-back').onclick = () => navigateBack();
 $('modal-close').onclick = () => $('modal').close();
 $('refresh').onclick = () => void reload();
 $('save').onclick = () => void save();
-$('logout').onclick = () => void api('/admin/api/logout', 'POST', {}).then(() => showLogin(false)).catch(e => show(String(e), true));
+$('logout').onclick = () => { if (dirty && !confirm('Sign out? Your unsubmitted configuration draft will be discarded.'))
+    return; void api('/admin/api/logout', 'POST', {}).then(() => showLogin(false)).catch(e => show(String(e), true)); };
+setInterval(() => { if (!$('app-shell').hidden)
+    void refreshGatewayReadiness(); }, 30000);
 void initSession();
 async function initSession() {
     try {
@@ -870,11 +908,36 @@ async function initSession() {
     }
 }
 function showLogin(first) {
+    authGeneration++;
+    readinessGeneration++;
+    gatewayReadyLabel = '● Backend readiness not checked';
+    gatewayReadyWarn = true;
     csrf = '';
     currentRole = '';
+    currentUser = '';
+    otpChallenge = '';
     view = 'setup';
     viewHistory = [];
     lastRenderedView = 'setup';
+    dirty = false;
+    data = { name: 'YARP Control Center', gateway: 'unknown', time: '', routes: {}, clusters: {}, disabled: {}, mode: 'Local testing', telemetry: '', revision: '' };
+    probes = [];
+    orgProfile = null;
+    topologyResponse = null;
+    topologyDraft = null;
+    topologyStep = 0;
+    topologyChecks = [];
+    topologyWarnings = [];
+    $('content').innerHTML = '';
+    $('user-badge').textContent = '';
+    $('notice').hidden = true;
+    $('auth-password').value = '';
+    $('auth-otp').value = '';
+    $('auth-email').value = '';
+    $('auth-username').value = '';
+    $('auth-provider').value = 'local';
+    $('auth-password').minLength = 16;
+    updateBrand();
     $('app-shell').hidden = true;
     $('auth-screen').hidden = false;
     $('auth-title').textContent = first ? 'Create initial administrator' : 'Sign in to YARP Control Center';
@@ -894,6 +957,11 @@ function showLogin(first) {
 $('auth-provider').onchange = () => { $('auth-password').minLength = $('auth-provider').value === 'directory' ? 1 : 16; };
 $('auth-form').onsubmit = async (e) => {
     e.preventDefault();
+    const submit = $('auth-submit');
+    if (submit.disabled)
+        return;
+    submit.disabled = true;
+    $('auth-form').setAttribute('aria-busy', 'true');
     const mode = $('auth-form').dataset.mode;
     const username = $('auth-username').value.trim();
     const password = $('auth-password').value;
@@ -918,6 +986,10 @@ $('auth-form').onsubmit = async (e) => {
     }
     catch (err) {
         $('auth-message').textContent = String(err);
+    }
+    finally {
+        submit.disabled = false;
+        $('auth-form').removeAttribute('aria-busy');
     }
 };
 async function inventory() {
