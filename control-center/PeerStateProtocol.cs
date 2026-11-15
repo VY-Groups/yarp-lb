@@ -5,7 +5,11 @@ using System.Text;
 /// <summary>Bounded, eventually consistent two-node telemetry; never a strict
 /// global rate limiter. The Redis atomic quota remains the admission authority.</summary>
 public sealed record PeerStateFrame(string NodeId, long Minute, long Sequence,
-    Dictionary<string,int> Counters);
+    Dictionary<string,int> Counters)
+{
+    // Boot epoch allows full resynchronization when a peer process restarts.
+    public long SourceEpoch { get; init; }
+}
 
 public sealed record PeerSyncStatus(bool Enabled, string LocalNode, string RemoteNode,
     int LocalIdentities, long LocalRequests, int RemoteIdentities, long RemoteRequests,
@@ -19,6 +23,8 @@ public sealed class PeerStateJournal
     private readonly string remoteId;
     private readonly int maxIdentities;
     private long localMinute = -1, sequence, receivedMinute = -1, receivedSequence = -1;
+    private long receivedSourceEpoch;
+    private readonly long sourceEpoch = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
     private DateTimeOffset? lastAcceptedUtc;
     private readonly Dictionary<string,int> local = new(StringComparer.Ordinal);
     private Dictionary<string,int> remote = new(StringComparer.Ordinal);
@@ -72,28 +78,35 @@ public sealed class PeerStateJournal
             }
             sequence++;
             return new PeerStateFrame(localId, minute, sequence,
-                new Dictionary<string,int>(local, StringComparer.Ordinal));
+                new Dictionary<string,int>(local, StringComparer.Ordinal)) { SourceEpoch = sourceEpoch };
         }
     }
 
     public bool Apply(PeerStateFrame? frame, long currentMinute)
     {
         if (frame is null || frame.NodeId != remoteId ||
-            frame.Minute != currentMinute || frame.Sequence <= 0 ||
+            frame.Minute != currentMinute || frame.Sequence <= 0 || frame.SourceEpoch <= 0 ||
             frame.Counters is null || frame.Counters.Count > maxIdentities ||
             frame.Counters.Any(p => p.Key.Length != 64 ||
                 !p.Key.All(Uri.IsHexDigit) || p.Value is < 1 or > 1_000_000))
             return false;
         lock (gate)
         {
-            if (frame.Minute == receivedMinute && frame.Sequence <= receivedSequence) return false;
-            // A higher sequence cannot roll back previously observed counters.
-            if (frame.Minute == receivedMinute &&
+            // A legitimate process restart begins a newer boot epoch, so the
+            // first complete signed snapshot can reset its own counters.
+            // Older boot epochs never override state after such a reset.
+            if (frame.SourceEpoch < receivedSourceEpoch) return false;
+            var sameEpoch = frame.SourceEpoch == receivedSourceEpoch;
+            if (sameEpoch && frame.Minute == receivedMinute && frame.Sequence <= receivedSequence)
+                return false;
+            // Within an epoch a higher sequence cannot remove counters.
+            if (sameEpoch && frame.Minute == receivedMinute &&
                 remote.Any(kv => !frame.Counters.TryGetValue(kv.Key,out var n) || n < kv.Value))
                 return false;
             remote = new Dictionary<string,int>(frame.Counters, StringComparer.Ordinal);
             receivedMinute = frame.Minute;
             receivedSequence = frame.Sequence;
+            receivedSourceEpoch = frame.SourceEpoch;
             lastAcceptedUtc = DateTimeOffset.UtcNow;
             return true;
         }
