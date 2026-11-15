@@ -101,7 +101,7 @@ async Task<int> InFlight(string url)
     return json.RootElement.GetProperty("count").GetInt32();
 }
 
-void Configure(string policy, int aWeight, int bWeight, bool drainA = false, int slowStartA = 0, bool drainKillA = false)
+void Configure(string policy, int aWeight, int bWeight, bool drainA = false, int slowStartA = 0, bool drainKillA = false, bool riseFall = false)
 {
     var config = new {
         ReverseProxy = new {
@@ -116,11 +116,13 @@ void Configure(string policy, int aWeight, int bWeight, bool drainA = false, int
                         AvailableDestinationsPolicy = "HealthyAndUnknown",
                         Active = new {
                             Enabled = true, Interval = "00:00:01", Timeout = "00:00:01",
-                            Policy = "ConsecutiveFailures", Path = "/health/ready"
+                            Policy = riseFall ? "RiseFall" : "ConsecutiveFailures", Path = "/health/ready"
                         }
                     },
                     Metadata = new Dictionary<string,string> {
-                        ["ConsecutiveFailuresHealthPolicy.Threshold"] = "1"
+                        ["ConsecutiveFailuresHealthPolicy.Threshold"] = "1",
+                        ["RiseFall.Rise"] = "2",
+                        ["RiseFall.Fall"] = "3"
                     },
                     Destinations = new Dictionary<string, object> {
                         ["A"] = new { Address = aUrl + "/", Metadata = new Dictionary<string,string> { ["Weight"] = aWeight.ToString(), ["TrafficState"] = drainA ? "draining" : "active", ["SlowStartSeconds"] = slowStartA.ToString() } },
@@ -344,6 +346,22 @@ try
     await SetReady(aUrl, true);
     await WaitFor("A recovery", async () => (await Sample(100)).Nodes.ContainsKey("A"));
     Record("health-recovery", new { recovered = true });
+
+    // Exercise YARP's actual periodic HTTP probes using opt-in two-rise,
+    // three-fall hysteresis, then restore the ordinary policy for later tests.
+    Configure("WeightedRandom", 80, 20, riseFall: true);
+    await Task.Delay(2500);
+    await SetReady(aUrl, false);
+    await WaitFor("RiseFall removes A after sustained failures", () => RoutesOnly("B"));
+    var riseFallDown = await Sample(100);
+    Require(riseFallDown.Success == 100 && riseFallDown.Nodes.GetValueOrDefault("A") == 0,
+        "RiseFall excludes unhealthy destination");
+    await SetReady(aUrl, true);
+    await WaitFor("RiseFall returns A after consecutive successes", async () =>
+        (await Sample(100)).Nodes.ContainsKey("A"));
+    Record("rise-fall-active-health", new { rise = 2, fall = 3 });
+    Configure("WeightedRandom", 80, 20);
+    await Task.Delay(2500);
 
     await SetReady(aUrl, false);
     await SetReady(bUrl, false);
