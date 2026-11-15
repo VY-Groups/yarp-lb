@@ -11,6 +11,7 @@
     <Compile Include="../../../control-center/TrafficLifecycle.cs" Link="TrafficLifecycle.cs" />
     <Compile Include="../../../control-center/RecoveryTransition.cs" Link="RecoveryTransition.cs" />
     <Compile Include="../../../control-center/AutonomousRecoveryObserver.cs" Link="AutonomousRecoveryObserver.cs" />
+    <Compile Include="../../../control-center/RecoveryHealthGate.cs" Link="RecoveryHealthGate.cs" />
     <Compile Include="../../../src/TrafficPolicies/BoundedTransportFailureHealthPolicy.cs" Link="BoundedTransportFailureHealthPolicy.cs" />
     <Compile Include="../../../src/TrafficPolicies/EjectionBudget.cs" Link="EjectionBudget.cs" />
     <Compile Include="../../../src/TrafficPolicies/RiseFallCounter.cs" Link="RiseFallCounter.cs" />
