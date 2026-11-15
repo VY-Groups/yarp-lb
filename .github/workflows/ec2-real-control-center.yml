@@ -1,8 +1,8 @@
 name: EC2-backed real Control Center functional checks (read-only)
 on:
+  # Retired EC2 instances: do not schedule live requests to non-existent targets.
+  # Run deliberately after configuring two reachable allowlisted test backends.
   workflow_dispatch:
-  schedule:
-    - cron: "0 19 * * *" # 00:30 IST daily; no PR/push backend traffic
 permissions:
   contents: read
 concurrency:
