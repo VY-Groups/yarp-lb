@@ -28,9 +28,35 @@ class SafetyContract(TestCase):
                "BACKEND_A_HOST":ec2.HOST_A, "BACKEND_B_HOST":ec2.HOST_B}
         with patch.dict(os.environ, env, clear=True):
             self.assertEqual(ec2.prerequisites(), (ec2.HOST_A, ec2.HOST_B))
-        env["BACKEND_B_HOST"] = "example.com"
+        # New public EC2 hosts are allowed only when explicitly supplied;
+        # the deleted EC2 hostnames are no longer fixed in the implementation.
+        fresh = "ec2-18-52-3-40.ap-south-1.compute.amazonaws.com"
+        env["BACKEND_B_HOST"] = fresh
         with patch.dict(os.environ, env, clear=True):
-            with self.assertRaisesRegex(ec2.Failure, "variables missing"):
+            self.assertEqual(ec2.prerequisites(), (ec2.HOST_A, fresh))
+        for invalid in (
+            "", "example.com", "127.0.0.1", "ec2-127-0-0-1.ap-south-1.compute.amazonaws.com",
+            "ec2-10-1-2-3.ap-south-1.compute.amazonaws.com",
+            "ec2-169-254-1-2.ap-south-1.compute.amazonaws.com",
+            "ec2-54-10-20-30.us-east-1.compute.amazonaws.com",
+            "ec2-54-10-20-30.ap-south-1.compute.amazonaws.com.evil.org",
+            "EC2-54-10-20-30.ap-south-1.compute.amazonaws.com",
+            "https://ec2-54-10-20-30.ap-south-1.compute.amazonaws.com/",
+            "ec2-999-10-20-30.ap-south-1.compute.amazonaws.com",
+        ):
+            self.assertFalse(ec2.approved_ec2_host(invalid), invalid)
+            env["BACKEND_B_HOST"] = invalid
+            with patch.dict(os.environ, env, clear=True):
+                with self.assertRaisesRegex(ec2.Failure, "not approved"):
+                    ec2.prerequisites()
+        env["BACKEND_B_HOST"] = ec2.HOST_A
+        with patch.dict(os.environ, env, clear=True):
+            with self.assertRaisesRegex(ec2.Failure, "must differ"):
+                ec2.prerequisites()
+        env["BACKEND_B_HOST"] = ec2.HOST_B
+        env["GITHUB_ACTIONS"] = "false"
+        with patch.dict(os.environ, env, clear=True):
+            with self.assertRaisesRegex(ec2.Failure, "disposable GitHub Actions"):
                 ec2.prerequisites()
 
     def test_identity_parser(self):

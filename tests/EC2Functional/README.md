@@ -1,15 +1,15 @@
 # EC2-backed functional checks — real Control Center gateway
 
-Workflow: `.github/workflows/ec2-real-control-center.yml`. Entry points are **Actions → EC2-backed real Control Center functional checks → Run workflow** and the 00:30 IST nightly schedule. There are intentionally no pull-request/push triggers; no EC2 requests are made as part of source-code PR CI.
+Workflow: `.github/workflows/ec2-real-control-center.yml`. Entry points are **Actions → EC2-backed real Control Center functional checks → Run workflow** only. The former 00:30 IST nightly schedule was retired because the EC2 test instances were deleted. There are intentionally no pull-request/push triggers, and no external EC2 requests as part of source-code PR CI.
 
 ## Repository variables (Settings → Secrets and variables → Actions → Variables)
 
 ```text
-BACKEND_A_HOST=ec2-3-108-65-15.ap-south-1.compute.amazonaws.com
-BACKEND_B_HOST=ec2-65-0-11-186.ap-south-1.compute.amazonaws.com
+BACKEND_A_HOST=<reachable-test-backend-A-hostname>
+BACKEND_B_HOST=<reachable-test-backend-B-hostname>
 ```
 
-These must be ordinary repository *variables*, not secrets. There are no AWS tokens, EC2 credentials, SSH keys, remote shell commands, destructive backend operations or deployments. If either backend is inaccessible, body identity is missing, or both return the same identity, the preflight **fails with BACKEND_UNREACHABLE** and the gateway build/load stages do not run.
+These must be ordinary repository *variables*, not secrets. Each must be a distinct **public AWS Mumbai EC2 hostname** in the exact format `ec2-A-B-C-D.ap-south-1.compute.amazonaws.com`; no private IPs, generic URLs, aliases, non-Mumbai regions or duplicate names are accepted. The .NET TLS test-only allowance checks the actual current configured HTTPS roots against these two exact environment values, rather than against the deleted original instances. There are no AWS tokens, EC2 credentials, SSH keys, remote shell commands, destructive backend operations or deployments. If either backend is inaccessible, body identity is missing, or both return the same identity, the preflight **fails with BACKEND_UNREACHABLE** and the gateway build/load stages do not run.
 
 A backend must return **HTTP 200 at /** and a body containing `backend <hostname> <time>`; each is fetched directly five times first. For the strict/relaxed TLS negative controls, both need an HTTPS listener serving a self-signed/untrusted certificate on port 443.
 
@@ -42,8 +42,12 @@ Every named test writes one CSV with `timestamp,client_address,status,backend,la
 
 ## Evidence status
 
-Offline code/tests are checked in source-control CI. **The live EC2 workflow must be manually run or reach its scheduled execution before any EC2 functional scenario can truthfully be marked PASS.** GitHub connector API currently used in this conversation does not expose an Actions workflow-dispatch operation; do not substitute a PR/push trigger or claim an EC2 result without a run link. 
+Offline code/tests are checked in source-control CI. **The live EC2 workflow must be intentionally manually dispatched against two fresh, authorized, reachable test hosts before any EC2 functional scenario can truthfully be marked PASS. The previous test instances are deleted, so existing old hostname variables must be cleared or replaced.** GitHub connector API currently used in this conversation does not expose an Actions workflow-dispatch operation; do not substitute a PR/push trigger or claim an EC2 result without a run link. 
+
+## Retired EC2 infrastructure (November 2026)
+
+**Live acceptance: NOT TESTED.** The original EC2 instances have been deleted. This workflow is now **manual only**, so an unattended nightly run cannot accidentally probe a stale DNS name, waste runner minutes, or display a misleading green result. The code-level `ec2-gate-contracts.yml` workflow still validates offline safety and fail-closed missing-target handling on source changes. Do not reuse the retired EC2 hostnames. Before any new manual live run, provision **two expressly approved disposable targets** with the expected backend identity and TLS configuration, set both repository variables to their exact fresh hostnames, and confirm they are reachable. An unconfigured manual run deliberately fails closed.
 
 ## Missing-target workflow semantics
 
-The nightly scheduled workflow always runs offline safety-contract tests first. If either repository variable is missing, it uploads `not-tested.txt`, reports **NOT TESTED**, and deliberately skips live EC2 preflight, gateway build and external traffic. This scheduled run may complete successfully as **workflow execution**, but its evidence explicitly does **not** certify EC2 integration. A manually dispatched run without both variables fails (non-zero) with the same NOT TESTED artifact. If both variables are set, the original strict allowlist / live preflight remains mandatory and fails on unreachable or unexpected backends. The independent `ec2-gate-contracts.yml` tests these paths on PR/push without accessing EC2.
+When a manually requested live workflow has missing variables, its offline safety-contract tests still run first. If either repository variable is missing, it uploads `not-tested.txt`, reports **NOT TESTED**, and deliberately skips live EC2 preflight, gateway build and external traffic. The live workflow no longer has a schedule. A manually dispatched run without both variables fails (non-zero) with an explicit NOT TESTED artifact; it must not be reported as live acceptance. If both variables are set, the original strict allowlist / live preflight remains mandatory and fails on unreachable or unexpected backends. The independent `ec2-gate-contracts.yml` tests these paths on PR/push without accessing EC2.

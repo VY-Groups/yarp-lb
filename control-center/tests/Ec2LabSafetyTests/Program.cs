@@ -25,6 +25,29 @@ try
     Set("BACKEND_A_HOST",Ec2WorkflowLab.HostA);
     Set("BACKEND_B_HOST",Ec2WorkflowLab.HostB);
     Set("YARP_EC2_LAB_PRIVATE_DIR",Path.Combine(dir,"private"));
+    Check(Ec2WorkflowLab.IsApprovedEc2Host(Ec2WorkflowLab.HostA) &&
+          Ec2WorkflowLab.IsApprovedEc2Host(Ec2WorkflowLab.HostB),
+          "two offline example public Mumbai EC2 DNS names accepted");
+    foreach (var invalidHost in new[] {
+        "example.org", "127.0.0.1", "ec2-127-0-0-1.ap-south-1.compute.amazonaws.com",
+        "ec2-10-1-2-3.ap-south-1.compute.amazonaws.com",
+        "ec2-169-254-1-2.ap-south-1.compute.amazonaws.com",
+        "ec2-54-10-20-30.us-east-1.compute.amazonaws.com",
+        "ec2-54-10-20-30.ap-south-1.compute.amazonaws.com.evil.org",
+        "https://ec2-54-10-20-30.ap-south-1.compute.amazonaws.com/",
+        "ec2-999-10-20-30.ap-south-1.compute.amazonaws.com"
+    })
+        Check(!Ec2WorkflowLab.IsApprovedEc2Host(invalidHost),
+              "invalid/private/public-suffix EC2 host rejected: " + invalidHost);
+    Set("BACKEND_B_HOST","ec2-18-52-3-40.ap-south-1.compute.amazonaws.com");
+    Ec2WorkflowLab.RequireIsolatedRunner();
+    Check(true,"a newly provisioned approved public EC2 hostname is accepted");
+    Set("BACKEND_B_HOST",Ec2WorkflowLab.HostA);
+    var duplicateRejected = false;
+    try { Ec2WorkflowLab.RequireIsolatedRunner(); }
+    catch (InvalidOperationException) { duplicateRejected = true; }
+    Check(duplicateRejected,"duplicate backend hostnames rejected");
+    Set("BACKEND_B_HOST",Ec2WorkflowLab.HostB);
     Ec2WorkflowLab.RequireIsolatedRunner();
     Check(Ec2WorkflowLab.PrivateDirectory()==Path.Combine(dir,"private"),
         "explicit private workspace is accepted for isolated loopback CI");
@@ -82,6 +105,16 @@ try
     try {Ec2WorkflowLab.RelaxedBackendTls();}
     catch (InvalidOperationException) {blocked=true;}
     Check(blocked,"test-only TLS bypass refuses HTTP/mixed-scheme config");
+    Config("https://"+Ec2WorkflowLab.HostA+"/","https://"+Ec2WorkflowLab.HostA+"/");
+    blocked=false;
+    try { Ec2WorkflowLab.RelaxedBackendTls(); }
+    catch (InvalidOperationException) { blocked=true; }
+    Check(blocked,"test-only TLS bypass refuses duplicate A/A destinations");
+    Config("https://"+Ec2WorkflowLab.HostA+"/","https://"+Ec2WorkflowLab.HostB+"/?token=1");
+    blocked=false;
+    try { Ec2WorkflowLab.RelaxedBackendTls(); }
+    catch (InvalidOperationException) { blocked=true; }
+    Check(blocked,"test-only TLS bypass rejects URL query and noncanonical roots");
     Console.WriteLine("EC2 LAB SAFETY CONTRACT PASSED");
 }
 finally
