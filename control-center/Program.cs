@@ -151,7 +151,28 @@ var sharedPeerLimiter = SharedPeerRateLimiter.FromEnvironment(
 var peerRateTable = sharedPeerLimiter is null ? BoundedPeerRateTable.FromEnvironment(
     Environment.GetEnvironmentVariable("GATEWAY_PROXY_IP_RATE_PER_MINUTE"),
     Environment.GetEnvironmentVariable("GATEWAY_PROXY_IP_TABLE_CAPACITY")) : null;
+var peerSyncSettings = PeerSyncSettings.FromEnvironment(
+    Environment.GetEnvironmentVariable("GATEWAY_PEER_SYNC_NODE_ID"),
+    Environment.GetEnvironmentVariable("GATEWAY_PEER_SYNC_REMOTE_ID"),
+    Environment.GetEnvironmentVariable("GATEWAY_PEER_SYNC_REMOTE_URL"),
+    Environment.GetEnvironmentVariable("GATEWAY_PEER_SYNC_SECRET"),
+    Environment.GetEnvironmentVariable("GATEWAY_PEER_SYNC_CAPACITY"),
+    Environment.GetEnvironmentVariable("GATEWAY_PEER_SYNC_INTERVAL_SECONDS"));
+if (peerSyncSettings is not null)
+{
+    builder.Services.AddSingleton(peerSyncSettings);
+    builder.Services.AddSingleton(sp => new PeerStateJournal(peerSyncSettings.NodeId,
+        peerSyncSettings.RemoteId, peerSyncSettings.Secret, peerSyncSettings.Capacity));
+    builder.Services.AddSingleton(sp => new PeerSignedMessages(peerSyncSettings.Secret));
+    builder.Services.AddHttpClient("peer-sync", client => client.Timeout = TimeSpan.FromSeconds(5))
+        .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler {
+            AllowAutoRedirect = false, UseCookies = false
+        });
+    builder.Services.AddHostedService<PeerSyncPublisher>();
+}
 var app = builder.Build();
+var peerStateJournal = app.Services.GetService<PeerStateJournal>();
+var peerSigner = app.Services.GetService<PeerSignedMessages>();
 if (sharedPeerLimiter is not null)
     app.Lifetime.ApplicationStopped.Register(sharedPeerLimiter.Dispose);
 if (ec2Lab)
@@ -1363,10 +1384,52 @@ app.Use(async (ctx, next) =>
 });
 
 
+// Opt-in peer telemetry transport. Never accept plaintext or unauthenticated
+// messages, even when a proxy adds an untrusted X-Forwarded-Proto header.
+if (peerSyncSettings is not null && peerStateJournal is not null && peerSigner is not null)
+{
+    app.MapPost("/gateway/internal/peer-sync", async (HttpContext ctx) =>
+    {
+        if (!ctx.Request.IsHttps) return Results.StatusCode(403);
+        if (ctx.Request.ContentLength is > 262144) return Results.StatusCode(413);
+        using var body = new MemoryStream();
+        var buffer = new byte[8192];
+        while (true)
+        {
+            var n = await ctx.Request.Body.ReadAsync(buffer, ctx.RequestAborted);
+            if (n == 0) break;
+            if (body.Length + n > 262144) return Results.StatusCode(413);
+            body.Write(buffer, 0, n);
+        }
+        var bytes = body.ToArray();
+        var sender = ctx.Request.Headers["X-GC-Peer-Id"].ToString();
+        var nonce = ctx.Request.Headers["X-GC-Peer-Nonce"].ToString();
+        var signature = ctx.Request.Headers["X-GC-Peer-Sig"].ToString();
+        if (!long.TryParse(ctx.Request.Headers["X-GC-Peer-Ts"].ToString(),
+                System.Globalization.NumberStyles.None,
+                System.Globalization.CultureInfo.InvariantCulture, out var ts) ||
+            !peerSigner.Verify(sender, peerSyncSettings.RemoteId, ts, nonce, signature,
+                bytes, DateTimeOffset.UtcNow.ToUnixTimeSeconds()))
+            return Results.StatusCode(403);
+        PeerStateFrame? frame;
+        try { frame = System.Text.Json.JsonSerializer.Deserialize<PeerStateFrame>(bytes); }
+        catch (System.Text.Json.JsonException) { return Results.BadRequest(); }
+        if (!peerStateJournal.Apply(frame, PeerStateJournal.CurrentMinute()))
+            return Results.StatusCode(409);
+        return Results.NoContent();
+    });
+}
 app.MapOrganizationProfile(privateDir);
 app.MapTlsInventory();
 app.MapReverseProxy(proxyPipeline =>
 {
+    if (peerStateJournal is not null)
+        proxyPipeline.Use(async (context,next) => {
+            // Telemetry only. Never use eventual peer counters for strict admission.
+            peerStateJournal.Observe(context.Connection.RemoteIpAddress,
+                PeerStateJournal.CurrentMinute());
+            await next();
+        });
     // Opt-in, bounded process-local stick-table-style peer-IP admission.
     // No X-Forwarded-For: only the network-layer peer is trusted.
     if (sharedPeerLimiter is not null)
