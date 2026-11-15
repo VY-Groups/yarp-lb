@@ -29,14 +29,39 @@ jobs:
         run: |
           python3 -m unittest discover -s tests/EC2Functional -p 'test_*.py' -v
           python3 -m py_compile tests/EC2Functional/ec2_functional.py
+      - name: Gate live EC2 traffic on explicit configured targets
+        id: targets
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -n "$BACKEND_A_HOST" && -n "$BACKEND_B_HOST" ]]; then
+            echo 'enabled=true' >> "$GITHUB_OUTPUT"
+          else
+            mkdir -p artifacts/ec2
+            printf 'NOT_TESTED: live EC2 targets not configured; no EC2 requests attempted.\n' > artifacts/ec2/not-tested.txt
+            {
+              echo '### Live EC2 integration: NOT TESTED'
+              echo 'One or both BACKEND_A_HOST / BACKEND_B_HOST repository variables are missing.'
+              echo 'No external backend requests were sent. Offline safety tests passed independently.'
+            } >> "$GITHUB_STEP_SUMMARY"
+            if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+              echo 'Manual live request requires both repository variables.' >&2
+              exit 1
+            fi
+            echo 'enabled=false' >> "$GITHUB_OUTPUT"
+            echo '::warning::Scheduled EC2 live checks NOT TESTED: targets not configured'
+          fi
       - name: Preflight five direct HTTP requests per EC2 backend
+        if: steps.targets.outputs.enabled == 'true'
         id: preflight
         run: |
           python3 tests/EC2Functional/ec2_functional.py \
             --preflight --out artifacts/ec2
       - name: Build real shipping Control Center gateway from this commit
+        if: steps.targets.outputs.enabled == 'true'
         run: dotnet build control-center/GatewayCoreYarp.csproj -c Release
       - name: Exercise routing, weights, hashing, ejection, backend TLS and live weight switch
+        if: steps.targets.outputs.enabled == 'true'
         run: |
           python3 tests/EC2Functional/ec2_functional.py \
             --run --out artifacts/ec2 \
