@@ -1,4 +1,4 @@
-using Yarp.ReverseProxy.Health;
+using Yarp.ReverseProxy.Model;
 
 public static class RecoveryHealthGateTests
 {
