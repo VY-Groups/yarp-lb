@@ -119,6 +119,15 @@ builder.Services.AddSingleton<DirectoryAuthService>(sp =>
 builder.Services.AddRateLimiter(options =>
 {
     options.RejectionStatusCode = 429;
+    var proxyBounds = ProxyConcurrencySettings.FromEnvironment(
+        Environment.GetEnvironmentVariable("GATEWAY_PROXY_CONCURRENCY"),
+        Environment.GetEnvironmentVariable("GATEWAY_PROXY_QUEUE_LIMIT"));
+    options.AddConcurrencyLimiter("proxy-concurrency", cfg =>
+    {
+        cfg.PermitLimit = proxyBounds.PermitLimit;
+        cfg.QueueLimit = proxyBounds.QueueLimit;
+        cfg.QueueProcessingOrder = QueueProcessingOrder.OldestFirst;
+    });
     options.AddFixedWindowLimiter("mailtest", cfg => { cfg.PermitLimit = 3; cfg.Window = TimeSpan.FromMinutes(5); cfg.QueueLimit = 0; });
     options.AddFixedWindowLimiter("ldaptest", cfg => { cfg.PermitLimit = 4; cfg.Window = TimeSpan.FromMinutes(5); cfg.QueueLimit = 0; });
     options.AddFixedWindowLimiter("login", cfg =>
@@ -1365,7 +1374,7 @@ app.MapReverseProxy(proxyPipeline =>
     proxyPipeline.UseSessionAffinity();
     proxyPipeline.UseLoadBalancing();
     proxyPipeline.UsePassiveHealthChecks();
-});
+}).RequireRateLimiting("proxy-concurrency");
 app.Run();
 
 static bool ValidId(string s) => s.Length is > 0 and <= 80 && Regex.IsMatch(s, "^[a-zA-Z0-9_-]+$");
