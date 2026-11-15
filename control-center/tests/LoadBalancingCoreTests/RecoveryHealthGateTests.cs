@@ -1,5 +1,3 @@
-using Yarp.ReverseProxy.Model;
-
 public static class RecoveryHealthGateTests
 {
     public static void Run()
@@ -10,17 +8,17 @@ public static class RecoveryHealthGateTests
             Console.WriteLine("PASS: " + name);
         }
 
-        Check(RecoveryHealthGate.Eligible(DestinationHealth.Healthy, DestinationHealth.Unknown, false),
-            true, "healthy active + passive unknown permits recovery");
-        Check(RecoveryHealthGate.Eligible(DestinationHealth.Healthy, DestinationHealth.Healthy, false),
-            true, "healthy active + passive healthy permits recovery");
-        Check(RecoveryHealthGate.Eligible(DestinationHealth.Healthy, DestinationHealth.Unhealthy, false),
+        Check(RecoveryHealthGate.Eligible(true, false, false),
+            true, "affirmative active health and non-ejected destination permits recovery");
+        Check(RecoveryHealthGate.Eligible(true, true, false),
             false, "passive ejection blocks false active-only recovery");
-        Check(RecoveryHealthGate.Eligible(DestinationHealth.Unhealthy, DestinationHealth.Healthy, false),
-            false, "unhealthy active blocks recovery");
-        Check(RecoveryHealthGate.Eligible(DestinationHealth.Unknown, DestinationHealth.Healthy, false),
-            false, "unknown active does not qualify as a good probe");
-        Check(RecoveryHealthGate.Eligible(DestinationHealth.Healthy, DestinationHealth.Healthy, true),
-            false, "draining backend excluded");
+        Check(RecoveryHealthGate.Eligible(false, false, false),
+            false, "unhealthy or unknown active health blocks recovery");
+        Check(RecoveryHealthGate.Eligible(false, true, false),
+            false, "two unhealthy signals block recovery");
+        Check(RecoveryHealthGate.Eligible(true, false, true),
+            false, "draining destination excluded");
+        Check(RecoveryHealthGate.Eligible(true, true, true),
+            false, "draining and passively ejected destination excluded");
     }
 }
