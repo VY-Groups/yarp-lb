@@ -20,6 +20,10 @@ let csrf = '';
 let currentRole = '';
 let currentUser = '';
 let otpChallenge = '';
+let authGeneration = 0;
+let gatewayReadyLabel = '● Backend readiness not checked';
+let gatewayReadyWarn = true;
+let readinessGeneration = 0;
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const keys = (o) => Object.keys(o || {});
@@ -72,7 +76,7 @@ async function api(url, method = 'GET', body) { const opts = { method, credentia
     opts.headers['Content-Type'] = 'application/json';
     opts.headers['X-CSRF-Token'] = csrf;
     opts.body = JSON.stringify(body ?? {});
-} const r = await fetch(url, opts); if (r.status === 401) {
+} const generation = authGeneration; const r = await fetch(url, opts); if (generation !== authGeneration) throw Error('Management session changed. Outdated response ignored.'); if (r.status === 401) {
     if (!['/admin/api/session', '/admin/api/login', '/admin/api/bootstrap', '/admin/api/login/verify'].includes(url)) {
         if (!$('app-shell').hidden) {
             showLogin(false);
@@ -89,12 +93,13 @@ async function api(url, method = 'GET', body) { const opts = { method, credentia
     }
     catch { }
     throw Error(e);
-} return await r.json(); }
+} const json = await r.json(); if (generation !== authGeneration) throw Error('Management session changed. Outdated response ignored.'); return json; }
 async function reload() { if (dirty && !confirm('Discard unsaved changes and reload?'))
     return; try {
     data = await api('/admin/api/state');
     dirty = false;
     render();
+    void refreshGatewayReadiness();
     show('Latest configuration loaded');
 }
 catch (e) {
@@ -345,6 +350,27 @@ async function setupFreeze(frozen) {
         show('Freeze operation denied: ' + String(e), true);
     }
 }
+async function refreshGatewayReadiness() {
+    if ($('app-shell').hidden)
+        return;
+    const generation = ++readinessGeneration;
+    try {
+        const r = await fetch('/gateway/health/ready', { credentials: 'same-origin', cache: 'no-store' });
+        if (generation !== readinessGeneration || $('app-shell').hidden)
+            return;
+        gatewayReadyLabel = r.ok ? '● Backend readiness observed' : r.status === 503 ? '● No healthy backend reported' : '● Readiness unavailable';
+        gatewayReadyWarn = !r.ok;
+    }
+    catch {
+        if (generation !== readinessGeneration || $('app-shell').hidden)
+            return;
+        gatewayReadyLabel = '● Readiness unavailable';
+        gatewayReadyWarn = true;
+    }
+    const pill = $('gateway-pill');
+    pill.textContent = gatewayReadyLabel;
+    pill.className = gatewayReadyWarn ? 'pill warn' : 'pill';
+}
 function updateTopologyNavigation() { const finished = topologyResponse?.status === 'design-confirmed'; const prereqViews = ['organization', 'setup', 'onboarding', 'users', 'mail', 'directory']; document.querySelectorAll('.nav').forEach(b => { const dest = b.dataset.view || ''; const adminOnly = ['users', 'mail', 'directory'].includes(dest); b.hidden = (!finished && !prereqViews.includes(dest)) || (dest === 'fleet' && finished && topologyResponse?.plan?.mode === 'standalone') || (adminOnly && currentRole !== 'Administrator'); }); $('save').hidden = !finished || currentRole === 'Viewer' || view === 'onboarding' || view === 'setup'; }
 function render() {
     if (view !== lastRenderedView) {
@@ -360,7 +386,8 @@ function render() {
     const names = { organization: 'Organization profile', setup: 'Setup Center · 0.1', onboarding: 'Architecture & setup', overview: 'Overview', routes: 'Routing rules', clusters: 'Backend clusters', backends: 'Backend management', health: 'Health and diagnostics', backups: 'Backups and audit', inventory: 'Infrastructure inventory', users: 'Administrators and roles', mail: 'Mail & OTP', directory: 'Active Directory (LDAPS)', approvals: 'Change approvals', metrics: 'Gateway metrics', fleet: 'Gateway fleet', capabilities: 'YARP capabilities', featurematrix: 'Traffic Engine & platform modules', peers: 'Peer synchronization' };
     $('page-title').textContent = names[view];
     $('page-subtitle').textContent = dirty ? 'Unsaved configuration changes — submit for approval' : 'Control and inspect your gateway';
-    $('gateway-pill').textContent = '● Control plane responding';
+    $('gateway-pill').textContent = gatewayReadyLabel;
+    $('gateway-pill').className = gatewayReadyWarn ? 'pill warn' : 'pill';
     $('save').textContent = dirty ? '● Submit change request' : 'Submit change request';
     document.querySelectorAll('.nav').forEach(n => { const selected = n.dataset.view === view; n.classList.toggle('active', selected); if (selected)
         n.setAttribute('aria-current', 'page');
@@ -870,6 +897,10 @@ async function initSession() {
     }
 }
 function showLogin(first) {
+    authGeneration++;
+    readinessGeneration++;
+    gatewayReadyLabel = '● Backend readiness not checked';
+    gatewayReadyWarn = true;
     csrf = '';
     currentRole = '';
     currentUser = '';
