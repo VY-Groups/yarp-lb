@@ -58,7 +58,7 @@ jobs:
           set -euo pipefail
           docker compose -f ops/test-server/compose.yml -f tests/TwoUbuntu/compose.tailnet.yml \
             up -d --build backend-a backend-b gateway-a
-          for attempt in {1..60}; do
+          for ((attempt=0; attempt<60; attempt++)); do
             if curl --noproxy '*' -fsS --max-time 2 "http://$CI_TAILNET_IP:18080/api/identity" >/dev/null 2>&1; then
               exit 0
             fi
@@ -105,7 +105,7 @@ jobs:
           set -euo pipefail
           docker compose -f ops/test-server/compose.yml -f tests/TwoUbuntu/compose.tailnet.yml \
             up -d --no-build gateway-a
-          for attempt in {1..50}; do
+          for ((attempt=0; attempt<50; attempt++)); do
             if curl --noproxy '*' -fsS --max-time 2 "http://$CI_TAILNET_IP:18080/api/identity" >/dev/null 2>&1; then
               exit 0
             fi
@@ -154,7 +154,7 @@ jobs:
           set -euo pipefail
           docker compose -f ops/test-server/compose.yml -f tests/TwoUbuntu/compose.tailnet.yml \
             up -d --build backend-a backend-b gateway-a
-          for attempt in {1..60}; do
+          for ((attempt=0; attempt<60; attempt++)); do
             if curl --noproxy '*' -fsS --max-time 2 "http://$CI_TAILNET_IP:18080/api/identity" >/dev/null 2>&1; then exit 0; fi
             sleep 1
           done
@@ -178,8 +178,8 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq haproxy
           sudo haproxy -c -f artifacts/ha/ingress.cfg
-          sudo haproxy -db -f artifacts/ha/ingress.cfg > artifacts/ha/haproxy.log 2>&1 &
-          for attempt in {1..30}; do
+          haproxy -db -f artifacts/ha/ingress.cfg > artifacts/ha/haproxy.log 2>&1 &
+          for ((attempt=0; attempt<30; attempt++)); do
             if curl --noproxy '*' -fsS --max-time 2 "http://$REMOTE_A:18080/api/identity" >/dev/null 2>&1 &&
                curl --noproxy '*' -fsS --max-time 2 "http://127.0.0.1:19080/api/identity" >/dev/null 2>&1; then break; fi
             sleep 2
@@ -226,7 +226,7 @@ jobs:
           set -euo pipefail
           bash tests/TwoUbuntu/wait_for_artifact.sh a-restarted artifacts/a-restarted
           curl --noproxy '*' -fsS --max-time 3 "http://$REMOTE_A:18080/api/identity" >/dev/null
-          for attempt in {1..20}; do
+          for ((attempt=0; attempt<20; attempt++)); do
             curl --noproxy '*' -fsS --max-time 3 "http://127.0.0.1:19080/api/identity" >/dev/null
             sleep 0.2
           done
