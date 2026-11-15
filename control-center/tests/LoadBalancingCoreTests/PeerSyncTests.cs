@@ -1,0 +1,66 @@
+using System.Net;
+using System.Text;
+
+public static class PeerSyncTests
+{
+    public static void Run()
+    {
+        static void Check(bool condition,string name)
+        {
+            if(!condition) throw new Exception("FAIL: " + name);
+            Console.WriteLine("PASS: " + name);
+        }
+        var secret=Enumerable.Repeat((byte)0x42,32).ToArray();
+        var a=new PeerStateJournal("node-a","node-b",secret,2);
+        var b=new PeerStateJournal("node-b","node-a",secret,2);
+        var now=PeerStateJournal.CurrentMinute();
+        var client=IPAddress.Parse("10.123.4.5");
+        a.Observe(client,now);
+        a.Observe(IPAddress.Parse("::ffff:10.123.4.5"),now);
+        var frame=a.Snapshot(now);
+        Check(frame.Counters.Count==1 && frame.Counters.Values.Single()==2,
+            "IPv4 and mapped IPv6 share one hashed identity");
+        Check(!frame.Counters.Keys.Single().Contains("10.123"),"no plaintext peer IP transmitted");
+        Check(b.Apply(frame,now),"accept first bounded peer snapshot");
+        Check(b.PeerTelemetry(now)==(1,2L),"peer telemetry matches signed source counts");
+        Check(!b.Apply(frame,now),"duplicate sequence rejected");
+        var rollback=a.Snapshot(now);
+        rollback.Counters.Clear();
+        Check(!b.Apply(rollback,now),"state rollback rejected");
+        Check(!b.Apply(new PeerStateFrame("node-c",now,500,new()),now),"unknown peer rejected");
+        Check(!b.Apply(new PeerStateFrame("node-a",now+2,999,new()),now),
+            "future minute rejected");
+        a.Observe(IPAddress.Parse("10.123.4.6"),now);
+        a.Observe(IPAddress.Parse("10.123.4.7"),now);
+        Check(a.Snapshot(now).Counters.Count==2,"peer identity cardinality hard cap");
+        Check(b.Apply(a.Snapshot(now),now),"larger sequence merges without losing counters");
+        Check(b.PeerTelemetry(now)==(2,3L),"monotonic remote counts");
+        Check(b.PeerTelemetry(now+1)==(0,0L),"stale peer telemetry expires from current minute");
+
+        var auth=new PeerSignedMessages(secret);
+        var bytes=Encoding.UTF8.GetBytes("{\"NodeId\":\"node-a\"}");
+        const long t=1763200000;
+        var (nonce,sig)=auth.Sign("node-a",t,bytes);
+        Check(auth.Verify("node-a","node-a",t,nonce,sig,bytes,t),"valid signed frame accepted");
+        Check(!auth.Verify("node-a","node-a",t,nonce,sig,bytes,t),"replayed nonce rejected");
+        var (nonce2,sig2)=auth.Sign("node-a",t,bytes);
+        Check(!auth.Verify("node-a","node-b",t,nonce2,sig2,bytes,t),
+            "wrong peer identity rejected");
+        Check(!auth.Verify("node-a","node-a",t,nonce2,sig2,bytes,t+90),
+            "stale signed frame rejected");
+        Check(!auth.Verify("node-a","node-a",t,nonce2,sig2,Encoding.UTF8.GetBytes("tampered"),t),
+            "altered payload rejected");
+        Check(PeerSyncSettings.FromEnvironment(null,null,null,null,null,null) is null,
+            "peer synchronization disabled by default");
+        foreach(var url in new[]{"http://localhost/gateway/internal/peer-sync",
+            "https://node/gateway/internal/peer-sync?extra=true",
+            "https://name:secret@node/gateway/internal/peer-sync"})
+        {
+            var failed=false;
+            try { PeerSyncSettings.FromEnvironment("node-a","node-b",url,
+                     new string('z',32),null,null); }
+            catch(InvalidOperationException) { failed=true; }
+            Check(failed,"insecure or noncanonical peer URL rejected");
+        }
+    }
+}
