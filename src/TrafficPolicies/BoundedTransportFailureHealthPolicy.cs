@@ -13,7 +13,7 @@ using Yarp.ReverseProxy.Model;
 public sealed class BoundedTransportFailureHealthPolicy : IPassiveHealthCheckPolicy
 {
     public const string PolicyName = "BoundedTransportFailure";
-    private sealed class ClusterBudget { public readonly object Gate = new(); public readonly Dictionary<string,long> Until = new(); }
+    private sealed class ClusterBudget { public readonly object Gate = new(); public readonly Dictionary<string,long> Until = new(); public readonly Dictionary<string,int> FailureStreak = new(); }
     private readonly ConditionalWeakTable<ClusterState,ClusterBudget> budgets = new();
     private readonly IDestinationHealthUpdater updater;
 
@@ -24,12 +24,12 @@ public sealed class BoundedTransportFailureHealthPolicy : IPassiveHealthCheckPol
     {
         if (context.RequestAborted.IsCancellationRequested) return;
         var error=context.Features.Get<IForwarderErrorFeature>()?.Error;
-        if (error is not (ForwarderError.Request or ForwarderError.RequestTimedOut or
-            ForwarderError.RequestBodyDestination or ForwarderError.ResponseBodyDestination))
-            return;
+        var transportFailure = error is (ForwarderError.Request or ForwarderError.RequestTimedOut or
+            ForwarderError.RequestBodyDestination or ForwarderError.ResponseBodyDestination);
         var metadata=cluster.Model.Config.Metadata;
         var configuredPercent=50;
         var minimumRemaining=1;
+        var requiredFailures=2;
         if(metadata is not null)
         {
             if(metadata.TryGetValue("BoundedTransportFailure.MaxEjectedPercent",out var rawPercent) &&
@@ -37,6 +37,9 @@ public sealed class BoundedTransportFailureHealthPolicy : IPassiveHealthCheckPol
                 return; // invalid config must not cause unlimited ejection
             if(metadata.TryGetValue("BoundedTransportFailure.MinHealthyRemaining",out var rawMin) &&
                (!int.TryParse(rawMin,out minimumRemaining) || minimumRemaining is < 0 or > 1024))
+                return;
+            if(metadata.TryGetValue("BoundedTransportFailure.ConsecutiveFailures",out var rawFailures) &&
+               (!int.TryParse(rawFailures,out requiredFailures) || requiredFailures is < 1 or > 10))
                 return;
         }
         var total = cluster.Model.Config.Destinations.Count;
@@ -52,8 +55,20 @@ public sealed class BoundedTransportFailureHealthPolicy : IPassiveHealthCheckPol
         {
             foreach(var expired in scope.Until.Where(x=>x.Value<=now).Select(x=>x.Key).ToArray())
                 scope.Until.Remove(expired);
-            if(scope.Until.ContainsKey(destination.DestinationId) || scope.Until.Count>=cap)
+            // A successful/non-transport response ends the consecutive failure streak.
+            // Never eject for upstream HTTP 5xx, client abort, or ordinary HTTP response.
+            if (!transportFailure)
+            {
+                scope.FailureStreak.Remove(destination.DestinationId);
                 return;
+            }
+            var id = destination.DestinationId;
+            var count = scope.FailureStreak.TryGetValue(id, out var prior) ? prior : 0;
+            count = Math.Min(count + 1, requiredFailures);
+            scope.FailureStreak[id] = count;
+            if (count < requiredFailures || scope.Until.ContainsKey(id) || scope.Until.Count >= cap)
+                return;
+            scope.FailureStreak.Remove(id);
             // Claim the only available ejection slot atomically across requests.
             scope.Until.Add(destination.DestinationId,next);
         }
