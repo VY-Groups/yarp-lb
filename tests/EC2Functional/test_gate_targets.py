@@ -1,6 +1,7 @@
 """Executable contracts for the optional EC2 live-backend gate (no network)."""
 import os
 import pathlib
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -16,14 +17,30 @@ class TargetGateTests(unittest.TestCase):
             summary = root / "summary"
             env = {
                 **os.environ,
-                "GITHUB_OUTPUT": str(output),
-                "GITHUB_STEP_SUMMARY": str(summary),
+                "GITHUB_OUTPUT": "output",
+                "GITHUB_STEP_SUMMARY": "summary",
                 "GITHUB_EVENT_NAME": event,
                 "BACKEND_A_HOST": host_a,
                 "BACKEND_B_HOST": host_b,
             }
-            proc = subprocess.run(["bash", str(GATE)], cwd=tmp, env=env,
+            # On Windows, bare "bash" can resolve to the WSL launcher rather
+            # than Git Bash. Resolve the actual Git-for-Windows runtime.
+            if os.name == "nt":
+                git = shutil.which("git")
+                if git is None:
+                    self.fail("Git for Windows is required for the Bash contract tests")
+                bash = pathlib.Path(git).resolve().parent.parent / "bin" / "bash.exe"
+                if not bash.is_file():
+                    self.fail(f"Git Bash missing at {bash}")
+                bash_cmd = str(bash)
+            else:
+                bash_cmd = "bash"
+            proc = subprocess.run([bash_cmd], cwd=tmp, env=env,
+                                  input=GATE.read_text(encoding="utf-8"),
                                   text=True, capture_output=True, check=False)
+            if proc.returncode != 0 and event != "workflow_dispatch":
+                self.assertEqual(proc.returncode, 0,
+                                 f"Git Bash contract failed: stdout={proc.stdout!r} stderr={proc.stderr!r}")
             return (
                 proc,
                 output.read_text() if output.exists() else "",

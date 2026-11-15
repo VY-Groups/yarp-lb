@@ -25,3 +25,11 @@ For operator safety: do not change existing running Windows test configuration, 
 Boundaries: no new independent probe engine, no replacement for YARP's active check intervals/threshold semantics, no multi-node health consensus, no proof of physical VIP/host faults. An active health state of Unknown is not treated as a successful probe. This is not a HAProxy source-code port. A real HTTP acceptance scenario now injects backend failure and restores readiness with no customer proxy traffic for 3.2 seconds before measuring weighted warmup. CI success is required before treating that result as evidence; it remains different from multi-node physical failover.
 
 The referenced GitHub repository `REA` was not available through the connected account search during this implementation. No assertions about its source, tests or licensing have been made.
+
+## Passive-aware idle recovery safety (incremental fix)
+
+The autonomous observer only starts or retains warmup eligibility when active health is `Healthy`, passive health is **not** `Unhealthy`, and the destination is not draining. An actively healthy but passively ejected destination is no longer incorrectly considered recovered. Unknown active health does not count as affirmative recovery evidence. This does not replace YARP's own availability policy or override destination health and does not implement distributed health consensus. Active and passive health compatibility is covered by dedicated contract tests and existing Windows/Linux gateway acceptance CI.
+
+### Source comparison and limits
+
+Read-only comparison reference: `ha-praxy/src/check.c` (health probes), `src/queue.c` (queue lifetime and locks), `src/stick_table.c` (tracked counters), and `src/peers.c` (peer synchronization). Those files are GPL-licensed C and **are not copied into the .NET app**. The existing peer rate table is per-process, not synchronized: it must not be presented as a HAProxy peer-equivalent. A fully correct distributed quota requires independently designed/authenticated peer transport, sequence/replay handling, convergence, storage bounds, partition behavior, and at least two independent failure-domain tests. Production physical throughput, NIC/VRRP/ECMP failover, and network-partition evidence remain NOT TESTED.
