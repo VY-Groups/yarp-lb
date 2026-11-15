@@ -35,6 +35,22 @@ public static class PeerSyncTests
         Check(a.Snapshot(now).Counters.Count==2,"peer identity cardinality hard cap");
         Check(b.Apply(a.Snapshot(now),now),"larger sequence merges without losing counters");
         Check(b.PeerTelemetry(now)==(2,3L),"monotonic remote counts");
+        // Restarting the sender resets its process counters and per-minute
+        // sequence, but a newer authenticated boot epoch must resynchronize.
+        var beforeRestart = a.Snapshot(now);
+        System.Threading.Thread.Sleep(20);
+        var restarted = new PeerStateJournal("node-a", "node-b", secret, 2);
+        restarted.Observe(IPAddress.Parse("10.123.4.5"), now);
+        var afterRestart = restarted.Snapshot(now);
+        Check(afterRestart.SourceEpoch > beforeRestart.SourceEpoch,
+            "new sender process has a strictly newer boot epoch");
+        Check(b.Apply(afterRestart,now),
+            "legitimate sender restart replaces stale process counters");
+        Check(b.PeerTelemetry(now)==(1,1L),
+            "peer counts reset to newly synchronized process after restart");
+        Check(!b.Apply(beforeRestart,now),
+            "old boot epoch cannot replay an obsolete snapshot after recovery");
+
         Check(b.PeerTelemetry(now+1)==(0,0L),"stale peer telemetry expires from current minute");
 
         var maxFrame = new PeerStateJournal("node-a", "node-b", secret, 2048);
