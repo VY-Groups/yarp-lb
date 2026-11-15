@@ -55,6 +55,7 @@ builder.Services.AddReverseProxy()
     .LoadFromConfig(builder.Configuration.GetSection("ReverseProxy"));
 builder.Services.AddSingleton<ILoadBalancingPolicy, WeightedRandomPolicy>();
 builder.Services.AddSingleton<ILoadBalancingPolicy, SourceIpHashPolicy>();
+builder.Services.AddHostedService<AutonomousRecoveryObserver>();
 // Aggressive *test ingress only* transport-failure policy. Normal gateways
 // retain default policy behavior unless their cluster explicitly opts in.
 builder.Services.AddSingleton<IPassiveHealthCheckPolicy, ImmediateTransportFailureHealthPolicy>();
