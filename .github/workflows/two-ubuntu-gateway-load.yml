@@ -58,7 +58,13 @@ jobs:
           python3 -m http.server 18082 --bind 127.0.0.1 --directory artifacts/site &
           website_pid=$!
           trap 'kill "$website_pid" 2>/dev/null || true' EXIT
-          curl -fsS --max-time 5 http://127.0.0.1:18082/index.html | grep -Fq "${{ matrix.site }}"
+          website_ready=0
+          for attempt in {1..15}; do
+            if curl -fsS --max-time 3 http://127.0.0.1:18082/index.html 2>/dev/null |
+               grep -Fq "${{ matrix.site }}"; then website_ready=1; break; fi
+            sleep 1
+          done
+          [[ "$website_ready" -eq 1 ]] || { echo "Website failed to become ready" >&2; exit 1; }
           ready=0
           for attempt in {1..60}; do
             if curl --noproxy '*' -fsS --max-time 3 \
