@@ -15,7 +15,7 @@ services:
           --save "" --appendonly no
     volumes: ["./redis-certs:/testcert:ro"]
     healthcheck:
-      test: ["CMD-SHELL", 'redis-cli --tls -h redis-quota --cacert /testcert/ca.crt -a "$REDIS_TEST_PASSWORD" ping 2>/dev/null | grep -qx PONG']
+      test: ["CMD-SHELL", 'redis-cli --tls -h redis-quota --cacert /testcert/ca.crt -a "$$REDIS_TEST_PASSWORD" ping 2>/dev/null | grep -qx PONG']
       interval: 1s
       timeout: 3s
       retries: 30
