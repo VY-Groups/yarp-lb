@@ -1,0 +1,4 @@
+# Override only for disposable two-independent-GitHub-runner test.
+services:
+  gateway-a:
+    ports: ["127.0.0.1:18080:8080"]
