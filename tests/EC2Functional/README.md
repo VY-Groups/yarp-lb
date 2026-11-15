@@ -9,7 +9,7 @@ BACKEND_A_HOST=<reachable-test-backend-A-hostname>
 BACKEND_B_HOST=<reachable-test-backend-B-hostname>
 ```
 
-These must be ordinary repository *variables*, not secrets. There are no AWS tokens, EC2 credentials, SSH keys, remote shell commands, destructive backend operations or deployments. If either backend is inaccessible, body identity is missing, or both return the same identity, the preflight **fails with BACKEND_UNREACHABLE** and the gateway build/load stages do not run.
+These must be ordinary repository *variables*, not secrets. Each must be a distinct **public AWS Mumbai EC2 hostname** in the exact format `ec2-A-B-C-D.ap-south-1.compute.amazonaws.com`; no private IPs, generic URLs, aliases, non-Mumbai regions or duplicate names are accepted. The .NET TLS test-only allowance checks the actual current configured HTTPS roots against these two exact environment values, rather than against the deleted original instances. There are no AWS tokens, EC2 credentials, SSH keys, remote shell commands, destructive backend operations or deployments. If either backend is inaccessible, body identity is missing, or both return the same identity, the preflight **fails with BACKEND_UNREACHABLE** and the gateway build/load stages do not run.
 
 A backend must return **HTTP 200 at /** and a body containing `backend <hostname> <time>`; each is fetched directly five times first. For the strict/relaxed TLS negative controls, both need an HTTPS listener serving a self-signed/untrusted certificate on port 443.
 
