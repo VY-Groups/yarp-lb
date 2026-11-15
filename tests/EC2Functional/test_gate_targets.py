@@ -16,13 +16,14 @@ class TargetGateTests(unittest.TestCase):
             summary = root / "summary"
             env = {
                 **os.environ,
-                "GITHUB_OUTPUT": str(output),
-                "GITHUB_STEP_SUMMARY": str(summary),
+                "GITHUB_OUTPUT": "output",
+                "GITHUB_STEP_SUMMARY": "summary",
                 "GITHUB_EVENT_NAME": event,
                 "BACKEND_A_HOST": host_a,
                 "BACKEND_B_HOST": host_b,
             }
-            proc = subprocess.run(["bash", str(GATE)], cwd=tmp, env=env,
+            proc = subprocess.run(["bash"], cwd=tmp, env=env,
+                                  input=GATE.read_text(encoding="utf-8"),
                                   text=True, capture_output=True, check=False)
             return (
                 proc,
