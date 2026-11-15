@@ -1,0 +1,16 @@
+#REGTEST_TYPE=devel
+
+# This test uses the "new ssl ca-file" and "del ssl ca-file" commands to create
+# a new CA file or delete an unused CA file.
+#
+# It requires socat to upload the CA file.
+#
+# If this test does not work anymore:
+# - Check that you have socat
+
+varnishtest "Test the 'new ssl ca-file' and 'del ssl ca-file' commands of the CLI"
+feature cmd "$HAPROXY_PROGRAM -cc 'feature(QUIC) && !feature(QUIC_OPENSSL_COMPAT) && !feature(OPENSSL_WOLFSSL)'"
+feature cmd "command -v socat"
+
+setenv VTC_SOCK_TYPE quic
+include ${testdir}/../ssl/new_del_ssl_cafile.vtci

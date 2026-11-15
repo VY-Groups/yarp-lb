@@ -1,0 +1,10 @@
+# This teg-test verifies that automatic SNI selection for server connections and
+# health checks.
+
+varnishtest "Test the bind 'alpn' setting"
+feature cmd "$HAPROXY_PROGRAM -cc 'version_atleast(3.3-dev8)'"
+feature cmd "$HAPROXY_PROGRAM -cc 'feature(OPENSSL)'"
+
+setenv VTC_SOCK_TYPE stream
+setenv SSL_OPT check-ssl
+include ${testdir}/ssl_sni_auto.vtci

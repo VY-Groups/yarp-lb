@@ -1,0 +1,28 @@
+#REGTEST_TYPE=devel
+
+# This reg-test uses the "set ssl cert" command to update a certificate over the CLI.
+# It requires socat to upload the certificate
+#
+# This check has two separate parts.
+# In the first part, there are 3 requests, the first one will use "www.test1.com" as SNI,
+# the second one with the same but that must fail and the third one will use
+# "localhost". Since vtest can't do SSL, we use haproxy as an SSL client with 2
+# chained listen section.
+#
+# In the second part, we check the update of a default certificate in a crt-list.
+# This corresponds to a bug raised in https://github.com/haproxy/haproxy/issues/1143.
+# A certificate is used as default certificate as well as regular one, and during the update
+# the default certificate would not be properly updated if the default instance did not have
+# any SNI. The test consists in checking that the used certificate is the right one after
+# updating it via a "set ssl cert" call.
+#
+# If this test does not work anymore:
+# - Check that you have socat
+
+varnishtest "Test the 'set ssl cert' feature of the CLI"
+# QUIC backend are not supported with USE_QUIC_OPENSSL_COMPAT
+feature cmd "$HAPROXY_PROGRAM -cc 'feature(QUIC) && !feature(QUIC_OPENSSL_COMPAT) && !feature(OPENSSL_WOLFSSL)'"
+feature cmd "command -v socat"
+
+setenv VTC_SOCK_TYPE quic
+include ${testdir}/../ssl/set_ssl_cert.vtci

@@ -1,0 +1,118 @@
+#!/bin/sh
+
+set -e
+
+export VERBOSE=1
+export TIMEOUT=90
+export MASTER_SOCKET="${MASTER_SOCKET:-/var/run/haproxy-master.sock}"
+
+alert() {
+	if [ "$VERBOSE" -ge "1" ]; then
+		echo "[ALERT] $*" >&2
+	fi
+}
+
+
+reload() {
+	if [ -S "$MASTER_SOCKET" ]; then
+		socat_addr="UNIX-CONNECT:${MASTER_SOCKET}"
+	else
+		case "$MASTER_SOCKET" in
+			*:[0-9]*)
+				socat_addr="TCP:${MASTER_SOCKET}"
+				;;
+			*)
+				alert "Invalid master socket address '${MASTER_SOCKET}': expected a UNIX socket file or <host>:<port>"
+				return 1
+				;;
+		esac
+	fi
+
+	echo "reload" | socat -t"${TIMEOUT}" "$socat_addr" - | {
+		read -r status || { alert "No status received (connection error or timeout after ${TIMEOUT}s)."; exit 1; }
+		case "$status" in
+			"Success=1") ret=0 ;;
+			"Success=0") ret=1 ;;
+			*)           alert "Unexpected response: '$status'"; exit 1 ;;
+		esac
+
+		read -r _  # consume "--"
+
+		if [ "$VERBOSE" -ge 3 ] || { [ "$ret" = 1 ] && [ "$VERBOSE" -ge 2 ]; }; then
+			cat >&2
+		else
+			cat >/dev/null
+		fi
+
+		exit "$ret"
+	}
+}
+
+usage() {
+	echo "Usage:"
+	echo " $0 [options]*"
+	echo ""
+	echo " Trigger a reload from the master socket"
+	echo " Require socat"
+	echo " EXPERIMENTAL script!"
+	echo ""
+	echo "Options:"
+	echo "  -S,  --master-socket <addr>   Unix socket path or <host>:<port> (default: ${MASTER_SOCKET})"
+	echo "  -d,  --debug                  Debug mode, set -x"
+	echo "  -t,  --timeout                Timeout (socat -t) (default: ${TIMEOUT})"
+	echo "  -s,  --silent                 Silent mode (no output)"
+	echo "  -v,  --verbose                Verbose output (output from haproxy on failure)"
+	echo "  -vv  --verbose=all            Very verbose output (output from haproxy on success and failure)"
+	echo "  -h,  --help                   This help"
+	echo ""
+	echo "Examples:"
+	echo "  $0 -S ${MASTER_SOCKET} -d ${TIMEOUT}"
+}
+
+
+main() {
+	while [ -n "$1" ]; do
+		case "$1" in
+			-S|--master-socket)
+				MASTER_SOCKET="$2"
+				shift 2
+				;;
+			-t|--timeout)
+				TIMEOUT="$2"
+				shift 2
+				;;
+			-s|--silent)
+				VERBOSE=0
+				shift
+				;;
+			-v|--verbose)
+				VERBOSE=2
+				shift
+				;;
+			-vv|--verbose=all)
+				VERBOSE=3
+				shift
+				;;
+			-d|--debug)
+				DEBUG=1
+				shift
+				;;
+			-h|--help)
+				usage "$@"
+				exit 0
+				;;
+			*)
+				echo "[ALERT] ($$) : Unknown option '$1'" >&2
+				usage "$@"
+				exit 1
+				;;
+		esac
+	done
+
+	if [ -n "$DEBUG" ]; then
+		set -x
+	fi
+}
+
+main "$@"
+reload

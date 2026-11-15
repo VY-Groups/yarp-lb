@@ -1,0 +1,884 @@
+#include <errno.h>
+#include <string.h>
+
+#include <sys/types.h>
+#include <netinet/in.h>
+#include <netinet/udp.h>
+
+#include <haproxy/acl.h>
+#include <haproxy/action.h>
+#include <haproxy/api.h>
+#include <haproxy/cfgparse.h>
+#include <haproxy/errors.h>
+#include <haproxy/global.h>
+#include <haproxy/listener.h>
+#include <haproxy/proxy.h>
+#include <haproxy/quic_cc.h>
+#include <haproxy/quic_rules.h>
+#include <haproxy/quic_tune.h>
+#include <haproxy/tools.h>
+
+#define QUIC_CC_NEWRENO_STR "newreno"
+#define QUIC_CC_CUBIC_STR   "cubic"
+#define QUIC_CC_BBR_STR     "bbr"
+#define QUIC_CC_NO_CC_STR   "nocc"
+
+struct quic_tune quic_tune = {
+	.fe = {
+		.cc_max_frame_loss = QUIC_DFLT_CC_MAX_FRAME_LOSS,
+		.cc_max_win_size   = QUIC_DFLT_CC_MAX_WIN_SIZE,
+		.cc_reorder_ratio  = QUIC_DFLT_CC_REORDER_RATIO,
+		.max_idle_timeout  = QUIC_DFLT_FE_MAX_IDLE_TIMEOUT,
+		.sec_retry_threshold = QUIC_DFLT_SEC_RETRY_THRESHOLD,
+		.stream_data_ratio = QUIC_DFLT_FE_STREAM_DATA_RATIO,
+		.stream_max_concurrent = QUIC_DFLT_FE_STREAM_MAX_CONCURRENT,
+		.stream_max_total  = 0,
+		.stream_rxbuf      = 0,
+		.fb_opts = QUIC_TUNE_FB_TX_PACING|QUIC_TUNE_FB_TX_UDP_GSO,
+		.opts = QUIC_TUNE_FE_SOCK_PER_CONN,
+	},
+	.be = {
+		.cc_max_frame_loss = QUIC_DFLT_CC_MAX_FRAME_LOSS,
+		.cc_max_win_size   = QUIC_DFLT_CC_MAX_WIN_SIZE,
+		.cc_reorder_ratio  = QUIC_DFLT_CC_REORDER_RATIO,
+		.max_idle_timeout  = QUIC_DFLT_BE_MAX_IDLE_TIMEOUT,
+		.stream_data_ratio = QUIC_DFLT_BE_STREAM_DATA_RATIO,
+		.stream_max_concurrent = QUIC_DFLT_BE_STREAM_MAX_CONCURRENT,
+		.stream_rxbuf      = 0,
+		.fb_opts = QUIC_TUNE_FB_TX_PACING|QUIC_TUNE_FB_TX_UDP_GSO,
+	},
+	.mem_tx_max = QUIC_MAX_TX_MEM,
+};
+
+static int bind_parse_quic_force_retry(char **args, int cur_arg, struct proxy *px, struct bind_conf *conf, char **err)
+{
+	conf->options |= BC_O_QUIC_FORCE_RETRY;
+	return 0;
+}
+
+/* Parse <value> as a window size integer argument to keyword <kw>. By
+ * default, value is explained as bytes. Suffixes 'k', 'm' and 'g' are valid as
+ * multipliers. <end_opt> will point to the next unparsed character.
+ *
+ * Return the parsed window size or 0 on error.
+ */
+static unsigned long parse_window_size(const char *kw, char *value,
+                                       char **end_opt, char **err)
+{
+	unsigned long size;
+
+	errno = 0;
+	size = strtoul(value, end_opt, 0);
+	if (*end_opt == value || errno != 0) {
+		memprintf(err, "'%s' : could not parse congestion window value", kw);
+		goto fail;
+	}
+
+	if (**end_opt == 'k') {
+		size <<= 10;
+		(*end_opt)++;
+	}
+	else if (**end_opt == 'm') {
+		size <<= 20;
+		(*end_opt)++;
+	}
+	else if (**end_opt == 'g') {
+		size <<= 30;
+		(*end_opt)++;
+	}
+
+	if (size < 10240 || size > (4UL << 30)) {
+		memprintf(err, "'%s' : should be between 10k and 4g", kw);
+		goto fail;
+	}
+
+	return size;
+
+ fail:
+	return 0;
+}
+
+/* Parse option 'quic-cc-algo' on bind and server lines.
+ *
+ * Returns the selected algorithm or NULL on error. <max_cwnd> is used as a
+ * secondary output parameter, set to the maximum window size if specified.
+ */
+static const struct quic_cc_algo *parse_cc_algo(char **args, int cur_arg, char **err,
+                                                size_t *max_cwnd)
+{
+	const struct quic_cc_algo *cc_algo;
+	const char *algo = NULL;
+	struct ist algo_ist, arg_ist;
+	unsigned long cwnd = 0;
+	char *arg;
+
+	if (!*args[cur_arg + 1]) {
+		memprintf(err, "'%s' : missing control congestion algorithm", args[cur_arg]);
+		goto err;
+	}
+
+	arg = args[cur_arg + 1];
+	arg_ist = ist(args[cur_arg + 1]);
+	algo_ist = istsplit(&arg_ist, '(');
+	if (isteq(algo_ist, ist(QUIC_CC_NEWRENO_STR))) {
+		/* newreno */
+		algo = QUIC_CC_NEWRENO_STR;
+		cc_algo = &quic_cc_algo_nr;
+		arg += strlen(QUIC_CC_NEWRENO_STR);
+	}
+	else if (isteq(algo_ist, ist(QUIC_CC_CUBIC_STR))) {
+		/* cubic */
+		algo = QUIC_CC_CUBIC_STR;
+		cc_algo = &quic_cc_algo_cubic;
+		arg += strlen(QUIC_CC_CUBIC_STR);
+	}
+	else if (isteq(algo_ist, ist(QUIC_CC_BBR_STR))) {
+		/* bbr */
+		algo = QUIC_CC_BBR_STR;
+		cc_algo = &quic_cc_algo_bbr;
+		arg += strlen(QUIC_CC_BBR_STR);
+	}
+	else if (isteq(algo_ist, ist(QUIC_CC_NO_CC_STR))) {
+		/* nocc */
+		if (!experimental_directives_allowed) {
+			ha_alert("'%s' algo is experimental, must be allowed via a global "
+			         "'expose-experimental-directives'\n", arg);
+			goto err;
+		}
+
+		algo = QUIC_CC_NO_CC_STR;
+		cc_algo = &quic_cc_algo_nocc;
+		arg += strlen(QUIC_CC_NO_CC_STR);
+		mark_tainted(TAINTED_CONFIG_EXP_KW_DECLARED);
+	}
+	else {
+		memprintf(err, "'%s' : unknown control congestion algorithm", args[cur_arg + 1]);
+		goto err;
+	}
+
+	if (*arg++ == '(') {
+		char *end_opt;
+
+		if (*arg == ')')
+			goto out;
+
+		if (*arg != ',') {
+			cwnd = parse_window_size(args[cur_arg], arg, &end_opt, err);
+			if (!cwnd)
+				goto err;
+
+			if (*end_opt == ')') {
+				goto out;
+			}
+			else if (*end_opt != ',') {
+				memprintf(err, "'%s' : cannot parse max-window argument for '%s' algorithm", args[cur_arg], algo);
+				goto err;
+			}
+			arg = end_opt;
+		}
+
+		if (*++arg != ')') {
+			memprintf(err, "'%s' : too many argument for '%s' algorithm", args[cur_arg], algo);
+			goto err;
+		}
+	}
+
+
+ out:
+	if (cwnd)
+		*max_cwnd = cwnd;
+	return cc_algo;
+
+ err:
+	return NULL;
+}
+
+/* parse "quic-cc-algo" bind keyword */
+static int bind_parse_quic_cc_algo(char **args, int cur_arg, struct proxy *px,
+                                   struct bind_conf *conf, char **err)
+{
+	const struct quic_cc_algo *cc_algo = NULL;
+
+	cc_algo = parse_cc_algo(args, cur_arg, err, &conf->max_cwnd);
+	if (!cc_algo)
+		goto fail;
+
+ out:
+	conf->quic_cc_algo = cc_algo;
+	return 0;
+
+ fail:
+	return ERR_ALERT | ERR_FATAL;
+}
+
+static int bind_parse_quic_socket(char **args, int cur_arg, struct proxy *px,
+                                  struct bind_conf *conf, char **err)
+{
+	char *arg;
+	if (!*args[cur_arg + 1]) {
+		memprintf(err, "'%s' : missing argument, use either connection or listener.", args[cur_arg]);
+		return ERR_ALERT | ERR_FATAL;
+	}
+
+	arg = args[cur_arg + 1];
+	if (strcmp(arg, "connection") == 0) {
+		conf->quic_mode = QUIC_SOCK_MODE_CONN;
+	}
+	else if (strcmp(arg, "listener") == 0) {
+		conf->quic_mode = QUIC_SOCK_MODE_LSTNR;
+	}
+	else {
+		memprintf(err, "'%s' : unknown argument, use either connection or listener.", args[cur_arg]);
+		return ERR_ALERT | ERR_FATAL;
+	}
+
+	return 0;
+}
+
+/* parse "quic-cc-algo" server keyword */
+static int srv_parse_quic_cc_algo(char **args, int *cur_arg, struct proxy *px,
+                                  struct server *srv, char **err)
+{
+	const struct quic_cc_algo *cc_algo = NULL;
+
+	cc_algo = parse_cc_algo(args, *cur_arg, err, &srv->quic_max_cwnd);
+	if (!cc_algo)
+		goto fail;
+
+ out:
+	srv->quic_cc_algo = cc_algo;
+	return 0;
+
+ fail:
+	return ERR_ALERT | ERR_FATAL;
+}
+
+static struct bind_kw_list bind_kws = { "QUIC", { }, {
+	{ "quic-force-retry", bind_parse_quic_force_retry, 0 },
+	{ "quic-cc-algo", bind_parse_quic_cc_algo, 1 },
+	{ "quic-socket", bind_parse_quic_socket, 1 },
+	{ NULL, NULL, 0 },
+}};
+
+INITCALL1(STG_REGISTER, bind_register_keywords, &bind_kws);
+
+static struct srv_kw_list srv_kws = { "QUIC", { }, {
+	{ "quic-cc-algo", srv_parse_quic_cc_algo, 1 },
+	{ NULL, NULL, 0 },
+}};
+
+INITCALL1(STG_REGISTER, srv_register_keywords, &srv_kws);
+
+/* parse "tune.quic.fe.sock-per-conn", accepts "default-on" or "force-off" */
+static int cfg_parse_quic_tune_sock_per_conn(char **args, int section_type,
+                                             struct proxy *curpx,
+                                             const struct proxy *defpx,
+                                             const char *file, int line, char **err)
+{
+	if (too_many_args(1, args, err, NULL))
+		return -1;
+
+	if (strcmp(args[1], "default-on") == 0) {
+		quic_tune.fe.opts |= QUIC_TUNE_FE_SOCK_PER_CONN;
+	}
+	else if (strcmp(args[1], "force-off") == 0) {
+		quic_tune.fe.opts &= ~QUIC_TUNE_FE_SOCK_PER_CONN;
+	}
+	else {
+		memprintf(err, "'%s' expects either 'default-on' or 'force-off' but got '%s'.", args[0], args[1]);
+		return -1;
+	}
+
+	return 0;
+}
+
+/* parse "tune.quic.socket-owner", accepts "listener" or "connection" */
+static int cfg_parse_quic_tune_socket_owner(char **args, int section_type,
+                                            struct proxy *curpx,
+                                            const struct proxy *defpx,
+                                            const char *file, int line, char **err)
+{
+	if (too_many_args(1, args, err, NULL))
+		return -1;
+
+	memprintf(err, "'%s' is deprecated in 3.3 and will be removed in 3.5. "
+	               "Please use the newer keyword syntax 'tune.quic.fe.sock-per-conn'.", args[0]);
+
+	if (strcmp(args[1], "connection") == 0) {
+		quic_tune.fe.opts |= QUIC_TUNE_FE_SOCK_PER_CONN;
+	}
+	else if (strcmp(args[1], "listener") == 0) {
+		quic_tune.fe.opts &= ~QUIC_TUNE_FE_SOCK_PER_CONN;
+	}
+	else {
+		memprintf(err, "'%s' expects either 'listener' or 'connection' but got '%s'.", args[0], args[1]);
+		return -1;
+	}
+
+	/* Returns 1 to ensure deprecated warning is displayed. */
+	return 1;
+}
+
+/* Must be used to parse tune.quic.* setting which requires a time
+ * as value.
+ * Return -1 on alert, or 0 if succeeded.
+ */
+static int cfg_parse_quic_time(char **args, int section_type,
+                               struct proxy *curpx,
+                               const struct proxy *defpx,
+                               const char *file, int line, char **err)
+{
+	int ret = 0;
+	unsigned int time;
+	const char *res, *name, *value;
+	const int prefix_len = strlen("tune.quic.");
+	const char *suffix;
+
+	if (too_many_args(1, args, err, NULL))
+		return -1;
+
+	name = args[0];
+	value = args[1];
+	res = parse_time_err(value, &time, TIME_UNIT_MS);
+	if (res == PARSE_TIME_OVER) {
+		memprintf(err, "timer overflow in argument '%s' to '%s' "
+		          "(maximum value is 2147483647 ms or ~24.8 days)", value, name);
+		return -1;
+	}
+	else if (res == PARSE_TIME_UNDER) {
+		memprintf(err, "timer underflow in argument '%s' to '%s' "
+		          "(minimum non-null value is 1 ms)", value, name);
+		return -1;
+	}
+	else if (res) {
+		memprintf(err, "unexpected character '%c' in '%s'", *res, name);
+		return -1;
+	}
+
+	suffix = name + prefix_len;
+	if (strcmp(suffix, "be.max-idle-timeout") == 0 ||
+	    strcmp(suffix, "fe.max-idle-timeout") == 0) {
+		uint *ptr = (suffix[0] == 'b') ? &quic_tune.be.max_idle_timeout :
+		                                 &quic_tune.fe.max_idle_timeout;
+		*ptr = time;
+	}
+	/* legacy options */
+	else if (strcmp(name + prefix_len, "frontend.max-idle-timeout") == 0) {
+		memprintf(err, "'%s' is deprecated in 3.3 and will be removed in 3.5. "
+		               "Please use the newer keyword syntax 'tune.quic.fe.max-idle-timeout'.", args[0]);
+		quic_tune.fe.max_idle_timeout = time;
+		ret = 1;
+	}
+	else {
+		memprintf(err, "'%s' keyword not handled (please report this bug).", args[0]);
+		ret = -1;
+	}
+
+	return ret;
+}
+
+/* Parse any tune.quic.* setting with strictly positive integer values.
+ *
+ * Returns 0 on success, >0 on warning, <0 on fatal error.
+ */
+static int cfg_parse_quic_tune_setting(char **args, int section_type,
+                                       struct proxy *curpx,
+                                       const struct proxy *defpx,
+                                       const char *file, int line, char **err)
+{
+	int ret = 0;
+	unsigned int arg = 0;
+	int prefix_len = strlen("tune.quic.");
+	const char *suffix, *errptr;
+
+	if (too_many_args(1, args, err, NULL))
+		return -1;
+
+	if (*(args[1]) != 0)
+		arg = atoi(args[1]);
+
+	if (arg < 1) {
+		memprintf(err, "'%s' expects a positive integer.", args[0]);
+		return -1;
+	}
+
+	suffix = args[0] + prefix_len;
+	if (strcmp(suffix, "mem.tx-max") == 0) {
+		ullong mem_max;
+
+		if ((errptr = parse_size_err(args[1], &mem_max))) {
+			memprintf(err, "'%s': unexpected character '%c' in size argument '%s'.",
+			          args[0], *errptr, args[1]);
+			return -1;
+		}
+
+		quic_tune.mem_tx_max = mem_max;
+	}
+	else if (strcmp(suffix, "be.cc.cubic-min-losses") == 0 ||
+	         strcmp(suffix, "fe.cc.cubic-min-losses") == 0) {
+		uint *ptr = (suffix[0] == 'b') ? &quic_tune.be.cc_cubic_min_losses :
+		                                 &quic_tune.fe.cc_cubic_min_losses;
+		*ptr = arg - 1;
+	}
+	else if (strcmp(suffix, "be.cc.max-frame-loss") == 0 ||
+	         strcmp(suffix, "fe.cc.max-frame-loss") == 0) {
+		uint *ptr = (suffix[0] == 'b') ? &quic_tune.be.cc_max_frame_loss :
+		                                 &quic_tune.fe.cc_max_frame_loss;
+		*ptr = arg;
+	}
+	else if (strcmp(suffix, "be.cc.max-win-size") == 0 ||
+	         strcmp(suffix, "fe.cc.max-win-size") == 0) {
+		size_t *ptr = (suffix[0] == 'b') ? &quic_tune.be.cc_max_win_size :
+		                                   &quic_tune.fe.cc_max_win_size;
+		unsigned long cwnd;
+		char *end_opt;
+
+		cwnd = parse_window_size(args[0], args[1], &end_opt, err);
+		if (!cwnd)
+			return -1;
+		if (*end_opt != '\0') {
+			memprintf(err, "'%s' : expects an integer value with an optional suffix 'k', 'm' or 'g'", args[0]);
+			return -1;
+		}
+
+		*ptr = cwnd;
+	}
+	else if (strcmp(suffix, "be.cc.reorder-ratio") == 0 ||
+	         strcmp(suffix, "fe.cc.reorder-ratio") == 0) {
+		uint *ptr = (suffix[0] == 'b') ? &quic_tune.be.cc_reorder_ratio :
+		                                 &quic_tune.fe.cc_reorder_ratio;
+		*ptr = arg;
+	}
+	else if (strcmp(suffix, "be.sec.glitches-threshold") == 0 ||
+	         strcmp(suffix, "fe.sec.glitches-threshold") == 0) {
+		uint *ptr = (suffix[0] == 'b') ? &quic_tune.be.sec_glitches_threshold :
+		                                 &quic_tune.fe.sec_glitches_threshold;
+		*ptr = arg;
+	}
+	else if (strcmp(suffix, "fe.sec.retry-threshold") == 0) {
+		quic_tune.fe.sec_retry_threshold = arg;
+	}
+	else if (strcmp(suffix, "be.stream.data-ratio") == 0 ||
+	         strcmp(suffix, "fe.stream.data-ratio") == 0) {
+		uint *ptr = (suffix[0] == 'b') ? &quic_tune.be.stream_data_ratio :
+		                                 &quic_tune.fe.stream_data_ratio;
+		if (arg < 1 || arg > 100) {
+			memprintf(err, "'%s' expects an integer argument between 1 and 100.", args[0]);
+			return -1;
+		}
+		*ptr = arg;
+	}
+	else if (strcmp(suffix, "be.stream.max-concurrent") == 0 ||
+	         strcmp(suffix, "fe.stream.max-concurrent") == 0) {
+		uint *ptr = (suffix[0] == 'b') ? &quic_tune.be.stream_max_concurrent :
+		                                 &quic_tune.fe.stream_max_concurrent;
+		*ptr = arg;
+	}
+	else if (strcmp(suffix, "fe.stream.max-total") == 0) {
+		quic_tune.fe.stream_max_total = arg;
+	}
+	else if (strcmp(suffix, "be.stream.rxbuf") == 0 ||
+	         strcmp(suffix, "fe.stream.rxbuf") == 0) {
+		uint *ptr = (suffix[0] == 'b') ? &quic_tune.be.stream_rxbuf :
+		                                 &quic_tune.fe.stream_rxbuf;
+		if ((errptr = parse_size_err(args[1], &arg))) {
+			memprintf(err, "'%s': unexpected character '%c' in size argument '%s'.",
+			          args[0], *errptr, args[1]);
+			return -1;
+		}
+
+		*ptr = arg;
+	}
+
+	/* legacy options */
+	else if (strcmp(suffix, "cc.cubic.min-losses") == 0) {
+		memprintf(err, "'%s' is deprecated in 3.3 and will be removed in 3.5. "
+		               "Please use the newer keyword syntax 'tune.quic.fe.cc.cubic-min-losses'.", args[0]);
+		quic_tune.fe.cc_cubic_min_losses = arg - 1;
+		ret = 1;
+	}
+	else if (strcmp(suffix, "frontend.default-max-window-size") == 0) {
+		unsigned long cwnd;
+		char *end_opt;
+
+		memprintf(err, "'%s' is deprecated in 3.3 and will be removed in 3.5. "
+		               "Please use the newer keyword syntax 'tune.quic.fe.cc.max-win-size'.", args[0]);
+
+		cwnd = parse_window_size(args[0], args[1], &end_opt, err);
+		if (!cwnd)
+			return -1;
+		if (*end_opt != '\0') {
+			memprintf(err, "'%s' : expects an integer value with an optional suffix 'k', 'm' or 'g'", args[0]);
+			return -1;
+		}
+
+		quic_tune.fe.cc_max_win_size = cwnd;
+		ret = 1;
+	}
+	else if (strcmp(suffix, "frontend.glitches-threshold") == 0) {
+		memprintf(err, "'%s' is deprecated in 3.3 and will be removed in 3.5. "
+		               "Please use the newer keyword syntax 'tune.quic.fe.sec.glitches-threshold'.", args[0]);
+		quic_tune.fe.sec_glitches_threshold = arg;
+		ret = 1;
+	}
+	else if (strcmp(suffix, "frontend.max-data-size") == 0) {
+		memprintf(err, "'%s' is deprecated in 3.3 and will be removed in 3.5. "
+		               "Please use the newer keyword syntax 'tune.quic.fe.stream.rxbuf'.", args[0]);
+		if ((errptr = parse_size_err(args[1], &arg))) {
+			memprintf(err, "'%s': unexpected character '%c' in size argument '%s'.",
+			          args[0], *errptr, args[1]);
+			return -1;
+		}
+
+		quic_tune.fe.stream_rxbuf = arg;
+		ret = 1;
+	}
+	else if (strcmp(suffix, "frontend.max-streams-bidi") == 0) {
+		memprintf(err, "'%s' is deprecated in 3.3 and will be removed in 3.5. "
+		               "Please use the newer keyword syntax 'tune.quic.fe.stream.max-concurrent'.", args[0]);
+		quic_tune.fe.stream_max_concurrent = arg;
+		ret = 1;
+	}
+	else if (strcmp(suffix, "frontend.max-tx-mem") == 0) {
+		ullong max_mem;
+
+		memprintf(err, "'%s' is deprecated in 3.3 and will be removed in 3.5. "
+		               "Please use the newer keyword syntax 'tune.quic.mem.tx-max'.", args[0]);
+
+		if ((errptr = parse_size_err(args[1], &max_mem))) {
+			memprintf(err, "'%s': unexpected character '%c' in size argument '%s'.",
+			          args[0], *errptr, args[1]);
+			return -1;
+		}
+
+		quic_tune.mem_tx_max = max_mem;
+		ret = 1;
+	}
+	else if (strcmp(suffix, "frontend.stream-data-ratio") == 0) {
+		memprintf(err, "'%s' is deprecated in 3.3 and will be removed in 3.5. "
+		               "Please use the newer keyword syntax 'tune.quic.fe.stream.data-ratio'.", args[0]);
+
+		if (arg < 1 || arg > 100) {
+			memprintf(err, "'%s' expects an integer argument between 1 and 100.", args[0]);
+			return -1;
+		}
+		quic_tune.fe.stream_data_ratio = arg;
+		ret = 1;
+	}
+	else if (strcmp(suffix, "max-frame-loss") == 0) {
+		memprintf(err, "'%s' is deprecated in 3.3 and will be removed in 3.5. "
+		               "Please use the newer keyword syntax 'tune.quic.fe.cc.max-frame-loss'.", args[0]);
+		quic_tune.fe.cc_max_frame_loss = arg;
+		ret = 1;
+	}
+	else if (strcmp(suffix, "reorder-ratio") == 0) {
+		memprintf(err, "'%s' is deprecated in 3.3 and will be removed in 3.5. "
+		               "Please use the newer keyword syntax 'tune.quic.fe.cc.reorder-ratio'.", args[0]);
+		if (arg > 100) {
+			memprintf(err, "'%s' expects an integer argument between 0 and 100.", args[0]);
+			return -1;
+		}
+
+		quic_tune.fe.cc_reorder_ratio = arg;
+		ret = 1;
+	}
+	else if (strcmp(suffix, "retry-threshold") == 0) {
+		memprintf(err, "'%s' is deprecated in 3.3 and will be removed in 3.5. "
+		               "Please use the newer keyword syntax 'tune.quic.fe.sec.retry-threshold'.", args[0]);
+		quic_tune.fe.sec_retry_threshold = arg;
+		ret = 1;
+	}
+	else {
+		memprintf(err, "'%s' keyword not handled (please report this bug).", args[0]);
+		return -1;
+	}
+
+	return ret;
+}
+
+static int cfg_parse_quic_tune_setting0(char **args, int section_type,
+                                        struct proxy *curpx,
+                                        const struct proxy *defpx,
+                                        const char *file, int line, char **err)
+{
+	int ret = 0;
+	int prefix_len = strlen("tune.quic.");
+	const char *suffix;
+
+	if (too_many_args(0, args, err, NULL))
+		return -1;
+
+	suffix = args[0] + prefix_len;
+	if (strcmp(suffix, "disable-tx-pacing") == 0) {
+		memprintf(err, "'%s' is deprecated in 3.3 and will be removed in 3.5. "
+		               "Please use the newer keyword syntax 'tune.quic.fe.tx.pacing'.", args[0]);
+		quic_tune.fe.fb_opts &= ~QUIC_TUNE_FB_TX_PACING;
+		ret = 1;
+	}
+	else if (strcmp(suffix, "disable-udp-gso") == 0) {
+		memprintf(err, "'%s' is deprecated in 3.3 and will be removed in 3.5. "
+		               "Please use the newer keyword syntax 'tune.quic.fe.tx.udp-gso'.", args[0]);
+		quic_tune.fe.fb_opts &= ~QUIC_TUNE_FB_TX_UDP_GSO;
+		ret = 1;
+	}
+	else {
+		memprintf(err, "'%s' keyword unhandled (please report this bug).", args[0]);
+		return -1;
+	}
+
+	return ret;
+}
+
+/* config parser for global "tune.quic.* {on|off}" */
+static int cfg_parse_quic_tune_on_off(char **args, int section_type, struct proxy *curpx,
+                                      const struct proxy *defpx, const char *file, int line,
+                                      char **err)
+{
+	int on;
+	int prefix_len = strlen("tune.quic.");
+	const char *suffix;
+	int ret = 0;
+
+	if (too_many_args(1, args, err, NULL))
+		return -1;
+
+	if (strcmp(args[1], "on") == 0)
+		on = 1;
+	else if (strcmp(args[1], "off") == 0)
+		on = 0;
+	else {
+		memprintf(err, "'%s' expects 'on' or 'off'.", args[0]);
+		return -1;
+	}
+
+	suffix = args[0] + prefix_len;
+	if (strcmp(suffix, "listen") == 0 ) {
+		if (on)
+			quic_tune.fe.opts &= ~QUIC_TUNE_FE_LISTEN_OFF;
+		else
+			quic_tune.fe.opts |= QUIC_TUNE_FE_LISTEN_OFF;
+	}
+	if (strcmp(suffix, "zero-copy-fwd-send") == 0 ) {
+		if (on)
+			global.tune.no_zero_copy_fwd &= ~NO_ZERO_COPY_FWD_QUIC_SND;
+		else
+			global.tune.no_zero_copy_fwd |= NO_ZERO_COPY_FWD_QUIC_SND;
+	}
+	else if (strcmp(suffix, "be.cc.hystart") == 0 ||
+	         strcmp(suffix, "fe.cc.hystart") == 0) {
+		uint *ptr = (suffix[0] == 'b') ? &quic_tune.be.fb_opts :
+		                                 &quic_tune.fe.fb_opts;
+		if (on)
+			*ptr |= QUIC_TUNE_FB_CC_HYSTART;
+		else
+			*ptr &= ~QUIC_TUNE_FB_CC_HYSTART;
+	}
+	else if (strcmp(suffix, "be.tx.pacing") == 0 ||
+	         strcmp(suffix, "fe.tx.pacing") == 0) {
+		uint *ptr = (suffix[0] == 'b') ? &quic_tune.be.fb_opts :
+		                                 &quic_tune.fe.fb_opts;
+		if (on)
+			*ptr |= QUIC_TUNE_FB_TX_PACING;
+		else
+			*ptr &= ~QUIC_TUNE_FB_TX_PACING;
+	}
+	else if (strcmp(suffix, "be.tx.udp-gso") == 0 ||
+	         strcmp(suffix, "fe.tx.udp-gso") == 0) {
+		uint *ptr = (suffix[0] == 'b') ? &quic_tune.be.fb_opts :
+		                                 &quic_tune.fe.fb_opts;
+		if (on)
+			*ptr |= QUIC_TUNE_FB_TX_UDP_GSO;
+		else
+			*ptr &= ~QUIC_TUNE_FB_TX_UDP_GSO;
+	}
+	else if (strcmp(suffix, "cc-hystart") == 0) {
+		memprintf(err, "'%s' is deprecated in 3.3 and will be removed in 3.5. "
+		               "Please use the newer keyword syntax 'tune.quic.fe.cc.hystart'.", args[0]);
+		if (on)
+			quic_tune.fe.fb_opts |= QUIC_TUNE_FB_CC_HYSTART;
+		else
+			quic_tune.fe.fb_opts &= ~QUIC_TUNE_FB_CC_HYSTART;
+		ret = 1;
+	}
+
+	return ret;
+}
+
+static struct cfg_kw_list cfg_kws = {ILH, {
+	{ CFG_GLOBAL, "tune.quic.listen", cfg_parse_quic_tune_on_off },
+	{ CFG_GLOBAL, "tune.quic.mem.tx-max", cfg_parse_quic_tune_setting },
+	{ CFG_GLOBAL, "tune.quic.zero-copy-fwd-send", cfg_parse_quic_tune_on_off },
+
+	{ CFG_GLOBAL, "tune.quic.fe.cc.cubic-min-losses", cfg_parse_quic_tune_setting },
+	{ CFG_GLOBAL, "tune.quic.fe.cc.hystart", cfg_parse_quic_tune_on_off },
+	{ CFG_GLOBAL, "tune.quic.fe.cc.max-frame-loss", cfg_parse_quic_tune_setting },
+	{ CFG_GLOBAL, "tune.quic.fe.cc.max-win-size", cfg_parse_quic_tune_setting },
+	{ CFG_GLOBAL, "tune.quic.fe.cc.reorder-ratio", cfg_parse_quic_tune_setting },
+	{ CFG_GLOBAL, "tune.quic.fe.max-idle-timeout", cfg_parse_quic_time },
+	{ CFG_GLOBAL, "tune.quic.fe.sec.glitches-threshold", cfg_parse_quic_tune_setting },
+	{ CFG_GLOBAL, "tune.quic.fe.sec.retry-threshold", cfg_parse_quic_tune_setting },
+	{ CFG_GLOBAL, "tune.quic.fe.sock-per-conn", cfg_parse_quic_tune_sock_per_conn },
+	{ CFG_GLOBAL, "tune.quic.fe.stream.data-ratio", cfg_parse_quic_tune_setting },
+	{ CFG_GLOBAL, "tune.quic.fe.stream.max-concurrent", cfg_parse_quic_tune_setting },
+	{ CFG_GLOBAL, "tune.quic.fe.stream.max-total", cfg_parse_quic_tune_setting },
+	{ CFG_GLOBAL, "tune.quic.fe.stream.rxbuf", cfg_parse_quic_tune_setting },
+	{ CFG_GLOBAL, "tune.quic.fe.tx.pacing", cfg_parse_quic_tune_on_off },
+	{ CFG_GLOBAL, "tune.quic.fe.tx.udp-gso", cfg_parse_quic_tune_on_off },
+
+	{ CFG_GLOBAL, "tune.quic.be.cc.cubic-min-losses", cfg_parse_quic_tune_setting },
+	{ CFG_GLOBAL, "tune.quic.be.cc.hystart", cfg_parse_quic_tune_on_off },
+	{ CFG_GLOBAL, "tune.quic.be.cc.max-frame-loss", cfg_parse_quic_tune_setting },
+	{ CFG_GLOBAL, "tune.quic.be.cc.max-win-size", cfg_parse_quic_tune_setting },
+	{ CFG_GLOBAL, "tune.quic.be.cc.reorder-ratio", cfg_parse_quic_tune_setting },
+	{ CFG_GLOBAL, "tune.quic.be.max-idle-timeout", cfg_parse_quic_time },
+	{ CFG_GLOBAL, "tune.quic.be.sec.glitches-threshold", cfg_parse_quic_tune_setting },
+	{ CFG_GLOBAL, "tune.quic.be.stream.data-ratio", cfg_parse_quic_tune_setting },
+	{ CFG_GLOBAL, "tune.quic.be.stream.max-concurrent", cfg_parse_quic_tune_setting },
+	{ CFG_GLOBAL, "tune.quic.be.stream.rxbuf", cfg_parse_quic_tune_setting },
+	{ CFG_GLOBAL, "tune.quic.be.tx.pacing", cfg_parse_quic_tune_on_off },
+	{ CFG_GLOBAL, "tune.quic.be.tx.udp-gso", cfg_parse_quic_tune_on_off },
+
+	/* legacy options */
+	{ CFG_GLOBAL, "tune.quic.cc-hystart", cfg_parse_quic_tune_on_off },
+	{ CFG_GLOBAL, "tune.quic.cc.cubic.min-losses", cfg_parse_quic_tune_setting },
+	{ CFG_GLOBAL, "tune.quic.disable-tx-pacing", cfg_parse_quic_tune_setting0 },
+	{ CFG_GLOBAL, "tune.quic.disable-udp-gso", cfg_parse_quic_tune_setting0 },
+	{ CFG_GLOBAL, "tune.quic.frontend.default-max-window-size", cfg_parse_quic_tune_setting },
+	{ CFG_GLOBAL, "tune.quic.frontend.glitches-threshold", cfg_parse_quic_tune_setting },
+	{ CFG_GLOBAL, "tune.quic.frontend.max-data-size", cfg_parse_quic_tune_setting },
+	{ CFG_GLOBAL, "tune.quic.frontend.max-idle-timeout", cfg_parse_quic_time },
+	{ CFG_GLOBAL, "tune.quic.frontend.max-streams-bidi", cfg_parse_quic_tune_setting },
+	{ CFG_GLOBAL, "tune.quic.frontend.max-tx-mem", cfg_parse_quic_tune_setting },
+	{ CFG_GLOBAL, "tune.quic.frontend.stream-data-ratio", cfg_parse_quic_tune_setting },
+	{ CFG_GLOBAL, "tune.quic.max-frame-loss", cfg_parse_quic_tune_setting },
+	{ CFG_GLOBAL, "tune.quic.reorder-ratio", cfg_parse_quic_tune_setting },
+	{ CFG_GLOBAL, "tune.quic.retry-threshold", cfg_parse_quic_tune_setting },
+	{ CFG_GLOBAL, "tune.quic.socket-owner", cfg_parse_quic_tune_socket_owner },
+
+	{ 0, NULL, NULL }
+}};
+
+INITCALL1(STG_REGISTER, cfg_register_keywords, &cfg_kws);
+
+static int quic_parse_quic_initial(char **args, int section_type, struct proxy *curpx,
+                                   const struct proxy *defpx, const char *file, int line,
+                                   char **err)
+{
+	const struct acl *acl;
+	struct act_rule *rule;
+	struct action_kw *kw;
+	const char *acl_kw;
+	unsigned int where;
+	int warn = 0;
+	int arg = 1;
+
+	where = SMP_VAL_FE_CON_ACC;
+
+	if (curpx == defpx && strlen(defpx->id) == 0) {
+		memprintf(err, "%s is not allowed in anonymous 'defaults' sections",
+			  args[0]);
+		return -1;
+	}
+
+	if (!(curpx->cap & PR_CAP_FE)) {
+		memprintf(err, "'%s' : proxy '%s' has no frontend capability",
+		          args[0], curpx->id);
+		return -1;
+	}
+
+	if (!(curpx->mode & PR_MODE_HTTP)) {
+		memprintf(err, "'%s' : proxy '%s' does not use HTTP mode",
+		          args[0], curpx->id);
+		return -1;
+	}
+
+	rule = new_act_rule(0, file, line);
+	if (!rule) {
+		memprintf(err, "parsing [%s:%d] : out of memory", file, line);
+		return -1;
+	}
+
+	LIST_INIT(&rule->list);
+	rule->from = ACT_F_QUIC_INIT;
+
+	kw = action_quic_init_custom(args[1]);
+	if (kw) {
+		rule->kw = kw;
+		arg++;
+
+		if (kw->parse((const char **)args, &arg, curpx, rule, err) == ACT_RET_PRS_ERR)
+			goto err;
+	}
+	else {
+		const char *best = action_suggest(args[1], &quic_init_actions_list.list, NULL);
+
+		action_build_list(&quic_init_actions_list.list, &trash);
+		memprintf(err, "'quic-initial' expects %s, but got '%s'%s.%s%s%s",
+		          trash.area,
+		          args[1], *args[1] ? "" : " (missing argument)",
+		          best ? " Did you mean '" : "",
+		          best ? best : "",
+		          best ? "' maybe ?" : "");
+		goto err;
+	}
+
+	if (strcmp(args[arg], "if") == 0 || strcmp(args[arg], "unless") == 0) {
+		if ((rule->cond = build_acl_cond(file, line, &curpx->acl, curpx, (const char **)args+arg, err)) == NULL) {
+			memprintf(err,
+			          "'%s %s %s' : error detected in %s '%s' while parsing '%s' condition : %s",
+			          args[0], args[1], args[2], proxy_type_str(curpx), curpx->id, args[arg], *err);
+			goto err;
+		}
+	}
+	else if (*args[arg]) {
+		memprintf(err,
+			 "'%s %s %s' only accepts 'if' or 'unless', in %s '%s' (got '%s')",
+			 args[0], args[1], args[2], proxy_type_str(curpx), curpx->id, args[arg]);
+		goto err;
+	}
+
+	acl = rule->cond ? acl_cond_conflicts(rule->cond, where) : NULL;
+	if (acl) {
+		if (acl->name && *acl->name)
+			memprintf(err,
+				  "acl '%s' will never match in '%s' because it only involves keywords that are incompatible with '%s'",
+				  acl->name, args[0], sample_ckp_names(where));
+		else
+			memprintf(err,
+				  "anonymous acl will never match in '%s' because it uses keyword '%s' which is incompatible with '%s'",
+				  args[0],
+				  LIST_ELEM(acl->expr.n, struct acl_expr *, list)->kw,
+				  sample_ckp_names(where));
+
+		warn++;
+	}
+	else if (rule->cond && acl_cond_kw_conflicts(rule->cond, where, &acl, &acl_kw)) {
+		if (acl->name && *acl->name)
+			memprintf(err,
+				  "acl '%s' involves keyword '%s' which is incompatible with '%s'",
+				  acl->name, acl_kw, sample_ckp_names(where));
+		else
+			memprintf(err,
+				  "anonymous acl involves keyword '%s' which is incompatible with '%s'",
+				  acl_kw, sample_ckp_names(where));
+		warn++;
+	}
+
+	/* the following function directly emits the warning */
+	warnif_misplaced_quic_init(curpx, file, line, args[0], NULL);
+
+	LIST_APPEND(&curpx->quic_init_rules, &rule->list);
+
+	return warn;
+
+ err:
+	free_act_rule(rule);
+	return -1;
+}
+
+static struct cfg_kw_list cfg_kws_li = {ILH, {
+	{ CFG_LISTEN, "quic-initial",  quic_parse_quic_initial },
+	{ 0, NULL, NULL },
+}};
+
+INITCALL1(STG_REGISTER, cfg_register_keywords, &cfg_kws_li);

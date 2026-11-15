@@ -1,0 +1,25 @@
+name: Illumos
+
+on:
+  schedule:
+    - cron: "0 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  gcc:
+    runs-on: ubuntu-latest
+    if: ${{ github.repository_owner == 'haproxy' || github.event_name == 'workflow_dispatch' }}
+    steps:
+      - name: "Checkout repository"
+        uses: actions/checkout@v6
+
+      - name: "Build on VM"
+        uses: vmactions/solaris-vm@v1
+        with:
+          prepare: |
+            pkg install gcc make
+          run: |
+            gmake CC=gcc TARGET=solaris USE_OPENSSL=1 USE_PROMEX=1

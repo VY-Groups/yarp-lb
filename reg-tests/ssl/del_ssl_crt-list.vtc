@@ -1,0 +1,16 @@
+#REGTEST_TYPE=devel
+
+# This reg-test uses the "del ssl crt-list" command to remove a line from a crt-list.
+
+# It performs three requests towards a SSL/TCP frontend that uses simple.crt-list.
+# Between the second and third requests, a line is deleted from the crt-list,
+# which makes the third request fail since it would have used the deleted line
+# and the strict-sni option is enabled on the frontend.
+# Another test is performed as well. A line corresponding to the default instance
+# of a frontend that does not have the strict-sni option enabled cannot be deleted.
+
+varnishtest "Test the 'del ssl crt-list' feature of the CLI"
+#REQUIRE_OPTIONS=OPENSSL
+
+setenv VTC_SOCK_TYPE stream
+include ${testdir}/../ssl/del_ssl_crt-list.vtci

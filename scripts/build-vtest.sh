@@ -1,0 +1,33 @@
+#!/bin/sh
+
+DESTDIR=${DESTDIR:-${PWD}/../vtest/}
+TMPDIR=${TMPDIR:-$(mktemp -d)}
+set -eux
+
+git clone https://code.vinyl-cache.org/vtest/VTest2 "${TMPDIR}/vtest"
+# Special flags due to: https://github.com/vtest/VTest/issues/12
+
+# Note: do not use "make -C ../vtest", otherwise MAKEFLAGS contains "w"
+# and fails (see Options/Recursion in GNU Make doc, it contains the list
+# of options without the leading '-').
+# MFLAGS works on BSD but misses variable definitions on GNU Make.
+# Better just avoid the -C and do the cd ourselves then.
+
+cd "${TMPDIR}/vtest"
+
+set +e
+CPUS=${CPUS:-$(nproc 2>/dev/null)}
+CPUS=${CPUS:-1}
+set -e
+
+#
+# temporarily detect Apple Silicon (it's using /opt/homebrew instead of /usr/local)
+#
+if test -f /opt/homebrew/include/pcre2.h; then
+   make -j${CPUS} FLAGS="-O2 -s -Wall" INCS="-I. -Isrc -Ilib -I/usr/local/include -I/opt/homebrew/include -pthread"
+else
+   make -j${CPUS} FLAGS="-O2 -s -Wall"
+fi
+
+mkdir -p "${DESTDIR}"
+cp "${TMPDIR}/vtest/vtest" "${DESTDIR}"

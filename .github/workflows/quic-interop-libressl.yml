@@ -1,0 +1,64 @@
+#
+# goodput,crosstraffic are not run on purpose, those tests are intended to bandwidth measurement, we currently do not want to use GitHub runners for that
+#
+
+name: QUIC Interop LibreSSL
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 0 * * 2"
+
+permissions:
+  contents: read
+
+jobs:
+  combined-build-and-run:
+    runs-on: ubuntu-24.04
+    if: ${{ github.repository_owner == 'haproxy' || github.event_name == 'workflow_dispatch' }}
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Update Docker to the latest
+        uses: docker/setup-docker-action@v4
+
+      - name: Build Docker image
+        id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: https://github.com/haproxytech/haproxy-qns.git
+          platforms: linux/amd64
+          build-args: |
+            SSLLIB=LibreSSL
+          tags: local:libressl
+
+      - name: Install tshark
+        run: |
+          sudo apt-get update
+          sudo apt-get -y install tshark
+
+      - name: Run
+        run: |
+          git clone https://github.com/quic-interop/quic-interop-runner
+          cd quic-interop-runner
+          pip install -r requirements.txt --break-system-packages
+          python run.py -j result.json -l logs-picoquic -r haproxy=local:libressl -t "handshake,transfer,longrtt,chacha20,multiplexing,retry,http3,blackhole,amplificationlimit,handshakeloss,transferloss,handshakecorruption,transfercorruption,v2" -c picoquic -s haproxy
+          python run.py -j result.json -l logs-quic-go -r haproxy=local:libressl -t "handshake,transfer,longrtt,chacha20,multiplexing,retry,http3,blackhole,amplificationlimit,transferloss,transfercorruption,v2" -c quic-go -s haproxy
+
+      - name: Delete succeeded logs
+        if: ${{ failure() }}
+        run: |
+          for client in picoquic quic-go; do
+            pushd quic-interop-runner/logs-${client}/haproxy_${client}
+            cat ../../result.json | jq -r '.results[][] | select(.result=="succeeded") | .name' | xargs rm -rf
+            popd
+          done
+
+      - name: Logs upload
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: logs
+          path: quic-interop-runner/logs*/
+          retention-days: 6

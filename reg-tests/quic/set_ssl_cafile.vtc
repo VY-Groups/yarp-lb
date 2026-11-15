@@ -1,0 +1,23 @@
+#REGTEST_TYPE=devel
+
+# This reg-test uses the "set ssl ca-file" command to update a CA file over the CLI.
+# It also tests the "abort ssl ca-file" and "show ssl ca-file" commands.
+#
+# It is based on two CA certificates, set_cafile_interCA1.crt and set_cafile_interCA2.crt,
+# and a client certificate that was signed with set_cafile_interCA1.crt (set_cafile_client.pem)
+# and a server certificate that was signed with set_cafile_interCA2.crt (set_cafile_server.pem).
+# The CA files used by the client and the server will be updated through the CLI until a
+# proper connection can be established between them.
+#
+# It requires socat to upload the certificate
+#
+# If this test does not work anymore:
+# - Check that you have socat
+
+varnishtest "Test the 'set ssl ca-file' feature of the CLI"
+feature cmd "$HAPROXY_PROGRAM -cc 'feature(QUIC) && !feature(QUIC_OPENSSL_COMPAT) && !feature(OPENSSL_WOLFSSL) && !feature(OPENSSL_AWSLC)'"
+
+feature cmd "command -v socat"
+
+setenv VTC_SOCK_TYPE quic
+include ${testdir}/../ssl/set_ssl_cafile.vtci

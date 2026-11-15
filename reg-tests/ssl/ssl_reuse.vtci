@@ -1,0 +1,78 @@
+# Uses VTC_SOCK_TYPE (quic / stream) TLSV (TLSv1.2 / TLSv1.3)
+
+feature ignore_unknown_macro
+
+server s1 -repeat 84 {
+    rxreq
+    txresp
+} -start
+
+haproxy h1 -conf {
+   global
+    .if streq("$VTC_SOCK_TYPE",quic)
+        # required for backend connections
+        expose-experimental-directives
+    .endif
+    .if feature(THREAD)
+        thread-groups 1
+    .endif
+
+      # allow to enable or disable completely the cache for stateful resumption
+      tune.ssl.cachesize "${SSL_CACHESIZE}"
+      # forced to 1 here, because there is a cached session per thread
+      nbthread 1
+
+
+    defaults
+        mode http
+        option httplog
+        option logasap
+        log stderr local0 debug err
+        option httpclose
+        timeout connect "${HAPROXY_TEST_TIMEOUT-5s}"
+        timeout client  "${HAPROXY_TEST_TIMEOUT-5s}"
+        timeout server  "${HAPROXY_TEST_TIMEOUT-5s}"
+
+    listen clst3
+        bind "fd@${clst3}"
+        server s1 "${VTC_SOCK_TYPE}+${h1_fe3_addr}:${h1_fe3_port}" ssl verify none  sni str(www.test1.com)
+        http-response add-header x-ssl-bc-resumed %[ssl_bc_is_resumed]
+
+    listen ssl
+        bind "${VTC_SOCK_TYPE}+fd@${fe3}" ssl crt ${testdir}/certs/common.pem ssl-min-ver "${TLSV}" ssl-max-ver "${TLSV}" "${NO_TLS_TICKETS}"
+        http-response add-header x-ssl-resumed %[ssl_fc_is_resumed]
+        server s1 ${s1_addr}:${s1_port}
+} -start
+
+
+# third bind
+client c3 -connect ${h1_clst3_sock} {
+    txreq
+    rxresp
+    expect resp.status == 200
+    expect resp.http.x-ssl-resumed == 0
+} -run
+
+client c3 -connect ${h1_clst3_sock} -repeat 20 {
+    txreq
+    rxresp
+    expect resp.status == 200
+    expect resp.http.x-ssl-resumed == 1
+} -run
+
+# Could be useful to debug the result, the ssl_fc_is_resumed field in the log must be 1 after the 2nd command
+#shell {
+#
+#   HOST=${h1_fe4_addr}
+#    if [ "${h1_fe4_addr}" = "::1" ] ; then
+#        HOST="\[::1\]"
+#    fi
+#
+# rm sess.pem; (echo -e -n "GET / HTTP/1.1\r\n\r\n"; sleep 1) | openssl s_client -connect $HOST:${h1_fe4_port} -tls1_3 -sess_out sess.pem -keylogfile keys1.txt -servername www.test1.com > /tmp/ssl_debug1; echo | openssl s_client -connect ${HOST}:${h1_fe4_port} -tls1_3 -sess_in sess.pem -keylogfile keys2.txt -servername www.test1.com >> /tmp/ssl_debug1
+#    echo "GET / HTTP/1.1" | openssl s_client -connect $HOST:${h1_fe4_port} -tls1_3 -servername www.test1.com
+#}
+
+haproxy h1 -cli {
+    send "show info"
+    expect ~ ".*SslFrontendSessionReuse_pct: 95.*"
+}

@@ -1,0 +1,18 @@
+#REGTEST_TYPE=devel
+
+# This reg-test uses the "add ssl crt-list" command to add a certificate over the CLI.
+# It requires socat to upload the certificate
+
+# this check does 2 requests, the first one will use "www.test1.com" as SNI, and
+# the second one will use "localhost". Since vtest can't do SSL, we use haproxy
+# as an SSL client with 2 chained listen section.
+
+# If this test does not work anymore:
+# - Check that you have socat
+
+varnishtest "Test the 'add ssl crt-list' feature of the CLI"
+#REQUIRE_OPTIONS=OPENSSL
+feature cmd "command -v socat"
+
+setenv VTC_SOCK_TYPE stream
+include ${testdir}/add_ssl_crt-list.vtci

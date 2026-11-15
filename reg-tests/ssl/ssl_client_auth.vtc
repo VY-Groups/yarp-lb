@@ -1,0 +1,21 @@
+#REGTEST_TYPE=devel
+
+# This reg-test tests the client auth feature of HAProxy for both the backend
+# and frontend section with a CRL list
+#
+# This reg-test uses 2 chained listeners because vtest does not handle the SSL.
+# Test the frontend client auth and the backend side at the same time.
+#
+# The sends 3 requests one with a correct certificate, one with an expired one and one which was revoked.
+# The client then check if we received the right one with the right error.
+#
+# Certificates, CA and CRL are expiring in 2050 so it should be fine for the CI.
+#
+# Detail about configuration is explained there:
+# https://www.haproxy.com/blog/ssl-client-certificate-management-at-application-level/
+
+varnishtest "Test the client auth"
+#REQUIRE_OPTIONS=OPENSSL
+
+setenv VTC_SOCK_TYPE stream
+include ${testdir}/ssl_client_auth.vtci

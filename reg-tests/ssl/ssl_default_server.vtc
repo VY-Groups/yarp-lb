@@ -1,0 +1,18 @@
+#REGTEST_TYPE=devel
+
+# This reg-test ensures that SSL related configuration specified in a
+# default-server option are properly taken into account by the servers
+# (frontend). It mainly focuses on the client certificate used by the frontend,
+# that can either be defined in the server line itself, in the default-server
+# line or in both.
+#
+# It was created following a bug raised in redmine (issue #3906) in which a
+# server used an "empty" SSL context instead of the proper one.
+#
+
+varnishtest "Test the 'set ssl cert' feature of the CLI"
+feature cmd "$HAPROXY_PROGRAM -cc 'version_atleast(2.5-dev0)'"
+feature cmd "$HAPROXY_PROGRAM -cc 'feature(OPENSSL)'"
+
+setenv VTC_SOCK_TYPE stream
+include ${testdir}/ssl_default_server.vtci

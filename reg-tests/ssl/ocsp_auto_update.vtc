@@ -1,0 +1,35 @@
+#REGTEST_TYPE=slow
+# reg-test is around ~2.5s
+
+# broken with BoringSSL.
+
+# This reg-test focuses on the OCSP response auto-update functionality. It does
+# not test the full scope of the feature because most of it is based on
+# expiration times and long delays between updates of valid OCSP responses.
+# Automatic update of valid OCSP responses loaded during init will not be
+# tested because by design, such a response would no be automatically updated
+# until init+1H.
+#
+# This test will then focus on certificates that have a specified OCSP URI but
+# no known OCSP response. For those certificates, OCSP requests are sent as
+# soon as possible by the update task.
+#
+# The ocsp responder used in all the tests will be an openssl using the
+# certificate database in ocsp_update/index.txt. It will listen on port 12345
+# which was specified explicitly in the certificates used in the tests.
+# The synchronization will be based on the logs emitted by the OCSP update task
+# directly. When this log is created, we will know that the update was
+# effective and the updated OCSP response is loaded in the tree. So any
+# following call to "show ssl ocsp-response" will display the latest response
+# information.
+#
+# If this test does not work anymore:
+# - Check that you have openssl and socat
+
+varnishtest "Test the OCSP auto update feature"
+feature cmd "$HAPROXY_PROGRAM -cc 'version_atleast(3.0-dev0)'"
+feature cmd "$HAPROXY_PROGRAM -cc 'feature(OPENSSL) && !ssllib_name_startswith(BoringSSL) && !ssllib_name_startswith(LibreSSL) && openssl_version_atleast(1.1.1)'"
+feature cmd "command -v openssl && command -v socat"
+
+setenv VTC_SOCK_TYPE stream
+include ${testdir}/ocsp_auto_update.vtci

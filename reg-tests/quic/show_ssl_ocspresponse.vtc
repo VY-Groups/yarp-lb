@@ -1,0 +1,28 @@
+#REGTEST_TYPE=devel
+
+# broken with BoringSSL.
+
+# This reg-test uses the "show ssl ocsp-response" command to display the details
+# of the OCSP responses used by HAProxy.
+# It also uses the new special cases of the "show ssl cert" command, where an OCSP
+# extension is provided to the certificate name (with or without preceding * for an
+# ongoing transaction).
+#
+# It uses the show_ocsp_server.pem server certificate, signed off by set_cafile_rootCA.crt,
+# which has two OCSP responses, show_ocsp_server.pem.ocsp which is loaded by default and in
+# which it is valid, and show_ocsp_server.pem.ocsp.revoked in which it is revoked.
+# The OSCP response is updated through the two means available in the CLI, the
+# "set ssl ocsp-response" command and the update through a "set ssl cert foo.ocsp".
+#
+# It requires socat to upload the new OCSP responses.
+#
+# If this test does not work anymore:
+# - Check that you have socat
+
+varnishtest "Test the 'show ssl ocsp-response' and 'show ssl cert foo.pem.ocsp' features of the CLI"
+# QUIC backend are not supported with USE_QUIC_OPENSSL_COMPAT
+feature cmd "$HAPROXY_PROGRAM -cc 'feature(QUIC) && !feature(QUIC_OPENSSL_COMPAT) && !feature(OPENSSL_WOLFSSL)'"
+feature cmd "command -v socat && command -v openssl"
+
+setenv VTC_SOCK_TYPE quic
+include ${testdir}/../ssl/show_ssl_ocspresponse.vtci

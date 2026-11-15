@@ -1,0 +1,17 @@
+#REGTEST_TYPE=devel
+
+# This test uses the "new ssl crl-file" and "del ssl crl-file" commands to create
+# a new CRL file or delete an unused CRL file.
+#
+# It requires socat to upload the CRL file.
+#
+# If this test does not work anymore:
+# - Check that you have socat
+
+varnishtest "Test the 'new ssl crl-file' and 'del ssl crl-file' commands of the CLI"
+# QUIC backend are not supported with USE_QUIC_OPENSSL_COMPAT
+feature cmd "$HAPROXY_PROGRAM -cc 'feature(QUIC) && !feature(QUIC_OPENSSL_COMPAT) && !feature(OPENSSL_WOLFSSL)'"
+feature cmd "command -v socat"
+
+setenv VTC_SOCK_TYPE quic
+include ${testdir}/../ssl/new_del_ssl_crlfile.vtci
