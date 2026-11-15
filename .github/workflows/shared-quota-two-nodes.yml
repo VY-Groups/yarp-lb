@@ -1,0 +1,69 @@
+name: Two real GatewayCore nodes - shared TLS Redis quota and partition
+on:
+  pull_request:
+    paths:
+      - "control-center/SharedPeerRateLimiter.cs"
+      - "control-center/Program.cs"
+      - "tests/SharedQuota/**"
+      - "ops/test-server/compose.sharedquota.yml"
+      - "ops/test-server/Dockerfile.sharedquota"
+      - ".github/workflows/shared-quota-two-nodes.yml"
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  shared-quota-e2e:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Generate disposable CA, signed Redis TLS identity and authentication
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ops/test-server/redis-certs
+          cd ops/test-server/redis-certs
+          openssl req -x509 -newkey rsa:3072 -nodes -sha256 -days 1 \
+            -subj '/CN=GatewayCore CI Redis Root' \
+            -addext 'basicConstraints=critical,CA:TRUE' \
+            -keyout ca.key -out ca.crt >/dev/null 2>&1
+          openssl req -newkey rsa:3072 -nodes -sha256 -subj '/CN=redis-quota' \
+            -keyout redis.key -out redis.csr >/dev/null 2>&1
+          printf 'subjectAltName=DNS:redis-quota\nextendedKeyUsage=serverAuth\n' > redis.ext
+          openssl x509 -req -days 1 -sha256 -in redis.csr -CA ca.crt -CAkey ca.key \
+            -CAcreateserial -extfile redis.ext -out redis.crt >/dev/null 2>&1
+          chmod 0644 ca.crt redis.crt redis.key
+          echo "SHARED_TEST_PASSWORD=$(openssl rand -hex 24)" >> "$GITHUB_ENV"
+          echo "SHARED_TEST_HMAC=$(openssl rand -hex 32)" >> "$GITHUB_ENV"
+      - name: Build test-only real GatewayCore image and trusted-Redis extension
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker compose -f ops/test-server/compose.yml build gateway-a
+          docker compose -f ops/test-server/compose.yml -f ops/test-server/compose.sharedquota.yml build gateway-a
+      - name: Start two gateway instances with authenticated TLS Redis
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker compose -f ops/test-server/compose.yml -f ops/test-server/compose.sharedquota.yml up -d --no-build redis-quota backend-a backend-b gateway-a gateway-b
+      - name: Exercise combined quota against both shipping gateway processes
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker compose -f ops/test-server/compose.yml -f ops/test-server/compose.sharedquota.yml \
+            run --rm --no-deps quota-client
+      - name: Simulate loss of the only Redis writer (no local quota fallback)
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker compose -f ops/test-server/compose.yml -f ops/test-server/compose.sharedquota.yml stop redis-quota
+          docker compose -f ops/test-server/compose.yml -f ops/test-server/compose.sharedquota.yml \
+            run --rm --no-deps quota-client --partition
+      - name: Collect fault logs; dispose test containers, CA and secrets
+        if: always()
+        shell: bash
+        run: |
+          docker compose -f ops/test-server/compose.yml -f ops/test-server/compose.sharedquota.yml ps -a || true
+          docker compose -f ops/test-server/compose.yml -f ops/test-server/compose.sharedquota.yml logs --no-color --tail=90 gateway-a gateway-b redis-quota || true
+          docker compose -f ops/test-server/compose.yml -f ops/test-server/compose.sharedquota.yml down -v --remove-orphans || true
+          rm -rf ops/test-server/redis-certs
