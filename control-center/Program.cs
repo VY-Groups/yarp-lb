@@ -142,10 +142,18 @@ builder.Services.AddRateLimiter(options =>
     });
 });
 builder.Services.AddHttpClient("probe").ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
-var peerRateTable = BoundedPeerRateTable.FromEnvironment(
+var sharedPeerLimiter = SharedPeerRateLimiter.FromEnvironment(
+    Environment.GetEnvironmentVariable("GATEWAY_PROXY_SHARED_REDIS"),
+    Environment.GetEnvironmentVariable("GATEWAY_PROXY_SHARED_HMAC_KEY"),
     Environment.GetEnvironmentVariable("GATEWAY_PROXY_IP_RATE_PER_MINUTE"),
-    Environment.GetEnvironmentVariable("GATEWAY_PROXY_IP_TABLE_CAPACITY"));
+    Environment.GetEnvironmentVariable("GATEWAY_PROXY_IP_TABLE_CAPACITY"),
+    Environment.GetEnvironmentVariable("GATEWAY_PROXY_SHARED_NAMESPACE"));
+var peerRateTable = sharedPeerLimiter is null ? BoundedPeerRateTable.FromEnvironment(
+    Environment.GetEnvironmentVariable("GATEWAY_PROXY_IP_RATE_PER_MINUTE"),
+    Environment.GetEnvironmentVariable("GATEWAY_PROXY_IP_TABLE_CAPACITY")) : null;
 var app = builder.Build();
+if (sharedPeerLimiter is not null)
+    app.Lifetime.ApplicationStopped.Register(sharedPeerLimiter.Dispose);
 if (ec2Lab)
 {
     // Read-only, loopback-only snapshot of the actual in-memory YARP model,
@@ -1361,7 +1369,33 @@ app.MapReverseProxy(proxyPipeline =>
 {
     // Opt-in, bounded process-local stick-table-style peer-IP admission.
     // No X-Forwarded-For: only the network-layer peer is trusted.
-    if (peerRateTable is not null)
+    if (sharedPeerLimiter is not null)
+    {
+        proxyPipeline.Use(async (context, next) =>
+        {
+            try
+            {
+                if (!await sharedPeerLimiter.TryAdmitAsync(context.Connection.RemoteIpAddress))
+                {
+                    context.Response.StatusCode = StatusCodes.Status429TooManyRequests;
+                    return;
+                }
+            }
+            catch (StackExchange.Redis.RedisException)
+            {
+                // Network partition: do not fall back to per-node quota (double-spend).
+                context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+                return;
+            }
+            catch (TimeoutException)
+            {
+                context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+                return;
+            }
+            await next();
+        });
+    }
+    else if (peerRateTable is not null)
     {
         proxyPipeline.Use(async (context, next) =>
         {
