@@ -966,7 +966,7 @@ async Task<IResult> CommitReviewedChange(HttpContext ctx, JsonObject submitted)
         {
             foreach (var setting in new[] { "RiseFall.Rise", "RiseFall.Fall" })
                 if (c["Metadata"]?[setting] is JsonNode value &&
-                    (!int.TryParse(value.ToString(), out var threshold) || threshold is < 1 or > 10))
+                    (!int.TryParse(value.ToString(), System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var threshold) || threshold is < 1 or > 10))
                     return Results.BadRequest(new { error = $"Cluster {key}: {setting} must be 1..10" });
         }
         var hc = c["HealthCheck"]?["Active"];
