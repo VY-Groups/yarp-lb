@@ -864,7 +864,13 @@ $('page-back').onclick = () => navigateBack();
 $('modal-close').onclick = () => $('modal').close();
 $('refresh').onclick = () => void reload();
 $('save').onclick = () => void save();
-$('logout').onclick = () => void api('/admin/api/logout', 'POST', {}).then(() => showLogin(false)).catch(e => show(String(e), true));
+$('logout').onclick = () => {
+    if (dirty && !confirm('Sign out? Your unsubmitted configuration draft will be discarded.'))
+        return;
+    void api('/admin/api/logout', 'POST', {}).then(() => showLogin(false)).catch(e => show(String(e), true));
+};
+setInterval(() => { if (!$('app-shell').hidden)
+    void refreshGatewayReadiness(); }, 30000);
 void initSession();
 async function initSession() {
     try {
@@ -946,6 +952,11 @@ function showLogin(first) {
 $('auth-provider').onchange = () => { $('auth-password').minLength = $('auth-provider').value === 'directory' ? 1 : 16; };
 $('auth-form').onsubmit = async (e) => {
     e.preventDefault();
+    const submit = $('auth-submit');
+    if (submit.disabled)
+        return;
+    submit.disabled = true;
+    $('auth-form').setAttribute('aria-busy', 'true');
     const mode = $('auth-form').dataset.mode;
     const username = $('auth-username').value.trim();
     const password = $('auth-password').value;
@@ -970,6 +981,10 @@ $('auth-form').onsubmit = async (e) => {
     }
     catch (err) {
         $('auth-message').textContent = String(err);
+    }
+    finally {
+        submit.disabled = false;
+        $('auth-form').removeAttribute('aria-busy');
     }
 };
 async function inventory() {
