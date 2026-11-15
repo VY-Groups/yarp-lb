@@ -59,14 +59,14 @@ jobs:
           website_pid=$!
           trap 'kill "$website_pid" 2>/dev/null || true' EXIT
           website_ready=0
-          for attempt in {1..15}; do
+          for ((attempt=0; attempt<15; attempt++)); do
             if curl -fsS --max-time 3 http://127.0.0.1:18082/index.html 2>/dev/null |
                grep -Fq "${{ matrix.site }}"; then website_ready=1; break; fi
             sleep 1
           done
           [[ "$website_ready" -eq 1 ]] || { echo "Website failed to become ready" >&2; exit 1; }
           ready=0
-          for attempt in {1..60}; do
+          for ((attempt=0; attempt<60; attempt++)); do
             if curl --noproxy '*' -fsS --max-time 3 \
               http://127.0.0.1:18080/api/identity >/dev/null 2>&1; then ready=1; break; fi
             sleep 1
@@ -102,7 +102,7 @@ jobs:
             --url http://127.0.0.1:18080/api/body/1048576 \
             --seconds "$TEST_DURATION" --workers 16 \
             --target-mbps "$TARGET_MBPS" --p99-ms "$LIMIT_P99_MS" \
-            --out "artifacts/${{ matrix.site }}.json" "${ args[@]}"
+            --out "artifacts/${{ matrix.site }}.json" "${args[@]}"
       - name: Capture logs and exact commit
         if: always()
         shell: bash
@@ -143,7 +143,7 @@ jobs:
           python3 tests/TwoUbuntu/verify_two_evidence.py \
             --a artifacts/two/two-ubuntu-node-a/node-a.json \
             --b artifacts/two/two-ubuntu-node-b/node-b.json \
-            --sha "$GITHUB_SHA" --out artifacts/two-ubuntu-report.json "${ args[@]}"
+            --sha "$GITHUB_SHA" --out artifacts/two-ubuntu-report.json "${args[@]}"
       - uses: actions/upload-artifact@v4
         with:
           name: two-ubuntu-independent-cloud-evidence
