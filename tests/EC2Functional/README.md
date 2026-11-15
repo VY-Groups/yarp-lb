@@ -43,3 +43,7 @@ Every named test writes one CSV with `timestamp,client_address,status,backend,la
 ## Evidence status
 
 Offline code/tests are checked in source-control CI. **The live EC2 workflow must be manually run or reach its scheduled execution before any EC2 functional scenario can truthfully be marked PASS.** GitHub connector API currently used in this conversation does not expose an Actions workflow-dispatch operation; do not substitute a PR/push trigger or claim an EC2 result without a run link. 
+
+## Missing-target workflow semantics
+
+The nightly scheduled workflow always runs offline safety-contract tests first. If either repository variable is missing, it uploads `not-tested.txt`, reports **NOT TESTED**, and deliberately skips live EC2 preflight, gateway build and external traffic. This scheduled run may complete successfully as **workflow execution**, but its evidence explicitly does **not** certify EC2 integration. A manually dispatched run without both variables fails (non-zero) with the same NOT TESTED artifact. If both variables are set, the original strict allowlist / live preflight remains mandatory and fails on unreachable or unexpected backends. The independent `ec2-gate-contracts.yml` tests these paths on PR/push without accessing EC2.
