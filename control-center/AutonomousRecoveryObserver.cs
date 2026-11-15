@@ -35,8 +35,8 @@ public sealed class AutonomousRecoveryObserver : BackgroundService
                         // evidence. Keep draining destinations out of warmup.
                         TrafficLifecycle.ObserveActiveHealth(destination,
                             RecoveryHealthGate.Eligible(
-                                destination.Health.Active,
-                                destination.Health.Passive,
+                                destination.Health.Active == DestinationHealth.Healthy,
+                                destination.Health.Passive == DestinationHealth.Unhealthy,
                                 TrafficLifecycle.IsDraining(destination)));
                     }
                 }
