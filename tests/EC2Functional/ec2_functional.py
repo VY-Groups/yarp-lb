@@ -11,6 +11,7 @@ import argparse
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 import csv
+import ipaddress
 from datetime import datetime, timezone
 import json
 import os
@@ -24,8 +25,10 @@ import shutil
 import uuid
 from urllib.request import build_opener, ProxyHandler
 
-HOST_A = "ec2-3-108-65-15.ap-south-1.compute.amazonaws.com"
-HOST_B = "ec2-65-0-11-186.ap-south-1.compute.amazonaws.com"
+# Fixtures used only by offline tests; NEVER runtime allowlisted destinations.
+HOST_A = "ec2-54-10-20-30.ap-south-1.compute.amazonaws.com"
+HOST_B = "ec2-52-20-30-40.ap-south-1.compute.amazonaws.com"
+EC2_DNS_PATTERN = re.compile(r"ec2-(?:[0-9]{1,3}-){3}[0-9]{1,3}\\.ap-south-1\\.compute\\.amazonaws\\.com")
 GATEWAY = "http://127.0.0.1:18088"
 BODY_PATTERN = re.compile(r"\bbackend\s+([a-zA-Z0-9_.-]+)\s+(\S+)", re.I)
 CSV_FIELDS = ["timestamp", "client_address", "status", "backend", "latency_ms", "error"]
@@ -57,12 +60,26 @@ class Budget:
         self.by_test[test] += 1
 
 
+def approved_ec2_host(host: str) -> bool:
+    # Exact, region-scoped AWS-managed public EC2 names only: no URLs, ports,
+    # private addresses, whitespace, suffix tricks or arbitrary customer hosts.
+    if not host or len(host) > 128 or not EC2_DNS_PATTERN.fullmatch(host):
+        return False
+    dotted_ip = host[4:].split(".", 1)[0].replace("-", ".")
+    try:
+        ip = ipaddress.IPv4Address(dotted_ip)
+    except ipaddress.AddressValueError:
+        return False
+    return ip.is_global
+
+
 def prerequisites() -> tuple[str, str]:
     a = os.environ.get("BACKEND_A_HOST", "")
     b = os.environ.get("BACKEND_B_HOST", "")
     require(os.environ.get("GITHUB_ACTIONS") == "true" and os.environ.get("CI") == "true",
             "Requires disposable GitHub Actions runner")
-    require(a == HOST_A and b == HOST_B, "BACKEND_A_HOST / BACKEND_B_HOST variables missing or not the two allowlisted hosts")
+    require(approved_ec2_host(a) and approved_ec2_host(b),
+            "BACKEND_A_HOST / BACKEND_B_HOST missing or not approved public Mumbai EC2 DNS names")
     require(a != b, "BACKEND_A_HOST and BACKEND_B_HOST must differ")
     return a, b
 
