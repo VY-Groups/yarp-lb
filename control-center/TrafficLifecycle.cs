@@ -54,7 +54,7 @@ public static class TrafficLifecycle
             state.WasEligible = ready ? 1 : 0;
             if (!ready || seconds == 0)
                 Volatile.Write(ref state.FirstEligibleTick, 0);
-            else if (!wasEligible || prior != seconds)
+            else if (RecoveryTransition.ShouldRestartRamp(wasEligible, ready, prior, seconds))
                 Volatile.Write(ref state.FirstEligibleTick, Stopwatch.GetTimestamp());
             else if (Volatile.Read(ref state.FirstEligibleTick) == 0)
                 Volatile.Write(ref state.FirstEligibleTick, Stopwatch.GetTimestamp());
