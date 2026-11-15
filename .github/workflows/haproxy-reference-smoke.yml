@@ -38,7 +38,7 @@ jobs:
           haproxy -db -f ops/capacity/haproxy-reference/haproxy.cfg > "$RUNNER_TEMP/haproxy.log" 2>&1 &
           proxy_pid=$!
           ok=0
-          for i in $(seq 1 30); do
+          for (( attempt=0; attempt<30; attempt++ )); do
             if curl -fsS --max-time 2 http://127.0.0.1:19080/proxy/index.html -o "$RUNNER_TEMP/response"; then
               if cmp -s "$RUNNER_TEMP/response" "$RUNNER_TEMP/reference-origin/index.html"; then ok=1; break; fi
             fi
