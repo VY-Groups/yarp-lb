@@ -14,6 +14,11 @@ services:
           --requirepass "$$REDIS_TEST_PASSWORD" \
           --save "" --appendonly no
     volumes: ["./redis-certs:/testcert:ro"]
+    healthcheck:
+      test: ["CMD-SHELL", 'redis-cli --tls -h redis-quota --cacert /testcert/ca.crt -a "$REDIS_TEST_PASSWORD" ping 2>/dev/null | grep -qx PONG']
+      interval: 1s
+      timeout: 3s
+      retries: 30
     networks: [lab]
   gateway-a:
     build:
@@ -26,7 +31,9 @@ services:
       GATEWAY_PROXY_IP_RATE_PER_MINUTE: "7"
       GATEWAY_PROXY_IP_TABLE_CAPACITY: "8"
       GATEWAY_PROXY_SHARED_NAMESPACE: "ci:dualnode:quota"
-    depends_on: [redis-quota]
+    depends_on:
+      redis-quota:
+        condition: service_healthy
   gateway-b:
     image: gatewaycore-sharedquota-test:ci
     environment:
