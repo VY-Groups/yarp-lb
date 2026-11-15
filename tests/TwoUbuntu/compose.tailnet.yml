@@ -1,0 +1,5 @@
+# Manual GitHub-hosted two-VM overlay only. Never publish a public listener.
+services:
+  gateway-a:
+    ports:
+      - "${CI_TAILNET_IP:?Tailscale IPv4 address required}:18080:8080"
