@@ -16,3 +16,12 @@ The opt-in `BoundedTransportFailure` passive health policy now requires **2 cons
 Weighted random destination recovery uses existing `SlowStartSeconds` (0–600) and first observed eligibility; it is not an autonomous background probe scheduler. Source-IP hash remains exempt to avoid remapping. The observation logic now resets its ramp timer when a destination becomes eligible again after a previously observed unavailable/draining state. This is not asynchronous active-probe monitoring: if no request observes the unhealthy state, recovery can still retain an old ramp. Runtime recovery and fairness under load remain an open acceptance test.
 
 For operator safety: do not change existing running Windows test configuration, sign-in identities, TLS or firewall. No on-prem deployment or live provider credentials are involved. Production remains **NO-GO**.
+
+
+## Autonomous YARP health observation (proposed)
+
+`AutonomousRecoveryObserver` runs once a second as an in-process background service, reading **YARP's configured active-health state** for each loaded destination, rather than sending duplicate HTTP probes. When an actively unhealthy destination later becomes healthy, `TrafficLifecycle` restarts its `WeightedRandom` ramp timer even if no customer traffic was received during the fault. The shared eligibility state is synchronized and pure transition checks are included in the load-balancing test project.
+
+Boundaries: no new independent probe engine, no replacement for YARP's active check intervals/threshold semantics, no multi-node health consensus, no proof of physical VIP/host faults. An active health state of Unknown is not treated as a successful probe. This is not a HAProxy source-code port. A real HTTP acceptance scenario now injects backend failure and restores readiness with no customer proxy traffic for 3.2 seconds before measuring weighted warmup. CI success is required before treating that result as evidence; it remains different from multi-node physical failover.
+
+The referenced GitHub repository `REA` was not available through the connected account search during this implementation. No assertions about its source, tests or licensing have been made.

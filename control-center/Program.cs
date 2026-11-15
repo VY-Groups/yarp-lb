@@ -79,6 +79,8 @@ builder.Services.AddReverseProxy()
 // Custom policies are registered on every serving YARP instance, never on the UI alone.
 builder.Services.AddSingleton<ILoadBalancingPolicy, WeightedRandomPolicy>();
 builder.Services.AddSingleton<ILoadBalancingPolicy, SourceIpHashPolicy>();
+// Poll YARP active-health state independently of incoming requests.
+builder.Services.AddHostedService<AutonomousRecoveryObserver>();
 // Opt-in by cluster.HealthCheck.Passive.Policy only. No request replay.
 builder.Services.AddSingleton<IPassiveHealthCheckPolicy, BoundedTransportFailureHealthPolicy>();
 builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme)

@@ -24,22 +24,40 @@ public static class TrafficLifecycle
                 for (var i = 0; i < available.Count; i++)
                     if (ReferenceEquals(available[i], dest)) { ready = true; break; }
             }
-            var state = Timers.GetValue(dest, _ => new WarmupState());
-            var metadata = dest.Model.Config.Metadata;
-            var seconds = metadata is not null && metadata.TryGetValue("SlowStartSeconds", out var raw) &&
-                LoadBalancingCore.TrySlowStartSeconds(raw, out var configured) ? configured : 0;
-            // A config update that turns warmup on (or changes its window) must start
-            // a NEW ramp, even if YARP retains the same DestinationState instance.
-            var prior = Interlocked.Exchange(ref state.LastSlowStartSeconds, seconds);
-            var wasEligible = Interlocked.Exchange(ref state.WasEligible, ready ? 1 : 0) == 1;
-            // Begin a fresh ramp on the first observed recovery or a changed
-            // warmup interval, rather than keeping a previous eligibility timer.
+            ObserveEligibility(dest, ready);
+        }
+    }
+
+    /// <summary>
+    /// Called by the periodic YARP active-health observer even when no user request
+    /// is received. An unhealthy-to-healthy event starts a new warmup ramp.
+    /// Passive/unknown states are intentionally not interpreted as a healthy probe.
+    /// </summary>
+    public static void ObserveActiveHealth(DestinationState destination, bool healthy)
+    {
+        ObserveEligibility(destination, healthy && !IsDraining(destination));
+    }
+
+    private static void ObserveEligibility(DestinationState dest, bool ready)
+    {
+        var state = Timers.GetValue(dest, _ => new WarmupState());
+        var metadata = dest.Model.Config.Metadata;
+        var seconds = metadata is not null && metadata.TryGetValue("SlowStartSeconds", out var raw) &&
+            LoadBalancingCore.TrySlowStartSeconds(raw, out var configured) ? configured : 0;
+        // Serialize eligibility transitions to avoid a delayed request overwriting
+        // the ramp started by a background health state change.
+        lock (state)
+        {
+            var prior = state.LastSlowStartSeconds;
+            var wasEligible = state.WasEligible == 1;
+            state.LastSlowStartSeconds = seconds;
+            state.WasEligible = ready ? 1 : 0;
             if (!ready || seconds == 0)
-                Interlocked.Exchange(ref state.FirstEligibleTick, 0);
-            else if (!wasEligible || prior != seconds)
-                Interlocked.Exchange(ref state.FirstEligibleTick, Stopwatch.GetTimestamp());
-            else
-                Interlocked.CompareExchange(ref state.FirstEligibleTick, Stopwatch.GetTimestamp(), 0);
+                Volatile.Write(ref state.FirstEligibleTick, 0);
+            else if (RecoveryTransition.ShouldRestartRamp(wasEligible, ready, prior, seconds))
+                Volatile.Write(ref state.FirstEligibleTick, Stopwatch.GetTimestamp());
+            else if (Volatile.Read(ref state.FirstEligibleTick) == 0)
+                Volatile.Write(ref state.FirstEligibleTick, Stopwatch.GetTimestamp());
         }
     }
 
