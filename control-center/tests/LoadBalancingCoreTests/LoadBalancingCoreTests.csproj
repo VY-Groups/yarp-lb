@@ -10,6 +10,8 @@
     <Compile Include="PeerRateTableTests.cs" />
     <Compile Include="../../LoadBalancingCore.cs" Link="LoadBalancingCore.cs" />
     <Compile Include="../../../src/TrafficPolicies/EjectionBudget.cs" Link="EjectionBudget.cs" />
+    <Compile Include="../../../src/TrafficPolicies/RiseFallCounter.cs" Link="RiseFallCounter.cs" />
+    <Compile Include="RiseFallTests.cs" />
     <Compile Include="Program.cs" />
   </ItemGroup>
 </Project>
