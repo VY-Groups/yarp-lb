@@ -311,6 +311,20 @@ try
         $"slow-start returns to 80 percent A: {lateAPercent:F2}%");
     Record("slow-start", new { early, lateAPercent });
 
+    // No customer traffic after recovery: autonomous observation must start
+    // a NEW ramp when YARP marks A healthy, even during the idle interval.
+    await SetReady(aUrl, false);
+    await WaitFor("slow-start A failed", () => RoutesOnly("B"));
+    await Task.Delay(1700);
+    await SetReady(aUrl, true);
+    await Task.Delay(3200); // active probe and observer poll without proxy requests
+    var idleRecovery = await Sample(400);
+    Require(idleRecovery.Success == 400 &&
+            idleRecovery.Nodes.GetValueOrDefault("A") > 0 &&
+            idleRecovery.Nodes.GetValueOrDefault("A") < 320,
+        "idle health recovery restarts weighted warmup before client traffic");
+    Record("idle-recovery-warmup", idleRecovery);
+
 
     Configure("SourceIpHash", 80, 20);
     await Task.Delay(2500);
