@@ -358,7 +358,14 @@ async function initSession(){
     await reload();
   } catch(err){$('auth-message').textContent=String(err);$('auth-screen').hidden=false;$('app-shell').hidden=true}
 }
-function showLogin(first:boolean){csrf='';currentRole='';view='setup';viewHistory=[];lastRenderedView='setup';$('app-shell').hidden=true;$('auth-screen').hidden=false;
+function showLogin(first:boolean){csrf='';currentRole='';currentUser='';otpChallenge='';view='setup';viewHistory=[];lastRenderedView='setup';
+ dirty=false;data={name:'YARP Control Center',gateway:'unknown',time:'',routes:{},clusters:{},disabled:{},mode:'Local testing',telemetry:'',revision:''};
+ probes=[];orgProfile=null;topologyResponse=null;topologyDraft=null;topologyStep=0;topologyChecks=[];topologyWarnings=[];
+ $('content').innerHTML='';$('user-badge').textContent='';$('notice').hidden=true;
+ ($('auth-password') as HTMLInputElement).value='';($('auth-otp') as HTMLInputElement).value='';
+ ($('auth-email') as HTMLInputElement).value='';($('auth-username') as HTMLInputElement).value='';
+ ($('auth-provider') as HTMLSelectElement).value='local';($('auth-password') as HTMLInputElement).minLength=16;
+ updateBrand();$('app-shell').hidden=true;$('auth-screen').hidden=false;
  $('auth-title').textContent=first?'Create initial administrator':'Sign in to YARP Control Center';
  $('auth-description').textContent=first?'Create a local recovery administrator first. You can enable AD login and email OTP after signing in.':'Restricted local management access';
  $('auth-submit').textContent=first?'Create administrator':'Sign in';
