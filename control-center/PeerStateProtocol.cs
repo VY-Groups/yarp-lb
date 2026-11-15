@@ -7,6 +7,10 @@ using System.Text;
 public sealed record PeerStateFrame(string NodeId, long Minute, long Sequence,
     Dictionary<string,int> Counters);
 
+public sealed record PeerSyncStatus(bool Enabled, string LocalNode, string RemoteNode,
+    int LocalIdentities, long LocalRequests, int RemoteIdentities, long RemoteRequests,
+    bool RemoteReportedInCurrentMinute, DateTimeOffset? LastAcceptedUtc, long RemoteSequence);
+
 public sealed class PeerStateJournal
 {
     private readonly object gate = new();
@@ -15,6 +19,7 @@ public sealed class PeerStateJournal
     private readonly string remoteId;
     private readonly int maxIdentities;
     private long localMinute = -1, sequence, receivedMinute = -1, receivedSequence = -1;
+    private DateTimeOffset? lastAcceptedUtc;
     private readonly Dictionary<string,int> local = new(StringComparer.Ordinal);
     private Dictionary<string,int> remote = new(StringComparer.Ordinal);
 
@@ -23,7 +28,7 @@ public sealed class PeerStateJournal
         if (string.IsNullOrWhiteSpace(localId) || string.IsNullOrWhiteSpace(remoteId) ||
             localId == remoteId || localId.Length > 48 || remoteId.Length > 48)
             throw new ArgumentException("Two distinct nonempty node IDs of at most 48 characters required");
-        if (secret.Length < 32 || capacity is < 1 or > 4096)
+        if (secret.Length < 32 || capacity is < 1 or > 2048)
             throw new ArgumentException("Peer secret and bounded capacity required");
         this.localId = localId;
         this.remoteId = remoteId;
@@ -89,7 +94,24 @@ public sealed class PeerStateJournal
             remote = new Dictionary<string,int>(frame.Counters, StringComparer.Ordinal);
             receivedMinute = frame.Minute;
             receivedSequence = frame.Sequence;
+            lastAcceptedUtc = DateTimeOffset.UtcNow;
             return true;
+        }
+    }
+
+    public PeerSyncStatus Status(long minute)
+    {
+        lock (gate)
+        {
+            var validLocal = localMinute == minute;
+            var validRemote = receivedMinute == minute;
+            return new PeerSyncStatus(true, localId, remoteId,
+                validLocal ? local.Count : 0,
+                validLocal ? local.Values.Sum(x => (long)x) : 0,
+                validRemote ? remote.Count : 0,
+                validRemote ? remote.Values.Sum(x => (long)x) : 0,
+                validRemote, lastAcceptedUtc,
+                validRemote ? receivedSequence : 0);
         }
     }
 

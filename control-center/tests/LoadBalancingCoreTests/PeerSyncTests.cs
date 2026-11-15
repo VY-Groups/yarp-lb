@@ -37,6 +37,26 @@ public static class PeerSyncTests
         Check(b.PeerTelemetry(now)==(2,3L),"monotonic remote counts");
         Check(b.PeerTelemetry(now+1)==(0,0L),"stale peer telemetry expires from current minute");
 
+        var maxFrame = new PeerStateJournal("node-a", "node-b", secret, 2048);
+        for (var i = 0; i < 2048; i++)
+            maxFrame.Observe(new IPAddress(new byte[] { 10, 20,
+                (byte)(i / 256), (byte)(i % 256) }), now);
+        var bytesAtCap = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(
+            maxFrame.Snapshot(now));
+        Check(bytesAtCap.Length <= 262144,
+            "maximum configured peer snapshot fits signed 256KiB transport");
+        Check(maxFrame.Status(now).LocalIdentities == 2048,
+            "bounded high-cardinality local operational snapshot");
+        maxFrame.Observe(IPAddress.Parse("10.90.90.90"), now);
+        Check(maxFrame.Status(now).LocalIdentities == 2048,
+            "new peer admission capped without evicting tracked peers");
+        var capRejected = false;
+        try { _ = new PeerStateJournal("node-a", "node-b", secret, 2049); }
+        catch (ArgumentException) { capRejected = true; }
+        Check(capRejected, "oversized transport configuration rejected");
+        Check(PeerSyncSettings.FromEnvironment(null,null,null,null,null,null) is null,
+            "disabled peer sync remains disabled without required configuration");
+
         var auth=new PeerSignedMessages(secret);
         var bytes=Encoding.UTF8.GetBytes("{\"NodeId\":\"node-a\"}");
         const long t=1763200000;

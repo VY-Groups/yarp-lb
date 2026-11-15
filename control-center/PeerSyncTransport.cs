@@ -37,7 +37,7 @@ public sealed record PeerSyncSettings(string NodeId, string RemoteId, Uri Remote
             return n;
         }
         return new PeerSyncSettings(nodeId!,remoteId!,uri!,Encoding.UTF8.GetBytes(secret),
-            Read(capacity,4096,4096,"peer capacity"),
+            Read(capacity,2048,2048,"peer capacity"),
             Read(interval,2,30,"peer interval"));
     }
 }
