@@ -59,6 +59,7 @@ builder.Services.AddSingleton<ILoadBalancingPolicy, SourceIpHashPolicy>();
 // retain default policy behavior unless their cluster explicitly opts in.
 builder.Services.AddSingleton<IPassiveHealthCheckPolicy, ImmediateTransportFailureHealthPolicy>();
 builder.Services.AddSingleton<IPassiveHealthCheckPolicy, BoundedTransportFailureHealthPolicy>();
+builder.Services.AddSingleton<IActiveHealthCheckPolicy, RiseFallActiveHealthPolicy>();
 
 var app = builder.Build();
 var gatewayId = Environment.GetEnvironmentVariable("YARP_LAB_GATEWAY_ID") ?? "";
