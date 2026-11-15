@@ -83,6 +83,7 @@ builder.Services.AddSingleton<ILoadBalancingPolicy, SourceIpHashPolicy>();
 builder.Services.AddHostedService<AutonomousRecoveryObserver>();
 // Opt-in by cluster.HealthCheck.Passive.Policy only. No request replay.
 builder.Services.AddSingleton<IPassiveHealthCheckPolicy, BoundedTransportFailureHealthPolicy>();
+builder.Services.AddSingleton<IActiveHealthCheckPolicy, RiseFallActiveHealthPolicy>();
 builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme)
     .AddCookie(options =>
     {
@@ -961,6 +962,13 @@ async Task<IResult> CommitReviewedChange(HttpContext ctx, JsonObject submitted)
                 return Results.BadRequest(new { error = $"Cluster {key}: client certificate thumbprint must be 40 hex characters" });
             if (dests.Any(d => !(d.Value?["Address"]?.ToString() ?? "").StartsWith("https://", StringComparison.OrdinalIgnoreCase)))
                 return Results.BadRequest(new { error = $"Cluster {key}: backend mTLS requires all HTTPS destinations" });
+        }
+        if (string.Equals(c["HealthCheck"]?["Active"]?["Policy"]?.ToString(), "RiseFall", StringComparison.Ordinal))
+        {
+            foreach (var setting in new[] { "RiseFall.Rise", "RiseFall.Fall" })
+                if (c["Metadata"]?[setting] is JsonNode value &&
+                    (!int.TryParse(value.ToString(), System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var threshold) || threshold is < 1 or > 10))
+                    return Results.BadRequest(new { error = $"Cluster {key}: {setting} must be 1..10" });
         }
         var hc = c["HealthCheck"]?["Active"];
         if (hc is not null && hc["Path"] is not null && !ValidPath(hc["Path"]!.ToString())) return Results.BadRequest(new { error = "Invalid health-check path" });
