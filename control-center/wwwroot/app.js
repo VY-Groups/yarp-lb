@@ -171,13 +171,14 @@ async function featureMatrix() {
         show(String(e), true);
     }
 }
-
 async function peerSyncPage() {
-    if (view !== 'peers') return;
+    if (view !== 'peers')
+        return;
     $('content').innerHTML = '<div class="card"><h2>Peer synchronization</h2><p class="subtle">Loading authenticated status…</p></div>';
     try {
         const s = await api('/admin/api/peer-sync/status');
-        if (view !== 'peers') return;
+        if (view !== 'peers')
+            return;
         const active = !!s.enabled;
         const current = active && !!s.recentExchange && !!s.remoteReportedInCurrentMinute;
         const state = !active ? 'Not configured' : current ? 'Recent exchange observed' : 'No recent exchange';
@@ -194,16 +195,16 @@ async function peerSyncPage() {
             <div class="card"><h3>Identity limit</h3><div class="stat-number">${esc(s.trackedIdentityLimit)}</div><div class="stat-desc">Bounded per-node tracking</div></div>
         </div><div class="card card-spaced"><h2>Exchange diagnostics</h2>
         ${rows.map(([key, val]) => `<div class="rowline"><b>${esc(key)}</b><span>${esc(val ?? '—')}</span></div>`).join('')}</div>`
-        : '<div class="card card-spaced"><h2>Optional feature disabled</h2><p class="subtle">Configure reciprocally trusted HTTPS endpoints and secret storage before enabling peer telemetry.</p></div>'}
+            : '<div class="card card-spaced"><h2>Optional feature disabled</h2><p class="subtle">Configure reciprocally trusted HTTPS endpoints and secret storage before enabling peer telemetry.</p></div>'}
         <div class="healthbanner">Best-effort status only. No proof of distributed consensus, session or stick-table parity, physical VIP failover, or global admission consistency.</div>`;
-    } catch (e) {
+    }
+    catch (e) {
         if (view === 'peers') {
             $('content').innerHTML = '<div class="card"><h2>Status unavailable</h2><p class="subtle">No peer status is being claimed.</p></div>';
             show('Peer status unavailable: ' + String(e), true);
         }
     }
 }
-
 function capabilities() {
     const categories = [
         ['Traffic routing', 'Hostnames, paths, methods, request headers, query matching, route ordering and per-route authorization/rate-limit policy'],
@@ -349,18 +350,22 @@ function render() {
     if (view !== lastRenderedView) {
         if (!restoringNavigation) {
             viewHistory.push(lastRenderedView);
-            if (viewHistory.length > 24) viewHistory.shift();
+            if (viewHistory.length > 24)
+                viewHistory.shift();
         }
         lastRenderedView = view;
     }
     restoringNavigation = false;
     $('page-back').hidden = view === 'setup' && viewHistory.length === 0;
-    const names = { organization: 'Organization profile', setup: 'Setup Center · 0.1', onboarding: 'Architecture & setup', overview: 'Overview', routes: 'Routing rules', clusters: 'Backend clusters', backends: 'Backend management', health: 'Health and diagnostics', backups: 'Backups and audit', inventory: 'Infrastructure inventory', users: 'Administrators and roles', mail: 'Mail & OTP', directory: 'Active Directory (LDAPS)', approvals: 'Change approvals', metrics: 'Gateway metrics', fleet: 'Gateway fleet', capabilities: 'YARP capabilities', featurematrix: 'Traffic Engine & platform modules',peers:'Peer synchronization' };
+    const names = { organization: 'Organization profile', setup: 'Setup Center · 0.1', onboarding: 'Architecture & setup', overview: 'Overview', routes: 'Routing rules', clusters: 'Backend clusters', backends: 'Backend management', health: 'Health and diagnostics', backups: 'Backups and audit', inventory: 'Infrastructure inventory', users: 'Administrators and roles', mail: 'Mail & OTP', directory: 'Active Directory (LDAPS)', approvals: 'Change approvals', metrics: 'Gateway metrics', fleet: 'Gateway fleet', capabilities: 'YARP capabilities', featurematrix: 'Traffic Engine & platform modules', peers: 'Peer synchronization' };
     $('page-title').textContent = names[view];
     $('page-subtitle').textContent = dirty ? 'Unsaved configuration changes — submit for approval' : 'Control and inspect your gateway';
     $('gateway-pill').textContent = '● Control plane responding';
     $('save').textContent = dirty ? '● Submit change request' : 'Submit change request';
-    document.querySelectorAll('.nav').forEach(n => { const selected = n.dataset.view === view; n.classList.toggle('active', selected); if (selected) n.setAttribute('aria-current','page'); else n.removeAttribute('aria-current'); });
+    document.querySelectorAll('.nav').forEach(n => { const selected = n.dataset.view === view; n.classList.toggle('active', selected); if (selected)
+        n.setAttribute('aria-current', 'page');
+    else
+        n.removeAttribute('aria-current'); });
     const pages = { overview, routes, clusters, backends, health, capabilities };
     updateTopologyNavigation();
     if (view === 'organization')
@@ -375,7 +380,8 @@ function render() {
         void approvals();
     else if (view === 'metrics')
         void metrics();
-    else if (view === 'peers') void peerSyncPage();
+    else if (view === 'peers')
+        void peerSyncPage();
     else if (view === 'backups')
         void backups();
     else if (view === 'inventory')
@@ -866,7 +872,9 @@ async function initSession() {
 function showLogin(first) {
     csrf = '';
     currentRole = '';
-    view = 'setup'; viewHistory = []; lastRenderedView = 'setup';
+    view = 'setup';
+    viewHistory = [];
+    lastRenderedView = 'setup';
     $('app-shell').hidden = true;
     $('auth-screen').hidden = false;
     $('auth-title').textContent = first ? 'Create initial administrator' : 'Sign in to YARP Control Center';
