@@ -42,7 +42,9 @@ services:
       GATEWAY_PROXY_IP_RATE_PER_MINUTE: "7"
       GATEWAY_PROXY_IP_TABLE_CAPACITY: "8"
       GATEWAY_PROXY_SHARED_NAMESPACE: "ci:dualnode:quota"
-    depends_on: [redis-quota]
+    depends_on:
+      redis-quota:
+        condition: service_healthy
   quota-client:
     image: python:3.12-alpine
     entrypoint: ["python", "/test/test_gateway_integration.py"]
