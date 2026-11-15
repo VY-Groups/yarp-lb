@@ -1,0 +1,48 @@
+name: HAProxy reference loopback smoke (non-production)
+on:
+  pull_request:
+    paths:
+      - "ops/capacity/haproxy-reference/**"
+      - ".github/workflows/haproxy-reference-smoke.yml"
+  push:
+    branches: [main]
+    paths:
+      - "ops/capacity/haproxy-reference/**"
+      - ".github/workflows/haproxy-reference-smoke.yml"
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  reference:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate HAProxy config and test real proxy forwarding
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq haproxy
+          mkdir -p "$RUNNER_TEMP/reference-origin"
+          printf 'GatewayCore Backend Working\n' > "$RUNNER_TEMP/reference-origin/index.html"
+          python3 -m http.server 18081 --bind 127.0.0.1 --directory "$RUNNER_TEMP/reference-origin" > "$RUNNER_TEMP/reference-origin.log" 2>&1 &
+          backend_pid=$!
+          proxy_pid=''
+          cleanup() {
+            if [ -n "$proxy_pid" ]; then kill "$proxy_pid" 2>/dev/null || true; fi
+            kill "$backend_pid" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+          haproxy -c -f ops/capacity/haproxy-reference/haproxy.cfg
+          haproxy -db -f ops/capacity/haproxy-reference/haproxy.cfg > "$RUNNER_TEMP/haproxy.log" 2>&1 &
+          proxy_pid=$!
+          ok=0
+          for (( attempt=0; attempt<30; attempt++ )); do
+            if curl -fsS --max-time 2 http://127.0.0.1:19080/proxy/index.html -o "$RUNNER_TEMP/response"; then
+              if cmp -s "$RUNNER_TEMP/response" "$RUNNER_TEMP/reference-origin/index.html"; then ok=1; break; fi
+            fi
+            sleep 1
+          done
+          if [ "$ok" -ne 1 ]; then cat "$RUNNER_TEMP/haproxy.log"; exit 1; fi
+          echo 'PASS: HAProxy reference forwards loopback /proxy/index.html to isolated backend'
