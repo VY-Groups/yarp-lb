@@ -1,5 +1,5 @@
 "use strict";
-let data = { name: 'YARP Control Center', gateway: 'unknown', time: '', routes: {}, clusters: {}, disabled: {}, mode: 'Local testing', telemetry: '', revision: '' };
+let data = { name: 'GatewayCore', gateway: 'unknown', time: '', routes: {}, clusters: {}, disabled: {}, mode: 'Local testing', telemetry: '', revision: '' };
 let viewHistory = [];
 let lastRenderedView = 'setup';
 let restoringNavigation = false;
@@ -30,9 +30,9 @@ const keys = (o) => Object.keys(o || {});
 let orgProfile = null;
 const sectors = ['general', 'technology', 'finance', 'healthcare', 'government', 'telecom', 'ecommerce', 'education', 'ca-pki', 'other'];
 function updateBrand() {
-    const name = orgProfile?.organizationName?.trim() || 'YARP Control Center';
+    const name = orgProfile?.organizationName?.trim() || 'GatewayCore';
     document.querySelectorAll('[data-organization-name]').forEach(el => el.textContent = name);
-    document.title = name + ' | YARP Control Center 0.1';
+    document.title = name + ' | GatewayCore Control Center';
 }
 async function loadOrganization() { orgProfile = await api('/admin/api/organization'); updateBrand(); }
 async function organizationPage() {
@@ -920,7 +920,7 @@ function showLogin(first) {
     viewHistory = [];
     lastRenderedView = 'setup';
     dirty = false;
-    data = { name: 'YARP Control Center', gateway: 'unknown', time: '', routes: {}, clusters: {}, disabled: {}, mode: 'Local testing', telemetry: '', revision: '' };
+    data = { name: 'GatewayCore', gateway: 'unknown', time: '', routes: {}, clusters: {}, disabled: {}, mode: 'Local testing', telemetry: '', revision: '' };
     probes = [];
     orgProfile = null;
     topologyResponse = null;
@@ -940,7 +940,7 @@ function showLogin(first) {
     updateBrand();
     $('app-shell').hidden = true;
     $('auth-screen').hidden = false;
-    $('auth-title').textContent = first ? 'Create initial administrator' : 'Sign in to YARP Control Center';
+    $('auth-title').textContent = first ? 'Create initial administrator' : 'Sign in to GatewayCore';
     $('auth-description').textContent = first ? 'Create a local recovery administrator first. You can enable AD login and email OTP after signing in.' : 'Restricted local management access';
     $('auth-submit').textContent = first ? 'Create administrator' : 'Sign in';
     $('auth-email-row').hidden = !first;
