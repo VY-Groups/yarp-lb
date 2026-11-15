@@ -1,6 +1,6 @@
 type Obj = Record<string, any>;
 type State = {name:string;gateway:string;time:string;routes:Obj;clusters:Obj;disabled:Obj;mode:string;telemetry:string;revision:string};
-let data:State = {name:'YARP Control Center',gateway:'unknown',time:'',routes:{},clusters:{},disabled:{},mode:'Local testing',telemetry:'',revision:''};
+let data:State = {name:'GatewayCore',gateway:'unknown',time:'',routes:{},clusters:{},disabled:{},mode:'Local testing',telemetry:'',revision:''};
 let viewHistory:string[]=[];let lastRenderedView='setup';let restoringNavigation=false;
 function navigateBack(){if(viewHistory.length){restoringNavigation=true;view=viewHistory.pop()!;render()}else if(view!=='setup'){restoringNavigation=true;view='setup';render()}}
 let view='setup';let dirty=false;let probes:Obj[]=[];let csrf='';let currentRole='';let currentUser='';let otpChallenge='';
@@ -11,9 +11,9 @@ const keys=(o:Obj)=>Object.keys(o||{});
 type OrgProfile={organizationName:string;sector:string;region:string;notes:string;revision:number;updatedBy:string;updatedUtc:string|null};
 let orgProfile:OrgProfile|null=null;
 const sectors=['general','technology','finance','healthcare','government','telecom','ecommerce','education','ca-pki','other'];
-function updateBrand(){const name=orgProfile?.organizationName?.trim()||'YARP Control Center';
+function updateBrand(){const name=orgProfile?.organizationName?.trim()||'GatewayCore';
  document.querySelectorAll<HTMLElement>('[data-organization-name]').forEach(el=>el.textContent=name);
- document.title=name+' | YARP Control Center 0.1';
+ document.title=name+' | GatewayCore Control Center';
 }
 async function loadOrganization(){orgProfile=await api('/admin/api/organization');updateBrand()}
 async function organizationPage(){try{await loadOrganization();const o=orgProfile!;
@@ -378,14 +378,14 @@ async function initSession(){
   } catch(err){$('auth-message').textContent=String(err);$('auth-screen').hidden=false;$('app-shell').hidden=true}
 }
 function showLogin(first:boolean){authGeneration++;readinessGeneration++;gatewayReadyLabel='● Backend readiness not checked';gatewayReadyWarn=true;csrf='';currentRole='';currentUser='';otpChallenge='';view='setup';viewHistory=[];lastRenderedView='setup';
- dirty=false;data={name:'YARP Control Center',gateway:'unknown',time:'',routes:{},clusters:{},disabled:{},mode:'Local testing',telemetry:'',revision:''};
+ dirty=false;data={name:'GatewayCore',gateway:'unknown',time:'',routes:{},clusters:{},disabled:{},mode:'Local testing',telemetry:'',revision:''};
  probes=[];orgProfile=null;topologyResponse=null;topologyDraft=null;topologyStep=0;topologyChecks=[];topologyWarnings=[];
  $('content').innerHTML='';$('user-badge').textContent='';$('notice').hidden=true;
  ($('auth-password') as HTMLInputElement).value='';($('auth-otp') as HTMLInputElement).value='';
  ($('auth-email') as HTMLInputElement).value='';($('auth-username') as HTMLInputElement).value='';
  ($('auth-provider') as HTMLSelectElement).value='local';($('auth-password') as HTMLInputElement).minLength=16;
  updateBrand();$('app-shell').hidden=true;$('auth-screen').hidden=false;
- $('auth-title').textContent=first?'Create initial administrator':'Sign in to YARP Control Center';
+ $('auth-title').textContent=first?'Create initial administrator':'Sign in to GatewayCore';
  $('auth-description').textContent=first?'Create a local recovery administrator first. You can enable AD login and email OTP after signing in.':'Restricted local management access';
  $('auth-submit').textContent=first?'Create administrator':'Sign in';
  $('auth-email-row').hidden=!first;$('auth-provider-row').hidden=first;$('auth-otp-row').hidden=true;($('auth-password') as HTMLInputElement).required=true;($('auth-otp') as HTMLInputElement).required=false;otpChallenge='';
