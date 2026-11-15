@@ -1,12 +1,9 @@
-using Yarp.ReverseProxy.Model;
-
 /// <summary>
-/// The autonomous recovery observer may restart a ramp only for a destination
-/// confirmed healthy by active probes and NOT passively ejected or draining.
-/// Unknown active health is not affirmative recovery evidence.
+/// Pure admission decision: only an affirmative active-health success may
+/// initiate idle recovery; passive ejection and draining always veto it.
 /// </summary>
 public static class RecoveryHealthGate
 {
-    public static bool Eligible(DestinationHealth active, DestinationHealth passive, bool draining) =>
-        !draining && active == DestinationHealth.Healthy && passive != DestinationHealth.Unhealthy;
+    public static bool Eligible(bool activeHealthy, bool passiveEjected, bool draining) =>
+        activeHealthy && !passiveEjected && !draining;
 }
