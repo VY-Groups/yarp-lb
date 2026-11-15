@@ -131,7 +131,7 @@ public sealed class PeerSignedMessages
     public bool Verify(string sender,string expectedSender,long time,string nonce,
         string signature,byte[] payload,long now)
     {
-        if (sender != expectedSender || Math.Abs(now - time) > 30 ||
+        if (sender != expectedSender || time < now - 30 || time > now + 30 ||
             nonce.Length != 32 || !nonce.All(Uri.IsHexDigit) ||
             signature.Length > 128 || payload.Length > 262144) return false;
         byte[] supplied;
