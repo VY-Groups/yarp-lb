@@ -6,6 +6,8 @@
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
     <Compile Include="../../ProxyConcurrencySettings.cs" Link="ProxyConcurrencySettings.cs" />
     <Compile Include="ProxyConcurrencyTests.cs" />
+    <Compile Include="../../BoundedPeerRateTable.cs" Link="BoundedPeerRateTable.cs" />
+    <Compile Include="PeerRateTableTests.cs" />
     <Compile Include="../../LoadBalancingCore.cs" Link="LoadBalancingCore.cs" />
     <Compile Include="../../../src/TrafficPolicies/EjectionBudget.cs" Link="EjectionBudget.cs" />
     <Compile Include="Program.cs" />
