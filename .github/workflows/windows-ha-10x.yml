@@ -59,18 +59,55 @@ jobs:
           retention-days: 14
           if-no-files-found: warn
   all-ten:
-    name: Require all 10 independent Windows runs green
+    name: Require all 10 Windows HA runs and their evidence
     needs: repeat
     if: always()
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
-      - name: Fail closed unless all ten matrix jobs passed
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Verify evidence validator rejects fabricated or missing runs
+        run: python3 -m unittest discover -s tests/HA -p 'test_aggregate_windows_10x.py' -v
+      - name: Download all ten per-run raw artifacts from THIS workflow run
+        uses: actions/download-artifact@v4
+        with:
+          pattern: ha-windows-repeat-*
+          path: artifacts/ha-matrix
+          merge-multiple: false
+      - name: Report actual worst failure window; fail on missing or red run
+        shell: bash
         env:
           MATRIX_RESULT: ${{ needs.repeat.result }}
         run: |
-          if [ "$MATRIX_RESULT" != "success" ]; then
-            echo "FAIL: at least one Windows HA repetition failed or was cancelled."
+          set -euo pipefail
+          if [[ "$MATRIX_RESULT" != "success" ]]; then
+            echo "NO-GO: one or more Windows HA matrix jobs failed/cancelled; never override a red run."
             exit 1
           fi
-          echo "PASS: all 10 independent Windows HA fault-injection matrix jobs succeeded." >> "$GITHUB_STEP_SUMMARY"
-          echo "Inspect the 10 uploaded artifacts for per-run latency, failure windows and drain counts." >> "$GITHUB_STEP_SUMMARY"
+          python3 tests/HA/aggregate_windows_10x.py \
+            --artifacts artifacts/ha-matrix \
+            --sha "$GITHUB_SHA" --run-id "$GITHUB_RUN_ID" \
+            --out artifacts/windows-ha-10x-report.json
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          r=json.loads(Path("artifacts/windows-ha-10x-report.json").read_text())
+          with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a",encoding="utf-8") as f:
+              f.write("### Ten independent Windows HA runs — verified raw evidence\\n")
+              f.write(f"- Exact source: `{r['source_sha']}`\\n")
+              f.write(f"- Runs inspected: **{r['runs_verified']}/10**\\n")
+              f.write(f"- Total post-kill failed requests: **{r['total_failed_requests_after_kill']}**\\n")
+              f.write(f"- Worst last observed failure offset: **{r['worst_recorded_last_failure_after_kill_ms']} ms** (null means none observed)\\n")
+              f.write(f"- Pre-kill warmup failures preserved: **{r['prekill_failures_recorded']}**\\n")
+              f.write("- Physical-host failover: **NOT VERIFIED**\\n")
+          PY
+      - name: Upload strict ten-run aggregate for incident review
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ha-windows-10x-verified-aggregate
+          path: artifacts/windows-ha-10x-report.json
+          retention-days: 14
+          if-no-files-found: warn
