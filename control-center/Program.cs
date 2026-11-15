@@ -119,6 +119,15 @@ builder.Services.AddSingleton<DirectoryAuthService>(sp =>
 builder.Services.AddRateLimiter(options =>
 {
     options.RejectionStatusCode = 429;
+    var proxyBounds = ProxyConcurrencySettings.FromEnvironment(
+        Environment.GetEnvironmentVariable("GATEWAY_PROXY_CONCURRENCY"),
+        Environment.GetEnvironmentVariable("GATEWAY_PROXY_QUEUE_LIMIT"));
+    options.AddConcurrencyLimiter("proxy-concurrency", cfg =>
+    {
+        cfg.PermitLimit = proxyBounds.PermitLimit;
+        cfg.QueueLimit = proxyBounds.QueueLimit;
+        cfg.QueueProcessingOrder = QueueProcessingOrder.OldestFirst;
+    });
     options.AddFixedWindowLimiter("mailtest", cfg => { cfg.PermitLimit = 3; cfg.Window = TimeSpan.FromMinutes(5); cfg.QueueLimit = 0; });
     options.AddFixedWindowLimiter("ldaptest", cfg => { cfg.PermitLimit = 4; cfg.Window = TimeSpan.FromMinutes(5); cfg.QueueLimit = 0; });
     options.AddFixedWindowLimiter("login", cfg =>
@@ -130,6 +139,9 @@ builder.Services.AddRateLimiter(options =>
     });
 });
 builder.Services.AddHttpClient("probe").ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
+var peerRateTable = BoundedPeerRateTable.FromEnvironment(
+    Environment.GetEnvironmentVariable("GATEWAY_PROXY_IP_RATE_PER_MINUTE"),
+    Environment.GetEnvironmentVariable("GATEWAY_PROXY_IP_TABLE_CAPACITY"));
 var app = builder.Build();
 if (ec2Lab)
 {
@@ -1337,6 +1349,21 @@ app.MapOrganizationProfile(privateDir);
 app.MapTlsInventory();
 app.MapReverseProxy(proxyPipeline =>
 {
+    // Opt-in, bounded process-local stick-table-style peer-IP admission.
+    // No X-Forwarded-For: only the network-layer peer is trusted.
+    if (peerRateTable is not null)
+    {
+        proxyPipeline.Use(async (context, next) =>
+        {
+            if (!peerRateTable.TryAdmit(context.Connection.RemoteIpAddress,
+                    System.Diagnostics.Stopwatch.GetTimestamp()))
+            {
+                context.Response.StatusCode = StatusCodes.Status429TooManyRequests;
+                return;
+            }
+            await next();
+        });
+    }
     // Drain filtering runs before affinity and load balancing, for all policies.
     // Existing forwarded requests continue; no in-flight cancellation occurs.
     proxyPipeline.Use(async (context, next) =>
@@ -1365,7 +1392,7 @@ app.MapReverseProxy(proxyPipeline =>
     proxyPipeline.UseSessionAffinity();
     proxyPipeline.UseLoadBalancing();
     proxyPipeline.UsePassiveHealthChecks();
-});
+}).RequireRateLimiting("proxy-concurrency");
 app.Run();
 
 static bool ValidId(string s) => s.Length is > 0 and <= 80 && Regex.IsMatch(s, "^[a-zA-Z0-9_-]+$");

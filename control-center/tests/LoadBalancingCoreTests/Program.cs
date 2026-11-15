@@ -119,3 +119,7 @@ foreach (var bad in new[] {0,-1,101})
     Check(rejected,"invalid percent fail closed "+bad);
 }
 Console.WriteLine($"PASS: all algorithm, allocation and ejection tests. Remapped {moves}/2000; weighted favored B {skew}/2000.");
+
+await ProxyConcurrencyTests.RunAsync();
+
+PeerRateTableTests.Run();
