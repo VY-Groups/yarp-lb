@@ -29,14 +29,21 @@ jobs:
         run: |
           python3 -m unittest discover -s tests/EC2Functional -p 'test_*.py' -v
           python3 -m py_compile tests/EC2Functional/ec2_functional.py
+      - name: Gate live EC2 traffic on explicit configured targets
+        id: targets
+        shell: bash
+        run: bash tests/EC2Functional/gate_targets.sh
       - name: Preflight five direct HTTP requests per EC2 backend
+        if: steps.targets.outputs.enabled == 'true'
         id: preflight
         run: |
           python3 tests/EC2Functional/ec2_functional.py \
             --preflight --out artifacts/ec2
       - name: Build real shipping Control Center gateway from this commit
+        if: steps.targets.outputs.enabled == 'true'
         run: dotnet build control-center/GatewayCoreYarp.csproj -c Release
       - name: Exercise routing, weights, hashing, ejection, backend TLS and live weight switch
+        if: steps.targets.outputs.enabled == 'true'
         run: |
           python3 tests/EC2Functional/ec2_functional.py \
             --run --out artifacts/ec2 \
