@@ -59,6 +59,7 @@ public static class TrafficLifecycle
             else if (Volatile.Read(ref state.FirstEligibleTick) == 0)
                 Volatile.Write(ref state.FirstEligibleTick, Stopwatch.GetTimestamp());
         }
+    }
 
     public static int EffectiveWeightedRandomWeight(DestinationState destination, int configuredWeight)
     {
