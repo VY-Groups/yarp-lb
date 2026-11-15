@@ -1,1 +1,118 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>YARP Control Center · 0.1</title><link rel="stylesheet" href="/dashboard/style.css"></head><body><section id="auth-screen" class="auth-screen" hidden><div class="auth-box"><div class="brand"><div class="mark">Y</div><div><strong data-organization-name>YARP Control Center</strong><small>YARP CONTROL CENTER · 0.1</small></div></div><div class="tag">DEVELOPMENT 0.1 · LOCAL-ONLY BOOTSTRAP</div><h1 id="auth-title">Sign in</h1><p id="auth-description">Restricted management access</p><form id="auth-form" class="auth-form"><label>Username<input id="auth-username" autocomplete="username" required minlength="3"></label><label id="auth-email-row" hidden>Email for OTP<input id="auth-email" type="email" autocomplete="email"></label><label id="auth-otp-row" hidden>Six-digit email code<input id="auth-otp" inputmode="numeric" pattern="[0-9]{6}" autocomplete="one-time-code"></label><label id="auth-provider-row" hidden>Sign-in method<select id="auth-provider"><option value="local">Local administrator</option><option value="directory">Active Directory / LDAPS</option></select></label><label>Password<input id="auth-password" type="password" autocomplete="current-password" required minlength="16"></label><p id="auth-message" role="alert"></p><button id="auth-submit" class="primary" type="submit">Sign in</button></form><p class="subtle">Do not expose this development listener on the network. Production requires HTTPS and an independent security review.</p></div></section><div class="shell" id="app-shell" hidden><aside class="sidebar"><div class="brand"><div class="mark">Y</div><div><strong data-organization-name>YARP Control Center</strong><small>YARP CONTROL CENTER · 0.1</small></div></div><div class="tag">DEVELOPMENT 0.1 · LOCAL CONTROL</div><nav><button class="nav" data-view="organization">▤ &nbsp; Organization</button><button class="nav" data-view="setup">✦ &nbsp; Setup Center</button><button class="nav" data-view="onboarding">◈ &nbsp; Architecture & setup</button><button class="nav active" data-view="overview">◫ &nbsp; Overview</button><button class="nav" data-view="capabilities">⚙ &nbsp; Capabilities</button><button class="nav" data-view="featurematrix">◈ &nbsp; Traffic Engine &amp; modules</button><button class="nav" data-view="routes">⇄ &nbsp; Routes</button><button class="nav" data-view="clusters">▤ &nbsp; Clusters</button><button class="nav" data-view="backends">◈ &nbsp; Backends</button><button class="nav" data-view="health">♡ &nbsp; Health checks</button><button class="nav" data-view="approvals">✓ &nbsp; Change approvals</button><button class="nav" data-view="metrics">▥ &nbsp; HTTP metrics</button><button class="nav" data-view="backups">◷ &nbsp; Backups & audit</button><button class="nav" data-view="fleet">▦ &nbsp; Gateway fleet</button><button class="nav" data-view="inventory">▣ &nbsp; Machines & inventory</button><button class="nav" data-view="users">♙ &nbsp; Admin accounts</button><button class="nav" data-view="mail">✉ &nbsp; Mail &amp; OTP</button><button class="nav" data-view="directory">⌁ &nbsp; Active Directory</button></nav><div class="sidefoot"><span class="dot"></span> Local administration only<br><span class="muted">Changes require independent approval</span></div></aside><main><header><div><button id="page-back" class="ghost" type="button" hidden aria-label="Go back to previous page">← Back</button><div class="eyebrow">GATEWAY MANAGEMENT</div><h1 id="page-title">Overview</h1><p id="page-subtitle">L7 gateway configuration and status</p></div><div class="actions"><span class="pill" id="gateway-pill">● Checking gateway</span><span id="user-badge" class="chip"></span><button id="logout" class="ghost">Sign out</button><button id="refresh" class="ghost">↻ Refresh</button><button id="save" class="primary">Submit change request</button></div></header><div id="notice" class="notice" hidden></div><div class="content" id="content"></div><footer>YARP Control Center · 0.1 development · Design is not deployment · Restricted local administration</footer></main></div><dialog id="modal"><form method="dialog" id="editor"><button type="button" id="modal-close" class="ghost" aria-label="Close editor">✕ Close</button><h2 id="modal-title">Edit</h2><p id="modal-help"></p><div id="modal-fields"></div><div class="modal-actions"><button value="cancel" class="ghost">Cancel</button><button value="confirm" id="confirm" class="primary">Apply to draft</button></div></form></dialog><script src="/dashboard/app.js" defer></script></body></html>
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#0b1220">
+  <title>GatewayCore | Control Center</title>
+  <link rel="stylesheet" href="/dashboard/style.css">
+</head>
+<body>
+<a class="skip-link" href="#content">Skip to page content</a>
+<section id="auth-screen" class="auth-screen" hidden aria-label="GatewayCore administration sign-in">
+  <div class="auth-layout">
+    <div class="auth-intro">
+      <div class="auth-brand">
+        <span class="mark" aria-hidden="true">G</span>
+        <div><strong data-organization-name>GatewayCore</strong><small>CONTROL CENTER</small></div>
+      </div>
+      <span class="auth-kicker">ON-PREMISES APPLICATION DELIVERY</span>
+      <h2>One place to run and review your gateway.</h2>
+      <p>Manage traffic routes, backend health, change approvals, and identity from a controlled management surface.</p>
+      <div class="auth-capabilities" aria-label="System capabilities">
+        <div><span class="capability-symbol" aria-hidden="true">01</span><span><strong>Traffic operations</strong><small>Route configuration and backend health</small></span></div>
+        <div><span class="capability-symbol" aria-hidden="true">02</span><span><strong>Change control</strong><small>Independent review before activation</small></span></div>
+        <div><span class="capability-symbol" aria-hidden="true">03</span><span><strong>Local administration</strong><small>Restricted access and audit trails</small></span></div>
+      </div>
+      <p class="auth-disclaimer">Development build · Environment capabilities require independent deployment validation</p>
+    </div>
+    <div class="auth-panel">
+      <div class="auth-box">
+        <div class="auth-panel-top"><span class="auth-badge">RESTRICTED ACCESS</span><span class="auth-panel-version">v0.1</span></div>
+        <h1 id="auth-title">Sign in</h1>
+        <p id="auth-description">Sign in to manage your GatewayCore environment.</p>
+        <form id="auth-form" class="auth-form">
+          <label for="auth-username">Username<input id="auth-username" name="username" autocomplete="username" required minlength="3" autofocus></label>
+          <label id="auth-email-row" for="auth-email" hidden>Administrator email<input id="auth-email" name="email" type="email" autocomplete="email"></label>
+          <label id="auth-provider-row" for="auth-provider" hidden>Sign-in method
+            <select id="auth-provider" name="provider">
+              <option value="local">Local administrator</option>
+              <option value="directory">Active Directory / LDAPS</option>
+            </select>
+          </label>
+          <label for="auth-password">Password<input id="auth-password" name="password" type="password" autocomplete="current-password" required minlength="16"></label>
+          <label id="auth-otp-row" for="auth-otp" hidden>Six-digit email code<input id="auth-otp" name="otp" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code"></label>
+          <p id="auth-message" role="alert" aria-live="assertive"></p>
+          <button id="auth-submit" class="primary" type="submit">Sign in</button>
+        </form>
+        <div class="auth-security"><span aria-hidden="true">◈</span><span>For authorized operators only. Administrative access must use an approved secure listener in production.</span></div>
+      </div>
+    </div>
+  </div>
+</section>
+<div class="shell" id="app-shell" hidden>
+  <aside class="sidebar" aria-label="Application navigation">
+    <div class="brand">
+      <div class="mark" aria-hidden="true">G</div>
+      <div><strong data-organization-name>GatewayCore</strong><small>CONTROL CENTER</small></div>
+    </div>
+    <div class="workspace-label"><span class="workspace-indicator" aria-hidden="true"></span> ON-PREMISES WORKSPACE <span class="workspace-version">v0.1</span></div>
+    <nav aria-label="Primary navigation">
+      <div class="nav-group" aria-label="Workspace"><h2 class="nav-group-title">Workspace</h2><button type="button" class="nav active" data-view="overview"><span class="nav-icon" aria-hidden="true">◉</span><span class="nav-text">Overview</span></button>
+<button type="button" class="nav" data-view="setup"><span class="nav-icon" aria-hidden="true">◫</span><span class="nav-text">Setup Center</span></button>
+<button type="button" class="nav" data-view="organization"><span class="nav-icon" aria-hidden="true">▤</span><span class="nav-text">Organization</span></button>
+<button type="button" class="nav" data-view="onboarding"><span class="nav-icon" aria-hidden="true">◇</span><span class="nav-text">Architecture & setup</span></button></div>
+<div class="nav-group" aria-label="Traffic & delivery"><h2 class="nav-group-title">Traffic & delivery</h2><button type="button" class="nav" data-view="routes"><span class="nav-icon" aria-hidden="true">⇄</span><span class="nav-text">Routes</span></button>
+<button type="button" class="nav" data-view="clusters"><span class="nav-icon" aria-hidden="true">▦</span><span class="nav-text">Clusters</span></button>
+<button type="button" class="nav" data-view="backends"><span class="nav-icon" aria-hidden="true">⬡</span><span class="nav-text">Backends</span></button>
+<button type="button" class="nav" data-view="health"><span class="nav-icon" aria-hidden="true">♡</span><span class="nav-text">Health checks</span></button>
+<button type="button" class="nav" data-view="metrics"><span class="nav-icon" aria-hidden="true">▥</span><span class="nav-text">HTTP metrics</span></button></div>
+<div class="nav-group" aria-label="Change & operations"><h2 class="nav-group-title">Change & operations</h2><button type="button" class="nav" data-view="approvals"><span class="nav-icon" aria-hidden="true">✓</span><span class="nav-text">Change approvals</span></button>
+<button type="button" class="nav" data-view="backups"><span class="nav-icon" aria-hidden="true">◷</span><span class="nav-text">Backups & audit</span></button>
+<button type="button" class="nav" data-view="fleet"><span class="nav-icon" aria-hidden="true">▣</span><span class="nav-text">Gateway fleet</span></button>
+<button type="button" class="nav" data-view="inventory"><span class="nav-icon" aria-hidden="true">▧</span><span class="nav-text">Machines & inventory</span></button></div>
+<div class="nav-group" aria-label="Platform"><h2 class="nav-group-title">Platform</h2><button type="button" class="nav" data-view="capabilities"><span class="nav-icon" aria-hidden="true">⚙</span><span class="nav-text">Capabilities</span></button>
+<button type="button" class="nav" data-view="featurematrix"><span class="nav-icon" aria-hidden="true">◇</span><span class="nav-text">Traffic Engine & modules</span></button></div>
+<div class="nav-group" aria-label="Access & security"><h2 class="nav-group-title">Access & security</h2><button type="button" class="nav" data-view="users"><span class="nav-icon" aria-hidden="true">♙</span><span class="nav-text">Admin accounts</span></button>
+<button type="button" class="nav" data-view="mail"><span class="nav-icon" aria-hidden="true">✉</span><span class="nav-text">Mail & OTP</span></button>
+<button type="button" class="nav" data-view="directory"><span class="nav-icon" aria-hidden="true">⌁</span><span class="nav-text">Active Directory</span></button></div>
+    </nav>
+    <div class="sidefoot"><span class="dot"></span> Local administration<br><span class="muted">Configuration updates require independent approval</span></div>
+  </aside>
+  <main id="main">
+    <header class="page-header">
+      <div class="page-heading">
+        <button id="page-back" class="ghost" type="button" hidden aria-label="Go back to previous page">← Back</button>
+        <div class="eyebrow">GATEWAY MANAGEMENT / CONTROL CENTER</div>
+        <h1 id="page-title">Overview</h1>
+        <p id="page-subtitle">L7 gateway configuration and status</p>
+      </div>
+      <div class="actions">
+        <span class="pill" id="gateway-pill" aria-live="polite">Checking gateway</span>
+        <span id="user-badge" class="chip" aria-label="Signed-in account"></span>
+        <button id="refresh" class="ghost" type="button">↻ Refresh</button>
+        <button id="logout" class="ghost" type="button">Sign out</button>
+        <button id="save" class="primary" type="button">Submit change request</button>
+      </div>
+    </header>
+    <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
+    <div class="content" id="content" tabindex="-1" aria-label="Selected management page"></div>
+    <footer>GatewayCore Control Center · Development release · Configuration review is not deployment approval</footer>
+  </main>
+</div>
+<dialog id="modal" aria-labelledby="modal-title" aria-describedby="modal-help">
+  <form method="dialog" id="editor">
+    <button type="button" id="modal-close" class="ghost" aria-label="Close editor">✕ Close</button>
+    <h2 id="modal-title">Edit</h2>
+    <p id="modal-help"></p>
+    <div id="modal-fields"></div>
+    <div class="modal-actions">
+      <button value="cancel" class="ghost">Cancel</button>
+      <button value="confirm" id="confirm" class="primary">Apply to draft</button>
+    </div>
+  </form>
+</dialog>
+<script src="/dashboard/app.js" defer></script>
+</body>
+</html>
