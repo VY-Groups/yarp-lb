@@ -17,6 +17,11 @@ const nav=[...html.matchAll(/data-view="([^"]+)"/g)].map(match=>match[1]);
 assert.equal(new Set(nav).size,nav.length,'navigation must not duplicate pages');
 assert.ok(nav.length>=19, 'all existing pages plus peer status must remain navigable');
 assert.ok(nav.includes('peers'));
+assert.match(html,/GatewayCore Control Center/);
+assert.match(js,/Sign in to GatewayCore/);
+assert.match(ts,/Sign in to GatewayCore/);
+assert.doesNotMatch(js,/YARP Control Center/,'customer-facing product naming must be consistent');
+
 assert.match(html,/aria-label="Primary navigation"/);
 assert.doesNotMatch(html,/style="/,'styles must remain in reviewed stylesheet');
 assert.ok(js.includes("aria-current"));
