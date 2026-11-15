@@ -16,6 +16,9 @@
     <Compile Include="RecoveryHealthGateTests.cs" />
     <Compile Include="../../../src/TrafficPolicies/RiseFallCounter.cs" Link="RiseFallCounter.cs" />
     <Compile Include="RiseFallTests.cs" />
+    <Compile Include="../../PeerStateProtocol.cs" Link="PeerStateProtocol.cs" />
+    <Compile Include="../../PeerSyncTransport.cs" Link="PeerSyncTransport.cs" />
+    <Compile Include="PeerSyncTests.cs" />
     <Compile Include="Program.cs" />
   </ItemGroup>
 </Project>
