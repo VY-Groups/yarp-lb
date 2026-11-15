@@ -28,21 +28,25 @@ def main():
         assert statuses == [503, 503], f"partition must fail closed, got {statuses}"
         print("PASS: disconnected shared quota returns 503 on both gateway processes")
         return
+    # Probe direct process health; this endpoint bypasses the proxy quota.
     for host in gateways:
-        for attempt in range(40):
+        for attempt in range(60):
             try:
-                code = request(host)
-                if code == 200:
-                    break
+                with urllib.request.urlopen(f"http://{host}:8080/gateway/health", timeout=3) as response:
+                    if response.status == 200:
+                        break
             except Exception:
                 pass
             time.sleep(1)
         else:
-            raise RuntimeError(f"{host} not ready for controlled quota test")
-    # Important: readiness probes above consumed two permits, so each test
-    # namespace must be reset before quota assertions.
-    # Instead use direct health API, which is not in the reverse proxy quota.
-    raise RuntimeError("Do not run quota sequence before isolated readiness reset")
+            raise RuntimeError(f"{host} failed to start")
+
+    statuses = []
+    for index in range(12):
+        statuses.append(request(gateways[index % 2]))
+    assert statuses.count(200) == 7, f"expected 7 globally admitted requests: {statuses}"
+    assert statuses.count(429) == 5, f"expected 5 globally rejected requests: {statuses}"
+    print("PASS: 2 real gateway processes share exactly 7 permits, 5 requests rejected")
 
 if __name__ == "__main__":
     main()
