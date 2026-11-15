@@ -354,7 +354,9 @@ function topologyInputUpdate(el:HTMLInputElement|HTMLSelectElement){if(!topology
 }
 $('content').addEventListener('input',e=>{const el=e.target as HTMLInputElement;if(el.matches('[data-setup-field],[data-setup-array]'))topologyInputUpdate(el)});
 $('content').addEventListener('change',e=>{const el=e.target as HTMLInputElement;if(el.matches('[data-setup-field],[data-setup-array]'))topologyInputUpdate(el)});
-document.querySelectorAll<HTMLButtonElement>('.nav').forEach(el=>el.onclick=()=>{const next=el.dataset.view||'overview';if(view===next)return;view=next;render()});$('page-back').onclick=()=>navigateBack();$('modal-close').onclick=()=>($('modal') as HTMLDialogElement).close();$('refresh').onclick=()=>void reload();$('save').onclick=()=>void save();$('logout').onclick=()=>void api('/admin/api/logout','POST',{}).then(()=>showLogin(false)).catch(e=>show(String(e),true));void initSession();
+document.querySelectorAll<HTMLButtonElement>('.nav').forEach(el=>el.onclick=()=>{const next=el.dataset.view||'overview';if(view===next)return;view=next;render()});$('page-back').onclick=()=>navigateBack();$('modal-close').onclick=()=>($('modal') as HTMLDialogElement).close();$('refresh').onclick=()=>void reload();$('save').onclick=()=>void save();$('logout').onclick=()=>{if(dirty&&!confirm('Sign out? Your unsubmitted configuration draft will be discarded.'))return;void api('/admin/api/logout','POST',{}).then(()=>showLogin(false)).catch(e=>show(String(e),true))};
+setInterval(()=>{if(!$('app-shell').hidden)void refreshGatewayReadiness()},30000);
+void initSession();
 
 async function initSession(){
   try {
@@ -389,7 +391,10 @@ function showLogin(first:boolean){authGeneration++;readinessGeneration++;gateway
  $('auth-message').textContent='';if(!first)void fetch('/admin/api/auth-methods').then(r=>r.json()).then(m=>{const x=$('auth-provider') as HTMLSelectElement;x.querySelectorAll<HTMLOptionElement>('option[value="directory"]').forEach(o=>{o.disabled=!m.activeDirectory;o.textContent=m.activeDirectory?'Active Directory / LDAPS':'Active Directory (not configured)'});}).catch(()=>{});}
 ($('auth-provider') as HTMLSelectElement).onchange=()=>{($('auth-password') as HTMLInputElement).minLength=($('auth-provider') as HTMLSelectElement).value==='directory'?1:16};
 ($('auth-form') as HTMLFormElement).onsubmit=async e=>{
- e.preventDefault();const mode=($('auth-form') as HTMLFormElement).dataset.mode;
+ e.preventDefault();
+ const submit=$('auth-submit') as HTMLButtonElement;
+ if(submit.disabled)return;
+ submit.disabled=true;($('auth-form') as HTMLFormElement).setAttribute('aria-busy','true');const mode=($('auth-form') as HTMLFormElement).dataset.mode;
  const username=($('auth-username') as HTMLInputElement).value.trim();
  const password=($('auth-password') as HTMLInputElement).value;
  const email=($('auth-email') as HTMLInputElement).value.trim();
@@ -398,6 +403,7 @@ function showLogin(first:boolean){authGeneration++;readinessGeneration++;gateway
    if(!r.authenticated)throw Error('Authentication was not completed');
    ($('auth-password') as HTMLInputElement).value='';await initSession();
  }catch(err){$('auth-message').textContent=String(err)}
+ finally{submit.disabled=false;($('auth-form') as HTMLFormElement).removeAttribute('aria-busy')}
 };
 async function inventory(){try{const items=await api('/admin/api/inventory');
  const rows=items.map((x:Obj)=>`<tr><td><b>${esc(x.name)}</b><div class="subtle mono">${esc(x.id)}</div></td><td>${esc(x.type)}</td><td class="mono">${esc(x.address)}</td><td>${esc(x.notes)}</td><td>${currentRole==='Viewer'?'—':actionBtn('Remove','inventory-delete',x.id,'danger-btn mini')}</td></tr>`).join('');
