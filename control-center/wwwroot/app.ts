@@ -80,6 +80,39 @@ async function featureMatrix(){
   $('content').innerHTML=`<div class="card"><h2>Traffic Engine & Platform Modules</h2><p class="subtle">Version 0.1. This is an authenticated, API-backed capability register, NOT a claim that every feature is deployed. Native policies are usable after approved configuration. Custom policies require Windows build and two-node traffic verification.</p><div class="healthbanner">IP-based hashing uses the incoming TCP peer IP. With firewall SNAT, different users may all appear identical. Do not use it before verifying the proxy chain. This software is HTTP L7; TCP/UDP, anycast, and authoritative DNS require separate infrastructure.</div><p><b>Policies:</b> ${esc((result.policies||[]).join(', '))}</p></div><div class="tablewrap"><table><thead><tr><th>Capability</th><th>Category</th><th>Implementation status</th><th>Engine</th><th>Constraint</th></tr></thead><tbody>${body}</tbody></table></div>`;
  }catch(e){show(String(e),true)}
 }
+
+async function peerSyncPage() {
+    if (view !== 'peers') return;
+    $('content').innerHTML = '<div class="card"><h2>Peer synchronization</h2><p class="subtle">Loading authenticated status…</p></div>';
+    try {
+        const s = await api('/admin/api/peer-sync/status');
+        if (view !== 'peers') return;
+        const active = !!s.enabled;
+        const current = active && !!s.recentExchange && !!s.remoteReportedInCurrentMinute;
+        const state = !active ? 'Not configured' : current ? 'Recent exchange observed' : 'No recent exchange';
+        const seen = s.lastAcceptedUtc ? new Date(s.lastAcceptedUtc).toLocaleString() : 'No accepted message';
+        const rows = [['Local node', s.localNode], ['Expected peer', s.remoteNode],
+            ['Last accepted message', seen], ['Expected interval', active ? String(s.expectedIntervalSeconds) + ' seconds' : '—'],
+            ['Current-minute remote snapshot', s.remoteReportedInCurrentMinute ? 'Available' : 'Missing / expired']];
+        $('content').innerHTML = \`<div class="toolbar"><div><h2>Peer synchronization</h2><p class="subtle">Authenticated counter exchange for this gateway. This is not a shared rate-limit authority.</p></div>\${actionBtn('Refresh', 'switch', 'peers')}</div>
+        <div class="card peer-status-card"><div><p class="subtle">PEER STATE</p><h2><span class="chip \${current ? 'good' : 'warn'}">\${esc(state)}</span></h2><p class="subtle">\${active ? 'Last accepted exchange and observed peer counters.' : 'No peer transport is configured; this is the safe default.'}</p></div><div><p class="subtle">Strict request admission</p><h3>\${esc(s.strictAdmission || 'Not reported')}</h3><p class="subtle">Peer telemetry never authorizes requests during a network partition.</p></div></div>
+        \${active ? \`<div class="stats peer-stat-grid">
+            <div class="card"><h3>Local identities</h3><div class="stat-number">\${esc(s.localIdentities)}</div><div class="stat-desc">\${esc(s.localRequests)} local request attempts</div></div>
+            <div class="card"><h3>Remote identities</h3><div class="stat-number">\${esc(s.remoteIdentities)}</div><div class="stat-desc">\${esc(s.remoteRequests)} remote request attempts</div></div>
+            <div class="card"><h3>Remote sequence</h3><div class="stat-number">\${esc(s.remoteSequence)}</div><div class="stat-desc">Current minute</div></div>
+            <div class="card"><h3>Identity limit</h3><div class="stat-number">\${esc(s.trackedIdentityLimit)}</div><div class="stat-desc">Bounded per-node tracking</div></div>
+        </div><div class="card card-spaced"><h2>Exchange diagnostics</h2>
+        \${rows.map(([key, val]) => \`<div class="rowline"><b>\${esc(key)}</b><span>\${esc(val ?? '—')}</span></div>\`).join('')}</div>\`
+        : '<div class="card card-spaced"><h2>Optional feature disabled</h2><p class="subtle">Configure reciprocally trusted HTTPS endpoints and secret storage before enabling peer telemetry.</p></div>'}
+        <div class="healthbanner">Best-effort status only. No proof of distributed consensus, session or stick-table parity, physical VIP failover, or global admission consistency.</div>\`;
+    } catch (e) {
+        if (view === 'peers') {
+            $('content').innerHTML = '<div class="card"><h2>Status unavailable</h2><p class="subtle">No peer status is being claimed.</p></div>';
+            show('Peer status unavailable: ' + String(e), true);
+        }
+    }
+}
+
 function capabilities(){const categories=[
  ['Traffic routing','Hostnames, paths, methods, request headers, query matching, route ordering and per-route authorization/rate-limit policy'],
  ['Load balancing','Round Robin, Least Requests, Power of Two Choices, Random, First Alphabetical'],
@@ -168,7 +201,8 @@ function render(){
  if(view!==lastRenderedView){if(!restoringNavigation)viewHistory.push(lastRenderedView);lastRenderedView=view}
  restoringNavigation=false;
  $('page-back').hidden=view==='setup'&&viewHistory.length===0;
- const names:Obj={organization:'Organization profile',setup:'Setup Center · 0.1',onboarding:'Architecture & setup',overview:'Overview',routes:'Routing rules',clusters:'Backend clusters',backends:'Backend management',health:'Health and diagnostics',backups:'Backups and audit',inventory:'Infrastructure inventory',users:'Administrators and roles',mail:'Mail & OTP',directory:'Active Directory (LDAPS)',approvals:'Change approvals',metrics:'Gateway metrics',fleet:'Gateway fleet',capabilities:'YARP capabilities',featurematrix:'Traffic Engine & platform modules'};$('page-title').textContent=names[view];$('page-subtitle').textContent=dirty?'Unsaved configuration changes — submit for approval':'Control and inspect your gateway';$('gateway-pill').textContent='● Gateway online';$('save').textContent=dirty?'● Submit change request':'Submit change request';document.querySelectorAll<HTMLButtonElement>('.nav').forEach(n=>n.classList.toggle('active',n.dataset.view===view));const pages:Obj={overview,routes,clusters,backends,health,capabilities};updateTopologyNavigation();if(view==='organization')void organizationPage();else if(view==='featurematrix')void featureMatrix();else if(view==='setup')void setupPage();else if(view==='onboarding')$('content').innerHTML=topologyPage();else if(view==='approvals')void approvals();else if(view==='metrics')void metrics();else if(view==='backups')void backups();else if(view==='inventory')void inventory();else if(view==='fleet')void fleet();else if(view==='users')void users();else if(view==='mail')void mailPage();else if(view==='directory')void directoryPage();else $('content').innerHTML=pages[view]();}
+ const names:Obj={organization:'Organization profile',setup:'Setup Center · 0.1',onboarding:'Architecture & setup',overview:'Overview',routes:'Routing rules',clusters:'Backend clusters',backends:'Backend management',health:'Health and diagnostics',backups:'Backups and audit',inventory:'Infrastructure inventory',users:'Administrators and roles',mail:'Mail & OTP',directory:'Active Directory (LDAPS)',approvals:'Change approvals',metrics:'Gateway metrics',fleet:'Gateway fleet',capabilities:'YARP capabilities',featurematrix:'Traffic Engine & platform modules',peers:'Peer synchronization'};$('page-title').textContent=names[view];$('page-subtitle').textContent=dirty?'Unsaved configuration changes — submit for approval':'Control and inspect your gateway';$('gateway-pill').textContent='● Control plane responding';$('save').textContent=dirty?'● Submit change request':'Submit change request';document.querySelectorAll<HTMLButtonElement>('.nav').forEach(n=>n.classList.toggle('active',n.dataset.view===view));const pages:Obj={overview,routes,clusters,backends,health,capabilities};updateTopologyNavigation();if(view==='organization')void organizationPage();else if(view==='featurematrix')void featureMatrix();else if(view==='setup')void setupPage();else if(view==='onboarding')$('content').innerHTML=topologyPage();else if(view==='approvals')void approvals();else if(view==='metrics')void metrics();
+    else if (view === 'peers') void peerSyncPage();else if(view==='backups')void backups();else if(view==='inventory')void inventory();else if(view==='fleet')void fleet();else if(view==='users')void users();else if(view==='mail')void mailPage();else if(view==='directory')void directoryPage();else $('content').innerHTML=pages[view]();}
 type Field={name:string;label:string;value:string;kind?:string;options?:string[];optional?:boolean;minLength?:number};
 function modal(title:string,help:string,fields:Field[],cb:(vals:Obj)=>void,confirmLabel='Apply to draft'){$('confirm').textContent=confirmLabel;$('modal-title').textContent=title;$('modal-help').textContent=help;$('modal-fields').innerHTML=fields.map(f=>`<div class="field"><label for="f-${esc(f.name)}">${esc(f.label)}</label>${f.options?`<select id="f-${esc(f.name)}">${f.options.map(o=>`<option value="${esc(o)}" ${o===f.value?'selected':''}>${esc(o)}</option>`).join('')}</select>`:`<input id="f-${esc(f.name)}" value="${esc(f.value)}" type="${f.kind||'text'}" autocomplete="off" ${f.optional?'':'required'} ${f.minLength?`minlength="${f.minLength}"`:''}>`}</div>`).join('');const dlg=$('modal') as HTMLDialogElement;const form=$('editor') as HTMLFormElement;form.onsubmit=e=>{if((e as SubmitEvent).submitter?.getAttribute('value')==='cancel')return; e.preventDefault();const vals:Obj={};for(const f of fields)vals[f.name]=($('f-'+f.name) as HTMLInputElement).value;try{cb(vals);dlg.close()}catch(err){show(String(err),true)}};dlg.showModal()}
 function validId(s:string){return /^[A-Za-z0-9_-]{1,80}$/.test(s)}
