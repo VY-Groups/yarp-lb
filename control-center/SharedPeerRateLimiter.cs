@@ -74,7 +74,7 @@ public sealed class SharedPeerRateLimiter : IDisposable
             throw new InvalidOperationException("GATEWAY_PROXY_SHARED_NAMESPACE contains invalid characters");
         var config = ConfigurationOptions.Parse(endpoint);
         // Require verified TLS; do not accept self-signed or certificate bypass callbacks.
-        if (!config.Ssl || config.EndPoints.Count != 1 || config.TieBreaker != "__Booksleeve_TieBreak")
+        if (!config.Ssl || config.EndPoints.Count != 1)
             // Only explicit single-server configuration is supported in this revision.
             throw new InvalidOperationException("Shared Redis requires a single TLS endpoint (ssl=true)");
         config.AbortOnConnectFail = true;
