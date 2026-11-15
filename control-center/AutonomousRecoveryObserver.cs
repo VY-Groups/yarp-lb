@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Hosting;
+using Yarp.ReverseProxy;
 using Microsoft.Extensions.Logging;
 using Yarp.ReverseProxy.Health;
 using Yarp.ReverseProxy.Model;
