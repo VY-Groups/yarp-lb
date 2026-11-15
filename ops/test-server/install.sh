@@ -41,8 +41,24 @@ if [[ "$ready" != "1" ]]; then
   docker compose -f compose.yml logs --tail=80 gateway-a gateway-b ingress
   echo 'NO-GO: gateway did not become ready' >&2; exit 1
 fi
-curl --noproxy '*' --fail --silent --show-error --cacert certs/server.crt \
-  https://127.0.0.1:18443/api/identity >/dev/null
+# HTTP and HTTPS ingress listeners become usable independently. The HTTP
+# success above is not proof that the TLS listener has finished warmup.
+# Retry only bounded startup transients; never disable certificate validation.
+https_ready=0
+for attempt in $(seq 1 60); do
+  if curl --noproxy '*' --fail --silent --show-error --max-time 3 \
+    --cacert certs/server.crt https://127.0.0.1:18443/api/identity \
+    >/dev/null 2>&1; then
+    https_ready=1; break
+  fi
+  sleep 1
+done
+if [[ "$https_ready" != "1" ]]; then
+  docker compose -f compose.yml ps
+  docker compose -f compose.yml logs --tail=80 gateway-a gateway-b ingress
+  echo 'NO-GO: trusted HTTPS gateway did not become ready' >&2
+  exit 1
+fi
 for url in /dashboard /gateway/metrics; do
   status=$(curl --noproxy '*' -s -o /dev/null -w '%{http_code}' \
     "http://127.0.0.1:18080$url")
