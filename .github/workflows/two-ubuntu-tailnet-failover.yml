@@ -1,0 +1,250 @@
+name: Manual two-host Ubuntu failover over encrypted Tailscale overlay
+on:
+  pull_request:
+    paths:
+      - "tests/TwoUbuntu/compose.tailnet.yml"
+      - "tests/TwoUbuntu/wait_for_artifact.sh"
+      - "tests/TwoUbuntu/create_overlay_ingress.py"
+      - "tests/TwoUbuntu/check_overlay_failover.py"
+      - ".github/workflows/two-ubuntu-tailnet-failover.yml"
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  contracts:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate scripts without accessing a Tailnet
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash -n tests/TwoUbuntu/wait_for_artifact.sh
+          python3 -m py_compile tests/TwoUbuntu/create_overlay_ingress.py tests/TwoUbuntu/check_overlay_failover.py
+          python3 - <<'PY'
+          import sys
+          sys.path.insert(0,"tests/TwoUbuntu")
+          from create_overlay_ingress import build
+          assert "server remote_a 100.64.0.1:18080 check" in build("100.64.0.1","100.64.0.2")
+          for invalid in ["8.8.8.8","127.0.0.1"]:
+              try: build(invalid,"100.64.0.2")
+              except ValueError: continue
+              raise AssertionError("public/loopback ingress target must be rejected")
+          print("PASS: overlay HAProxy target allowlist")
+          PY
+  node-a:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 28
+    steps:
+      - uses: actions/checkout@v4
+      - name: Join ephemeral private tailnet with scoped CI tag
+        uses: tailscale/github-action@v4
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+      - name: Capture private-only tailnet listener address
+        shell: bash
+        run: |
+          set -euo pipefail
+          ip="$(tailscale ip -4)"
+          [[ "$ip" == 100.* ]] || { echo "No approved Tailscale IPv4" >&2; exit 1; }
+          echo "CI_TAILNET_IP=$ip" >> "$GITHUB_ENV"
+      - name: Run real GatewayCore and website origins on Ubuntu VM A
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker compose -f ops/test-server/compose.yml -f tests/TwoUbuntu/compose.tailnet.yml \
+            up -d --build backend-a backend-b gateway-a
+          for ((attempt=0; attempt<60; attempt++)); do
+            if curl --noproxy '*' -fsS --max-time 2 "http://$CI_TAILNET_IP:18080/api/identity" >/dev/null 2>&1; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Node A gateway never became ready" >&2
+          exit 1
+      - name: Publish only endpoint IP and exact source SHA for this run
+        shell: bash
+        run: |
+          mkdir -p artifacts/endpoint-a
+          printf '%s' "$CI_TAILNET_IP" > artifacts/endpoint-a/ip.txt
+          printf '%s' "$GITHUB_SHA" > artifacts/endpoint-a/sha.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: endpoint-a
+          path: artifacts/endpoint-a/
+          retention-days: 1
+      - name: Await peer-triggered gateway fault
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash tests/TwoUbuntu/wait_for_artifact.sh request-stop-a artifacts/request-stop-a
+      - name: Kill only disposable Ubuntu A gateway container
+        shell: bash
+        run: docker compose -f ops/test-server/compose.yml -f tests/TwoUbuntu/compose.tailnet.yml kill -s SIGKILL gateway-a
+      - name: Acknowledge fault through same-run artifacts
+        run: |
+          mkdir -p artifacts/a-stopped
+          printf '%s' "$GITHUB_SHA" > artifacts/a-stopped/sha.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: a-stopped
+          path: artifacts/a-stopped/
+          retention-days: 1
+      - name: Await request for recovering Ubuntu A gateway
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash tests/TwoUbuntu/wait_for_artifact.sh request-restart-a artifacts/request-restart-a
+      - name: Restart same gateway and verify its health
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker compose -f ops/test-server/compose.yml -f tests/TwoUbuntu/compose.tailnet.yml \
+            up -d --no-build gateway-a
+          for ((attempt=0; attempt<50; attempt++)); do
+            if curl --noproxy '*' -fsS --max-time 2 "http://$CI_TAILNET_IP:18080/api/identity" >/dev/null 2>&1; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Node A failed to recover" >&2
+          exit 1
+      - name: Acknowledge gateway A recovery
+        run: |
+          mkdir -p artifacts/a-restarted
+          printf '%s' "$GITHUB_SHA" > artifacts/a-restarted/sha.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: a-restarted
+          path: artifacts/a-restarted/
+          retention-days: 1
+      - name: Await completion of remote ingress verification
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash tests/TwoUbuntu/wait_for_artifact.sh b-finished artifacts/b-finished
+      - name: Teardown runner A
+        if: always()
+        run: docker compose -f ops/test-server/compose.yml -f tests/TwoUbuntu/compose.tailnet.yml down -v --remove-orphans || true
+  node-b:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 28
+    steps:
+      - uses: actions/checkout@v4
+      - name: Join same restricted ephemeral tailnet
+        uses: tailscale/github-action@v4
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+      - name: Capture private-only listener address
+        shell: bash
+        run: |
+          set -euo pipefail
+          ip="$(tailscale ip -4)"
+          [[ "$ip" == 100.* ]] || exit 1
+          echo "CI_TAILNET_IP=$ip" >> "$GITHUB_ENV"
+      - name: Run real GatewayCore and website origins on independent Ubuntu B VM
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker compose -f ops/test-server/compose.yml -f tests/TwoUbuntu/compose.tailnet.yml \
+            up -d --build backend-a backend-b gateway-a
+          for ((attempt=0; attempt<60; attempt++)); do
+            if curl --noproxy '*' -fsS --max-time 2 "http://$CI_TAILNET_IP:18080/api/identity" >/dev/null 2>&1; then exit 0; fi
+            sleep 1
+          done
+          echo "Node B gateway never became ready" >&2
+          exit 1
+      - name: Discover A from current-run artifact, never a public IP
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          bash tests/TwoUbuntu/wait_for_artifact.sh endpoint-a artifacts/remote-a
+          [[ "$(cat artifacts/remote-a/sha.txt)" == "$GITHUB_SHA" ]] || exit 1
+          echo "REMOTE_A=$(cat artifacts/remote-a/ip.txt)" >> "$GITHUB_ENV"
+      - name: Install isolated HAProxy ingress and verify BOTH VM gateways before failure
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tests/TwoUbuntu/create_overlay_ingress.py \
+            --a "$REMOTE_A" --b "$CI_TAILNET_IP" --out artifacts/ha/ingress.cfg
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq haproxy
+          sudo haproxy -c -f artifacts/ha/ingress.cfg
+          haproxy -db -f artifacts/ha/ingress.cfg > artifacts/ha/haproxy.log 2>&1 &
+          for ((attempt=0; attempt<30; attempt++)); do
+            if curl --noproxy '*' -fsS --max-time 2 "http://$REMOTE_A:18080/api/identity" >/dev/null 2>&1 &&
+               curl --noproxy '*' -fsS --max-time 2 "http://127.0.0.1:19080/api/identity" >/dev/null 2>&1; then break; fi
+            sleep 2
+          done
+          curl --noproxy '*' -fsS --max-time 3 "http://$REMOTE_A:18080/api/identity" >/dev/null
+          curl --noproxy '*' -fsS --max-time 3 "http://127.0.0.1:19080/api/identity" >/dev/null
+          echo "PASS: two separate Ubuntu VMs reachable over encrypted tailnet"
+      - name: Request remote A SIGKILL with same-run artifact
+        run: |
+          mkdir -p artifacts/request-stop-a
+          printf '%s' "$GITHUB_SHA" > artifacts/request-stop-a/sha.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: request-stop-a
+          path: artifacts/request-stop-a/
+          retention-days: 1
+      - name: Await confirmed A failure
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash tests/TwoUbuntu/wait_for_artifact.sh a-stopped artifacts/a-stopped
+      - name: Measure absolute failures and steady-state recovery through real ingress
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tests/TwoUbuntu/check_overlay_failover.py \
+            --ingress http://127.0.0.1:19080/api/identity \
+            --failed "http://$REMOTE_A:18080/api/identity" \
+            --healthy "http://$CI_TAILNET_IP:18080/api/identity" \
+            --out artifacts/ha/cloud-vm-overlay-failover.json
+      - name: Request remote A process restart
+        run: |
+          mkdir -p artifacts/request-restart-a
+          printf '%s' "$GITHUB_SHA" > artifacts/request-restart-a/sha.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: request-restart-a
+          path: artifacts/request-restart-a/
+          retention-days: 1
+      - name: Await A restart and confirm ingress availability
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          bash tests/TwoUbuntu/wait_for_artifact.sh a-restarted artifacts/a-restarted
+          curl --noproxy '*' -fsS --max-time 3 "http://$REMOTE_A:18080/api/identity" >/dev/null
+          for ((attempt=0; attempt<20; attempt++)); do
+            curl --noproxy '*' -fsS --max-time 3 "http://127.0.0.1:19080/api/identity" >/dev/null
+            sleep 0.2
+          done
+      - name: Signal completion so A can terminate safely
+        run: |
+          mkdir -p artifacts/b-finished
+          printf '%s' "$GITHUB_SHA" > artifacts/b-finished/sha.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: b-finished
+          path: artifacts/b-finished/
+          retention-days: 1
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: two-ubuntu-tailnet-ha-evidence
+          path: artifacts/ha/
+          retention-days: 14
+      - name: Teardown runner B
+        if: always()
+        run: docker compose -f ops/test-server/compose.yml -f tests/TwoUbuntu/compose.tailnet.yml down -v --remove-orphans || true
