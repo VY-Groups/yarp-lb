@@ -1,0 +1,34 @@
+name: EC2 optional-backend prerequisite gate contracts
+on:
+  pull_request:
+    paths:
+      - "tests/EC2Functional/gate_targets.sh"
+      - "tests/EC2Functional/test_gate_targets.py"
+      - "tests/EC2Functional/ec2_functional.py"
+      - "tests/EC2Functional/test_ec2_functional.py"
+      - ".github/workflows/ec2-real-control-center.yml"
+      - ".github/workflows/ec2-gate-contracts.yml"
+  push:
+    branches: [main]
+    paths:
+      - "tests/EC2Functional/gate_targets.sh"
+      - "tests/EC2Functional/test_gate_targets.py"
+      - "tests/EC2Functional/ec2_functional.py"
+      - "tests/EC2Functional/test_ec2_functional.py"
+      - ".github/workflows/ec2-real-control-center.yml"
+      - ".github/workflows/ec2-gate-contracts.yml"
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  offline-contracts:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run deterministic EC2 harness and target gate contracts without network calls
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m unittest discover -s tests/EC2Functional -p 'test_*.py' -v
+          python3 -m py_compile tests/EC2Functional/ec2_functional.py
