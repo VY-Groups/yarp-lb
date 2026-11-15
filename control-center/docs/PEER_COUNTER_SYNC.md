@@ -19,3 +19,9 @@ A sender emits one bounded snapshot per interval, signed by HMAC-SHA256 over sen
 **Availability/consistency:** best-effort telemetry gossip can diverge during partitions. It has no quorum, replay of CA requests, external mutation or leader election, and MUST NEVER be used to enforce a strict global quota. To enforce an atomic shared limit across nodes, use the independent opt-in `SharedPeerRateLimiter` single Redis writer. Its own fail-closed 503 behavior on disconnect remains unchanged. Asynchronous Redis replica promotion can also lose writes and is NOT certified for hard limits.
 
 The signed protocol has deterministic unit tests; a full production mTLS/PKI peer session, independent-host fault isolation and on-prem NIC throughput remain unverified until measured. Passing software CI is not production permission.
+
+## Process-restart resynchronization
+
+The signed snapshot now carries a process boot-epoch (UTC milliseconds), plus the per-minute sequence. Within one epoch and minute, sequence and counters must progress monotonically; after a peer restarts with a strictly newer boot epoch, the receiving peer can intentionally reset that sender's counters and resume normal gossip. Older epochs are rejected even if they present a higher sequence. Epoch changes are never permission to use gossip for strict admission.
+
+**Clock requirement:** Restart epochs rely on non-regressing host clocks. If a node's clock moves backward before an earlier accepted boot epoch, synchronization intentionally fails closed until the issue is corrected. Tomorrow's live drill should check NTP time synchronization, process restarts while requests continue, delayed/duplicate peer frames, and recovery within the minute. The in-memory signed protocol remains two-node only and does not implement HAProxy's multi-table wire protocol or peer full-state learning.
