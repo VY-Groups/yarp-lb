@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Text;
 using System.Text.Json;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 
 /// <summary>
 /// A strict opt-in, one-peer HTTPS signed transport for eventually consistent
