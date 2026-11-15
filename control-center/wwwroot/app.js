@@ -347,8 +347,10 @@ async function setupFreeze(frozen) {
 function updateTopologyNavigation() { const finished = topologyResponse?.status === 'design-confirmed'; const prereqViews = ['organization', 'setup', 'onboarding', 'users', 'mail', 'directory']; document.querySelectorAll('.nav').forEach(b => { const dest = b.dataset.view || ''; const adminOnly = ['users', 'mail', 'directory'].includes(dest); b.hidden = (!finished && !prereqViews.includes(dest)) || (dest === 'fleet' && finished && topologyResponse?.plan?.mode === 'standalone') || (adminOnly && currentRole !== 'Administrator'); }); $('save').hidden = !finished || currentRole === 'Viewer' || view === 'onboarding' || view === 'setup'; }
 function render() {
     if (view !== lastRenderedView) {
-        if (!restoringNavigation)
+        if (!restoringNavigation) {
             viewHistory.push(lastRenderedView);
+            if (viewHistory.length > 24) viewHistory.shift();
+        }
         lastRenderedView = view;
     }
     restoringNavigation = false;
@@ -358,7 +360,7 @@ function render() {
     $('page-subtitle').textContent = dirty ? 'Unsaved configuration changes — submit for approval' : 'Control and inspect your gateway';
     $('gateway-pill').textContent = '● Control plane responding';
     $('save').textContent = dirty ? '● Submit change request' : 'Submit change request';
-    document.querySelectorAll('.nav').forEach(n => n.classList.toggle('active', n.dataset.view === view));
+    document.querySelectorAll('.nav').forEach(n => { const selected = n.dataset.view === view; n.classList.toggle('active', selected); if (selected) n.setAttribute('aria-current','page'); else n.removeAttribute('aria-current'); });
     const pages = { overview, routes, clusters, backends, health, capabilities };
     updateTopologyNavigation();
     if (view === 'organization')
@@ -864,6 +866,7 @@ async function initSession() {
 function showLogin(first) {
     csrf = '';
     currentRole = '';
+    view = 'setup'; viewHistory = []; lastRenderedView = 'setup';
     $('app-shell').hidden = true;
     $('auth-screen').hidden = false;
     $('auth-title').textContent = first ? 'Create initial administrator' : 'Sign in to YARP Control Center';
