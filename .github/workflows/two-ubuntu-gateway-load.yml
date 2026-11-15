@@ -72,6 +72,11 @@ jobs:
             sleep 1
           done
           if [[ "$ready" -ne 1 ]]; then
+            echo 'Gateway port binding and unfiltered HTTP diagnostics:' >&2
+            docker compose -f ops/test-server/compose.yml -f tests/TwoUbuntu/compose.one-gateway.yml ps >&2 || true
+            docker compose -f ops/test-server/compose.yml -f tests/TwoUbuntu/compose.one-gateway.yml port gateway-a 8080 >&2 || true
+            curl --noproxy '*' -si --max-time 3 http://127.0.0.1:18080/gateway/health >&2 || true
+            curl --noproxy '*' -si --max-time 3 http://127.0.0.1:18080/api/identity >&2 || true
             docker compose -f ops/test-server/compose.yml -f tests/TwoUbuntu/compose.one-gateway.yml \
               logs --tail 80 gateway-a backend-a backend-b
             exit 1
