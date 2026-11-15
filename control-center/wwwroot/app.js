@@ -76,7 +76,8 @@ async function api(url, method = 'GET', body) { const opts = { method, credentia
     opts.headers['Content-Type'] = 'application/json';
     opts.headers['X-CSRF-Token'] = csrf;
     opts.body = JSON.stringify(body ?? {});
-} const generation = authGeneration; const r = await fetch(url, opts); if (generation !== authGeneration) throw Error('Management session changed. Outdated response ignored.'); if (r.status === 401) {
+} const generation = authGeneration; const r = await fetch(url, opts); if (generation !== authGeneration)
+    throw Error('Management session changed. Outdated response ignored.'); if (r.status === 401) {
     if (!['/admin/api/session', '/admin/api/login', '/admin/api/bootstrap', '/admin/api/login/verify'].includes(url)) {
         if (!$('app-shell').hidden) {
             showLogin(false);
@@ -93,7 +94,8 @@ async function api(url, method = 'GET', body) { const opts = { method, credentia
     }
     catch { }
     throw Error(e);
-} const json = await r.json(); if (generation !== authGeneration) throw Error('Management session changed. Outdated response ignored.'); return json; }
+} const json = await r.json(); if (generation !== authGeneration)
+    throw Error('Management session changed. Outdated response ignored.'); return json; }
 async function reload() { if (dirty && !confirm('Discard unsaved changes and reload?'))
     return; try {
     data = await api('/admin/api/state');
@@ -131,8 +133,11 @@ function destinationRows() { const arr = []; for (const cid of keys(data.cluster
     const [cid, did] = id.split('::');
     arr.push({ cid, did, address: data.disabled[id].Address, enabled: false });
 } return arr; }
-function summary() { const ready = !gatewayReadyWarn && gatewayReadyLabel.includes('Backend readiness observed'); const status = ready ? 'BACKEND READY' : gatewayReadyLabel.includes('No healthy backend reported') ? 'NO BACKEND' : 'NOT VERIFIED';
-    return `<div class="stats"><div class="card"><h3>Backend readiness</h3><div class="stat-number ${ready ? 'green' : 'yellow'}">${status}</div><div class="stat-desc">${ready ? 'At least one configured destination ready; not full fleet health' : esc(gatewayReadyLabel.replace('● ', ''))}</div></div><div class="card"><h3>Configured routes</h3><div class="stat-number">${keys(data.routes).length}</div><div class="stat-desc">Saved / draft HTTP routing rules</div></div><div class="card"><h3>Backend clusters</h3><div class="stat-number">${keys(data.clusters).length}</div><div class="stat-desc">Independent balancing policies</div></div><div class="card"><h3>Enabled destinations</h3><div class="stat-number">${destinationRows().filter(x => x.enabled).length}</div><div class="stat-desc">Configured, not necessarily healthy</div></div></div>`; }
+function summary() {
+    const ready = !gatewayReadyWarn && gatewayReadyLabel.includes('Backend readiness observed');
+    const status = ready ? 'BACKEND READY' : gatewayReadyLabel.includes('No healthy backend reported') ? 'NO BACKEND' : 'NOT VERIFIED';
+    return `<div class="stats"><div class="card"><h3>Backend readiness</h3><div class="stat-number ${ready ? 'green' : 'yellow'}">${status}</div><div class="stat-desc">${ready ? 'At least one configured destination ready; not full fleet health' : esc(gatewayReadyLabel.replace('● ', ''))}</div></div><div class="card"><h3>Configured routes</h3><div class="stat-number">${keys(data.routes).length}</div><div class="stat-desc">Saved / draft HTTP routing rules</div></div><div class="card"><h3>Backend clusters</h3><div class="stat-number">${keys(data.clusters).length}</div><div class="stat-desc">Independent balancing policies</div></div><div class="card"><h3>Enabled destinations</h3><div class="stat-number">${destinationRows().filter(x => x.enabled).length}</div><div class="stat-desc">Configured, not necessarily healthy</div></div></div>`;
+}
 function overview() { let routes = keys(data.routes).slice(0, 5).map(id => `<div class="rowline"><div><b>${esc(id)}</b><div class="subtle mono">${esc(data.routes[id]?.Match?.Path || '—')}</div></div><span class="chip">${esc(data.routes[id]?.ClusterId || '—')}</span></div>`).join('') || '<div class="empty">No routes configured</div>'; let nodes = destinationRows().slice(0, 6).map(d => `<div class="rowline"><div><b>${esc(d.did)}</b><div class="subtle mono">${esc(d.address)}</div></div><span class="chip ${d.enabled ? '' : 'bad'}">${d.enabled ? 'Configured' : 'Disabled'}</span></div>`).join('') || '<div class="empty">No destinations configured</div>'; return summary() + `<div class="grid2"><div class="card"><div class="flex"><h2 class="section-title">Traffic architecture</h2><span class="chip">Design view</span></div><div class="arch"><div class="archnode">Clients / Public & internal ingress</div><div class="arrow">↓</div><div class="archnode">Firewall / upstream HA VIP</div><div class="arrow">↓</div><div class="archnode accent">${esc(topologyModeName(topologyResponse?.plan?.mode || 'standalone'))} (design topology)</div><div class="arrow">↓</div><div class="twonodes"><div class="archnode">Backend node 01</div><div class="archnode">Backend node 02</div></div><div class="arrow">↓</div><div class="archnode">Application-specific data services (optional)</div></div><div class="healthbanner">This gateway is one running instance. The onboarding design is metadata, not proof that a gateway fleet, VIP or backend is healthy.</div></div><div><div class="card"><h2 class="section-title">Route snapshot</h2>${routes}${actionBtn('Manage routes', 'switch', 'routes')}</div><div class="card card-spaced"><h2 class="section-title">Destinations</h2>${nodes}${actionBtn('Manage backends', 'switch', 'backends')}</div></div></div>`; }
 function routes() { const rows = keys(data.routes).map(id => { const r = data.routes[id]; return `<tr><td><b>${esc(id)}</b></td><td class="mono">${esc((r.Match?.Hosts || []).join(', ') || 'Any host')}</td><td class="mono">${esc(r.Match?.Path)}</td><td>${esc(r.ClusterId)}</td><td>${actionBtn('Edit', 'route-edit', id)} ${actionBtn('Advanced', 'route-advanced', id)} ${actionBtn('Delete', 'route-delete', id, 'danger-btn mini')}</td></tr>`; }).join(''); return `<div class="toolbar"><div><h2>Routes</h2><p class="subtle">Map incoming host/path matches to clusters.</p></div>${actionBtn('+ Add route', 'route-add', '')}</div><div class="tablewrap"><table><thead><tr><th>Route ID</th><th>Hosts</th><th>Path</th><th>Cluster</th><th>Actions</th></tr></thead><tbody>${rows || '<tr><td colspan="5" class="empty">No routes configured</td></tr>'}</tbody></table></div>`; }
 function clusters() { const rows = keys(data.clusters).map(id => { const c = data.clusters[id]; return `<tr><td><b>${esc(id)}</b></td><td>${esc(c.LoadBalancingPolicy || 'Default')}</td><td>${keys(c.Destinations || {}).length}</td><td>${c.HealthCheck?.Active?.Enabled ? '<span class="chip good">Enabled</span>' : '<span class="chip">Disabled</span>'}</td><td>${actionBtn('Edit', 'cluster-edit', id)} ${actionBtn('Advanced', 'cluster-advanced', id)} ${actionBtn('Delete', 'cluster-delete', id, 'danger-btn mini')}</td></tr>`; }).join(''); return `<div class="toolbar"><div><h2>Clusters</h2><p class="subtle">Balance and health-check each application separately.</p></div>${actionBtn('+ Add cluster', 'cluster-add', '')}</div><div class="tablewrap"><table><thead><tr><th>Cluster</th><th>Policy</th><th>Active backends</th><th>Health checks</th><th>Actions</th></tr></thead><tbody>${rows || '<tr><td colspan="5" class="empty">No clusters configured</td></tr>'}</tbody></table></div>`; }
@@ -867,11 +872,8 @@ $('page-back').onclick = () => navigateBack();
 $('modal-close').onclick = () => $('modal').close();
 $('refresh').onclick = () => void reload();
 $('save').onclick = () => void save();
-$('logout').onclick = () => {
-    if (dirty && !confirm('Sign out? Your unsubmitted configuration draft will be discarded.'))
-        return;
-    void api('/admin/api/logout', 'POST', {}).then(() => showLogin(false)).catch(e => show(String(e), true));
-};
+$('logout').onclick = () => { if (dirty && !confirm('Sign out? Your unsubmitted configuration draft will be discarded.'))
+    return; void api('/admin/api/logout', 'POST', {}).then(() => showLogin(false)).catch(e => show(String(e), true)); };
 setInterval(() => { if (!$('app-shell').hidden)
     void refreshGatewayReadiness(); }, 30000);
 void initSession();
