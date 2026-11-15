@@ -10,10 +10,12 @@ import urllib.request
 import urllib.error
 from pathlib import Path
 
+_direct_http = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
 def get(url):
     started=time.monotonic()
     try:
-        with urllib.request.urlopen(url,timeout=3) as resp:
+        with _direct_http.open(url,timeout=3) as resp:
             body=resp.read()
             return (resp.status, len(body), (time.monotonic()-started)*1000)
     except (urllib.error.URLError,TimeoutError,OSError) as error:
