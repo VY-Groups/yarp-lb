@@ -125,3 +125,5 @@ await ProxyConcurrencyTests.RunAsync();
 PeerRateTableTests.Run();
 
 RecoveryTransitionTests.Run();
+
+RiseFallTests.Run();
