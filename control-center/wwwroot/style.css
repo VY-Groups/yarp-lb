@@ -218,3 +218,15 @@ dialog{border-color:#4a607a;box-shadow:0 24px 85px rgba(0,0,0,.75)}
 @media(prefers-reduced-motion:reduce){
   *,*::before,*::after{scroll-behavior:auto!important;animation:none!important;transition:none!important}
 }
+
+/* Read-only peer sync diagnostics use the same operator cards as other pages. */
+.peer-status-card{display:grid;grid-template-columns:minmax(0,1.3fr) minmax(260px,.7fr);gap:28px;align-items:center;background:linear-gradient(135deg,#17323a,#132139 65%)}
+.peer-status-card>div+div{border-left:1px solid #35546a;padding-left:28px}
+.peer-status-card h2{margin:8px 0}
+.peer-status-card h3{font-size:19px;line-height:1.4;margin:10px 0;color:#ebf9fa}
+.peer-status-card p{line-height:1.7}
+.peer-status-card .chip{font-size:13px;letter-spacing:.1px;padding:7px 11px}
+.peer-stat-grid{margin-top:16px}
+.peer-stat-grid .card{min-height:135px}
+.chip.warn{background:#443321;color:#f5cc8b}
+@media(max-width:750px){.peer-status-card{grid-template-columns:1fr;gap:12px}.peer-status-card>div+div{border:0;border-top:1px solid #35546a;padding:16px 0 0}}
