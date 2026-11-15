@@ -12,6 +12,8 @@
     <Compile Include="../../../src/TrafficPolicies/EjectionBudget.cs" Link="EjectionBudget.cs" />
     <Compile Include="../../RecoveryTransition.cs" Link="RecoveryTransition.cs" />
     <Compile Include="RecoveryTransitionTests.cs" />
+    <Compile Include="../../RecoveryHealthGate.cs" Link="RecoveryHealthGate.cs" />
+    <Compile Include="RecoveryHealthGateTests.cs" />
     <Compile Include="../../../src/TrafficPolicies/RiseFallCounter.cs" Link="RiseFallCounter.cs" />
     <Compile Include="RiseFallTests.cs" />
     <Compile Include="Program.cs" />
