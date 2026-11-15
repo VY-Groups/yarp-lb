@@ -139,6 +139,9 @@ builder.Services.AddRateLimiter(options =>
     });
 });
 builder.Services.AddHttpClient("probe").ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
+var peerRateTable = BoundedPeerRateTable.FromEnvironment(
+    Environment.GetEnvironmentVariable("GATEWAY_PROXY_IP_RATE_PER_MINUTE"),
+    Environment.GetEnvironmentVariable("GATEWAY_PROXY_IP_TABLE_CAPACITY"));
 var app = builder.Build();
 if (ec2Lab)
 {
@@ -1346,6 +1349,21 @@ app.MapOrganizationProfile(privateDir);
 app.MapTlsInventory();
 app.MapReverseProxy(proxyPipeline =>
 {
+    // Opt-in, bounded process-local stick-table-style peer-IP admission.
+    // No X-Forwarded-For: only the network-layer peer is trusted.
+    if (peerRateTable is not null)
+    {
+        proxyPipeline.Use(async (context, next) =>
+        {
+            if (!peerRateTable.TryAdmit(context.Connection.RemoteIpAddress,
+                    System.Diagnostics.Stopwatch.GetTimestamp()))
+            {
+                context.Response.StatusCode = StatusCodes.Status429TooManyRequests;
+                return;
+            }
+            await next();
+        });
+    }
     // Drain filtering runs before affinity and load balancing, for all policies.
     // Existing forwarded requests continue; no in-flight cancellation occurs.
     proxyPipeline.Use(async (context, next) =>
