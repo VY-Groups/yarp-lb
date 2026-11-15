@@ -208,7 +208,7 @@ jobs:
             --ingress http://127.0.0.1:19080/api/identity \
             --failed "http://$REMOTE_A:18080/api/identity" \
             --healthy "http://$CI_TAILNET_IP:18080/api/identity" \
-            --out artifacts/ha/physical-vm-overlay-failover.json
+            --out artifacts/ha/cloud-vm-overlay-failover.json
       - name: Request remote A process restart
         run: |
           mkdir -p artifacts/request-restart-a
