@@ -48,6 +48,10 @@ public static class PeerSyncTests
             "wrong peer identity rejected");
         Check(!auth.Verify("node-a","node-a",t,nonce2,sig2,bytes,t+90),
             "stale signed frame rejected");
+        Check(!auth.Verify("node-a","node-a",long.MinValue,nonce2,sig2,bytes,t),
+            "extreme negative timestamp rejected without exception");
+        Check(!auth.Verify("node-a","node-a",long.MaxValue,nonce2,sig2,bytes,t),
+            "extreme positive timestamp rejected without exception");
         Check(!auth.Verify("node-a","node-a",t,nonce2,sig2,Encoding.UTF8.GetBytes("tampered"),t),
             "altered payload rejected");
         Check(PeerSyncSettings.FromEnvironment(null,null,null,null,null,null) is null,
