@@ -359,6 +359,32 @@ app.MapGet("/admin/api/destination-metrics", () => Results.Ok(new {
         meanLatencyMs = x.Value.MeanLatencyMs
     }).ToArray()
 })).RequireAuthorization();
+// Authentication-protected operator snapshot. This shows best-effort peer
+// telemetry, not a global quota decision or proof of network consensus.
+app.MapGet("/admin/api/peer-sync/status", () =>
+{
+    if (peerSyncSettings is null || peerStateJournal is null)
+        return Results.Ok(new {
+            enabled = false, mode = "disabled", scope = "No peer synchronization configured",
+            strictAdmission = sharedPeerLimiter is not null ? "atomic Redis" : "local process"
+        });
+    var info = peerStateJournal.Status(PeerStateJournal.CurrentMinute());
+    var tolerance = TimeSpan.FromSeconds(Math.Max(15, peerSyncSettings.IntervalSeconds * 3));
+    var recentExchange = info.LastAcceptedUtc.HasValue &&
+        DateTimeOffset.UtcNow - info.LastAcceptedUtc.Value <= tolerance;
+    return Results.Ok(new {
+        enabled = true, mode = "signed HTTPS peer telemetry",
+        info.LocalNode, info.RemoteNode,
+        info.LocalIdentities, info.LocalRequests,
+        info.RemoteIdentities, info.RemoteRequests,
+        info.RemoteReportedInCurrentMinute, info.LastAcceptedUtc,
+        info.RemoteSequence, recentExchange,
+        expectedIntervalSeconds = peerSyncSettings.IntervalSeconds,
+        trackedIdentityLimit = peerSyncSettings.Capacity,
+        strictAdmission = sharedPeerLimiter is not null ? "atomic Redis" : "local process",
+        scope = "This gateway only; eventually consistent; no quorum or distributed admission"
+    });
+}).RequireAuthorization();
 app.MapGet("/admin/api/metrics", () =>
 {
     var total = Interlocked.Read(ref requestsTotal);
