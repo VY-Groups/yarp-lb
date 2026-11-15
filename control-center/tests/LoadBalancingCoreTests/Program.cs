@@ -127,3 +127,5 @@ PeerRateTableTests.Run();
 RecoveryTransitionTests.Run();
 
 RiseFallTests.Run();
+
+RecoveryHealthGateTests.Run();
