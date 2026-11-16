@@ -40,7 +40,7 @@ foreach(var zone in config.Zones)
     foreach(var site in zone.Sites)
     {
         if(!IPAddress.TryParse(site.Address,out var address) ||
-            address.AddressFamily != AddressFamily.InterNetwork ||
+            address.AddressFamily is not (AddressFamily.InterNetwork or AddressFamily.InterNetworkV6) ||
             site.Weight is < 1 or > 100 ||
             site.Priority is < 0 or > 1000 ||
             !Uri.TryCreate(site.HealthUrl, UriKind.Absolute, out var health) ||
