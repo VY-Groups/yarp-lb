@@ -996,7 +996,9 @@ async Task<IResult> CommitReviewedChange(HttpContext ctx, JsonObject submitted)
         if (c["HttpRequest"]?["Version"] is JsonNode version && version.ToString() is not ("1.0" or "1.1" or "2" or "3"))
             return Results.BadRequest(new { error = "Unsupported outbound HTTP version" });
         var policy = c["LoadBalancingPolicy"]?.ToString() ?? "RoundRobin";
-        if (policy is not ("RoundRobin" or "PowerOfTwoChoices" or "LeastRequests" or "Random" or "FirstAlphabetical" or "WeightedRandom" or "SourceIpHash")) return Results.BadRequest(new { error = "Unsupported load-balancing policy" });
+        if (policy is not ("RoundRobin" or "PowerOfTwoChoices" or "LeastRequests" or "Random" or "FirstAlphabetical" or "WeightedRandom" or "SourceIpHash" or "PrimaryBackup")) return Results.BadRequest(new { error = "Unsupported load-balancing policy" });
+        if (policy == "PrimaryBackup" && c["HealthCheck"]?["Active"]?["Enabled"]?.ToString()?.ToLowerInvariant() != "true")
+            return Results.BadRequest(new { error = $"Cluster {key}: PrimaryBackup requires enabled active health checks for safe fallback" });
         if (c["Destinations"] is not JsonObject dests || dests.Count > 40) return Results.BadRequest(new { error = "Invalid destinations" });
         foreach (var (destId, node) in dests)
         {
@@ -1005,6 +1007,9 @@ async Task<IResult> CommitReviewedChange(HttpContext ctx, JsonObject submitted)
             if (node?["Metadata"]?["Weight"] is JsonNode weightValue &&
                 !LoadBalancingCore.TryWeight(weightValue.ToString(), out _))
                 return Results.BadRequest(new { error = $"Destination {destId} Weight must be integer 1..100" });
+            var role = node?["Metadata"]?["TrafficRole"]?.ToString();
+            if (!PrimaryBackupCore.TryBackupRole(role, out _))
+                return Results.BadRequest(new { error = $"Destination {destId} TrafficRole must be primary or backup" });
             var trafficState = node?["Metadata"]?["TrafficState"]?.ToString() ?? "active";
             if (trafficState is not ("active" or "draining"))
                 return Results.BadRequest(new { error = $"Destination {destId} TrafficState must be active or draining" });
