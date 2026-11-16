@@ -17,6 +17,8 @@ import time
 
 class Ready(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
+        if getattr(self.server, "count_checks", False):
+            self.server.checks += 1
         self.send_response(self.server.verdict)
         server = self.server
         if hasattr(server, "signer") and server.mode != "unsigned":
@@ -110,14 +112,14 @@ def main():
                    GSLB_VALIDATOR_KEY_PEM=str(root / "client.key"),
                    GSLB_VALIDATOR_SIGNING_KEYS=json.dumps(keys), GSLB_VALIDATOR_ORIGINS=",".join(origins))
         nodes = []
-        def start_node(interval, environment):
+        def start_node(interval, environment, rise=1, fall=1):
             with socket.socket() as reservation:
                 reservation.bind(("127.0.0.1", 0))
                 port = reservation.getsockname()[1]
             config = root / f"{port}.json"
             config.write_text(json.dumps({"ListenHost": "127.0.0.1", "ListenPort": port,
                 "ProbeIntervalSeconds": interval, "Zones": [{"Name": "lab.example", "TtlSeconds": 5,
-                "FailClosedWhenAllSitesDown": True, "Sites": [{"Address": "192.0.2.17", "Weight": 1,
+                "SuccessThreshold": rise, "FailureThreshold": fall, "FailClosedWhenAllSitesDown": True, "Sites": [{"Address": "192.0.2.17", "Weight": 1,
                 "HealthUrl": f"http://127.0.0.1:{local.server_port}/ready",
                 "ValidatorUrls": [o + "/ready" for o in origins]}]}]}))
             proc = subprocess.Popen(["dotnet", dll, config], env=environment)
@@ -178,6 +180,26 @@ def main():
         slow = [start_node(30, env)]
         check(slow, 0)
         check(slow, 2)
+
+        # Isolate a single node with rise=2, fall=3. A single missed signed verdict
+        # must withdraw immediately and the first recovered probe must stay withdrawn.
+        private_local = serve(stack)
+        local = private_local
+        threshold_node = [start_node(3, env, rise=2, fall=3)]
+        check(threshold_node, 0)
+        local.verdict = 503
+        check(threshold_node, 2)
+        local.checks = 0
+        local.count_checks = True
+        local.verdict = 200
+        deadline = time.monotonic() + 6
+        while local.checks == 0 and time.monotonic() < deadline:
+            time.sleep(.02)
+        assert local.checks == 1
+        time.sleep(.5)  # allow both loopback signature checks to complete
+        check(threshold_node, 2)
+        assert local.checks == 1, "first healthy probe prematurely restored the site"
+        check(threshold_node, 0)
 
         # A certificate with only serverAuth cannot authenticate as an observer client.
         wrong = dict(env, GSLB_VALIDATOR_CERT_PEM=str(root / "server.pem"),
