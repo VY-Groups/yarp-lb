@@ -1,7 +1,7 @@
 # GatewayCore — Codex handoff, verified repository snapshot
 
 **Snapshot date:** 2026-11-16 (UTC; refresh all live status before acting)  
-**Repository:** this checkout’s configured `origin` remote (verify with `git remote -v`)  
+**Repository:** this checkout’s configured `origin` remote (verify with `git remote -v`)
 **Product:** GatewayCore — .NET 10 / YARP ADC-style single-organization on-premises L7 gateway and management UI, with separate experimental L4, WAF integration, and GSLB/DNS engines.  
 **Canonical baseline at handoff:** `main` = `cdee959d8c5f66a5bb8edf9b432de48bcd27ca1a` (PR #107).  
 **Release decision:** **GO for isolated development and controlled test/staging; NO-GO for production.**  
