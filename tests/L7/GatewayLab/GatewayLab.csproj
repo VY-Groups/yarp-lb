@@ -14,6 +14,8 @@
     <Compile Include="../../../control-center/RecoveryHealthGate.cs" Link="RecoveryHealthGate.cs" />
     <Compile Include="../../../src/TrafficPolicies/BoundedTransportFailureHealthPolicy.cs" Link="BoundedTransportFailureHealthPolicy.cs" />
     <Compile Include="../../../src/TrafficPolicies/EjectionBudget.cs" Link="EjectionBudget.cs" />
+    <Compile Include="../../../src/TrafficPolicies/PrimaryBackupCore.cs" Link="PrimaryBackupCore.cs" />
+    <Compile Include="../../../src/TrafficPolicies/PrimaryBackupPolicy.cs" Link="PrimaryBackupPolicy.cs" />
     <Compile Include="../../../src/TrafficPolicies/RiseFallCounter.cs" Link="RiseFallCounter.cs" />
     <Compile Include="../../../src/TrafficPolicies/RiseFallActiveHealthPolicy.cs" Link="RiseFallActiveHealthPolicy.cs" />
     <Compile Include="../../../control-center/NonBlockingConsoleLogging.cs" Link="NonBlockingConsoleLogging.cs" />
