@@ -3,5 +3,6 @@
  <Nullable>enable</Nullable><ImplicitUsings>enable</ImplicitUsings>
  </PropertyGroup>  <ItemGroup>
     <Compile Include="../../engines/GslbDns/DnsResponseRateLimiter.cs" Link="DnsResponseRateLimiter.cs" />
+    <Compile Include="../../engines/GslbDns/DnsHealthHysteresis.cs" Link="DnsHealthHysteresis.cs" />
   </ItemGroup>
 </Project>

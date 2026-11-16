@@ -31,7 +31,10 @@ foreach(var zone in config.Zones)
         !names.Add(zone.Name.TrimEnd('.')) || zone.TtlSeconds is < 5 or > 300 ||
         !DnsWireProtocol.ValidName(zone.Name.TrimEnd('.')) ||
         zone.Sites is not {Length: >=1 and <=16} ||
-        zone.NameServers is {Length: >4} || zone.SoaSerial == 0)
+        zone.NameServers is {Length: >4} || zone.SoaSerial == 0 ||
+        zone.FailureThreshold is < 1 or > 10 ||
+        zone.SuccessThreshold is < 1 or > 10 ||
+        zone.RoutingPolicy is not ("Weighted" or "Failover"))
         throw new InvalidDataException("Invalid GSLB zone or TTL");
     var sites=new List<Site>();
     foreach(var site in zone.Sites)
@@ -39,11 +42,13 @@ foreach(var zone in config.Zones)
         if(!IPAddress.TryParse(site.Address,out var address) ||
             address.AddressFamily != AddressFamily.InterNetwork ||
             site.Weight is < 1 or > 100 ||
+            site.Priority is < 0 or > 1000 ||
             !Uri.TryCreate(site.HealthUrl, UriKind.Absolute, out var health) ||
             (health.Scheme != Uri.UriSchemeHttp && health.Scheme != Uri.UriSchemeHttps) ||
             !string.IsNullOrWhiteSpace(health.UserInfo))
             throw new InvalidDataException("Invalid GSLB site address, weight or health probe URL");
-        sites.Add(new Site(address,health,site.Weight));
+        sites.Add(new Site(address,health,site.Weight,site.Priority,
+            zone.FailureThreshold,zone.SuccessThreshold));
     }
     var origin = zone.Name.TrimEnd('.').ToLowerInvariant();
     var servers = new List<DnsNameServer>();
@@ -65,7 +70,8 @@ foreach(var zone in config.Zones)
     if (!DnsWireProtocol.ValidName(contact))
         throw new InvalidDataException("Invalid SOA contact name");
     groups.Add(origin, new SiteGroup(sites.ToArray(), zone.TtlSeconds,
-        zone.FailClosedWhenAllSitesDown, servers.ToArray(), contact, zone.SoaSerial));
+        zone.FailClosedWhenAllSitesDown, servers.ToArray(), contact, zone.SoaSerial,
+        zone.RoutingPolicy));
 }
 using var stop=new CancellationTokenSource();
 Console.CancelKeyPress += (_, e)=>{e.Cancel=true;stop.Cancel();};
@@ -88,7 +94,9 @@ async Task ProbeAll(CancellationToken ct)
             if(response.IsSuccessStatusCode)healthy=1;
         }
         catch(Exception e) when(e is HttpRequestException or TaskCanceledException) { }
-        Volatile.Write(ref site.Healthy, healthy);
+        // Probe results pass through bounded hysteresis before publication.
+        // A single probe does not flap DNS when thresholds are configured.
+        Volatile.Write(ref site.Healthy, site.Health.Observe(healthy == 1) ? 1 : 0);
     }
 }
 await ProbeAll(stop.Token);
@@ -200,24 +208,35 @@ sealed record DnsZone(string Name,int TtlSeconds,DnsSite[] Sites,
     public DnsNameServerConfig[]? NameServers { get; init; }
     public string? SoaContact { get; init; }
     public uint SoaSerial { get; init; } = 1;
+    public string RoutingPolicy { get; init; } = "Weighted";
+    public int FailureThreshold { get; init; } = 1;
+    public int SuccessThreshold { get; init; } = 1;
 }
 sealed record DnsNameServerConfig(string Host,string Address);
 sealed record DnsNameServer(string Host,IPAddress Address);
-sealed record DnsSite(string Address,string HealthUrl,int Weight);
+sealed record DnsSite(string Address,string HealthUrl,int Weight,int Priority=0);
 sealed class Site
 {
-    public Site(IPAddress address,Uri healthUrl,int weight)=>(Address,HealthUrl,Weight)=(address,healthUrl,weight);
+    public Site(IPAddress address,Uri healthUrl,int weight,int priority,
+        int failureThreshold,int successThreshold)
+    {
+        Address=address;HealthUrl=healthUrl;Weight=weight;Priority=priority;
+        Health=new DnsHealthHysteresis(failureThreshold,successThreshold);
+    }
     public IPAddress Address {get;}
     public Uri HealthUrl {get;}
     public int Weight {get;}
+    public int Priority {get;}
+    public DnsHealthHysteresis Health {get;}
     public int Healthy;
 }
 sealed class SiteGroup
 {
     public SiteGroup(Site[] sites,int ttl,bool failClosedWhenAllSitesDown,
-        DnsNameServer[] nameServers,string soaContact,uint soaSerial)
-        =>(Sites,Ttl,FailClosedWhenAllSitesDown,NameServers,SoaContact,SoaSerial)
-        =(sites,ttl,failClosedWhenAllSitesDown,nameServers,soaContact,soaSerial);
+        DnsNameServer[] nameServers,string soaContact,uint soaSerial,string routingPolicy)
+        =>(Sites,Ttl,FailClosedWhenAllSitesDown,NameServers,SoaContact,SoaSerial,RoutingPolicy)
+        =(sites,ttl,failClosedWhenAllSitesDown,nameServers,soaContact,soaSerial,routingPolicy);
+    public string RoutingPolicy { get; }
     public DnsNameServer[] NameServers { get; }
     public string SoaContact { get; }
     public uint SoaSerial { get; }

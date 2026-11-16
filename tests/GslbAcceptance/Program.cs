@@ -4,6 +4,19 @@ using System.Net;
 using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
+// Deterministic state-transition characterization: no sleeps or mutable network state.
+var hysteresis = new DnsHealthHysteresis(2, 2);
+if (hysteresis.Observe(true) || !hysteresis.Observe(true) ||
+    !hysteresis.Observe(false) || hysteresis.Observe(false) ||
+    hysteresis.Observe(true) || !hysteresis.Observe(true))
+    throw new Exception("FAIL: rise/fall requires two consecutive results");
+if (!new DnsHealthHysteresis(1,1).Observe(true))
+    throw new Exception("FAIL: legacy single-success eligibility");
+var invalidThreshold = false;
+try { _ = new DnsHealthHysteresis(0, 2); }
+catch (ArgumentOutOfRangeException) { invalidThreshold = true; }
+if (!invalidThreshold) throw new Exception("FAIL: invalid hysteresis config accepted");
+Console.WriteLine("PASS: health hysteresis, recovery and default behavior");
 // Verify response limiting with deterministic monotonic timestamps: no flaky UDP flood.
 var rate=new DnsResponseRateLimiter(2,2);
 var ip1=IPAddress.Parse("127.0.0.31");
@@ -29,13 +42,26 @@ var configuration=Path.Combine(temp,"zones.json");
 File.WriteAllText(configuration,JsonSerializer.Serialize(new {
  AllowNonLoopbackListeners=false,
  ListenHost="127.0.0.1",ListenPort=15353,ProbeIntervalSeconds=1,
- Zones=new []{new{ Name="app.integration.test",TtlSeconds=10,Sites=new []{
-    new { Address="127.0.0.21",HealthUrl="http://127.0.0.1:19711/ready",Weight=2 },
-    new { Address="127.0.0.22",HealthUrl="http://127.0.0.1:19712/ready",Weight=1 }
+ Zones=new []{
+ new{ Name="app.integration.test",TtlSeconds=10,Sites=new []{
+    new { Address="127.0.0.21",HealthUrl="http://127.0.0.1:19711/ready",Weight=2,Priority=0 },
+    new { Address="127.0.0.22",HealthUrl="http://127.0.0.1:19712/ready",Weight=1,Priority=10 }
  },NameServers=new []{
      new {Host="ns1.app.integration.test",Address="127.0.0.31"},
      new {Host="ns2.app.integration.test",Address="127.0.0.32"}
- },SoaContact="hostmaster.app.integration.test",SoaSerial=2026111601u } }
+ },SoaContact="hostmaster.app.integration.test",SoaSerial=2026111601u,
+   RoutingPolicy="Weighted",FailureThreshold=1,SuccessThreshold=1,
+   FailClosedWhenAllSitesDown=false },
+ new{ Name="ha.integration.test",TtlSeconds=10,Sites=new []{
+    new { Address="127.0.0.21",HealthUrl="http://127.0.0.1:19711/ready",Weight=2,Priority=0 },
+    new { Address="127.0.0.22",HealthUrl="http://127.0.0.1:19712/ready",Weight=1,Priority=10 }
+ },NameServers=new []{
+     new {Host="ns1.ha.integration.test",Address="127.0.0.31"},
+     new {Host="ns2.ha.integration.test",Address="127.0.0.32"}
+ },SoaContact="hostmaster.ha.integration.test",SoaSerial=2026111601u,
+   RoutingPolicy="Failover",FailureThreshold=2,SuccessThreshold=2,
+   FailClosedWhenAllSitesDown=true }
+ }
 }));
 var info=new ProcessStartInfo("dotnet"){ UseShellExecute=false,CreateNoWindow=true,
  WorkingDirectory=Path.GetDirectoryName(dll)!,RedirectStandardOutput=true,RedirectStandardError=true };
@@ -58,6 +84,10 @@ try
         return seen.Contains("127.0.0.21") && seen.Contains("127.0.0.22");
     });
     Console.WriteLine("PASS: both sites healthy before distribution sampling");
+    await Wait(async () => (await Query("ha.integration.test")).Address=="127.0.0.21");
+    for (var i=0;i<12;i++)
+        Must((await Query("ha.integration.test")).Address=="127.0.0.21",
+            "failover policy always selects healthy first-priority site");
     var counts=new Dictionary<string,int> {["127.0.0.21"]=0,["127.0.0.22"]=0};
     for(var i=0;i<90;i++)
     {
@@ -80,6 +110,10 @@ try
     });
     for(var i=0;i<30;i++) Must((await Query("app.integration.test")).Address=="127.0.0.22",
         "failed site not returned while secondary healthy");
+    await Wait(async () => (await Query("ha.integration.test")).Address=="127.0.0.22");
+    for (var i=0;i<12;i++)
+        Must((await Query("ha.integration.test")).Address=="127.0.0.22",
+            "failed primary selects configured standby after fall threshold");
     s2.Healthy=0;
     await Task.Delay(3500);
     // By default, total probe failure must not create DNS outage.
@@ -93,9 +127,15 @@ try
     }
     Must(allDown.SetEquals(new[]{"127.0.0.21","127.0.0.22"}),
         "all-down fallback includes all configured sites");
+    await Wait(async () => (await Query("ha.integration.test")).Status==2);
+    Must((await Query("ha.integration.test")).Status==2,
+        "strict failover zone SERVFAIL when every site is down");
     s1.Healthy=1;
     await Task.Delay(2500);
     await Wait(async()=> (await Query("app.integration.test")).Address=="127.0.0.21");
+    await Wait(async()=> (await Query("ha.integration.test")).Address=="127.0.0.21");
+    Must((await Query("ha.integration.test")).Address=="127.0.0.21",
+        "recovered primary preferred after success threshold");
     Must((await Query("unknown.integration.test")).Status==5,"unknown zones explicitly refused");
     var (nsReq, nsUdp) = await QueryWire("app.integration.test", 2);
     Must((Dns16(nsUdp,2)&0x0200)!=0 &&

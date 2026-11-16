@@ -2,8 +2,9 @@ using System.Buffers.Binary;
 using System.Net;
 using System.Text;
 
-// Independent DNS wire-format implementation. Polaris is an architectural reference,
-// not a source dependency. No recursion, DNSSEC, EDNS Client Subnet, or zone transfer.
+// Independent DNS wire-format implementation. External GSLB references are reviewed
+// only as architectural context; no AGPL source is included. No recursion,
+// DNSSEC, EDNS Client Subnet routing, or zone transfer.
 internal static class DnsWireProtocol
 {
     private const ushort A = 1, Ns = 2, Soa = 6, Opt = 41;
@@ -119,17 +120,28 @@ internal static class DnsWireProtocol
                 }
                 if (eligible.Length > 0 && rcode == 0)
                 {
-                    var total = eligible.Sum(s => s.Weight);
-                    var ticket = (int)((ulong)Interlocked.Increment(ref zone.Counter) % (ulong)total);
-                    foreach (var site in eligible)
+                    Site? chosen = null;
+                    if (zone.RoutingPolicy == "Failover")
                     {
-                        ticket -= site.Weight;
-                        if (ticket < 0)
+                        // Explicit tier and configuration order; no random standby promotion.
+                        // Every healthy higher-priority site outranks lower-priority sites.
+                        // For equal priority, first configured site wins deterministically.
+                        var bestPriority = eligible.Min(s => s.Priority);
+                        chosen = eligible.First(s => s.Priority == bestPriority);
+                    }
+                    else
+                    {
+                        // Historical weighted policy is unchanged by the new opt-in.
+                        var total = eligible.Sum(s => s.Weight);
+                        var ticket = (int)((ulong)Interlocked.Increment(ref zone.Counter) % (ulong)total);
+                        foreach (var site in eligible)
                         {
-                            answers.Add(new Resource(domain, A, (uint)zone.Ttl, site.Address.GetAddressBytes()));
-                            break;
+                            ticket -= site.Weight;
+                            if (ticket < 0) { chosen = site; break; }
                         }
                     }
+                    if (chosen is not null)
+                        answers.Add(new Resource(domain, A, (uint)zone.Ttl, chosen.Address.GetAddressBytes()));
                 }
             }
             else if (qtype == A && ns is not null)
