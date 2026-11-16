@@ -62,7 +62,7 @@ Example IPv6 site: `{"Address":"2001:db8::99","HealthUrl":"http://127.0.0.1:1971
 The address and the readiness probe target are deliberately separate.
 **A successful IPv4 HTTP probe is not proof of IPv6 reachability.** Production
 acceptance must probe over the network/address family actually advertised.
-IPv6 DNS UDP/TCP listener binding, IPv6 NS glue and DNSSEC are still missing.
+IPv6 DNS UDP/TCP listeners and IPv6 NS glue are supported. DNSSEC remains open.
 
 ## Newly supported in lab
 
@@ -72,8 +72,12 @@ IPv6 DNS UDP/TCP listener binding, IPv6 NS glue and DNSSEC are still missing.
   AXFR/IXFR or dynamic zone writes.
 - Explicit SOA and NS answers only when NameServers are configured. Static
   serial must be deliberately bumped in config when site authority changes.
-  In-bailiwick name server IPv4 address answers and additional glue are available;
+  In-bailiwick name server IPv4 or IPv6 address answers and additional glue are available;
   out-of-bailiwick NS targets are listed without forging glue.
+- Empty non-terminals above configured in-zone NS address records return
+  NODATA with negative SOA (RFC 8020 section 3.1), preserving resolution of
+  their descendants. Label-boundary matching does not invent sibling names.
+  This is static-name correctness, not delegation/zone-cut support.
 - In-zone missing names return NXDOMAIN with an SOA negative-cache record;
   existing names with unsupported types return NODATA with SOA; names outside
   the configured zones are REFUSED.
@@ -228,11 +232,29 @@ plus an HTTP 302 redirect to a separately healthy backend. DNS must never
 restore the redirected primary. A real external TLS/health acceptance drill
 and isolation across two independent sites remain mandatory for production.
 
+## Opt-in observed probe latency (not user RTT)
+
+`RoutingPolicy: "ObservedLatency"` measures successful HTTP/TCP health probe
+completion time from **this DNS instance** to its configured endpoint. It
+is not end-user-to-datacenter latency and does not imply geographic proximity.
+A bounded exponentially smoothed measurement (alpha 0.25) is available only
+after 3 successful samples, is invalidated on probe failure and must be at most
+15 seconds old. If any currently eligible backend has insufficient/stale
+measurements, the policy uses the preexisting weighted algorithm. If two
+endpoints are within 15% of each other, weighted fallback avoids choosing a
+winner based on small probe jitter. A failed or drained backend is never
+made eligible by an apparently favorable latency score.
+
+`Weighted`, `Failover`, and `CidrRegion` still behave exactly as before.
+No external telemetry, service probes on your infrastructure, or
+client IP/ECS geolocation is enabled. A multi-region RTT architecture needs
+licensed geographic data, independently authenticated vantage-point agents,
+sample freshness/replay fencing, privacy and failover acceptance before GO.
+
 ## Remaining NO-GO areas
 
 DNSSEC signatures/keys, TLS/DoT/DoH, TSIG, DNS NOTIFY, zone transfer, true
-zone-cut/delegation conformance, CNAME/MX, IPv6 DNS transport listeners,
-IPv6 NS glue, geographic/ASN policy with licensed data and privacy, verified multi-site
+zone-cut/delegation conformance, CNAME/MX, geographic/ASN policy with licensed data and privacy, verified multi-site
 health quorum and authenticated state propagation, split-brain protection,
 ECMP/multi-NS physical hosting, public resolver interoperability and
 spoofed-source reflection protection are NOT complete.
@@ -256,3 +278,50 @@ targets observable features only, not OpenGSLB protocol compatibility or
 vendor certification. See `OPENGSLB_REFERENCE_REVIEW.md` for mapping,
 risk and test boundaries. Consult legal counsel before any future direct
 code reuse or software distribution.
+
+## Opt-in external HTTPS health validation
+
+Set a site's `ValidatorUrls` to two distinct HTTPS origins that each return 2xx only when their independently measured site is ready. Configure the DNS process with local environment variables `GSLB_VALIDATOR_CERT_PEM` and `GSLB_VALIDATOR_KEY_PEM` as absolute local file paths. Set `GSLB_VALIDATOR_ORIGINS` to a comma-separated allowlist of exact HTTPS origins. Validators must require this client certificate. DNS verifies server certificates against system trust and verifies hostnames. Restrict access to the private key and restart for credential replacement.
+
+Both validators and the local probe must succeed. Set `FailClosedWhenAllSitesDown` to true. One failed validation immediately excludes the site; successful evidence expires ten seconds after validation starts even if the probe scheduler stalls. Choose a probe interval and batch capacity that refresh within ten seconds. Each validator must disable caching for its readiness URL. Distinct origins are configured by the operator and need independent network placement. This is synchronous validation, without signed store-and-forward health snapshots.
+
+### Signed synchronous readiness responses
+
+Each configured validator origin requires its own P-256 signing key. Set `GSLB_VALIDATOR_SIGNING_KEYS` on each DNS node to a JSON object mapping canonical HTTPS origins to absolute PEM public-key paths. Keep private signing keys at the observers. Configure a distinct readiness URL for each monitored service and site. Observers should derive that URL from their own configured public origin and endpoint.
+
+DNS sends a fresh `Gslb-Challenge` per probe (32 random bytes as uppercase hex). The validator measures readiness and signs the UTF-8 encoding of four lines with LF separators and no trailing newline: `GatewayCore.Health.v1`, the canonical absolute validator URL, the received challenge, and the decimal HTTP status. Return the base64 DER-encoded ECDSA/SHA-256 signature in `Gslb-Signature`. Only signed 2xx responses are eligible. Unsigned failures also withdraw the site. A response is valid only for its originating request. Asynchronous reports require a separate sequence and expiry protocol.
+## Opt-in weighted priority groups
+
+Set `RoutingPolicy: "WeightedFailover"` to select the lowest numeric
+`Priority` among healthy sites **of the requested address family**, then
+apply the existing proportional weighted rotation within that group.
+Groups are implicit: sites sharing a priority belong to the same group.
+No new scheduler or external dependency is required.
+
+For example, two healthy sites at priority 0 with weights 2 and 1 receive
+two-thirds and one-third of DNS selections. Priority 10 sites receive none
+until every priority 0 site of that family fails its configured health
+threshold. A partial group outage uses its remaining healthy members;
+it does not overflow to standby groups. Priority 20 can provide a third
+fallback. Recovery automatically prefers the lowest healthy priority again
+after the configured success threshold.
+
+Existing bounds still apply: 1–16 sites per zone, priority 0–1000,
+weight 1–100, and rise/fall thresholds 1–10. `Weighted`, deterministic
+first-site `Failover`, and `CidrRegion` retain their previous semantics.
+A and AAAA pools remain separate, including priority comparisons.
+
+When every site of a family is down, `FailClosedWhenAllSitesDown: true`
+returns SERVFAIL. With the legacy availability-first setting `false`,
+the policy chooses the lowest **configured** priority group and applies
+its weights despite failed probes. That response is not a healthy-site claim.
+Use strict all-down behavior for transaction-sensitive deployments.
+
+The real-socket acceptance fixture covers a three-group chain, 2:1 primary
+and 1:3 backup distribution, partial primary failure, full-group failure,
+TCP backup loss, tertiary failure, strict/open all-down behavior, automatic
+failback and independent IPv6 selection. DNS selection ratios are not HTTP
+load ratios: cached answers and long-lived connections affect traffic.
+This feature adds no agent trust, gossip mesh, GeoIP, ECS routing or DNSSEC.
+Those remain separate release gates under #52/#109.
+`ListenHost` accepts native IPv4 and IPv6 addresses for both UDP and TCP. Use `::1` for IPv6 loopback. Non-loopback addresses still require explicit opt-in. Each process listens on one address family.

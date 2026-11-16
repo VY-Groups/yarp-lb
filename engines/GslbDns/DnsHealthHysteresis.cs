@@ -19,6 +19,13 @@ internal sealed class DnsHealthHysteresis
 
     public bool IsHealthy { get; private set; }
 
+    public void Invalidate()
+    {
+        IsHealthy = false;
+        passes = 0;
+        fails = 0;
+    }
+
     public bool Observe(bool succeeded)
     {
         if (succeeded)

@@ -2,8 +2,9 @@
 
 Source of comparison: user-supplied OpenGSLB feature matrix and the *reference*
 `gslb` branch at `48f020c3f0d7d3d353485c9a0d701061a3014c08`
-(OpenGSLB Go v1.1.10). GatewayCore baseline after PR #103:
-`6c2c6da4ad38586dbb0cef396d05dfda2b3cb5be`.
+(OpenGSLB Go v1.1.10). GatewayCore base `main`:
+`82c7b863e3674bb7c0a4ba368f4c11b3c7636152`. This branch additionally
+proposes opt-in weighted priority groups; it is not merged until its PR is approved.
 
 The matrix compares desired **features**, NOT commercial/product certifications,
 vendor prices, security guarantees or claims that other providers lack a feature.
@@ -15,12 +16,12 @@ performance. No AGPL OpenGSLB source is incorporated.
 | Self-hosted data sovereignty | On-prem .NET DNS prototype | Two independent gateway hosts, network/privacy audit |
 | No vendor lock-in | Independent source/runtime design goal | Dependency/license inventory, reproducible image builds |
 | Authoritative DNS A/NS/SOA/EDNS/TCP | Limited lab implementation | Zone cut/delegation, conformance, transport, fuzz, DNSSEC |
-| DNS AAAA / IPv6 | **New lab implementation; CI required** | IPv6 listener and NS glue, real dual-stack probes and public resolvers |
+| DNS AAAA / IPv6 | Merged lab implementation; Windows/Linux acceptance exists | IPv6 listener and NS glue, real dual-stack probes and public resolvers |
 | Weighted traffic selection | Existing opt-in per-zone selection | Predictable fairness under health churn, matched load |
 | Ordered primary/standby failover | Existing opt-in `RoutingPolicy=Failover` | DNS caching, DR state, physical failover behavior |
-| Weighted failover *chains* | Not implemented | Multiple weighted priority groups, stable tie/drain policy and tests |
-| GeoIP and CIDR routing | Explicit resolver CIDR longest-prefix in this branch, CI pending; **licensed GeoIP still missing** | Resolver/source semantics, GeoIP dataset licensing/version, stale-data policy and real geo tests |
-| Latency / RTT selection | Not implemented | Per-vantage measured RTT, min sample, timeout, bounded EMA and rollback |
+| Weighted failover *chains* | Proposed opt-in `WeightedFailover` with weighted healthy priority groups | Exact-head Windows/Linux CI, review, DNS cache behavior and physical DR evidence; no explicit maintenance/drain API |
+| GeoIP and CIDR routing | Merged explicit resolver CIDR longest-prefix with lab acceptance; **licensed GeoIP still missing** | Resolver/source semantics, GeoIP dataset licensing/version, stale-data policy and real geo tests |
+| Latency / RTT selection | Draft PR #108 proposes local probe elapsed-time EMA, not merged or client RTT | Per-vantage measured RTT, min sample, timeout, bounded EMA and rollback |
 | EDNS Client Subnet (ECS) | EDNS parsed; ECS **ignored** | Explicit opt-in/allowlist, privacy minimization, valid prefix/data and cache scope |
 | Predictive health | Not implemented | Evidence-based confidence, false predictions, strict safety policy |
 | Agent-side failure prediction | Not implemented | Signed agent identity, replay/freshness, bounded metric flow, external validation |

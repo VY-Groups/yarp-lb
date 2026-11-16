@@ -107,9 +107,15 @@ internal static class DnsWireProtocol
             var atApex = domain == apex;
             var ns = zone.NameServers.FirstOrDefault(n =>
                 n.Host.Equals(domain, StringComparison.OrdinalIgnoreCase));
+            // A configured address below this name makes it an existing empty
+            // non-terminal. NXDOMAIN would incorrectly deny its entire subtree
+            // to caching resolvers (RFC 8020 section 3.1).
+            var emptyNonTerminal = !atApex && ns is null &&
+                zone.NameServers.Any(n =>
+                    n.Host.EndsWith("." + domain, StringComparison.OrdinalIgnoreCase));
             if (!atApex && ns is null)
             {
-                rcode = 3; // NXDOMAIN within a hosted zone
+                rcode = emptyNonTerminal ? 0 : 3; // NODATA vs true NXDOMAIN
                 AddNegativeSoa();
             }
             else if ((qtype == A || qtype == Aaaa) && atApex)
@@ -125,7 +131,8 @@ internal static class DnsWireProtocol
                 }
                 else
                 {
-                    var eligible = configured.Where(s => Volatile.Read(ref s.Healthy) == 1).ToArray();
+                    var eligible = configured.Where(s => Volatile.Read(ref s.Healthy) == 1 &&
+                        (s.Validators.Length == 0 || Environment.TickCount64 < Volatile.Read(ref s.ValidatorDeadline))).ToArray();
                     if (eligible.Length == 0)
                     {
                         if (zone.FailClosedWhenAllSitesDown) rcode = 2; // SERVFAIL
@@ -156,13 +163,52 @@ internal static class DnsWireProtocol
                         }
                         else
                         {
-                            // Historic IPv4 weighted ordering/semantics are unchanged.
-                            var total = eligible.Sum(s => s.Weight);
-                            var ticket = (int)((ulong)Interlocked.Increment(ref zone.Counter) % (ulong)total);
-                            foreach (var site in eligible)
+                            if (zone.RoutingPolicy == "WeightedFailover")
                             {
-                                ticket -= site.Weight;
-                                if (ticket < 0) { chosen = site; break; }
+                                // Group only the family-correct eligible pool. Never
+                                // send overflow into lower-priority groups while a
+                                // higher-priority member remains healthy.
+                                var priority = eligible.Min(s => s.Priority);
+                                eligible = eligible.Where(s => s.Priority == priority).ToArray();
+                            }
+                            if (zone.RoutingPolicy == "ObservedLatency")
+                            {
+                                // This is local DNS-node -> probe-endpoint latency,
+                                // NOT client-perceived latency or cross-region RTT.
+                                // A single missing/stale sample causes weighted fallback.
+                                var now = Environment.TickCount64;
+                                var measured = new List<(Site Site, double Ms)>();
+                                foreach (var site in eligible)
+                                {
+                                    if (!site.Latency.TryRead(now,
+                                            SiteGroup.LatencyMinimumSamples,
+                                            SiteGroup.LatencyMaximumAgeMs, out var ms))
+                                    {
+                                        measured.Clear();
+                                        break;
+                                    }
+                                    measured.Add((site, ms));
+                                }
+                                if (measured.Count == eligible.Length)
+                                {
+                                    var best = measured.OrderBy(x => x.Ms).First();
+                                    // Avoid switching affinity on sub-15% probe jitter.
+                                    var runnerUp = measured.OrderBy(x => x.Ms).Skip(1).FirstOrDefault();
+                                    if (measured.Count == 1 ||
+                                        runnerUp.Ms >= best.Ms * 1.15)
+                                        chosen = best.Site;
+                                }
+                            }
+                            if (chosen is null)
+                            {
+                                // Historic IPv4 weighted ordering/semantics remain unchanged.
+                                var total = eligible.Sum(s => s.Weight);
+                                var ticket = (int)((ulong)Interlocked.Increment(ref zone.Counter) % (ulong)total);
+                                foreach (var site in eligible)
+                                {
+                                    ticket -= site.Weight;
+                                    if (ticket < 0) { chosen = site; break; }
+                                }
                             }
                         }
                         if (chosen is not null)
@@ -170,8 +216,8 @@ internal static class DnsWireProtocol
                     }
                 }
             }
-            else if (qtype == A && ns is not null)
-                answers.Add(new Resource(domain, A, (uint)zone.Ttl, ns.Address.GetAddressBytes()));
+            else if (ns is not null && qtype == ns.RecordType)
+                answers.Add(new Resource(domain, ns.RecordType, (uint)zone.Ttl, ns.Address.GetAddressBytes()));
             else if (qtype == Soa && atApex && zone.NameServers.Length != 0)
                 answers.Add(SoaRecord(apex!, zone));
             else if (qtype == Ns && atApex && zone.NameServers.Length != 0)
@@ -180,7 +226,7 @@ internal static class DnsWireProtocol
                 {
                     answers.Add(new Resource(apex!, Ns, (uint)zone.Ttl, WireName(server.Host)));
                     if (server.Host.EndsWith("." + apex!, StringComparison.OrdinalIgnoreCase))
-                        extra.Add(new Resource(server.Host, A, (uint)zone.Ttl, server.Address.GetAddressBytes()));
+                        extra.Add(new Resource(server.Host, server.RecordType, (uint)zone.Ttl, server.Address.GetAddressBytes()));
                 }
             }
             else AddNegativeSoa(); // NODATA (including AAAA, ANY and unsupported QTYPE)

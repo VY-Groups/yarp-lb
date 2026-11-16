@@ -16,7 +16,8 @@ var options = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
 var config = JsonSerializer.Deserialize<DnsConfig>(File.ReadAllText(args[0]), options)
     ?? throw new InvalidDataException("Missing DNS config");
 if (!IPAddress.TryParse(config.ListenHost, out var listen) ||
-    listen.AddressFamily != AddressFamily.InterNetwork ||
+    listen.IsIPv4MappedToIPv6 ||
+    listen.AddressFamily is not (AddressFamily.InterNetwork or AddressFamily.InterNetworkV6) ||
     (!config.AllowNonLoopbackListeners && !IPAddress.IsLoopback(listen)) ||
     config.ListenPort is < 1025 or > 65535 ||
     config.ProbeIntervalSeconds is < 1 or > 60 ||
@@ -35,7 +36,7 @@ foreach(var zone in config.Zones)
         zone.NameServers is {Length: >4} || zone.SoaSerial == 0 ||
         zone.FailureThreshold is < 1 or > 10 ||
         zone.SuccessThreshold is < 1 or > 10 ||
-        zone.RoutingPolicy is not ("Weighted" or "Failover" or "CidrRegion") ||
+        zone.RoutingPolicy is not ("Weighted" or "Failover" or "CidrRegion" or "ObservedLatency" or "WeightedFailover") ||
         (zone.RoutingPolicy == "CidrRegion" &&
              zone.CidrRoutes is not { Length: >= 1 and <= 256 }) ||
         (zone.RoutingPolicy != "CidrRegion" && zone.CidrRoutes is { Length: > 0 }))
@@ -63,9 +64,12 @@ foreach(var zone in config.Zones)
             (site.HealthCheckType == "Tcp" &&
                 (site.TcpPort is < 1 or > 65535 || !string.IsNullOrWhiteSpace(site.HealthUrl))))
             throw new InvalidDataException("Invalid GSLB site address, weight, probe type, URL or port");
+        var observers = ExternalValidation.Parse(site.ValidatorUrls);
+        if (observers.Length != 0 && !zone.FailClosedWhenAllSitesDown)
+            throw new InvalidDataException("External validation requires strict all-down behavior");
         sites.Add(new Site(address,site.HealthCheckType == "Http" ? health : null,
             site.Weight,site.Priority,zone.FailureThreshold,zone.SuccessThreshold,
-            site.HealthCheckType,site.TcpPort,site.Region));
+            site.HealthCheckType,site.TcpPort,site.Region) { Validators = observers });
     }
     var origin = zone.Name.TrimEnd('.').ToLowerInvariant();
     var servers = new List<DnsNameServer>();
@@ -75,8 +79,8 @@ foreach(var zone in config.Zones)
         if (source is null || string.IsNullOrWhiteSpace(source.Host) ||
             !DnsWireProtocol.ValidName(source.Host.TrimEnd('.')) ||
             !IPAddress.TryParse(source.Address, out var nsAddress) ||
-            nsAddress.AddressFamily != AddressFamily.InterNetwork)
-            throw new InvalidDataException("Invalid authoritative NS host or IPv4 glue");
+            nsAddress.IsIPv4MappedToIPv6 || nsAddress.AddressFamily is not (AddressFamily.InterNetwork or AddressFamily.InterNetworkV6))
+            throw new InvalidDataException("Invalid authoritative NS hostname or address");
         var host = source.Host.TrimEnd('.').ToLowerInvariant();
         if (!serverNames.Add(host))
             throw new InvalidDataException("Duplicate authoritative NS hostname");
@@ -97,6 +101,8 @@ foreach(var zone in config.Zones)
         zone.FailClosedWhenAllSitesDown, servers.ToArray(), contact, zone.SoaSerial,
         zone.RoutingPolicy,cidrTable));
 }
+using var validation = groups.Values.SelectMany(group => group.Sites).Any(site => site.Validators.Length > 0)
+    ? new ExternalValidation(groups.Values.SelectMany(group => group.Sites).SelectMany(site => site.Validators)) : null;
 using var stop=new CancellationTokenSource();
 Console.CancelKeyPress += (_, e)=>{e.Cancel=true;stop.Cancel();};
 using var sigterm=OperatingSystem.IsLinux()
@@ -118,6 +124,7 @@ async Task ProbeAll(CancellationToken ct)
         config.MaxConcurrentHealthProbes,
         async (site, token) =>
         {
+            var started = System.Diagnostics.Stopwatch.GetTimestamp();
             var healthy = false;
             try
             {
@@ -139,6 +146,26 @@ async Task ProbeAll(CancellationToken ct)
             }
             catch (Exception e) when (e is HttpRequestException or SocketException or
                 OperationCanceledException) { }
+            // Only a successful real probe advances the latency estimator.
+            // Failed probes invalidate the previously measured performance.
+            if (healthy)
+                site.Latency.ObserveSuccess(System.Diagnostics.Stopwatch.GetElapsedTime(started),
+                    Environment.TickCount64);
+            else
+                site.Latency.ObserveFailure();
+            if (site.Validators.Length != 0)
+            {
+                var observedAt = Environment.TickCount64;
+                var confirmed = healthy && await validation!.ConfirmAsync(site.Validators, token);
+                // A lost or expired authority lease starts a new recovery sequence.
+                var previousDeadline = Volatile.Read(ref site.ValidatorDeadline);
+                if (!confirmed || Environment.TickCount64 >= previousDeadline)
+                    site.Health.Invalidate();
+                var eligible = confirmed && site.Health.Observe(true);
+                Volatile.Write(ref site.Healthy, eligible ? 1 : 0);
+                Volatile.Write(ref site.ValidatorDeadline, confirmed ? observedAt + 10_000 : 0);
+                return;
+            }
             // Publish a single verdict for each distinct zone/site per cycle.
             Volatile.Write(ref site.Healthy, site.Health.Observe(healthy) ? 1 : 0);
         }, ct);
@@ -155,9 +182,13 @@ var probes=Task.Run(async()=>{
     }
     catch(OperationCanceledException) when(stop.IsCancellationRequested){}
 });
-using var dnsSocket=new Socket(AddressFamily.InterNetwork,SocketType.Dgram,ProtocolType.Udp);
+using var dnsSocket=new Socket(listen.AddressFamily,SocketType.Dgram,ProtocolType.Udp);
+var ipv6 = listen.AddressFamily == AddressFamily.InterNetworkV6;
+if (ipv6) dnsSocket.DualMode = false;
+var receiveEndpoint = new IPEndPoint(ipv6 ? IPAddress.IPv6Any : IPAddress.Any, 0);
 dnsSocket.Bind(new IPEndPoint(listen,config.ListenPort));
 using var tcpListener = new TcpListener(listen, config.ListenPort);
+if (ipv6) tcpListener.Server.DualMode = false;
 tcpListener.Start(32);
 using var tcpSlots = new SemaphoreSlim(32);
 var tcpSessions = new List<Task>();
@@ -218,7 +249,7 @@ try
     {
         SocketReceiveFromResult received;
         try { received=await dnsSocket.ReceiveFromAsync(buffer,SocketFlags.None,
-            new IPEndPoint(IPAddress.Any,0),stop.Token); }
+            receiveEndpoint,stop.Token); }
         catch(OperationCanceledException) when(stop.IsCancellationRequested){break;}
         catch(SocketException) when(stop.IsCancellationRequested){break;}
         // IP-keyed response budget. Do not echo arbitrary UDP traffic without limits.
@@ -262,9 +293,13 @@ sealed record DnsZone(string Name,int TtlSeconds,DnsSite[] Sites,
     public DnsCidrRegionRule[]? CidrRoutes { get; init; }
 }
 sealed record DnsNameServerConfig(string Host,string Address);
-sealed record DnsNameServer(string Host,IPAddress Address);
+sealed record DnsNameServer(string Host,IPAddress Address)
+{
+    public ushort RecordType => Address.AddressFamily == AddressFamily.InterNetwork ? (ushort)1 : (ushort)28;
+}
 sealed record DnsSite(string Address,string? HealthUrl,int Weight,int Priority=0)
 {
+    public string[]? ValidatorUrls { get; init; }
     public string HealthCheckType { get; init; } = "Http";
     public int TcpPort { get; init; }
     public string? Region { get; init; }
@@ -287,6 +322,9 @@ sealed class Site
     public int Weight {get;}
     public int Priority {get;}
     public DnsHealthHysteresis Health {get;}
+    public Uri[] Validators { get; init; } = [];
+    public long ValidatorDeadline;
+    public DnsProbeLatency Latency {get;} = new();
     public int Healthy;
 }
 sealed class SiteGroup
@@ -297,6 +335,9 @@ sealed class SiteGroup
         =>(Sites,Ttl,FailClosedWhenAllSitesDown,NameServers,SoaContact,SoaSerial,RoutingPolicy,CidrTable)
         =(sites,ttl,failClosedWhenAllSitesDown,nameServers,soaContact,soaSerial,routingPolicy,cidrTable);
     public string RoutingPolicy { get; }
+    // 3 local successful measurements; at most 3 probe periods, clamped 6..60s.
+    public const int LatencyMinimumSamples = 3;
+    public const int LatencyMaximumAgeMs = 15_000;
     public DnsCidrRegionTable? CidrTable { get; }
     public DnsNameServer[] NameServers { get; }
     public string SoaContact { get; }

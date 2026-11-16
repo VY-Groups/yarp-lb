@@ -914,6 +914,15 @@ app.MapGet("/gateway/health/ready", (IProxyStateLookup proxy) =>
         ? Results.Ok(new { ready = true })
         : Results.StatusCode(503));
 
+// Authenticated management-plane observation. Do not relax data-listener isolation
+// to make the dashboard poll the public readiness endpoint.
+app.MapGet("/admin/api/gateway-readiness", (IProxyStateLookup proxy) =>
+    Results.Ok(new {
+        ready = GatewayListenerIsolation.AnyDestinationHealthy(proxy),
+        scope = "Local active destination health",
+        collectedUtc = DateTimeOffset.UtcNow
+    })).RequireAuthorization();
+
 JsonObject ReadConfig() => JsonNode.Parse(File.ReadAllText(configPath))!.AsObject();
 JsonObject ReadProxy() => (ReadConfig()["ReverseProxy"]?.DeepClone() as JsonObject) ?? new JsonObject();
 

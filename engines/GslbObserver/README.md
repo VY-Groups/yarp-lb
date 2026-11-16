@@ -1,0 +1,18 @@
+# External readiness observer
+
+Start one instance per service and observer vantage with `dotnet GslbObserver.dll /absolute/observer.json`. Give each observer its own signing key and restrict its private listener to the authorised DNS nodes. Trust the client CA on the observer host and configure the DNS client certificate's SHA-256 fingerprint. The observer performs a fresh probe to its configured service for every challenge. A TCP connection alone cannot produce a signed readiness verdict.
+
+```json
+{
+  "ListenAddress": "127.0.0.1",
+  "Port": 18443,
+  "PublicUrl": "https://validator.example:18443/ready",
+  "HealthUrl": "https://service.example/transaction-ready",
+  "ServerCertificatePem": "/private/server.crt",
+  "ServerKeyPem": "/private/server.key",
+  "SigningKeyPem": "/private/observer-p256.key",
+  "AllowedClientSha256": ["<64 hexadecimal characters>"]
+}
+```
+
+The server certificate must match the public URL. The signing key is separate from TLS credentials. Configure the matching public key on each DNS node. Restart the processes after changing key material or trust configuration. A DNS node accepts readiness only when both configured observers and its own local probe succeed.

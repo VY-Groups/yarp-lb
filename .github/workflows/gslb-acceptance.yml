@@ -2,9 +2,9 @@ name: GSLB authoritative DNS health/failover acceptance
 on:
   push:
     branches: [main, "feature/**"]
-    paths: ["engines/GslbDns/**", "tests/GslbAcceptance/**", ".github/workflows/gslb-acceptance.yml"]
+    paths: ["engines/GslbDns/**", "engines/GslbObserver/**", "tests/GslbAcceptance/**", ".github/workflows/gslb-acceptance.yml"]
   pull_request:
-    paths: ["engines/GslbDns/**", "tests/GslbAcceptance/**", ".github/workflows/gslb-acceptance.yml"]
+    paths: ["engines/GslbDns/**", "engines/GslbObserver/**", "tests/GslbAcceptance/**", ".github/workflows/gslb-acceptance.yml"]
   workflow_dispatch:
 permissions: {contents: read}
 jobs:
@@ -22,3 +22,14 @@ jobs:
         with: {dotnet-version: "10.0.x"}
       - run: dotnet build engines/GslbDns/GslbDns.csproj -c Release
       - run: dotnet run --project tests/GslbAcceptance/GslbAcceptance.csproj -c Release -- "${{ github.workspace }}"
+      - run: dotnet build engines/GslbObserver/GslbObserver.csproj -c Release
+      - name: Two DNS nodes and two TLS-authenticated external health validators
+        if: runner.os == 'Linux'
+        run: python tests/GslbAcceptance/external_validation.py
+      - run: python tests/GslbAcceptance/ipv6_transport.py
+      - name: Install independent DNS clients
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -qq && sudo apt-get install -y dnsutils knot-dnsutils
+      - name: Query IPv6 authority with BIND and Knot over UDP and TCP
+        if: runner.os == 'Linux'
+        run: python tests/GslbAcceptance/ipv6_transport.py --interop

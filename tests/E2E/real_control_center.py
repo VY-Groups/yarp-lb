@@ -180,6 +180,7 @@ def acceptance(base:str,origin_port:int):
     check(anonymous.request("GET","/admin/api/users",expect=401)=="","anonymous users endpoint remains 401")
     anonymous.request("POST","/admin/api/users",{"username":"unauth"},expect=401)
     anonymous.request("POST","/admin/api/bootstrap",{"username":"a","password":"weak","email":"invalid"},expect=400)
+    anonymous.request("GET","/admin/api/gateway-readiness",expect=401)
     admin=Client(base)
     admin.bootstrap("admin_e2e","Admin-secret-long-4096!","admin@example.invalid")
     admin.request("POST","/admin/api/bootstrap",{"username":"other","password":"Another-very-long-secret!","email":"a@example.invalid"},expect=409)
@@ -196,6 +197,10 @@ def acceptance(base:str,origin_port:int):
     viewer.request("GET","/admin/api/users",expect=403)
     viewer.request("POST","/admin/api/inventory",{"id":"bad"},expect=403)
     operator.request("POST","/admin/api/users",{"username":"bad"},expect=403)
+    for client in (admin,operator,viewer):
+        readiness=client.request("GET","/admin/api/gateway-readiness")
+        check(type(readiness["ready"]) is bool and readiness["scope"]=="Local active destination health",
+              "authenticated roles can inspect local readiness without data-listener access")
     check(viewer.request("GET","/admin/api/setup/overview")["verifiedForProduction"] is False,
         "viewer can inspect honest unverified setup")
     admin.request("GET","/admin/api/setup/version")
