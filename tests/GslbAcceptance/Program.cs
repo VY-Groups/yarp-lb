@@ -4,6 +4,7 @@ using System.Net;
 using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
+LatencyRoutingTests.Run();
 // Exercise opt-in probe-latency state with deterministic monotonic timestamps.
 var latency = new DnsProbeLatency();
 latency.ObserveSuccess(TimeSpan.FromMilliseconds(40), 1000);
@@ -213,6 +214,20 @@ try
         Must((await Query("latency.integration.test")).Address=="127.0.0.22",
             "locally faster probe endpoint wins only after sample floor");
 
+    // Remove the measured winner, then prove real DNS chooses the slower
+    // healthy backend; restore it and wait for a stable measured winner.
+    s2.Healthy=0;
+    await Wait(async()=> (await Query("latency.integration.test")).Address=="127.0.0.21");
+    for(var i=0;i<12;i++)
+        Must((await Query("latency.integration.test")).Address=="127.0.0.21",
+            "failed faster endpoint must not win based on old latency");
+    s2.Healthy=1;
+    await Wait(async()=>{
+        for(var i=0;i<12;i++)
+            if((await Query("latency.integration.test")).Address!="127.0.0.22")return false;
+        return true;
+    });
+
     await Wait(async()=> (await Query("geo.integration.test")).Address=="127.0.0.21");
     var geoTcp=await TcpQuery(DnsRequest("geo.integration.test",1));
     Must(Dns16(geoTcp,6)==1 &&
@@ -299,6 +314,9 @@ try
     await Wait(async () => (await Query("ha.integration.test")).Status==2);
     Must((await Query("ha.integration.test")).Status==2,
         "strict failover zone SERVFAIL when every site is down");
+    await Wait(async()=> (await Query("latency.integration.test")).Status==2);
+    Must((await Query("latency.integration.test")).Status==2,
+        "strict observed-latency zone SERVFAIL when every site is down");
     await Wait(async()=> (await Query("geo.integration.test")).Status==2);
     Must((await Query("geo.integration.test")).Status==2,
         "strict CIDR region zone returns SERVFAIL when all sites down");
@@ -308,6 +326,9 @@ try
     await Wait(async()=> (await Query("ha.integration.test")).Address=="127.0.0.21");
     Must((await Query("ha.integration.test")).Address=="127.0.0.21",
         "recovered primary preferred after success threshold");
+    await Wait(async()=> (await Query("latency.integration.test")).Address=="127.0.0.21");
+    Must((await Query("latency.integration.test")).Address=="127.0.0.21",
+        "sole recovered slow backend is eligible without stale fast-site data");
     await Wait(async()=> (await Query("geo.integration.test")).Address=="127.0.0.21");
     Must((await Query("geo.integration.test")).Address=="127.0.0.21",
         "recovered preferred-region site selected again");
