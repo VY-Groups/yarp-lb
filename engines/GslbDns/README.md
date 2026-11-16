@@ -231,8 +231,7 @@ and isolation across two independent sites remain mandatory for production.
 ## Remaining NO-GO areas
 
 DNSSEC signatures/keys, TLS/DoT/DoH, TSIG, DNS NOTIFY, zone transfer, true
-zone-cut/delegation conformance, CNAME/MX, IPv6 DNS transport listeners,
-IPv6 NS glue, geographic/ASN policy with licensed data and privacy, verified multi-site
+zone-cut/delegation conformance, CNAME/MX, IPv6 NS glue, geographic/ASN policy with licensed data and privacy, verified multi-site
 health quorum and authenticated state propagation, split-brain protection,
 ECMP/multi-NS physical hosting, public resolver interoperability and
 spoofed-source reflection protection are NOT complete.
@@ -256,3 +255,5 @@ targets observable features only, not OpenGSLB protocol compatibility or
 vendor certification. See `OPENGSLB_REFERENCE_REVIEW.md` for mapping,
 risk and test boundaries. Consult legal counsel before any future direct
 code reuse or software distribution.
+
+`ListenHost` accepts native IPv4 and IPv6 addresses for both UDP and TCP. Use `::1` for IPv6 loopback. Non-loopback addresses still require explicit opt-in. Each process listens on one address family.

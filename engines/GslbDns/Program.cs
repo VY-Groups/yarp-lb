@@ -16,7 +16,8 @@ var options = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
 var config = JsonSerializer.Deserialize<DnsConfig>(File.ReadAllText(args[0]), options)
     ?? throw new InvalidDataException("Missing DNS config");
 if (!IPAddress.TryParse(config.ListenHost, out var listen) ||
-    listen.AddressFamily != AddressFamily.InterNetwork ||
+    listen.IsIPv4MappedToIPv6 ||
+    listen.AddressFamily is not (AddressFamily.InterNetwork or AddressFamily.InterNetworkV6) ||
     (!config.AllowNonLoopbackListeners && !IPAddress.IsLoopback(listen)) ||
     config.ListenPort is < 1025 or > 65535 ||
     config.ProbeIntervalSeconds is < 1 or > 60 ||
@@ -155,9 +156,13 @@ var probes=Task.Run(async()=>{
     }
     catch(OperationCanceledException) when(stop.IsCancellationRequested){}
 });
-using var dnsSocket=new Socket(AddressFamily.InterNetwork,SocketType.Dgram,ProtocolType.Udp);
+using var dnsSocket=new Socket(listen.AddressFamily,SocketType.Dgram,ProtocolType.Udp);
+var ipv6 = listen.AddressFamily == AddressFamily.InterNetworkV6;
+if (ipv6) dnsSocket.DualMode = false;
+var receiveEndpoint = new IPEndPoint(ipv6 ? IPAddress.IPv6Any : IPAddress.Any, 0);
 dnsSocket.Bind(new IPEndPoint(listen,config.ListenPort));
 using var tcpListener = new TcpListener(listen, config.ListenPort);
+if (ipv6) tcpListener.Server.DualMode = false;
 tcpListener.Start(32);
 using var tcpSlots = new SemaphoreSlim(32);
 var tcpSessions = new List<Task>();
@@ -218,7 +223,7 @@ try
     {
         SocketReceiveFromResult received;
         try { received=await dnsSocket.ReceiveFromAsync(buffer,SocketFlags.None,
-            new IPEndPoint(IPAddress.Any,0),stop.Token); }
+            receiveEndpoint,stop.Token); }
         catch(OperationCanceledException) when(stop.IsCancellationRequested){break;}
         catch(SocketException) when(stop.IsCancellationRequested){break;}
         // IP-keyed response budget. Do not echo arbitrary UDP traffic without limits.
