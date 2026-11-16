@@ -1,4 +1,5 @@
 """Disposable Linux Actions test for local readiness plus two mTLS validators."""
+import base64
 import contextlib
 import http.server
 import json
@@ -16,6 +17,21 @@ import time
 class Ready(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(self.server.verdict)
+        server = self.server
+        if hasattr(server, "signer") and server.mode != "unsigned":
+            challenge = self.headers.get("Gslb-Challenge", "")
+            target = server.origin + self.path
+            if server.mode == "wrong-target":
+                target += "/other"
+            message = f"GatewayCore.Health.v1\n{target}\n{challenge}\n{server.verdict}".encode()
+            if server.mode == "replay":
+                signature = server.last_signature
+            else:
+                signature = base64.b64encode(subprocess.run(
+                    ["openssl", "dgst", "-sha256", "-sign", server.signer],
+                    input=message, capture_output=True, check=True).stdout).decode()
+                server.last_signature = signature
+            self.send_header("Gslb-Signature", signature)
         self.end_headers()
 
     def log_message(self, *args):
@@ -78,11 +94,20 @@ def main():
         tls.verify_mode = ssl.CERT_REQUIRED
         observers = [serve(stack, tls), serve(stack, tls)]
         origins = [f"https://127.0.0.1:{s.server_port}" for s in observers]
+        keys = {}
+        for index, (server, origin) in enumerate(zip(observers, origins)):
+            server.origin = origin
+            server.mode = "signed"
+            server.signer = root / f"observer-{index}.key"
+            public = root / f"observer-{index}.pub"
+            openssl("ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out", server.signer)
+            openssl("pkey", "-in", server.signer, "-pubout", "-out", public)
+            keys[origin] = str(public)
         local = serve(stack)
         env = dict(os.environ, SSL_CERT_FILE=str(root / "ca.pem"),
                    GSLB_VALIDATOR_CERT_PEM=str(root / "client.pem"),
                    GSLB_VALIDATOR_KEY_PEM=str(root / "client.key"),
-                   GSLB_VALIDATOR_ORIGINS=",".join(origins))
+                   GSLB_VALIDATOR_SIGNING_KEYS=json.dumps(keys), GSLB_VALIDATOR_ORIGINS=",".join(origins))
         nodes = []
         def start_node(interval, environment):
             with socket.socket() as reservation:
@@ -106,6 +131,12 @@ def main():
             server.verdict = 503
             check(nodes, 2)
             server.verdict = 200
+            check(nodes, 0)
+
+        for mode in ("unsigned", "replay", "wrong-target"):
+            observers[0].mode = mode
+            check(nodes, 2)
+            observers[0].mode = "signed"
             check(nodes, 0)
 
         # No scheduler refresh before the ten-second lease expires.
