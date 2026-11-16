@@ -1,5 +1,3 @@
-using System.Globalization;
-
 /// <summary>
 /// Pure, deterministic primary selection helper for an opt-in HAProxy-style
 /// primary/backup routing policy. It neither retries nor replays HTTP requests.
