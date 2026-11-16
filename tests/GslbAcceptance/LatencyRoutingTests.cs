@@ -75,7 +75,7 @@ internal static class LatencyRoutingTests
             0, 1, 1, "Http", 0, null, null, []) { Healthy = 1 };
     private static SiteGroup Group(params Site[] sites) =>
         new(sites, 10, true, Array.Empty<DnsNameServer>(),
-            "hostmaster.latency.unit.test", 1, "ObservedLatency", null);
+            "hostmaster.latency.unit.test", 1, "ObservedLatency", null, false, null);
     private static void Observe(Site site, double ms, long now) =>
         ObserveValue(site.Latency, ms, now);
     private static void ObserveValue(DnsProbeLatency latency, double ms, long now)
