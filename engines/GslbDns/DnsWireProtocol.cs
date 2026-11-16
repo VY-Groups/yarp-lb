@@ -156,6 +156,14 @@ internal static class DnsWireProtocol
                         }
                         else
                         {
+                            if (zone.RoutingPolicy == "WeightedFailover")
+                            {
+                                // Group only the family-correct eligible pool. Never
+                                // send overflow into lower-priority groups while a
+                                // higher-priority member remains healthy.
+                                var priority = eligible.Min(s => s.Priority);
+                                eligible = eligible.Where(s => s.Priority == priority).ToArray();
+                            }
                             // Historic IPv4 weighted ordering/semantics are unchanged.
                             var total = eligible.Sum(s => s.Weight);
                             var ticket = (int)((ulong)Interlocked.Increment(ref zone.Counter) % (ulong)total);

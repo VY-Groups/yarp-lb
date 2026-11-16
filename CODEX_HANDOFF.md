@@ -390,3 +390,27 @@ For every Codex task, produce: (a) short issue-linked scope and current `main` S
 | `engines/L4/README.md` and `integrations/WafCrs/README.md` | Separate experimental L4/WAF architecture and limits |
 
 **Handoff snapshot end. Refresh live GitHub state before every code change.**
+
+## Continuation — weighted priority groups (2026-11-16)
+
+Live main remains `82c7b863e3674bb7c0a4ba368f4c11b3c7636152`.
+PR #111 (DNS empty non-terminal fix) is open, ready for independent review at
+`1689e92304d52ec3a3afb69088dc945fd688866e`; its 9 reported DNS/L7/HA/load
+checks passed. PR #108 remains draft at `471bb8356af4a2a3e44e527700d3b723795f5390`
+with routing-policy edge-test gaps documented in its review. Neither is merged.
+
+`codex/gslb-weighted-failover-groups` starts from current main and proposes
+`WeightedFailover`: choose the best healthy priority per address family,
+then use existing weighted selection within it. This independently implements
+one requested routing feature without OpenGSLB source/module reuse.
+ECC 2.2.3 is installed/enabled and its TDD/verification process is being used.
+The test-only commit `7160066e9c4e80eabbe6e06551dde91646b197e1` compiled
+but failed at startup because unchanged main correctly rejects the not-yet
+implemented policy. Final-head CI and maintainer review are required.
+
+The feature comparison table and supplied topology are requirements, not
+evidence that either product satisfies them. Authenticated multi-vantage
+health agents, mTLS/signed freshness/quorum and partition fencing (#109),
+DNSSEC/GeoIP/ECS/delegation (#52), secure management and independent
+physical HA/capacity (#36) remain incomplete. Prediction stays advisory.
+Production remains NO-GO; no source-level feature test closes these issues.
