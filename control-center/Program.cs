@@ -163,7 +163,8 @@ if (peerSyncSettings is not null)
 {
     builder.Services.AddSingleton(peerSyncSettings);
     builder.Services.AddSingleton(sp => new PeerStateJournal(peerSyncSettings.NodeId,
-        peerSyncSettings.RemoteId, peerSyncSettings.Secret, peerSyncSettings.Capacity));
+        peerSyncSettings.RemoteId, peerSyncSettings.Secret, peerSyncSettings.Capacity,
+        TimeSpan.FromSeconds(Math.Clamp(peerSyncSettings.IntervalSeconds * 3, 6, 60))));
     builder.Services.AddSingleton(sp => new PeerSignedMessages(peerSyncSettings.Secret));
     builder.Services.AddHttpClient("peer-sync", client => client.Timeout = TimeSpan.FromSeconds(5))
         .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler {
