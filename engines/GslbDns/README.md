@@ -6,6 +6,50 @@ IPv6 AAAA GSLB backends, with HTTP(S) and opt-in TCP health probes,
 weighted/Failover selection, response rate limits and per-zone all-down policy.
 The DNS listener remains IPv4-only even when answering AAAA queries.
 
+## Private CIDR-to-region routing (opt-in, **not GeoIP**)
+
+A zone may explicitly opt into `RoutingPolicy: "CidrRegion"` with a bounded
+`CidrRoutes` table of 1–256 canonical IPv4/IPv6 CIDR prefixes. Each
+`DnsSite` in that zone needs a valid `Region` (ASCII letters, digits, dash
+or underscore; max 32 characters). Every mapped region must have at least one
+configured site. Invalid, duplicate, noncanonical or conflicting entries
+fail startup instead of silently misrouting customers.
+
+Only the direct **DNS resolver source IP** from the UDP/TCP socket is used
+for matching; it is not necessarily the actual user IP. More specific CIDR
+prefixes take priority, independent of declaration order. A healthy matching
+region receives weighted A/AAAA selection. If the resolver is unmapped or
+every member of its preferred region is unhealthy, fall back to any healthy
+configured site of that address family (or the zone's configured strict
+all-down behavior when none are healthy).
+
+Example **lab-only** zone (complete operational NS/SOA settings omitted):
+
+    {
+      "Name": "app.example.test",
+      "TtlSeconds": 10,
+      "RoutingPolicy": "CidrRegion",
+      "FailureThreshold": 2,
+      "SuccessThreshold": 2,
+      "FailClosedWhenAllSitesDown": true,
+      "CidrRoutes": [
+        {"Cidr":"10.42.0.0/16","Region":"dc"},
+        {"Cidr":"10.42.10.0/24","Region":"dr"}
+      ],
+      "Sites": [
+        {"Address":"192.0.2.10","HealthUrl":"https://dc.example.test/ready","Weight":2,"Region":"dc"},
+        {"Address":"192.0.2.20","HealthUrl":"https://dr.example.test/ready","Weight":1,"Region":"dr"}
+      ]
+    }
+
+**Not equivalent to geographical user routing.** ECS remains ignored (and
+must not be trusted without explicit source resolver policy and privacy
+approval). No GeoIP/ASN dataset or inferred country/continent is used.
+External recursive resolvers may serve cached answers to many geographically
+diverse users. Use this mode only for controlled resolver networks with
+explicitly owned CIDR mappings. Multi-region failure safety, DNSSEC,
+signed configuration, physical DR and cache-aware rollover remain NO-GO.
+
 ## Family-correct IPv4/IPv6 backend answers (lab)
 
 Each site `Address` may now be an IPv4 or IPv6 literal. A queries select only
