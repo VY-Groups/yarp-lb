@@ -1,9 +1,24 @@
 # GatewayCore standalone GSLB DNS — experimental authoritative transport
 
 This separate, non-recursive .NET 10 engine is NOT the HTTP YARP dataplane and
-must not be delegated a production domain. It serves explicit IPv4 GSLB hosts,
-with HTTP(S) health probes, weighted selection, response rate limits and per-zone
-all-down policy.
+must not be delegated a production domain. It serves explicit IPv4 A and
+IPv6 AAAA GSLB backends, with HTTP(S) and opt-in TCP health probes,
+weighted/Failover selection, response rate limits and per-zone all-down policy.
+The DNS listener remains IPv4-only even when answering AAAA queries.
+
+## Family-correct IPv4/IPv6 backend answers (lab)
+
+Each site `Address` may now be an IPv4 or IPv6 literal. A queries select only
+configured IPv4 site addresses, and AAAA queries only configured IPv6 sites.
+Health, optional priority and existing weights are applied within that family.
+When no site is configured for the requested family, the authoritative result
+is **NODATA with negative SOA**, not SERVFAIL or an incorrectly typed answer.
+
+Example IPv6 site: `{"Address":"2001:db8::99","HealthUrl":"http://127.0.0.1:19711/ready","Weight":1}`.
+The address and the readiness probe target are deliberately separate.
+**A successful IPv4 HTTP probe is not proof of IPv6 reachability.** Production
+acceptance must probe over the network/address family actually advertised.
+IPv6 DNS UDP/TCP listener binding, IPv6 NS glue and DNSSEC are still missing.
 
 ## Newly supported in lab
 
@@ -151,8 +166,8 @@ and isolation across two independent sites remain mandatory for production.
 ## Remaining NO-GO areas
 
 DNSSEC signatures/keys, TLS/DoT/DoH, TSIG, DNS NOTIFY, zone transfer, true
-zone-cut/delegation conformance, CNAME/MX, health-aware AAAA and regional
-IPv6, geographic/ASN policy with licensed data and privacy, verified multi-site
+zone-cut/delegation conformance, CNAME/MX, IPv6 DNS transport listeners,
+IPv6 NS glue, geographic/ASN policy with licensed data and privacy, verified multi-site
 health quorum and authenticated state propagation, split-brain protection,
 ECMP/multi-NS physical hosting, public resolver interoperability and
 spoofed-source reflection protection are NOT complete.
