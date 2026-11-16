@@ -7,7 +7,7 @@ using System.Text;
 // DNSSEC, EDNS Client Subnet routing, or zone transfer.
 internal static class DnsWireProtocol
 {
-    private const ushort A = 1, Ns = 2, Soa = 6, Opt = 41;
+    private const ushort A = 1, Ns = 2, Soa = 6, Aaaa = 28, Opt = 41;
     private const ushort ClassIn = 1;
     private sealed record Resource(string Owner, ushort Type, uint Ttl, byte[] Rdata);
 
@@ -110,38 +110,47 @@ internal static class DnsWireProtocol
                 rcode = 3; // NXDOMAIN within a hosted zone
                 AddNegativeSoa();
             }
-            else if (qtype == A && atApex)
+            else if ((qtype == A || qtype == Aaaa) && atApex)
             {
-                var eligible = zone.Sites.Where(s => Volatile.Read(ref s.Healthy) == 1).ToArray();
-                if (eligible.Length == 0)
+                // A and AAAA have separate backend-eligibility pools. When a family
+                // is not configured the authoritative answer is NODATA + negative
+                // SOA, never SERVFAIL or a mismatched address family.
+                var family = qtype == A ? AddressFamily.InterNetwork : AddressFamily.InterNetworkV6;
+                var configured = zone.Sites.Where(s => s.Address.AddressFamily == family).ToArray();
+                if (configured.Length == 0)
                 {
-                    if (zone.FailClosedWhenAllSitesDown) rcode = 2; // SERVFAIL
-                    else eligible = zone.Sites; // explicit availability-first fallback
+                    AddNegativeSoa();
                 }
-                if (eligible.Length > 0 && rcode == 0)
+                else
                 {
-                    Site? chosen = null;
-                    if (zone.RoutingPolicy == "Failover")
+                    var eligible = configured.Where(s => Volatile.Read(ref s.Healthy) == 1).ToArray();
+                    if (eligible.Length == 0)
                     {
-                        // Explicit tier and configuration order; no random standby promotion.
-                        // Every healthy higher-priority site outranks lower-priority sites.
-                        // For equal priority, first configured site wins deterministically.
-                        var bestPriority = eligible.Min(s => s.Priority);
-                        chosen = eligible.First(s => s.Priority == bestPriority);
+                        if (zone.FailClosedWhenAllSitesDown) rcode = 2; // SERVFAIL
+                        else eligible = configured; // family-specific availability-first fallback
                     }
-                    else
+                    if (eligible.Length > 0 && rcode == 0)
                     {
-                        // Historical weighted policy is unchanged by the new opt-in.
-                        var total = eligible.Sum(s => s.Weight);
-                        var ticket = (int)((ulong)Interlocked.Increment(ref zone.Counter) % (ulong)total);
-                        foreach (var site in eligible)
+                        Site? chosen = null;
+                        if (zone.RoutingPolicy == "Failover")
                         {
-                            ticket -= site.Weight;
-                            if (ticket < 0) { chosen = site; break; }
+                            var bestPriority = eligible.Min(s => s.Priority);
+                            chosen = eligible.First(s => s.Priority == bestPriority);
                         }
+                        else
+                        {
+                            // Historic IPv4 weighted ordering/semantics are unchanged.
+                            var total = eligible.Sum(s => s.Weight);
+                            var ticket = (int)((ulong)Interlocked.Increment(ref zone.Counter) % (ulong)total);
+                            foreach (var site in eligible)
+                            {
+                                ticket -= site.Weight;
+                                if (ticket < 0) { chosen = site; break; }
+                            }
+                        }
+                        if (chosen is not null)
+                            answers.Add(new Resource(domain, qtype, (uint)zone.Ttl, chosen.Address.GetAddressBytes()));
                     }
-                    if (chosen is not null)
-                        answers.Add(new Resource(domain, A, (uint)zone.Ttl, chosen.Address.GetAddressBytes()));
                 }
             }
             else if (qtype == A && ns is not null)
