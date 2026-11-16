@@ -17,6 +17,42 @@ try { _ = new DnsHealthHysteresis(0, 2); }
 catch (ArgumentOutOfRangeException) { invalidThreshold = true; }
 if (!invalidThreshold) throw new Exception("FAIL: invalid hysteresis config accepted");
 Console.WriteLine("PASS: health hysteresis, recovery and default behavior");
+// Prove max in-flight health checks and eventual completion without timing races.
+var releaseChecks = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+var twoChecksRunning = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+var startedChecks=0; var activeChecks=0; var maxChecks=0; var completedChecks=0;
+var checksGate=new object();
+var probeBatch=BoundedDnsProbes.RunAsync(Enumerable.Range(0,6),2,async (_,ct)=>
+{
+    var active=Interlocked.Increment(ref activeChecks);
+    lock(checksGate) maxChecks=Math.Max(maxChecks,active);
+    if(Interlocked.Increment(ref startedChecks)==2) twoChecksRunning.TrySetResult();
+    try { await releaseChecks.Task.WaitAsync(ct); }
+    finally
+    {
+        Interlocked.Decrement(ref activeChecks);
+        Interlocked.Increment(ref completedChecks);
+    }
+},CancellationToken.None);
+try
+{
+    await twoChecksRunning.Task.WaitAsync(TimeSpan.FromSeconds(10));
+    if(startedChecks!=2 || maxChecks!=2)
+        throw new Exception("FAIL: DNS probe concurrency exceeded configured cap");
+}
+finally {releaseChecks.TrySetResult();}
+await probeBatch;
+if(startedChecks!=6 || completedChecks!=6 || maxChecks!=2 || activeChecks!=0)
+    throw new Exception("FAIL: bounded DNS probe batch did not drain and finish all sites");
+var invalidParallelism=false;
+try
+{
+    await BoundedDnsProbes.RunAsync(Array.Empty<int>(),0,
+        (_,__)=>ValueTask.CompletedTask,CancellationToken.None);
+}
+catch(ArgumentOutOfRangeException){invalidParallelism=true;}
+if(!invalidParallelism) throw new Exception("FAIL: unsafe DNS probe concurrency accepted");
+Console.WriteLine("PASS: DNS health probe concurrency hard cap, drain and validation");
 // Verify response limiting with deterministic monotonic timestamps: no flaky UDP flood.
 var rate=new DnsResponseRateLimiter(2,2);
 var ip1=IPAddress.Parse("127.0.0.31");
