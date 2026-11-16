@@ -2,8 +2,9 @@ using System.Buffers.Binary;
 using System.Net;
 using System.Text;
 
-// Independent DNS wire-format implementation. Polaris is an architectural reference,
-// not a source dependency. No recursion, DNSSEC, EDNS Client Subnet, or zone transfer.
+// Independent DNS wire-format implementation. External GSLB references are reviewed
+// only as architectural context; no AGPL source is included. No recursion,
+// DNSSEC, EDNS Client Subnet routing, or zone transfer.
 internal static class DnsWireProtocol
 {
     private const ushort A = 1, Ns = 2, Soa = 6, Opt = 41;
