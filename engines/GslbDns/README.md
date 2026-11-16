@@ -112,6 +112,27 @@ be accepted separately. Existing DNS caches can continue returning earlier
 answers until TTL expiry. Health hysteresis may intentionally delay failover;
 size thresholds and TTL from application SLOs, not to force a green CI result.
 
+## Bounded parallel DNS health sweeps
+
+`MaxConcurrentHealthProbes` is an optional top-level JSON setting, default
+**32**, accepted **1..128**. Each timed DNS probe cycle now dispatches
+up to that many HTTP(S)/TCP probes concurrently, rather than probing all
+configured sites sequentially. The complete batch finishes before another
+cycle begins: no overlapping health writes to the same per-zone backend,
+no unbounded per-site Task.Run fanout, and cancellation propagates on stop.
+Existing readiness timeout, health hysteresis and all-down policy are unchanged.
+
+The acceptance suite uses a deterministic blocked-probe workload to prove
+that only two of six synthetic probes start before release, that all six
+eventually complete, and that an invalid parallelism setting is rejected.
+This supplements the real Windows/Linux DNS health and failover tests.
+
+The engine allows up to 64 zones with up to 16 sites per zone. At maximum
+cardinality, even 32 concurrent probes can require many seconds to conclude
+if every target times out; operators must measure probe durations, age and
+batch cadence. Local source observations are not multi-site health quorum.
+**Concurrency tuning is not a production GSLB certification.**
+
 ## Backend health probe types (independent, opt-in)
 
 Existing site configurations continue to use direct HTTP(S) readiness with the
