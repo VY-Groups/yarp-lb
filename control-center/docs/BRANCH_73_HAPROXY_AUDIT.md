@@ -8,7 +8,7 @@
 
 The current source tree already includes `RiseFallActiveHealthPolicy`, `AutonomousRecoveryObserver`, `RecoveryHealthGate`, Linux key-protection source, L4/GSLB standalone experimental engines, WAF CRS integration harness, peer telemetry, signed TLS Redis atomic quota and all major frontend pages. **Presence of a source path is not proof of feature parity or live production acceptance.** Do not backport an old copy of `Program.cs` or any old workflow: it could undo the recent security hardening, onboarding improvements, code contracts or CI evidence.
 
-**New safe, additive port chosen:** [PR #95](https://github.com/VY-Groups/yarp-lb/pull/95) provides opt-in `PrimaryBackup` routing with backend role settings, management UI and real L7 fault tests. That feature is authored independently on current main; it is **not** a merge of HAProxy GPL sources or a promise of physical HA. Production gating still applies.
+**New safe, additive port chosen:** PR #95 provides opt-in `PrimaryBackup` routing with backend role settings, management UI and real L7 fault tests. That feature is authored independently on current main; it is **not** a merge of HAProxy GPL sources or a promise of physical HA. Production gating still applies.
 
 ## Branch-by-branch comparison
 
