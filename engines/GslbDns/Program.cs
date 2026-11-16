@@ -157,8 +157,14 @@ async Task ProbeAll(CancellationToken ct)
             {
                 var observedAt = Environment.TickCount64;
                 var confirmed = healthy && await validation!.ConfirmAsync(site.Validators, token);
+                // A lost or expired authority lease starts a new recovery sequence.
+                var previousDeadline = Volatile.Read(ref site.ValidatorDeadline);
+                if (!confirmed || Environment.TickCount64 >= previousDeadline)
+                    site.Health.Invalidate();
+                var eligible = confirmed && site.Health.Observe(true);
+                Volatile.Write(ref site.Healthy, eligible ? 1 : 0);
                 Volatile.Write(ref site.ValidatorDeadline, confirmed ? observedAt + 10_000 : 0);
-                healthy = confirmed;
+                return;
             }
             // Publish a single verdict for each distinct zone/site per cycle.
             Volatile.Write(ref site.Healthy, site.Health.Observe(healthy) ? 1 : 0);

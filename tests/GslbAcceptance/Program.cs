@@ -33,6 +33,14 @@ if (hysteresis.Observe(true) || !hysteresis.Observe(true) ||
     throw new Exception("FAIL: rise/fall requires two consecutive results");
 if (!new DnsHealthHysteresis(1,1).Observe(true))
     throw new Exception("FAIL: legacy single-success eligibility");
+hysteresis.Invalidate();
+if (hysteresis.IsHealthy || hysteresis.Observe(true) || !hysteresis.Observe(true))
+    throw new Exception("FAIL: withdrawn authority requires the full recovery threshold");
+hysteresis.Invalidate();
+hysteresis.Observe(true);
+hysteresis.Invalidate();
+if (hysteresis.Observe(true))
+    throw new Exception("FAIL: expiry during recovery discards partial rise evidence");
 var invalidThreshold = false;
 try { _ = new DnsHealthHysteresis(0, 2); }
 catch (ArgumentOutOfRangeException) { invalidThreshold = true; }
