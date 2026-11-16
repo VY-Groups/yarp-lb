@@ -66,6 +66,23 @@ var badDns=dns.DeepClone().AsObject();
 badDns["Zones"]![0]!["Sites"]![0]!["HealthUrl"]="file:///etc/passwd";
 Must(!EngineConfigContract.Validate("gslb",badDns,false),
     "unsafe probe URL scheme rejected");
+var tcpDns = dns.DeepClone().AsObject();
+tcpDns["ListenHost"] = "::1";
+var tcpSite = tcpDns["Zones"]![0]!["Sites"]![0]!.AsObject();
+tcpSite["Address"] = "2001:db8::17";
+tcpSite["HealthCheckType"] = "Tcp";
+tcpSite.Remove("HealthUrl");
+tcpSite["TcpPort"] = 443;
+Must(EngineConfigContract.Validate("gslb",tcpDns,false), "native IPv6 DNS and TCP probe can stage");
+tcpDns["ListenHost"] = "::";
+Must(!EngineConfigContract.Validate("gslb",tcpDns,false), "IPv6 wildcard requires both bind permissions");
+tcpDns["AllowNonLoopbackListeners"] = true;
+Must(!EngineConfigContract.Validate("gslb",tcpDns,false), "signed opt-in alone cannot publish IPv6");
+Must(EngineConfigContract.Validate("gslb",tcpDns,true), "both opt-ins permit native IPv6 public bind");
+tcpSite["HealthUrl"] = "https://localhost/ready";
+Must(!EngineConfigContract.Validate("gslb",tcpDns,true), "TCP probe with conflicting HTTP URL rejected");
+tcpSite["HealthCheckType"] = "Http";
+Must(!EngineConfigContract.Validate("gslb",tcpDns,true), "HTTP probe with nonzero TCP port rejected");
 // Per-engine replay state must survive process restarts and reject duplicates.
 var stageRoot = Path.Combine(Path.GetTempPath(), "engine-security-"+Guid.NewGuid().ToString("N"));
 Directory.CreateDirectory(stageRoot);

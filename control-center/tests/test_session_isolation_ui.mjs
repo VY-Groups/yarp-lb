@@ -69,7 +69,7 @@ assert.equal(run('Object.keys(data.routes).length'),0);
 assert.match(js,/unsubmitted configuration draft will be discarded/);
 assert.match(js,/submit.disabled = true;/);
 assert.match(js,/submit.disabled = false;/);
-assert.match(js,/gateway\/health\/ready/);
+assert.match(js,/admin\/api\/gateway-readiness/);
 assert.match(js,/Backend readiness observed/);
 assert.match(js,/No healthy backend reported/);
 console.log('PASS: logout/expiry purges drafts and credentials; stale async responses rejected; live readiness status wired');

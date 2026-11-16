@@ -4,6 +4,27 @@ using System.Net;
 using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
+LatencyRoutingTests.Run();
+// Exercise opt-in probe-latency state with deterministic monotonic timestamps.
+var latency = new DnsProbeLatency();
+latency.ObserveSuccess(TimeSpan.FromMilliseconds(40), 1000);
+latency.ObserveSuccess(TimeSpan.FromMilliseconds(20), 2000);
+if (latency.TryRead(2000,3,15000,out _))
+    throw new Exception("FAIL: insufficient latency samples admitted");
+latency.ObserveSuccess(TimeSpan.FromMilliseconds(10), 3000);
+if (!latency.TryRead(3000,3,15000,out var ewma) ||
+    Math.Abs(ewma - 28.75) > 0.001)
+    throw new Exception("FAIL: observed latency EWMA wrong");
+if (latency.TryRead(18001,3,15000,out _) ||
+    latency.TryRead(2999,3,15000,out _))
+    throw new Exception("FAIL: expired or clock-rolled-back latency admitted");
+latency.ObserveFailure();
+if (latency.TryRead(3001,3,15000,out _))
+    throw new Exception("FAIL: failed probe must invalidate old latency");
+latency.ObserveSuccess(TimeSpan.FromMilliseconds(60), 4000);
+if (latency.TryRead(4000,3,15000,out _))
+    throw new Exception("FAIL: recovered backend requires new sample floor");
+Console.WriteLine("PASS: observed latency EWMA, sample floor, expiry and failover invalidation");
 // Deterministic state-transition characterization: no sleeps or mutable network state.
 var hysteresis = new DnsHealthHysteresis(2, 2);
 if (hysteresis.Observe(true) || !hysteresis.Observe(true) ||
@@ -93,28 +114,52 @@ var repo=args.Length==1?Path.GetFullPath(args[0]):Directory.GetCurrentDirectory(
 var dll=Path.Combine(repo,"engines","GslbDns","bin","Release","net10.0","GslbDns.dll");
 if(!File.Exists(dll))throw new FileNotFoundException("Compile DNS server first",dll);
 using var cancel=new CancellationTokenSource();
-var s1=new ProbeState();var s2=new ProbeState();
+var s1=new ProbeState { DelayMs=180 };var s2=new ProbeState();var s3=new ProbeState();
 var healthA=new TcpListener(IPAddress.Loopback,19711);
 var healthB=new TcpListener(IPAddress.Loopback,19712);
-healthA.Start();healthB.Start();
+var healthC=new TcpListener(IPAddress.Loopback,19714);
+healthA.Start();healthB.Start();healthC.Start();
 var tcpHealth=new TcpListener(IPAddress.Loopback,19713);
 tcpHealth.Start();
-var tcpTasks=new List<Task> { ProbeTcpServer(tcpHealth,cancel.Token) };
-var tasks=new []{ProbeServer(healthA,s1,cancel.Token),ProbeServer(healthB,s2,cancel.Token)};
+// TCP readiness probes connect to the advertised address (unlike HTTP URLs).
+// Bind each disposable loopback backend to its actual advertised address.
+var chainTcpA=new TcpListener(IPAddress.Parse("127.0.0.43"),19713);
+var chainTcpB=new TcpListener(IPAddress.Parse("127.0.0.44"),19713);
+chainTcpA.Start();chainTcpB.Start();
+var tcpTasks=new List<Task> { ProbeTcpServer(tcpHealth,cancel.Token),
+    ProbeTcpServer(chainTcpA,cancel.Token),ProbeTcpServer(chainTcpB,cancel.Token) };
+var tasks=new []{ProbeServer(healthA,s1,cancel.Token),ProbeServer(healthB,s2,cancel.Token),
+    ProbeServer(healthC,s3,cancel.Token)};
 var temp=Path.Combine(Path.GetTempPath(),"yarp-dns-"+Guid.NewGuid().ToString("N"));
 Directory.CreateDirectory(temp);
 var configuration=Path.Combine(temp,"zones.json");
+// Three independently probed priority groups; IPv6 has a separate pool.
+var chainSites=new[]{
+    new {Address="127.0.0.41",HealthUrl="http://127.0.0.1:19711/ready",Weight=2,Priority=0,HealthCheckType="Http",TcpPort=0},
+    new {Address="127.0.0.42",HealthUrl="http://127.0.0.1:19712/ready",Weight=1,Priority=0,HealthCheckType="Http",TcpPort=0},
+    new {Address="127.0.0.43",HealthUrl="",Weight=1,Priority=10,HealthCheckType="Tcp",TcpPort=19713},
+    new {Address="127.0.0.44",HealthUrl="",Weight=3,Priority=10,HealthCheckType="Tcp",TcpPort=19713},
+    new {Address="127.0.0.45",HealthUrl="http://127.0.0.1:19714/ready",Weight=1,Priority=20,HealthCheckType="Http",TcpPort=0},
+    new {Address="2001:db8::41",HealthUrl="http://127.0.0.1:19712/ready",Weight=1,Priority=10,HealthCheckType="Http",TcpPort=0}
+};
 File.WriteAllText(configuration,JsonSerializer.Serialize(new {
  AllowNonLoopbackListeners=false,
  ListenHost="127.0.0.1",ListenPort=15353,ProbeIntervalSeconds=1,
  Zones=new object[]{
+ new {Name="chain.integration.test",TtlSeconds=10,Sites=chainSites,
+      NameServers=new[]{new {Host="ns.chain.integration.test",Address="127.0.0.31"}},
+      RoutingPolicy="WeightedFailover",FailureThreshold=1,SuccessThreshold=1,
+      FailClosedWhenAllSitesDown=true},
+ new {Name="chain-open.integration.test",TtlSeconds=10,Sites=chainSites,
+      RoutingPolicy="WeightedFailover",FailureThreshold=1,SuccessThreshold=1,
+      FailClosedWhenAllSitesDown=false},
  new{ Name="app.integration.test",TtlSeconds=10,Sites=new []{
     new { Address="127.0.0.21",HealthUrl="http://127.0.0.1:19711/ready",Weight=2,Priority=0,HealthCheckType="Http",TcpPort=0 },
     new { Address="127.0.0.22",HealthUrl="http://127.0.0.1:19712/ready",Weight=1,Priority=10,HealthCheckType="Http",TcpPort=0 },
     new { Address="2001:db8::99",HealthUrl="http://127.0.0.1:19711/ready",Weight=1,Priority=20,HealthCheckType="Http",TcpPort=0 }
  },NameServers=new []{
      new {Host="ns1.app.integration.test",Address="127.0.0.31"},
-     new {Host="ns2.app.integration.test",Address="127.0.0.32"}
+     new {Host="ns2.edge.app.integration.test",Address="127.0.0.32"}
  },SoaContact="hostmaster.app.integration.test",SoaSerial=2026111601u,
    RoutingPolicy="Weighted",FailureThreshold=1,SuccessThreshold=1,
    FailClosedWhenAllSitesDown=false },
@@ -149,7 +194,18 @@ File.WriteAllText(configuration,JsonSerializer.Serialize(new {
    CidrRoutes=new[]{
        new {Cidr="127.0.0.0/8",Region="dr"},
        new {Cidr="127.0.0.1/32",Region="local"}
-   }}
+   }},
+ new{ Name="latency.integration.test",TtlSeconds=10,Sites=new []{
+    new { Address="127.0.0.21",HealthUrl="http://127.0.0.1:19711/ready",
+          Weight=1,Priority=0,HealthCheckType="Http",TcpPort=0 },
+    new { Address="127.0.0.22",HealthUrl="http://127.0.0.1:19712/ready",
+          Weight=1,Priority=10,HealthCheckType="Http",TcpPort=0 }
+ },NameServers=new []{
+     new {Host="ns1.latency.integration.test",Address="127.0.0.31"},
+     new {Host="ns2.latency.integration.test",Address="127.0.0.32"}
+ },SoaContact="hostmaster.latency.integration.test",SoaSerial=2026111601u,
+   RoutingPolicy="ObservedLatency",FailureThreshold=1,SuccessThreshold=1,
+   FailClosedWhenAllSitesDown=true }
  }
 }));
 var info=new ProcessStartInfo("dotnet"){ UseShellExecute=false,CreateNoWindow=true,
@@ -164,6 +220,7 @@ try
 {
     await Wait(async () =>
     {
+        if(dns.HasExited) throw new Exception("DNS exited before readiness: "+await errTask);
         var seen=new HashSet<string>();
         for(var j=0;j<9;j++)
         {
@@ -173,6 +230,66 @@ try
         return seen.Contains("127.0.0.21") && seen.Contains("127.0.0.22");
     });
     Console.WriteLine("PASS: both IPv4 sites healthy before distribution sampling");
+    // The policy deliberately falls back to weighted while samples accumulate.
+    // Wait for three independently scheduled one-second probe cycles before
+    // asserting a deterministic winner; a single weighted reply is not proof.
+    await Task.Delay(4200);
+    await Wait(async()=> (await Query("latency.integration.test")).Address=="127.0.0.22");
+    for(var i=0;i<12;i++)
+        Must((await Query("latency.integration.test")).Address=="127.0.0.22",
+            "locally faster probe endpoint wins only after sample floor");
+
+    // Remove the measured winner, then prove real DNS chooses the slower
+    // healthy backend; restore it and wait for a stable measured winner.
+    s2.Healthy=0;
+    await Wait(async()=> (await Query("latency.integration.test")).Address=="127.0.0.21");
+    for(var i=0;i<12;i++)
+        Must((await Query("latency.integration.test")).Address=="127.0.0.21",
+            "failed faster endpoint must not win based on old latency");
+    s2.Healthy=1;
+    await Wait(async()=>{
+        for(var i=0;i<12;i++)
+            if((await Query("latency.integration.test")).Address!="127.0.0.22")return false;
+        return true;
+    });
+    // An NS address below edge makes edge an empty non-terminal, not a missing
+    // subtree (RFC 8020 section 3.1). Test both transports and several QTYPEs.
+    foreach (var type in new ushort[] { 1, 28, 2, 16 })
+    {
+        var (_, entUdp) = await QueryWire("edge.app.integration.test", type);
+        var entTcp = await TcpQuery(DnsRequest("edge.app.integration.test", type));
+        foreach (var packet in new[] { entUdp, entTcp })
+            Must((Dns16(packet,2)&0x040F)==0x0400 &&
+                Dns16(packet,6)==0 && Dns16(packet,8)==1,
+                "empty non-terminal is authoritative NODATA with negative SOA");
+    }
+    var nestedNs = await TcpQuery(DnsRequest("ns2.edge.app.integration.test",1));
+    Must(Dns16(nestedNs,6)==1 &&
+         nestedNs.AsSpan(nestedNs.Length-4).SequenceEqual(new byte[]{127,0,0,32}),
+         "descendant NS address remains resolvable after empty-parent queries");
+    foreach (var missing in new[] { "xedge.app.integration.test",
+                                  "missing.edge.app.integration.test" })
+    {
+        var packet = await TcpQuery(DnsRequest(missing,1));
+        Must((Dns16(packet,2)&0x040F)==0x0403 &&
+             Dns16(packet,6)==0 && Dns16(packet,8)==1,
+             "absent sibling or descendant remains authoritative NXDOMAIN");
+    }
+    Console.WriteLine("PASS: empty non-terminal NODATA, descendant address and true NXDOMAIN");
+    await Wait(async () => {
+        var seen=new HashSet<string>();
+        for(var i=0;i<6;i++) {
+            var reply=await Query("chain.integration.test");
+            if(reply.Address is not null) seen.Add(reply.Address);
+        }
+        return seen.SetEquals(new[]{"127.0.0.41","127.0.0.42"});
+    });
+    await CheckChainWeights("chain.integration.test",90,"127.0.0.41",60,"127.0.0.42",30);
+    var chainV6=await TcpQuery(DnsRequest("chain.integration.test",28));
+    Must(Dns16(chainV6,6)==1 &&
+         chainV6.AsSpan(chainV6.Length-16).SequenceEqual(IPAddress.Parse("2001:db8::41").GetAddressBytes()),
+         "IPv6 priority pool is independent of better-priority IPv4 sites");
+
     await Wait(async()=> (await Query("geo.integration.test")).Address=="127.0.0.21");
     var geoTcp=await TcpQuery(DnsRequest("geo.integration.test",1));
     Must(Dns16(geoTcp,6)==1 &&
@@ -235,6 +352,10 @@ try
     await Wait(async()=> (await Query("geo.integration.test")).Address=="127.0.0.22");
     Must((await Query("geo.integration.test")).Address=="127.0.0.22",
         "no healthy preferred-region site falls back to healthy DR region");
+    await Wait(async()=> (await Query("chain.integration.test")).Address=="127.0.0.42");
+    for(var i=0;i<12;i++)
+        Must((await Query("chain.integration.test")).Address=="127.0.0.42",
+            "partial primary group failure does not spill into backup groups");
     // A 302 to healthy standby must NOT incorrectly rehabilitate primary.
     // This fails if HTTP readiness follows redirects to a healthy login/backend.
     s1.Healthy=2;
@@ -259,15 +380,38 @@ try
     await Wait(async () => (await Query("ha.integration.test")).Status==2);
     Must((await Query("ha.integration.test")).Status==2,
         "strict failover zone SERVFAIL when every site is down");
+    await Wait(async()=> (await Query("latency.integration.test")).Status==2);
+    Must((await Query("latency.integration.test")).Status==2,
+        "strict observed-latency zone SERVFAIL when every site is down");
     await Wait(async()=> (await Query("geo.integration.test")).Status==2);
     Must((await Query("geo.integration.test")).Status==2,
         "strict CIDR region zone returns SERVFAIL when all sites down");
+    await CheckChainWeights("chain.integration.test",40,"127.0.0.43",10,"127.0.0.44",30);
+    chainTcpA.Stop();chainTcpB.Stop();
+    await Wait(async()=> (await Query("chain.integration.test")).Address=="127.0.0.45");
+    for(var i=0;i<12;i++)
+        Must((await Query("chain.integration.test")).Address=="127.0.0.45",
+            "second failed group advances to healthy tertiary only");
+    s3.Healthy=0;
+    await Wait(async()=> (await Query("chain.integration.test")).Status==2);
+    Must((await Query("chain.integration.test")).Status==2,
+         "strict weighted chain returns SERVFAIL after all groups fail");
+    await CheckChainWeights("chain-open.integration.test",90,"127.0.0.41",60,"127.0.0.42",30);
+    Console.WriteLine("PASS: weighted priority groups, partial outage, tertiary and all-down policies");
     s1.Healthy=1;
     await Task.Delay(2500);
     await Wait(async()=> (await Query("app.integration.test")).Address=="127.0.0.21");
     await Wait(async()=> (await Query("ha.integration.test")).Address=="127.0.0.21");
     Must((await Query("ha.integration.test")).Address=="127.0.0.21",
         "recovered primary preferred after success threshold");
+    await Wait(async()=> (await Query("latency.integration.test")).Address=="127.0.0.21");
+    Must((await Query("latency.integration.test")).Address=="127.0.0.21",
+        "sole recovered slow backend is eligible without stale fast-site data");
+    await Wait(async()=> (await Query("chain.integration.test")).Address=="127.0.0.41");
+    for(var i=0;i<12;i++)
+        Must((await Query("chain.integration.test")).Address=="127.0.0.41",
+            "recovered primary preempts failed backup groups without restart");
+
     await Wait(async()=> (await Query("geo.integration.test")).Address=="127.0.0.21");
     Must((await Query("geo.integration.test")).Address=="127.0.0.21",
         "recovered preferred-region site selected again");
@@ -304,7 +448,8 @@ try
 finally
 {
     cancel.Cancel();
-    healthA.Stop();healthB.Stop();tcpHealth.Stop();
+    healthA.Stop();healthB.Stop();healthC.Stop();tcpHealth.Stop();
+    chainTcpA.Stop();chainTcpB.Stop();
     if(!dns.HasExited)dns.Kill(entireProcessTree:true);
     await dns.WaitForExitAsync();
     try {await Task.WhenAll(tasks);}catch{}
@@ -316,6 +461,20 @@ finally
 }
 return 0;
 
+async Task CheckChainWeights(string zone,int queries,string first,int firstCount,string second,int secondCount)
+{
+    var counts=new Dictionary<string,int>{{first,0},{second,0}};
+    for(var i=0;i<queries;i++)
+    {
+        var response=await Query(zone);
+        Must(response.Status==0 && response.Ttl==10 &&
+             response.Address is not null && counts.ContainsKey(response.Address),
+             "weighted chain answers only from selected priority group with original TTL");
+        counts[response.Address!]++;
+    }
+    Must(counts[first]==firstCount && counts[second]==secondCount,
+         "weighted chain preserves exact proportional distribution within selected group");
+}
 async Task<(int Status,string? Address,int Ttl)> Query(string domain)
 {
     var request=new List<byte>(256);
@@ -442,6 +601,8 @@ static async Task ProbeServer(TcpListener server,ProbeState state,CancellationTo
                                 { complete=true; break; }
                         }
                         if(!complete) return;
+                        var delay=Volatile.Read(ref state.DelayMs);
+                        if(delay>0) await Task.Delay(delay,timeout.Token);
                         await stream.WriteAsync(bytes,timeout.Token);
                     }
                     catch(Exception ex) when(ex is IOException or SocketException or
@@ -468,4 +629,4 @@ static async Task ProbeTcpServer(TcpListener server,CancellationToken ct)
     catch(ObjectDisposedException){}
 }
 
-sealed class ProbeState {public volatile int Healthy=1;}
+sealed class ProbeState {public volatile int Healthy=1;public int DelayMs;}
