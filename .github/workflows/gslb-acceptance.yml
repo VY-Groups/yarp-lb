@@ -23,3 +23,9 @@ jobs:
       - run: dotnet build engines/GslbDns/GslbDns.csproj -c Release
       - run: dotnet run --project tests/GslbAcceptance/GslbAcceptance.csproj -c Release -- "${{ github.workspace }}"
       - run: python tests/GslbAcceptance/ipv6_transport.py
+      - name: Install independent DNS clients
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -qq && sudo apt-get install -y dnsutils knot-dnsutils
+      - name: Query IPv6 authority with BIND and Knot over UDP and TCP
+        if: runner.os == 'Linux'
+        run: python tests/GslbAcceptance/ipv6_transport.py --interop

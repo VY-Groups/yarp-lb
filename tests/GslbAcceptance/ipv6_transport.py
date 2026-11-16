@@ -1,4 +1,5 @@
 """Exercise the shipping authoritative listener over native IPv6 UDP and TCP."""
+import argparse
 import json
 import socket
 import struct
@@ -26,6 +27,9 @@ def verify(answer):
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--interop", action="store_true")
+    args = parser.parse_args()
     with tempfile.TemporaryDirectory() as directory:
         with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as reservation:
             reservation.bind(("::1", 0))
@@ -58,6 +62,15 @@ def main():
                 tcp.sendall(struct.pack("!H", len(query)) + query)
                 size, = struct.unpack("!H", read_exact(tcp, 2))
                 verify(read_exact(tcp, size))
+            if args.interop:
+                for client in ("dig", "kdig"):
+                    for transport in ("+tcp", "+notcp"):
+                        result = subprocess.run(
+                            [client, "@::1", "-p", str(port), "lab.example.", "AAAA",
+                             transport, "+bufsize=1232", "+short"],
+                            capture_output=True, text=True, timeout=6, check=True,
+                        )
+                        assert result.stdout.strip() == "2001:db8::17", result
         finally:
             if process.poll() is None:
                 process.kill()
