@@ -4,6 +4,26 @@ using System.Net;
 using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
+// Exercise opt-in probe-latency state with deterministic monotonic timestamps.
+var latency = new DnsProbeLatency();
+latency.ObserveSuccess(TimeSpan.FromMilliseconds(40), 1000);
+latency.ObserveSuccess(TimeSpan.FromMilliseconds(20), 2000);
+if (latency.TryRead(2000,3,15000,out _))
+    throw new Exception("FAIL: insufficient latency samples admitted");
+latency.ObserveSuccess(TimeSpan.FromMilliseconds(10), 3000);
+if (!latency.TryRead(3000,3,15000,out var ewma) ||
+    Math.Abs(ewma - 29.375) > 0.001)
+    throw new Exception("FAIL: observed latency EWMA wrong");
+if (latency.TryRead(18001,3,15000,out _) ||
+    latency.TryRead(2999,3,15000,out _))
+    throw new Exception("FAIL: expired or clock-rolled-back latency admitted");
+latency.ObserveFailure();
+if (latency.TryRead(3001,3,15000,out _))
+    throw new Exception("FAIL: failed probe must invalidate old latency");
+latency.ObserveSuccess(TimeSpan.FromMilliseconds(60), 4000);
+if (latency.TryRead(4000,3,15000,out _))
+    throw new Exception("FAIL: recovered backend requires new sample floor");
+Console.WriteLine("PASS: observed latency EWMA, sample floor, expiry and failover invalidation");
 // Deterministic state-transition characterization: no sleeps or mutable network state.
 var hysteresis = new DnsHealthHysteresis(2, 2);
 if (hysteresis.Observe(true) || !hysteresis.Observe(true) ||
