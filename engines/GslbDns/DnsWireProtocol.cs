@@ -162,6 +162,14 @@ internal static class DnsWireProtocol
                         }
                         else
                         {
+                            if (zone.RoutingPolicy == "WeightedFailover")
+                            {
+                                // Group only the family-correct eligible pool. Never
+                                // send overflow into lower-priority groups while a
+                                // higher-priority member remains healthy.
+                                var priority = eligible.Min(s => s.Priority);
+                                eligible = eligible.Where(s => s.Priority == priority).ToArray();
+                            }
                             if (zone.RoutingPolicy == "ObservedLatency")
                             {
                                 // This is local DNS-node -> probe-endpoint latency,

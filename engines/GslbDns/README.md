@@ -279,3 +279,38 @@ targets observable features only, not OpenGSLB protocol compatibility or
 vendor certification. See `OPENGSLB_REFERENCE_REVIEW.md` for mapping,
 risk and test boundaries. Consult legal counsel before any future direct
 code reuse or software distribution.
+
+## Opt-in weighted priority groups
+
+Set `RoutingPolicy: "WeightedFailover"` to select the lowest numeric
+`Priority` among healthy sites **of the requested address family**, then
+apply the existing proportional weighted rotation within that group.
+Groups are implicit: sites sharing a priority belong to the same group.
+No new scheduler or external dependency is required.
+
+For example, two healthy sites at priority 0 with weights 2 and 1 receive
+two-thirds and one-third of DNS selections. Priority 10 sites receive none
+until every priority 0 site of that family fails its configured health
+threshold. A partial group outage uses its remaining healthy members;
+it does not overflow to standby groups. Priority 20 can provide a third
+fallback. Recovery automatically prefers the lowest healthy priority again
+after the configured success threshold.
+
+Existing bounds still apply: 1–16 sites per zone, priority 0–1000,
+weight 1–100, and rise/fall thresholds 1–10. `Weighted`, deterministic
+first-site `Failover`, and `CidrRegion` retain their previous semantics.
+A and AAAA pools remain separate, including priority comparisons.
+
+When every site of a family is down, `FailClosedWhenAllSitesDown: true`
+returns SERVFAIL. With the legacy availability-first setting `false`,
+the policy chooses the lowest **configured** priority group and applies
+its weights despite failed probes. That response is not a healthy-site claim.
+Use strict all-down behavior for transaction-sensitive deployments.
+
+The real-socket acceptance fixture covers a three-group chain, 2:1 primary
+and 1:3 backup distribution, partial primary failure, full-group failure,
+TCP backup loss, tertiary failure, strict/open all-down behavior, automatic
+failback and independent IPv6 selection. DNS selection ratios are not HTTP
+load ratios: cached answers and long-lived connections affect traffic.
+This feature adds no agent trust, gossip mesh, GeoIP, ECS routing or DNSSEC.
+Those remain separate release gates under #52/#109.

@@ -35,7 +35,7 @@ foreach(var zone in config.Zones)
         zone.NameServers is {Length: >4} || zone.SoaSerial == 0 ||
         zone.FailureThreshold is < 1 or > 10 ||
         zone.SuccessThreshold is < 1 or > 10 ||
-        zone.RoutingPolicy is not ("Weighted" or "Failover" or "CidrRegion" or "ObservedLatency") ||
+        zone.RoutingPolicy is not ("Weighted" or "Failover" or "CidrRegion" or "ObservedLatency" or "WeightedFailover") ||
         (zone.RoutingPolicy == "CidrRegion" &&
              zone.CidrRoutes is not { Length: >= 1 and <= 256 }) ||
         (zone.RoutingPolicy != "CidrRegion" && zone.CidrRoutes is { Length: > 0 }))
