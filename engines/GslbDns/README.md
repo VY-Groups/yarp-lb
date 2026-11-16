@@ -69,6 +69,49 @@ answer TTL and the bounded per-source IPv4 UDP response limit remain in place.
 Configurations without NameServers keep legacy A behavior; this alone is not
 a complete authoritative zone.
 
+## New opt-in health hysteresis and DNS standby policy
+
+Legacy configurations remain **Weighted** and retain one-probe health
+transitions. New per-zone settings use independent GatewayCore managed code:
+
+- `RoutingPolicy: "Weighted"` (default): weighted selection from eligible sites,
+  preserving the previous behavior and the 1..100 weight range.
+- `RoutingPolicy: "Failover"`: deterministically selects the *first configured*
+  healthy site with the smallest nonnegative `Priority` (0..1000). Weights are
+  deliberately ignored under Failover. A missing `Priority` defaults to 0,
+  so configuration order is the tie-breaker and failback is predictable.
+- `FailureThreshold` and `SuccessThreshold`: 1..10 consecutive local HTTP
+  probe results required to remove or restore the backend. Both default to 1.
+  Startup remains unverified until the required number of successful probes.
+  A successful probe resets the failure streak; a failure resets success streak.
+- `FailClosedWhenAllSitesDown`: existing per-zone all-down policy. When true,
+  DNS A queries return SERVFAIL instead of advertising sites that failed local
+  readiness. This is recommended for CA/PKI or transaction-sensitive services.
+  When false, the existing availability-first fallback still applies.
+
+Example **test** zone (do not use these example addresses as production DNS):
+
+    {
+      "Name": "signing.example.test",
+      "TtlSeconds": 5,
+      "RoutingPolicy": "Failover",
+      "FailureThreshold": 2,
+      "SuccessThreshold": 2,
+      "FailClosedWhenAllSitesDown": true,
+      "Sites": [
+        {"Address":"192.0.2.10","HealthUrl":"https://primary.example.test/ready","Weight":1,"Priority":0},
+        {"Address":"192.0.2.20","HealthUrl":"https://standby.example.test/ready","Weight":1,"Priority":10}
+      ]
+    }
+
+Values are validated during startup; invalid policy, priority or thresholds
+abort rather than silently enable an unexpected routing mode. The DNS engine
+does **not** retry CA operations, establish backend data replication, or prove
+application transaction readiness; readiness endpoints and DR recovery have to
+be accepted separately. Existing DNS caches can continue returning earlier
+answers until TTL expiry. Health hysteresis may intentionally delay failover;
+size thresholds and TTL from application SLOs, not to force a green CI result.
+
 ## Remaining NO-GO areas
 
 DNSSEC signatures/keys, TLS/DoT/DoH, TSIG, DNS NOTIFY, zone transfer, true
@@ -84,11 +127,16 @@ interoperability, DNS stress/fuzz, dual-authoritative-node evidence, site-specif
 health checks, delegation review, and independent network/security approval.
 GitHub Actions exercise a disposable Windows/Linux lab; they do not certify GSLB.
 
-## Open-source architecture reference
+## Open-source architecture references and licensing
 
-The separately hosted gslb Git branch contains Verisign's Polaris PowerDNS
-remote-backend project, BSD-3-Clause licensed (see gslb:LICENSE). Its
-PowerDNS integration, topology/weighted selection, per-site checks, failover
-groups, and SOA management informed the requirements, not this C# source.
-This code does not import Polaris source or polaris_common. See
-POLARIS_ARCHITECTURE_REVIEW.md.
+At the time of PR #98, `gslb` held BSD-3-Clause licensed Polaris
+(historical comparison retained in `POLARIS_ARCHITECTURE_REVIEW.md`).
+The user replaced that branch with **OpenGSLB v1.1.10**, Go source at
+`gslb:48f020c3f0d7d3d353485c9a0d701061a3014c08`. Its
+`LICENSE` is **AGPL-3.0-or-later OR a separate commercial license**.
+No Go source, third-party DNS library, OpenGSLB dependency or product
+branding is incorporated into GatewayCore. This independent C# adaptation
+targets observable features only, not OpenGSLB protocol compatibility or
+vendor certification. See `OPENGSLB_REFERENCE_REVIEW.md` for mapping,
+risk and test boundaries. Consult legal counsel before any future direct
+code reuse or software distribution.
