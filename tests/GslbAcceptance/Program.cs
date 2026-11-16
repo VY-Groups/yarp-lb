@@ -35,6 +35,9 @@ var s1=new ProbeState();var s2=new ProbeState();
 var healthA=new TcpListener(IPAddress.Loopback,19711);
 var healthB=new TcpListener(IPAddress.Loopback,19712);
 healthA.Start();healthB.Start();
+var tcpHealth=new TcpListener(IPAddress.Loopback,19713);
+tcpHealth.Start();
+var tcpTasks=new List<Task> { ProbeTcpServer(tcpHealth,cancel.Token) };
 var tasks=new []{ProbeServer(healthA,s1,cancel.Token),ProbeServer(healthB,s2,cancel.Token)};
 var temp=Path.Combine(Path.GetTempPath(),"yarp-dns-"+Guid.NewGuid().ToString("N"));
 Directory.CreateDirectory(temp);
@@ -44,8 +47,8 @@ File.WriteAllText(configuration,JsonSerializer.Serialize(new {
  ListenHost="127.0.0.1",ListenPort=15353,ProbeIntervalSeconds=1,
  Zones=new []{
  new{ Name="app.integration.test",TtlSeconds=10,Sites=new []{
-    new { Address="127.0.0.21",HealthUrl="http://127.0.0.1:19711/ready",Weight=2,Priority=0 },
-    new { Address="127.0.0.22",HealthUrl="http://127.0.0.1:19712/ready",Weight=1,Priority=10 }
+    new { Address="127.0.0.21",HealthUrl="http://127.0.0.1:19711/ready",Weight=2,Priority=0,HealthCheckType="Http",TcpPort=0 },
+    new { Address="127.0.0.22",HealthUrl="http://127.0.0.1:19712/ready",Weight=1,Priority=10,HealthCheckType="Http",TcpPort=0 }
  },NameServers=new []{
      new {Host="ns1.app.integration.test",Address="127.0.0.31"},
      new {Host="ns2.app.integration.test",Address="127.0.0.32"}
@@ -53,13 +56,21 @@ File.WriteAllText(configuration,JsonSerializer.Serialize(new {
    RoutingPolicy="Weighted",FailureThreshold=1,SuccessThreshold=1,
    FailClosedWhenAllSitesDown=false },
  new{ Name="ha.integration.test",TtlSeconds=10,Sites=new []{
-    new { Address="127.0.0.21",HealthUrl="http://127.0.0.1:19711/ready",Weight=2,Priority=0 },
-    new { Address="127.0.0.22",HealthUrl="http://127.0.0.1:19712/ready",Weight=1,Priority=10 }
+    new { Address="127.0.0.21",HealthUrl="http://127.0.0.1:19711/ready",Weight=2,Priority=0,HealthCheckType="Http",TcpPort=0 },
+    new { Address="127.0.0.22",HealthUrl="http://127.0.0.1:19712/ready",Weight=1,Priority=10,HealthCheckType="Http",TcpPort=0 }
  },NameServers=new []{
      new {Host="ns1.ha.integration.test",Address="127.0.0.31"},
      new {Host="ns2.ha.integration.test",Address="127.0.0.32"}
  },SoaContact="hostmaster.ha.integration.test",SoaSerial=2026111601u,
    RoutingPolicy="Failover",FailureThreshold=2,SuccessThreshold=2,
+   FailClosedWhenAllSitesDown=true },
+ new{ Name="tcp.integration.test",TtlSeconds=10,Sites=new []{
+    new { Address="127.0.0.1",HealthUrl="",Weight=1,Priority=0,HealthCheckType="Tcp",TcpPort=19713 }
+ },NameServers=new []{
+     new {Host="ns1.tcp.integration.test",Address="127.0.0.31"},
+     new {Host="ns2.tcp.integration.test",Address="127.0.0.32"}
+ },SoaContact="hostmaster.tcp.integration.test",SoaSerial=2026111601u,
+   RoutingPolicy="Failover",FailureThreshold=1,SuccessThreshold=1,
    FailClosedWhenAllSitesDown=true }
  }
 }));
@@ -84,6 +95,18 @@ try
         return seen.Contains("127.0.0.21") && seen.Contains("127.0.0.22");
     });
     Console.WriteLine("PASS: both sites healthy before distribution sampling");
+    await Wait(async()=> (await Query("tcp.integration.test")).Address=="127.0.0.1");
+    Must((await Query("tcp.integration.test")).Address=="127.0.0.1",
+        "opt-in TCP-connect probe admits ready TCP backend");
+    tcpHealth.Stop();
+    await Wait(async()=> (await Query("tcp.integration.test")).Status==2);
+    Must((await Query("tcp.integration.test")).Status==2,
+        "TCP-connect failure removes strict backend from DNS");
+    tcpHealth.Start();
+    tcpTasks.Add(ProbeTcpServer(tcpHealth,cancel.Token));
+    await Wait(async()=> (await Query("tcp.integration.test")).Address=="127.0.0.1");
+    Must((await Query("tcp.integration.test")).Address=="127.0.0.1",
+        "TCP-connect readiness recovers without restart");
     await Wait(async () => (await Query("ha.integration.test")).Address=="127.0.0.21");
     for (var i=0;i<12;i++)
         Must((await Query("ha.integration.test")).Address=="127.0.0.21",
@@ -114,6 +137,14 @@ try
     for (var i=0;i<12;i++)
         Must((await Query("ha.integration.test")).Address=="127.0.0.22",
             "failed primary selects configured standby after fall threshold");
+    // A 302 to healthy standby must NOT incorrectly rehabilitate primary.
+    // This fails if HTTP readiness follows redirects to a healthy login/backend.
+    s1.Healthy=2;
+    await Task.Delay(3200);
+    for (var i=0;i<12;i++)
+        Must((await Query("ha.integration.test")).Address=="127.0.0.22",
+            "HTTP health redirect cannot falsely restore primary");
+    s1.Healthy=0;
     s2.Healthy=0;
     await Task.Delay(3500);
     // By default, total probe failure must not create DNS outage.
@@ -169,10 +200,11 @@ try
 finally
 {
     cancel.Cancel();
-    healthA.Stop();healthB.Stop();
+    healthA.Stop();healthB.Stop();tcpHealth.Stop();
     if(!dns.HasExited)dns.Kill(entireProcessTree:true);
     await dns.WaitForExitAsync();
     try {await Task.WhenAll(tasks);}catch{}
+    try {await Task.WhenAll(tcpTasks);}catch{}
     try {Directory.Delete(temp,true);}catch{}
     Console.WriteLine("DNS stdout: "+(await outTask).Trim());
     var errors=(await errTask).Trim();
@@ -282,9 +314,34 @@ static async Task ProbeServer(TcpListener server,ProbeState state,CancellationTo
                 {
                     var bytes=Encoding.ASCII.GetBytes(state.Healthy==1
                         ? "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                        : state.Healthy==2
+                        ? "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:19712/ready\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
                         : "HTTP/1.1 503 Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
-                    try {await client.GetStream().WriteAsync(bytes,ct);}
-                    catch(Exception ex) when(ex is IOException or ObjectDisposedException or OperationCanceledException){}
+                    try
+                    {
+                        // Read complete HTTP headers before closing the accepted
+                        // connection. Immediate close with unread request bytes can
+                        // cause TCP RST / spurious HttpClient failure on Windows.
+                        var stream=client.GetStream();
+                        using var timeout=CancellationTokenSource.CreateLinkedTokenSource(ct);
+                        timeout.CancelAfter(TimeSpan.FromSeconds(2));
+                        var request=new byte[4096]; var used=0; var complete=false;
+                        while(used<request.Length && !complete)
+                        {
+                            var previous=used;
+                            var n=await stream.ReadAsync(request.AsMemory(used),timeout.Token);
+                            if(n==0) return;
+                            used+=n;
+                            for(var i=Math.Max(0,previous-3);i<=used-4;i++)
+                                if(request[i]==13 && request[i+1]==10 &&
+                                   request[i+2]==13 && request[i+3]==10)
+                                { complete=true; break; }
+                        }
+                        if(!complete) return;
+                        await stream.WriteAsync(bytes,timeout.Token);
+                    }
+                    catch(Exception ex) when(ex is IOException or SocketException or
+                        ObjectDisposedException or OperationCanceledException){}
                 }
             },ct);
         }
@@ -292,4 +349,19 @@ static async Task ProbeServer(TcpListener server,ProbeState state,CancellationTo
     catch(OperationCanceledException){}
     catch(SocketException) when(ct.IsCancellationRequested){}
 }
+
+static async Task ProbeTcpServer(TcpListener server,CancellationToken ct)
+{
+    try
+    {
+        while(!ct.IsCancellationRequested)
+        {
+            using var connected=await server.AcceptTcpClientAsync(ct);
+        }
+    }
+    catch(OperationCanceledException) when(ct.IsCancellationRequested){}
+    catch(SocketException){} // listener intentionally stopped to simulate outage
+    catch(ObjectDisposedException){}
+}
+
 sealed class ProbeState {public volatile int Healthy=1;}

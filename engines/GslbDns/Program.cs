@@ -39,16 +39,23 @@ foreach(var zone in config.Zones)
     var sites=new List<Site>();
     foreach(var site in zone.Sites)
     {
+        if (site is null)
+            throw new InvalidDataException("Null GSLB site");
+        var validHttpUrl = Uri.TryCreate(site.HealthUrl, UriKind.Absolute, out var health) &&
+            (health.Scheme == Uri.UriSchemeHttp || health.Scheme == Uri.UriSchemeHttps) &&
+            string.IsNullOrWhiteSpace(health.UserInfo);
         if(!IPAddress.TryParse(site.Address,out var address) ||
             address.AddressFamily != AddressFamily.InterNetwork ||
             site.Weight is < 1 or > 100 ||
             site.Priority is < 0 or > 1000 ||
-            !Uri.TryCreate(site.HealthUrl, UriKind.Absolute, out var health) ||
-            (health.Scheme != Uri.UriSchemeHttp && health.Scheme != Uri.UriSchemeHttps) ||
-            !string.IsNullOrWhiteSpace(health.UserInfo))
-            throw new InvalidDataException("Invalid GSLB site address, weight or health probe URL");
-        sites.Add(new Site(address,health,site.Weight,site.Priority,
-            zone.FailureThreshold,zone.SuccessThreshold));
+            site.HealthCheckType is not ("Http" or "Tcp") ||
+            (site.HealthCheckType == "Http" && (!validHttpUrl || site.TcpPort != 0)) ||
+            (site.HealthCheckType == "Tcp" &&
+                (site.TcpPort is < 1 or > 65535 || !string.IsNullOrWhiteSpace(site.HealthUrl))))
+            throw new InvalidDataException("Invalid GSLB site address, weight, probe type, URL or port");
+        sites.Add(new Site(address,site.HealthCheckType == "Http" ? health : null,
+            site.Weight,site.Priority,zone.FailureThreshold,zone.SuccessThreshold,
+            site.HealthCheckType,site.TcpPort));
     }
     var origin = zone.Name.TrimEnd('.').ToLowerInvariant();
     var servers = new List<DnsNameServer>();
@@ -79,24 +86,41 @@ using var sigterm=OperatingSystem.IsLinux()
     ? System.Runtime.InteropServices.PosixSignalRegistration.Create(
         System.Runtime.InteropServices.PosixSignal.SIGTERM, e=>{e.Cancel=true;stop.Cancel();})
     : null;
-using var healthClient = new HttpClient(new SocketsHttpHandler { UseProxy=false })
+// A 301/302/307/308 must NOT become healthy by redirecting readiness to a
+// login page, another server or a public site. Require direct HTTP 2xx.
+using var healthClient = new HttpClient(new SocketsHttpHandler {
+    UseProxy=false, AllowAutoRedirect=false })
     { Timeout=TimeSpan.FromSeconds(1.5) };
 async Task ProbeAll(CancellationToken ct)
 {
     foreach(var group in groups.Values)
     foreach(var site in group.Sites)
     {
-        var healthy=0;
+        var healthy = false;
         try
         {
-            using var response=await healthClient.GetAsync(site.HealthUrl,
-                HttpCompletionOption.ResponseHeadersRead,ct);
-            if(response.IsSuccessStatusCode)healthy=1;
+            if(site.HealthCheckType == "Tcp")
+            {
+                // This only proves that the configured TCP port accepted a
+                // connection. It does not prove application/DB transaction health.
+                using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                deadline.CancelAfter(TimeSpan.FromSeconds(1.5));
+                using var tcp = new TcpClient(site.Address.AddressFamily);
+                await tcp.ConnectAsync(site.Address, site.TcpPort, deadline.Token);
+                healthy = tcp.Connected;
+            }
+            else
+            {
+                using var response=await healthClient.GetAsync(site.HealthUrl!,
+                    HttpCompletionOption.ResponseHeadersRead,ct);
+                healthy = response.IsSuccessStatusCode;
+            }
         }
-        catch(Exception e) when(e is HttpRequestException or TaskCanceledException) { }
+        catch(Exception e) when(e is HttpRequestException or SocketException or
+            OperationCanceledException) { }
         // Probe results pass through bounded hysteresis before publication.
         // A single probe does not flap DNS when thresholds are configured.
-        Volatile.Write(ref site.Healthy, site.Health.Observe(healthy == 1) ? 1 : 0);
+        Volatile.Write(ref site.Healthy, site.Health.Observe(healthy) ? 1 : 0);
     }
 }
 await ProbeAll(stop.Token);
@@ -214,17 +238,24 @@ sealed record DnsZone(string Name,int TtlSeconds,DnsSite[] Sites,
 }
 sealed record DnsNameServerConfig(string Host,string Address);
 sealed record DnsNameServer(string Host,IPAddress Address);
-sealed record DnsSite(string Address,string HealthUrl,int Weight,int Priority=0);
+sealed record DnsSite(string Address,string? HealthUrl,int Weight,int Priority=0)
+{
+    public string HealthCheckType { get; init; } = "Http";
+    public int TcpPort { get; init; }
+}
 sealed class Site
 {
-    public Site(IPAddress address,Uri healthUrl,int weight,int priority,
-        int failureThreshold,int successThreshold)
+    public Site(IPAddress address,Uri? healthUrl,int weight,int priority,
+        int failureThreshold,int successThreshold,string healthCheckType,int tcpPort)
     {
         Address=address;HealthUrl=healthUrl;Weight=weight;Priority=priority;
+        HealthCheckType=healthCheckType;TcpPort=tcpPort;
         Health=new DnsHealthHysteresis(failureThreshold,successThreshold);
     }
     public IPAddress Address {get;}
-    public Uri HealthUrl {get;}
+    public Uri? HealthUrl {get;}
+    public string HealthCheckType {get;}
+    public int TcpPort {get;}
     public int Weight {get;}
     public int Priority {get;}
     public DnsHealthHysteresis Health {get;}

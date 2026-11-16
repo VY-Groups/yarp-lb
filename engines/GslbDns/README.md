@@ -112,6 +112,42 @@ be accepted separately. Existing DNS caches can continue returning earlier
 answers until TTL expiry. Health hysteresis may intentionally delay failover;
 size thresholds and TTL from application SLOs, not to force a green CI result.
 
+## Backend health probe types (independent, opt-in)
+
+Existing site configurations continue to use direct HTTP(S) readiness with the
+same 1.5-second timeout. **HTTP 3xx redirects are now classified as a failed
+readiness probe** instead of following them, because a redirect to a login
+page or another healthy backend can incorrectly announce the original
+application as ready. Configure the final HTTPS readiness URL directly;
+readiness endpoints should return 2xx without redirects, even during rotation.
+
+Optional per-site `HealthCheckType: "Tcp"` probes direct TCP connectivity to
+`Address:TcpPort` (port 1..65535), using a bounded 1.5-second connection
+deadline and the existing rise/fall thresholds. TCP mode must have
+`HealthUrl` omitted or blank, and HTTP mode cannot specify `TcpPort`.
+Unknown probe types, malformed ports or conflicting probe settings fail
+startup. An example TCP site is:
+
+    {
+      "Address": "192.0.2.30",
+      "HealthUrl": "",
+      "Weight": 1,
+      "Priority": 0,
+      "HealthCheckType": "Tcp",
+      "TcpPort": 5432
+    }
+
+This only confirms a TCP handshake, **not PostgreSQL replication, application
+readiness, signing authority, authentication or transactional consistency**.
+For critical applications, prefer a dedicated HTTPS readiness endpoint
+that validates dependencies and fails closed. The probe does not send payloads
+or authenticate and does not require changing the YARP L7 routing behavior.
+
+Tests simulate a TCP listener accepting, refusing and recovering connections,
+plus an HTTP 302 redirect to a separately healthy backend. DNS must never
+restore the redirected primary. A real external TLS/health acceptance drill
+and isolation across two independent sites remain mandatory for production.
+
 ## Remaining NO-GO areas
 
 DNSSEC signatures/keys, TLS/DoT/DoH, TSIG, DNS NOTIFY, zone transfer, true
