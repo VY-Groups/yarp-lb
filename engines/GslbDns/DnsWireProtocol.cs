@@ -56,7 +56,7 @@ internal static class DnsWireProtocol
         var domain = string.Join('.', labels).ToLowerInvariant();
 
         // A single well-formed EDNS(0) OPT is allowed. Unknown options are deliberately ignored;
-        // ECS does not influence selection and its client IP data is never retained or echoed.
+        // ECS influences selection only for explicitly enabled zones and trusted resolvers.
         var edns = false;
         var payload = 512;
         var unsupportedEdns = false;
