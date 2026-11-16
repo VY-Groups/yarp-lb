@@ -11,6 +11,10 @@ internal sealed class DnsCidrRegionTable
     private sealed record Entry(IPAddress Network, int PrefixLength, string Region);
     private readonly Entry[] routes;
 
+    public static bool ValidRegion(string? region) =>
+        !string.IsNullOrWhiteSpace(region) && region.Length <= 32 &&
+        region.All(c => char.IsAsciiLetterOrDigit(c) || c is '-' or '_');
+
     public DnsCidrRegionTable(IEnumerable<DnsCidrRegionRule> configuration)
     {
         if (configuration is null) throw new ArgumentNullException(nameof(configuration));
@@ -23,9 +27,7 @@ internal sealed class DnsCidrRegionTable
         foreach (var rule in rules)
         {
             if (rule is null || string.IsNullOrWhiteSpace(rule.Cidr) ||
-                string.IsNullOrWhiteSpace(rule.Region) ||
-                rule.Region.Length > 32 ||
-                !rule.Region.All(c => char.IsAsciiLetterOrDigit(c) || c is '-' or '_'))
+                !ValidRegion(rule.Region))
                 throw new ArgumentException("Invalid CIDR region mapping");
             var parts = rule.Cidr.Split('/');
             if (parts.Length != 2 || !IPAddress.TryParse(parts[0], out var network) ||
