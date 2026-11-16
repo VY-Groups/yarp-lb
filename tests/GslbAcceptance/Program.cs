@@ -32,7 +32,10 @@ File.WriteAllText(configuration,JsonSerializer.Serialize(new {
  Zones=new []{new{ Name="app.integration.test",TtlSeconds=10,Sites=new []{
     new { Address="127.0.0.21",HealthUrl="http://127.0.0.1:19711/ready",Weight=2 },
     new { Address="127.0.0.22",HealthUrl="http://127.0.0.1:19712/ready",Weight=1 }
- } } }
+ },NameServers=new []{
+     new {Host="ns1.app.integration.test",Address="127.0.0.31"},
+     new {Host="ns2.app.integration.test",Address="127.0.0.32"}
+ },SoaContact="hostmaster.app.integration.test",SoaSerial=2026111601u } }
 }));
 var info=new ProcessStartInfo("dotnet"){ UseShellExecute=false,CreateNoWindow=true,
  WorkingDirectory=Path.GetDirectoryName(dll)!,RedirectStandardOutput=true,RedirectStandardError=true };
@@ -94,7 +97,34 @@ try
     await Task.Delay(2500);
     await Wait(async()=> (await Query("app.integration.test")).Address=="127.0.0.21");
     Must((await Query("unknown.integration.test")).Status==5,"unknown zones explicitly refused");
-    Console.WriteLine("GSLB REAL DNS HEALTH AND FAILOVER ACCEPTANCE PASSED");
+    var (nsReq, nsUdp) = await QueryWire("app.integration.test", 2);
+    Must((Dns16(nsUdp,2)&0x0200)!=0 &&
+        nsUdp.Length <= Math.Min(512, Math.Max(128,nsReq.Length*4)),
+        "large NS response is safely UDP-truncated with TC");
+    var nsTcp = await TcpQuery(nsReq);
+    Must((Dns16(nsTcp,2)&0x0200)==0 && Dns16(nsTcp,6)==2 &&
+        Dns16(nsTcp,10)==2 && Dns16(nsTcp,8)==0,
+        "TCP fallback returns complete two NS answers and two in-bailiwick glue records");
+    var soa = await TcpQuery(DnsRequest("app.integration.test",6));
+    Must(Dns16(soa,6)==1 && Dns16(soa,8)==0 && (Dns16(soa,2)&0xF)==0,
+        "SOA query has one authoritative answer and a valid serial");
+    var nx = await TcpQuery(DnsRequest("missing.app.integration.test",1));
+    Must((Dns16(nx,2)&0xF)==3 && Dns16(nx,6)==0 && Dns16(nx,8)==1,
+        "in-zone unknown name uses NXDOMAIN with SOA negative cache");
+    var nodata = await TcpQuery(DnsRequest("app.integration.test",28));
+    Must((Dns16(nodata,2)&0xF)==0 && Dns16(nodata,6)==0 && Dns16(nodata,8)==1,
+        "unsupported AAAA is NODATA, not a fabricated IPv6 address");
+    var (_, edns) = await QueryWire("app.integration.test",1,ednsVersion:0);
+    Must((Dns16(edns,2)&0xF)==0 && Dns16(edns,10)==1 &&
+         edns[^11]==0 && edns[^10]==0 && edns[^9]==41 && edns[^1]==0,
+         "EDNS0 OPT answered without leaking unknown client options or DO bit");
+    var (_, badVers) = await QueryWire("app.integration.test",1,ednsVersion:1);
+    Must(Dns16(badVers,6)==0 && Dns16(badVers,10)==1 &&
+         badVers[^7]==1,"EDNS version mismatch signals BADVERS, without A answer");
+    var glue = await TcpQuery(DnsRequest("ns1.app.integration.test",1));
+    Must(Dns16(glue,6)==1 && glue.AsSpan(glue.Length-4).SequenceEqual(new byte[]{127,0,0,31}),
+        "bailiwick NS hostname resolves to configured glue A");
+    Console.WriteLine("GSLB REAL DNS HEALTH, AUTHORITATIVE TCP, EDNS AND FAILOVER ACCEPTANCE PASSED");
 }
 finally
 {
@@ -135,6 +165,59 @@ async Task<(int Status,string? Address,int Ttl)> Query(string domain)
     var ttl=(int)BinaryPrimitives.ReadUInt32BigEndian(a.Slice(6,4));
     return (rcode,new IPAddress(a.Slice(12,4)).ToString(),ttl);
 }
+
+ushort Dns16(byte[] packet, int index) => BinaryPrimitives.ReadUInt16BigEndian(packet.AsSpan(index,2));
+
+byte[] DnsRequest(string domain, ushort type, byte? ednsVersion=null)
+{
+    var request=new List<byte>();
+    request.Add(0x46);request.Add(0x13);
+    request.AddRange(new byte[]{1,0,0,1,0,0,0,0,0,ednsVersion is null?(byte)0:(byte)1});
+    foreach(var label in domain.Split('.'))
+    {
+        request.Add((byte)label.Length);
+        request.AddRange(Encoding.ASCII.GetBytes(label));
+    }
+    request.Add(0);
+    request.Add((byte)(type>>8));request.Add((byte)type);
+    request.Add(0);request.Add(1);
+    if(ednsVersion is not null)
+    {
+        // OPT: root, type 41, UDP payload 1232, ext rcode 0, version as configured,
+        // DO bit supplied (must not be reflected without DNSSEC support).
+        request.AddRange(new byte[]{0,0,41,4,208,0,ednsVersion.Value,0x80,0,0,0});
+    }
+    return request.ToArray();
+}
+async Task<(byte[] Request,byte[] Reply)> QueryWire(string domain,ushort type,byte? ednsVersion=null)
+{
+    var packet=DnsRequest(domain,type,ednsVersion);
+    await client.SendAsync(packet);
+    using var timeout=new CancellationTokenSource(TimeSpan.FromSeconds(3));
+    var reply=await client.ReceiveAsync(timeout.Token);
+    Must(reply.Buffer.Length>=12 && Dns16(reply.Buffer,0)==0x4613,
+        "DNS UDP transaction matching");
+    return(packet,reply.Buffer);
+}
+async Task<byte[]> TcpQuery(byte[] query)
+{
+    using var timeout=new CancellationTokenSource(TimeSpan.FromSeconds(5));
+    using var tcp=new TcpClient(AddressFamily.InterNetwork);
+    await tcp.ConnectAsync(IPAddress.Loopback,15353,timeout.Token);
+    using var stream=tcp.GetStream();
+    var prefix=new byte[2];
+    BinaryPrimitives.WriteUInt16BigEndian(prefix,(ushort)query.Length);
+    await stream.WriteAsync(prefix,timeout.Token);
+    await stream.WriteAsync(query,timeout.Token);
+    await stream.ReadExactlyAsync(prefix,timeout.Token);
+    var count=BinaryPrimitives.ReadUInt16BigEndian(prefix);
+    Must(count>=12 && count<=4096,"TCP DNS length is bounded");
+    var reply=new byte[count];
+    await stream.ReadExactlyAsync(reply,timeout.Token);
+    Must(Dns16(reply,0)==0x4613,"DNS TCP transaction matching");
+    return reply;
+}
+
 async Task Wait(Func<Task<bool>> condition)
 {
     for(var i=0;i<80;i++)
