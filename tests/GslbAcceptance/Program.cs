@@ -326,7 +326,7 @@ static async Task ProbeServer(TcpListener server,ProbeState state,CancellationTo
     catch(OperationCanceledException){}
     catch(SocketException) when(ct.IsCancellationRequested){}
 }
-sealed class ProbeState {public volatile int Healthy=1;}
+
 static async Task ProbeTcpServer(TcpListener server,CancellationToken ct)
 {
     try
@@ -340,3 +340,5 @@ static async Task ProbeTcpServer(TcpListener server,CancellationToken ct)
     catch(SocketException){} // listener intentionally stopped to simulate outage
     catch(ObjectDisposedException){}
 }
+
+sealed class ProbeState {public volatile int Healthy=1;}
