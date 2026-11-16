@@ -19,7 +19,7 @@ performance. No AGPL OpenGSLB source is incorporated.
 | Weighted traffic selection | Existing opt-in per-zone selection | Predictable fairness under health churn, matched load |
 | Ordered primary/standby failover | Existing opt-in `RoutingPolicy=Failover` | DNS caching, DR state, physical failover behavior |
 | Weighted failover *chains* | Not implemented | Multiple weighted priority groups, stable tie/drain policy and tests |
-| GeoIP and CIDR routing | Not implemented | Licensed versioned dataset, deterministic longest-prefix, stale-data policy |
+| GeoIP and CIDR routing | Explicit resolver CIDR longest-prefix in this branch, CI pending; **licensed GeoIP still missing** | Resolver/source semantics, GeoIP dataset licensing/version, stale-data policy and real geo tests |
 | Latency / RTT selection | Not implemented | Per-vantage measured RTT, min sample, timeout, bounded EMA and rollback |
 | EDNS Client Subnet (ECS) | EDNS parsed; ECS **ignored** | Explicit opt-in/allowlist, privacy minimization, valid prefix/data and cache scope |
 | Predictive health | Not implemented | Evidence-based confidence, false predictions, strict safety policy |
