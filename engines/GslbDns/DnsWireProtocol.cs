@@ -125,7 +125,8 @@ internal static class DnsWireProtocol
                 }
                 else
                 {
-                    var eligible = configured.Where(s => Volatile.Read(ref s.Healthy) == 1).ToArray();
+                    var eligible = configured.Where(s => Volatile.Read(ref s.Healthy) == 1 &&
+                        (s.Validators.Length == 0 || Environment.TickCount64 < Volatile.Read(ref s.ValidatorDeadline))).ToArray();
                     if (eligible.Length == 0)
                     {
                         if (zone.FailClosedWhenAllSitesDown) rcode = 2; // SERVFAIL

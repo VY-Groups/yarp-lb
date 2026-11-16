@@ -256,3 +256,9 @@ targets observable features only, not OpenGSLB protocol compatibility or
 vendor certification. See `OPENGSLB_REFERENCE_REVIEW.md` for mapping,
 risk and test boundaries. Consult legal counsel before any future direct
 code reuse or software distribution.
+
+## Opt-in external HTTPS health validation
+
+Set a site's `ValidatorUrls` to two distinct HTTPS origins that each return 2xx only when their independently measured site is ready. Configure the DNS process with local environment variables `GSLB_VALIDATOR_CERT_PEM` and `GSLB_VALIDATOR_KEY_PEM` as absolute local file paths. Set `GSLB_VALIDATOR_ORIGINS` to a comma-separated allowlist of exact HTTPS origins. Validators must require this client certificate. DNS verifies server certificates against system trust and verifies hostnames. Restrict access to the private key and restart for credential replacement.
+
+Both validators and the local probe must succeed. Set `FailClosedWhenAllSitesDown` to true. One failed validation immediately excludes the site; successful evidence expires ten seconds after validation starts even if the probe scheduler stalls. Choose a probe interval and batch capacity that refresh within ten seconds. Each validator must disable caching for its readiness URL. Distinct origins are configured by the operator and need independent network placement. This is synchronous validation, without signed store-and-forward health snapshots.

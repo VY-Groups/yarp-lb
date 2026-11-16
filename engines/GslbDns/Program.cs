@@ -63,9 +63,12 @@ foreach(var zone in config.Zones)
             (site.HealthCheckType == "Tcp" &&
                 (site.TcpPort is < 1 or > 65535 || !string.IsNullOrWhiteSpace(site.HealthUrl))))
             throw new InvalidDataException("Invalid GSLB site address, weight, probe type, URL or port");
+        var observers = ExternalValidation.Parse(site.ValidatorUrls);
+        if (observers.Length != 0 && !zone.FailClosedWhenAllSitesDown)
+            throw new InvalidDataException("External validation requires strict all-down behavior");
         sites.Add(new Site(address,site.HealthCheckType == "Http" ? health : null,
             site.Weight,site.Priority,zone.FailureThreshold,zone.SuccessThreshold,
-            site.HealthCheckType,site.TcpPort,site.Region));
+            site.HealthCheckType,site.TcpPort,site.Region) { Validators = observers });
     }
     var origin = zone.Name.TrimEnd('.').ToLowerInvariant();
     var servers = new List<DnsNameServer>();
@@ -97,6 +100,8 @@ foreach(var zone in config.Zones)
         zone.FailClosedWhenAllSitesDown, servers.ToArray(), contact, zone.SoaSerial,
         zone.RoutingPolicy,cidrTable));
 }
+using var validation = groups.Values.SelectMany(group => group.Sites).Any(site => site.Validators.Length > 0)
+    ? new ExternalValidation(groups.Values.SelectMany(group => group.Sites).SelectMany(site => site.Validators)) : null;
 using var stop=new CancellationTokenSource();
 Console.CancelKeyPress += (_, e)=>{e.Cancel=true;stop.Cancel();};
 using var sigterm=OperatingSystem.IsLinux()
@@ -139,6 +144,13 @@ async Task ProbeAll(CancellationToken ct)
             }
             catch (Exception e) when (e is HttpRequestException or SocketException or
                 OperationCanceledException) { }
+            if (site.Validators.Length != 0)
+            {
+                var observedAt = Environment.TickCount64;
+                var confirmed = healthy && await validation!.ConfirmAsync(site.Validators, token);
+                Volatile.Write(ref site.ValidatorDeadline, confirmed ? observedAt + 10_000 : 0);
+                healthy = confirmed;
+            }
             // Publish a single verdict for each distinct zone/site per cycle.
             Volatile.Write(ref site.Healthy, site.Health.Observe(healthy) ? 1 : 0);
         }, ct);
@@ -265,6 +277,7 @@ sealed record DnsNameServerConfig(string Host,string Address);
 sealed record DnsNameServer(string Host,IPAddress Address);
 sealed record DnsSite(string Address,string? HealthUrl,int Weight,int Priority=0)
 {
+    public string[]? ValidatorUrls { get; init; }
     public string HealthCheckType { get; init; } = "Http";
     public int TcpPort { get; init; }
     public string? Region { get; init; }
@@ -287,6 +300,8 @@ sealed class Site
     public int Weight {get;}
     public int Priority {get;}
     public DnsHealthHysteresis Health {get;}
+    public Uri[] Validators { get; init; } = [];
+    public long ValidatorDeadline;
     public int Healthy;
 }
 sealed class SiteGroup

@@ -22,3 +22,6 @@ jobs:
         with: {dotnet-version: "10.0.x"}
       - run: dotnet build engines/GslbDns/GslbDns.csproj -c Release
       - run: dotnet run --project tests/GslbAcceptance/GslbAcceptance.csproj -c Release -- "${{ github.workspace }}"
+      - name: Two DNS nodes and two TLS-authenticated external health validators
+        if: runner.os == 'Linux'
+        run: python tests/GslbAcceptance/external_validation.py
