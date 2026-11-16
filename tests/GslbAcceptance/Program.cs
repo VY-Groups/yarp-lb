@@ -4,6 +4,27 @@ using System.Net;
 using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
+LatencyRoutingTests.Run();
+// Exercise opt-in probe-latency state with deterministic monotonic timestamps.
+var latency = new DnsProbeLatency();
+latency.ObserveSuccess(TimeSpan.FromMilliseconds(40), 1000);
+latency.ObserveSuccess(TimeSpan.FromMilliseconds(20), 2000);
+if (latency.TryRead(2000,3,15000,out _))
+    throw new Exception("FAIL: insufficient latency samples admitted");
+latency.ObserveSuccess(TimeSpan.FromMilliseconds(10), 3000);
+if (!latency.TryRead(3000,3,15000,out var ewma) ||
+    Math.Abs(ewma - 28.75) > 0.001)
+    throw new Exception("FAIL: observed latency EWMA wrong");
+if (latency.TryRead(18001,3,15000,out _) ||
+    latency.TryRead(2999,3,15000,out _))
+    throw new Exception("FAIL: expired or clock-rolled-back latency admitted");
+latency.ObserveFailure();
+if (latency.TryRead(3001,3,15000,out _))
+    throw new Exception("FAIL: failed probe must invalidate old latency");
+latency.ObserveSuccess(TimeSpan.FromMilliseconds(60), 4000);
+if (latency.TryRead(4000,3,15000,out _))
+    throw new Exception("FAIL: recovered backend requires new sample floor");
+Console.WriteLine("PASS: observed latency EWMA, sample floor, expiry and failover invalidation");
 // Deterministic state-transition characterization: no sleeps or mutable network state.
 var hysteresis = new DnsHealthHysteresis(2, 2);
 if (hysteresis.Observe(true) || !hysteresis.Observe(true) ||
@@ -93,7 +114,7 @@ var repo=args.Length==1?Path.GetFullPath(args[0]):Directory.GetCurrentDirectory(
 var dll=Path.Combine(repo,"engines","GslbDns","bin","Release","net10.0","GslbDns.dll");
 if(!File.Exists(dll))throw new FileNotFoundException("Compile DNS server first",dll);
 using var cancel=new CancellationTokenSource();
-var s1=new ProbeState();var s2=new ProbeState();
+var s1=new ProbeState { DelayMs=180 };var s2=new ProbeState();
 var healthA=new TcpListener(IPAddress.Loopback,19711);
 var healthB=new TcpListener(IPAddress.Loopback,19712);
 healthA.Start();healthB.Start();
@@ -149,7 +170,18 @@ File.WriteAllText(configuration,JsonSerializer.Serialize(new {
    CidrRoutes=new[]{
        new {Cidr="127.0.0.0/8",Region="dr"},
        new {Cidr="127.0.0.1/32",Region="local"}
-   }}
+   }},
+ new{ Name="latency.integration.test",TtlSeconds=10,Sites=new []{
+    new { Address="127.0.0.21",HealthUrl="http://127.0.0.1:19711/ready",
+          Weight=1,Priority=0,HealthCheckType="Http",TcpPort=0 },
+    new { Address="127.0.0.22",HealthUrl="http://127.0.0.1:19712/ready",
+          Weight=1,Priority=10,HealthCheckType="Http",TcpPort=0 }
+ },NameServers=new []{
+     new {Host="ns1.latency.integration.test",Address="127.0.0.31"},
+     new {Host="ns2.latency.integration.test",Address="127.0.0.32"}
+ },SoaContact="hostmaster.latency.integration.test",SoaSerial=2026111601u,
+   RoutingPolicy="ObservedLatency",FailureThreshold=1,SuccessThreshold=1,
+   FailClosedWhenAllSitesDown=true }
  }
 }));
 var info=new ProcessStartInfo("dotnet"){ UseShellExecute=false,CreateNoWindow=true,
@@ -173,6 +205,29 @@ try
         return seen.Contains("127.0.0.21") && seen.Contains("127.0.0.22");
     });
     Console.WriteLine("PASS: both IPv4 sites healthy before distribution sampling");
+    // The policy deliberately falls back to weighted while samples accumulate.
+    // Wait for three independently scheduled one-second probe cycles before
+    // asserting a deterministic winner; a single weighted reply is not proof.
+    await Task.Delay(4200);
+    await Wait(async()=> (await Query("latency.integration.test")).Address=="127.0.0.22");
+    for(var i=0;i<12;i++)
+        Must((await Query("latency.integration.test")).Address=="127.0.0.22",
+            "locally faster probe endpoint wins only after sample floor");
+
+    // Remove the measured winner, then prove real DNS chooses the slower
+    // healthy backend; restore it and wait for a stable measured winner.
+    s2.Healthy=0;
+    await Wait(async()=> (await Query("latency.integration.test")).Address=="127.0.0.21");
+    for(var i=0;i<12;i++)
+        Must((await Query("latency.integration.test")).Address=="127.0.0.21",
+            "failed faster endpoint must not win based on old latency");
+    s2.Healthy=1;
+    await Wait(async()=>{
+        for(var i=0;i<12;i++)
+            if((await Query("latency.integration.test")).Address!="127.0.0.22")return false;
+        return true;
+    });
+
     await Wait(async()=> (await Query("geo.integration.test")).Address=="127.0.0.21");
     var geoTcp=await TcpQuery(DnsRequest("geo.integration.test",1));
     Must(Dns16(geoTcp,6)==1 &&
@@ -259,6 +314,9 @@ try
     await Wait(async () => (await Query("ha.integration.test")).Status==2);
     Must((await Query("ha.integration.test")).Status==2,
         "strict failover zone SERVFAIL when every site is down");
+    await Wait(async()=> (await Query("latency.integration.test")).Status==2);
+    Must((await Query("latency.integration.test")).Status==2,
+        "strict observed-latency zone SERVFAIL when every site is down");
     await Wait(async()=> (await Query("geo.integration.test")).Status==2);
     Must((await Query("geo.integration.test")).Status==2,
         "strict CIDR region zone returns SERVFAIL when all sites down");
@@ -268,6 +326,9 @@ try
     await Wait(async()=> (await Query("ha.integration.test")).Address=="127.0.0.21");
     Must((await Query("ha.integration.test")).Address=="127.0.0.21",
         "recovered primary preferred after success threshold");
+    await Wait(async()=> (await Query("latency.integration.test")).Address=="127.0.0.21");
+    Must((await Query("latency.integration.test")).Address=="127.0.0.21",
+        "sole recovered slow backend is eligible without stale fast-site data");
     await Wait(async()=> (await Query("geo.integration.test")).Address=="127.0.0.21");
     Must((await Query("geo.integration.test")).Address=="127.0.0.21",
         "recovered preferred-region site selected again");
@@ -442,6 +503,8 @@ static async Task ProbeServer(TcpListener server,ProbeState state,CancellationTo
                                 { complete=true; break; }
                         }
                         if(!complete) return;
+                        var delay=Volatile.Read(ref state.DelayMs);
+                        if(delay>0) await Task.Delay(delay,timeout.Token);
                         await stream.WriteAsync(bytes,timeout.Token);
                     }
                     catch(Exception ex) when(ex is IOException or SocketException or
@@ -468,4 +531,4 @@ static async Task ProbeTcpServer(TcpListener server,CancellationToken ct)
     catch(ObjectDisposedException){}
 }
 
-sealed class ProbeState {public volatile int Healthy=1;}
+sealed class ProbeState {public volatile int Healthy=1;public int DelayMs;}

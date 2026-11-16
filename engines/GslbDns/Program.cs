@@ -35,7 +35,7 @@ foreach(var zone in config.Zones)
         zone.NameServers is {Length: >4} || zone.SoaSerial == 0 ||
         zone.FailureThreshold is < 1 or > 10 ||
         zone.SuccessThreshold is < 1 or > 10 ||
-        zone.RoutingPolicy is not ("Weighted" or "Failover" or "CidrRegion") ||
+        zone.RoutingPolicy is not ("Weighted" or "Failover" or "CidrRegion" or "ObservedLatency") ||
         (zone.RoutingPolicy == "CidrRegion" &&
              zone.CidrRoutes is not { Length: >= 1 and <= 256 }) ||
         (zone.RoutingPolicy != "CidrRegion" && zone.CidrRoutes is { Length: > 0 }))
@@ -118,6 +118,7 @@ async Task ProbeAll(CancellationToken ct)
         config.MaxConcurrentHealthProbes,
         async (site, token) =>
         {
+            var started = System.Diagnostics.Stopwatch.GetTimestamp();
             var healthy = false;
             try
             {
@@ -139,7 +140,14 @@ async Task ProbeAll(CancellationToken ct)
             }
             catch (Exception e) when (e is HttpRequestException or SocketException or
                 OperationCanceledException) { }
-            // Publish a single verdict for each distinct zone/site per cycle.
+            // Only a successful real probe advances the latency estimator.
+            // Failed probes invalidate the previously measured performance.
+            if (healthy)
+                site.Latency.ObserveSuccess(System.Diagnostics.Stopwatch.GetElapsedTime(started),
+                    Environment.TickCount64);
+            else
+                site.Latency.ObserveFailure();
+            // Publish one verdict per zone/site per cycle.
             Volatile.Write(ref site.Healthy, site.Health.Observe(healthy) ? 1 : 0);
         }, ct);
 }
@@ -287,6 +295,7 @@ sealed class Site
     public int Weight {get;}
     public int Priority {get;}
     public DnsHealthHysteresis Health {get;}
+    public DnsProbeLatency Latency {get;} = new();
     public int Healthy;
 }
 sealed class SiteGroup
@@ -297,6 +306,9 @@ sealed class SiteGroup
         =>(Sites,Ttl,FailClosedWhenAllSitesDown,NameServers,SoaContact,SoaSerial,RoutingPolicy,CidrTable)
         =(sites,ttl,failClosedWhenAllSitesDown,nameServers,soaContact,soaSerial,routingPolicy,cidrTable);
     public string RoutingPolicy { get; }
+    // 3 local successful measurements; at most 3 probe periods, clamped 6..60s.
+    public const int LatencyMinimumSamples = 3;
+    public const int LatencyMaximumAgeMs = 15_000;
     public DnsCidrRegionTable? CidrTable { get; }
     public DnsNameServer[] NameServers { get; }
     public string SoaContact { get; }

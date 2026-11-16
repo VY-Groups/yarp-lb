@@ -156,13 +156,44 @@ internal static class DnsWireProtocol
                         }
                         else
                         {
-                            // Historic IPv4 weighted ordering/semantics are unchanged.
-                            var total = eligible.Sum(s => s.Weight);
-                            var ticket = (int)((ulong)Interlocked.Increment(ref zone.Counter) % (ulong)total);
-                            foreach (var site in eligible)
+                            if (zone.RoutingPolicy == "ObservedLatency")
                             {
-                                ticket -= site.Weight;
-                                if (ticket < 0) { chosen = site; break; }
+                                // This is local DNS-node -> probe-endpoint latency,
+                                // NOT client-perceived latency or cross-region RTT.
+                                // A single missing/stale sample causes weighted fallback.
+                                var now = Environment.TickCount64;
+                                var measured = new List<(Site Site, double Ms)>();
+                                foreach (var site in eligible)
+                                {
+                                    if (!site.Latency.TryRead(now,
+                                            SiteGroup.LatencyMinimumSamples,
+                                            SiteGroup.LatencyMaximumAgeMs, out var ms))
+                                    {
+                                        measured.Clear();
+                                        break;
+                                    }
+                                    measured.Add((site, ms));
+                                }
+                                if (measured.Count == eligible.Length)
+                                {
+                                    var best = measured.OrderBy(x => x.Ms).First();
+                                    // Avoid switching affinity on sub-15% probe jitter.
+                                    var runnerUp = measured.OrderBy(x => x.Ms).Skip(1).FirstOrDefault();
+                                    if (measured.Count == 1 ||
+                                        runnerUp.Ms >= best.Ms * 1.15)
+                                        chosen = best.Site;
+                                }
+                            }
+                            if (chosen is null)
+                            {
+                                // Historic IPv4 weighted ordering/semantics remain unchanged.
+                                var total = eligible.Sum(s => s.Weight);
+                                var ticket = (int)((ulong)Interlocked.Increment(ref zone.Counter) % (ulong)total);
+                                foreach (var site in eligible)
+                                {
+                                    ticket -= site.Weight;
+                                    if (ticket < 0) { chosen = site; break; }
+                                }
                             }
                         }
                         if (chosen is not null)
