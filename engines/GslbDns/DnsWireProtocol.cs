@@ -107,9 +107,15 @@ internal static class DnsWireProtocol
             var atApex = domain == apex;
             var ns = zone.NameServers.FirstOrDefault(n =>
                 n.Host.Equals(domain, StringComparison.OrdinalIgnoreCase));
+            // A configured address below this name makes it an existing empty
+            // non-terminal. NXDOMAIN would incorrectly deny its entire subtree
+            // to caching resolvers (RFC 8020 section 3.1).
+            var emptyNonTerminal = !atApex && ns is null &&
+                zone.NameServers.Any(n =>
+                    n.Host.EndsWith("." + domain, StringComparison.OrdinalIgnoreCase));
             if (!atApex && ns is null)
             {
-                rcode = 3; // NXDOMAIN within a hosted zone
+                rcode = emptyNonTerminal ? 0 : 3; // NODATA vs true NXDOMAIN
                 AddNegativeSoa();
             }
             else if ((qtype == A || qtype == Aaaa) && atApex)
