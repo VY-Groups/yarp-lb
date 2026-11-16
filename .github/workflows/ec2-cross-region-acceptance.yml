@@ -8,7 +8,7 @@ jobs:
   test:
     if: github.head_ref == 'codex/ec2-cross-region-acceptance'
     runs-on: ubuntu-24.04
-    timeout-minutes: 6
+    timeout-minutes: 10
     steps:
       - name: Verify both origins and both authoritative DNS processes
         env:
@@ -88,6 +88,60 @@ jobs:
                   call(h,"pause-l7")
                   l7("200:mumbai",[hosts[1-i]])
                   call(h,"resume-l7")
+                  l7("200:mumbai")
+              # Two-address retries are confined to idempotent GETs.
+              import collections, math
+              def fetch(h):
+                  with urllib.request.urlopen("http://"+h+"/gc-87323-gateway/site",timeout=2) as response:
+                      body=response.read(32).decode().strip()
+                      if response.status!=200 or body not in ("mumbai","osaka"):
+                          raise RuntimeError("invalid response")
+                      return body
+              def sample(preferred, end):
+                  counts=collections.Counter()
+                  durations=[]
+                  while time.monotonic()<end:
+                      started=time.monotonic()
+                      for addr in (preferred, hosts[1-hosts.index(preferred)]):
+                          try:
+                              body=fetch(addr)
+                          except (OSError,RuntimeError):
+                              counts["failed_http_attempts"]+=1
+                              continue
+                          counts["served_"+body]+=1
+                          break
+                      else:
+                          counts["failed_requests"]+=1
+                      durations.append(time.monotonic()-started)
+                      time.sleep(.07)
+                  durations.sort()
+                  return dict(counts, requests=len(durations),
+                              p99_ms=round(1000*durations[math.ceil(.99*len(durations))-1]))
+              for index,host in enumerate(hosts):
+                  other=hosts[1-index]
+                  with concurrent.futures.ThreadPoolExecutor() as pool:
+                      end=time.monotonic()+38
+                      streams=[pool.submit(sample,pref,end) for pref in hosts]
+                      time.sleep(3)
+                      try:
+                          call(host,"origin-stop")
+                          target=("osaka","mumbai")[index]
+                          deadline=time.monotonic()+12
+                          while time.monotonic()<deadline:
+                              try:
+                                  if fetch(other)==target: break
+                              except OSError:
+                                  pass
+                              time.sleep(.2)
+                          else: raise RuntimeError("surviving public gateway failed to reach "+target)
+                          print("Surviving public gateway",other,"served",target,flush=True)
+                          time.sleep(7)
+                      finally:
+                          call(host,"origin-start")
+                      for pref,stream in zip(hosts,streams):
+                          metrics=stream.result()
+                          print("EXTERNAL_SAMPLE",json.dumps(dict(outage=host,preferred=pref,**metrics)),flush=True)
+                          assert metrics["requests"]>0
                   l7("200:mumbai")
           finally:
               for host in hosts:
