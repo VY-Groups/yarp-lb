@@ -1,0 +1,83 @@
+# Integration test environment for OpenGSLB
+# Usage: docker compose -f docker-compose.test.yml up -d
+#
+# Network Layout:
+#   172.28.0.2   - backend1 (nginx)
+#   172.28.0.3   - backend2 (nginx)
+#   172.28.0.4   - backend3 (nginx)
+#   172.28.0.5   - backend-tcp (TCP echo server)
+#   172.28.0.100 - dns-mock (CoreDNS)
+#
+# OpenGSLB runs on the host and connects to this network.
+
+services:
+  # Mock backend server 1 - HTTP upstream
+  backend1:
+    image: nginx:alpine
+    networks:
+      testnet:
+        ipv4_address: 172.28.0.2
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+
+  # Mock backend server 2 - HTTP upstream
+  backend2:
+    image: nginx:alpine
+    networks:
+      testnet:
+        ipv4_address: 172.28.0.3
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+
+  # Mock backend server 3 - HTTP upstream (for better round-robin testing)
+  backend3:
+    image: nginx:alpine
+    networks:
+      testnet:
+        ipv4_address: 172.28.0.4
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+
+  # TCP backend for TCP health check testing
+  backend-tcp:
+    image: alpine:latest
+    command: sh -c "while true; do nc -l -p 9000 -e echo 'OK'; done"
+    networks:
+      testnet:
+        ipv4_address: 172.28.0.5
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "9000"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+
+  # Mock DNS resolver for testing DNS queries
+  dns-mock:
+    image: coredns/coredns:latest
+    command: -conf /etc/coredns/Corefile
+    volumes:
+      - ./test/testdata/coredns:/etc/coredns:ro
+    networks:
+      testnet:
+        ipv4_address: 172.28.0.100
+    healthcheck:
+      test: ["CMD", "nslookup", "health.check", "127.0.0.1"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+
+networks:
+  testnet:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16

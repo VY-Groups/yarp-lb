@@ -1,0 +1,46 @@
+# Example Terraform variables file
+# Copy this file to terraform.tfvars and customize the values
+
+# Resource group name (optional, defaults to rg-opengslb-latency-test)
+# resource_group_name = "rg-opengslb-latency-test"
+
+# Admin username for VMs (optional, defaults to azureuser)
+# admin_username = "azureuser"
+
+# Path to your SSH public key (required for Linux VMs)
+# IMPORTANT: Azure only supports RSA keys, NOT ed25519!
+# Generate one with: ssh-keygen -t rsa -b 4096 -f ~/.ssh/azure_rsa
+ssh_public_key_path = "~/.ssh/azure_rsa.pub"
+
+# VM size (optional, defaults to Standard_B2s)
+# vm_size = "Standard_B2s"
+
+# OpenGSLB version to deploy from GitHub Releases (e.g., "v1.1.1" or "latest")
+# opengslb_version = "v1.1.1"
+
+# GitHub repository for OpenGSLB releases (optional, defaults to LoganRossUS/OpenGSLB)
+# opengslb_github_repo = "LoganRossUS/OpenGSLB"
+
+# Tags (optional)
+# tags = {
+#   project = "OpenGSLB"
+#   purpose = "ADR-017-Testing"
+#   demo    = "passive-latency-learning"
+# }
+
+# Note: Gossip encryption key and service token are now auto-generated
+# by Terraform using the random provider. No need to configure them.
+
+# ============================================================================
+# Azure Bastion (Enterprise/Firewall-restricted environments)
+# ============================================================================
+
+# Enable Azure Bastion for secure browser-based SSH/RDP access
+# Useful when SSH/RDP ports are blocked by corporate firewalls
+# Note: Adds ~$140/month to infrastructure costs
+# enable_bastion = true
+
+# Bastion SKU (optional, defaults to Basic)
+# Basic: Browser-based access only
+# Standard: Native client support, IP-based connection, shareable links
+# bastion_sku = "Basic"

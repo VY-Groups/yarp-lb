@@ -1,0 +1,55 @@
+# OpenGSLB Demo 5: Agent Configuration (backend-1)
+#
+# This agent monitors the local demo-app and reports health to Overwatch.
+# PREDICTIVE MONITORING IS DISABLED on this backend - only backend-3 (chaos target)
+# has it enabled. This avoids all backends draining when Docker shares host CPU.
+
+mode: agent
+
+# Agent configuration
+agent:
+  identity:
+    region: demo
+    service_token: "demo-token-12345"
+
+  # Backend service this agent monitors
+  # IMPORTANT: Use the container's external IP so it matches the DNS config in overwatch.yaml
+  backends:
+    - service: app.demo.local
+      address: 10.50.0.21
+      port: 8080
+      weight: 100
+      health_check:
+        type: http
+        path: /health
+        interval: 2s
+        timeout: 1s
+        failure_threshold: 2
+        success_threshold: 1
+
+  # PREDICTIVE HEALTH MONITORING - DISABLED
+  # Only backend-3 has predictive monitoring enabled. In Docker, /proc/stat shows
+  # host CPU, so if all agents monitored CPU, they'd ALL drain when chaos hits.
+  predictive:
+    enabled: false
+
+  # Gossip configuration to reach Overwatch
+  gossip:
+    encryption_key: "cGFzc3dvcmQxMjM0NTY3ODkwMTIzNDU2Nzg5MDEyMzQ="
+    overwatch_nodes:
+      - "10.50.0.10:7946"
+
+  # Heartbeat settings
+  heartbeat:
+    interval: 5s
+    missed_threshold: 3
+
+# Metrics
+metrics:
+  enabled: true
+  address: "0.0.0.0:9100"
+
+# Logging
+logging:
+  level: debug
+  format: text

@@ -1,8 +1,0 @@
-#!/bin/sh
-
-. /etc/default/polaris
-
-POLARIS_PDNS_CONTROL_CMD="$POLARIS_INSTALL_PREFIX/bin/polaris-pdns-control"
-
-$POLARIS_PDNS_CONTROL_CMD
-

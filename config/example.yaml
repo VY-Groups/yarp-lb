@@ -1,0 +1,199 @@
+# OpenGSLB Example Configuration
+#
+# This file demonstrates all available configuration options.
+# Copy this file and modify it for your deployment.
+
+# Mode: overwatch (default) or agent
+# Overwatch nodes serve DNS and receive health updates from agents
+mode: overwatch
+
+# Overwatch-specific configuration
+overwatch:
+  # Gossip configuration for receiving agent health updates
+  # SECURITY: Encryption is MANDATORY - there is no option to disable it
+  gossip:
+    bind_address: "0.0.0.0:7946"
+
+    # REQUIRED: 32-byte base64-encoded encryption key for AES-256
+    # Generate with: openssl rand -base64 32
+    # IMPORTANT: Use the same key on all Agents and Overwatch nodes
+    encryption_key: "REPLACE_WITH_YOUR_32_BYTE_BASE64_KEY"
+
+    # Failure detection timing
+    probe_interval: 1s
+    probe_timeout: 500ms
+    gossip_interval: 200ms
+
+  # DNSSEC is enabled by default for security
+  dnssec:
+    enabled: true
+    algorithm: ECDSAP256SHA256
+
+# DNS server configuration
+dns:
+  # Address and port to listen on for DNS queries
+  # Format: "ip:port" or ":port" for all interfaces
+  # Default: ":53"
+  listen_address: ":53"
+  
+  # Default TTL (Time To Live) for DNS responses in seconds
+  # Clients will cache responses for this duration
+  # Lower values = faster failover, higher DNS query volume
+  # Default: 60
+  default_ttl: 60
+  
+  # When all servers are unhealthy, return last known good IP instead of SERVFAIL
+  # false = return SERVFAIL (default, more correct DNS behavior)
+  # true = return last healthy IP (degraded service over no service)
+  # Default: false
+  return_last_healthy: false
+
+# Logging configuration
+logging:
+  # Log level: debug, info, warn, error
+  # Default: info
+  level: info
+  
+  # Log format: json, text
+  # - json: Structured JSON output, ideal for log aggregation (ELK, Splunk, Loki)
+  # - text: Human-readable output, ideal for development and debugging
+  # Default: json
+  format: json
+
+# Region definitions
+# Each region represents a geographic location or data center
+regions:
+  - name: us-east-1
+    # Servers in this region
+    servers:
+      - address: 10.0.1.10
+        port: 80        # Default: 80
+        weight: 100     # Default: 100, range: 1-1000
+        # host: app.example.com  # For HTTPS: hostname for TLS SNI/cert validation
+      - address: 10.0.1.11
+        port: 80
+        weight: 100
+    
+    # Health check configuration for this region
+    health_check:
+      # Check type: http, https, tcp
+      # Default: http
+      type: http
+      
+      # How often to check server health
+      # Default: 30s
+      interval: 30s
+      
+      # Timeout for each health check (must be < interval)
+      # Default: 5s
+      timeout: 5s
+      
+      # HTTP/HTTPS path to check
+      # Default: /health
+      path: /health
+      
+      # Consecutive failures before marking unhealthy
+      # Default: 3, range: 1-10
+      failure_threshold: 3
+      
+      # Consecutive successes before marking healthy
+      # Default: 2, range: 1-10
+      success_threshold: 2
+
+  - name: us-west-2
+    servers:
+      - address: 10.0.2.10
+        port: 80
+        weight: 150     # Higher weight = more traffic
+      - address: 10.0.2.11
+        port: 80
+        weight: 100
+    health_check:
+      type: http
+      interval: 30s
+      timeout: 5s
+      path: /health
+
+  - name: eu-west-1
+    servers:
+      - address: 10.0.3.10
+        port: 8080      # Custom port
+        weight: 100
+    health_check:
+      type: tcp         # TCP-only check (no HTTP)
+      interval: 15s
+      timeout: 3s
+
+  # Example HTTPS region with host for TLS SNI
+  - name: eu-central-1
+    servers:
+      - address: 10.0.4.10
+        port: 443
+        weight: 100
+        host: secure.example.com  # Required for TLS certificate validation
+    health_check:
+      type: https
+      interval: 30s
+      timeout: 5s
+      path: /health
+# Domain routing configuration
+# Each domain can use different routing algorithms and regions
+domains:
+  - name: app.example.com
+    # Routing algorithm: round-robin, weighted, geolocation, latency
+    # Default: round-robin
+    routing_algorithm: round-robin
+    
+    # Regions to route traffic to (order matters for some algorithms)
+    regions:
+      - us-east-1
+      - us-west-2
+    
+    # TTL for this domain's DNS responses (overrides dns.default_ttl)
+    # Default: uses dns.default_ttl
+    ttl: 30
+
+  - name: api.example.com
+    routing_algorithm: weighted
+    regions:
+      - us-east-1
+      - us-west-2
+      - eu-west-1
+    ttl: 60
+
+  - name: static.example.com
+    routing_algorithm: round-robin
+    regions:
+      - us-west-2
+    ttl: 300    # Longer TTL for static content
+
+# API Server Configuration
+# The API provides health status endpoints for monitoring and integration.
+# 
+# SECURITY NOTE: The API exposes internal infrastructure details.
+# - Default binding is localhost only (127.0.0.1)
+# - For production, use a reverse proxy (NGINX/HAProxy) for authentication
+# - See docs/security/api-hardening.md for reference architectures
+
+api:
+  # Enable the API server (default: false)
+  enabled: true
+  
+  # Listen address for the API server
+  # Default: "127.0.0.1:8080" (localhost only)
+  # For network access, use "0.0.0.0:8080" with appropriate ACLs
+  address: "127.0.0.1:8080"
+  
+  # IP networks allowed to access the API (CIDR notation)
+  # Default: ["127.0.0.1/32", "::1/128"] (localhost only)
+  # Add your management network or reverse proxy IP
+  allowed_networks:
+    - "127.0.0.1/32"
+    - "::1/128"
+    # - "10.0.0.0/8"        # Internal network
+    # - "192.168.1.100/32"  # Specific monitoring server
+  
+  # Trust X-Forwarded-For and X-Real-IP headers
+  # Only enable when behind a trusted reverse proxy
+  # Default: false
+  trust_proxy_headers: false

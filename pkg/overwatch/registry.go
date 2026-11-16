@@ -1,0 +1,1166 @@
+// Copyright (C) 2025 Logan Ross
+//
+// This file is part of OpenGSLB – https://opengslb.org
+//
+// SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-OpenGSLB-Commercial
+
+// Package overwatch provides Overwatch mode functionality for OpenGSLB.
+// Overwatch nodes receive health reports from agents, perform external validation,
+// and serve authoritative DNS responses.
+package overwatch
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log/slog"
+	"sync"
+	"time"
+
+	"github.com/loganrossus/OpenGSLB/pkg/metrics"
+	"github.com/loganrossus/OpenGSLB/pkg/store"
+)
+
+// BackendStatus represents the health status of a backend as determined by Overwatch.
+type BackendStatus string
+
+const (
+	// StatusHealthy indicates the backend is healthy (agent claims healthy, validation passed).
+	StatusHealthy BackendStatus = "healthy"
+	// StatusUnhealthy indicates the backend is unhealthy (validation failed or agent claims unhealthy).
+	StatusUnhealthy BackendStatus = "unhealthy"
+	// StatusStale indicates no heartbeat received within threshold.
+	StatusStale BackendStatus = "stale"
+	// StatusOverridden indicates the status was manually overridden via API.
+	StatusOverridden BackendStatus = "overridden"
+	// StatusDraining indicates the backend is draining due to predictive health signals.
+	StatusDraining BackendStatus = "draining"
+)
+
+// Authority names the layer of the ADR-015 health hierarchy that decided a
+// backend's effective status.
+type Authority string
+
+const (
+	// AuthorityOverride: a manual override is set.
+	AuthorityOverride Authority = "override"
+	// AuthorityDraining: the agent reported predictive-health draining.
+	AuthorityDraining Authority = "draining"
+	// AuthorityValidation: Overwatch external validation produced the verdict.
+	AuthorityValidation Authority = "validation"
+	// AuthorityStale: no validation result and the agent heartbeat is stale.
+	AuthorityStale Authority = "stale"
+	// AuthorityAgent: no validation result, the agent's own claim is used.
+	AuthorityAgent Authority = "agent"
+	// AuthorityStatic: no validation result for a config or API defined backend,
+	// which is assumed healthy until validated.
+	AuthorityStatic Authority = "static"
+)
+
+// Authorities lists every authority value so metrics can publish all series.
+var Authorities = []Authority{
+	AuthorityOverride,
+	AuthorityDraining,
+	AuthorityValidation,
+	AuthorityStale,
+	AuthorityAgent,
+	AuthorityStatic,
+}
+
+// RegistrationSource indicates how a backend was registered.
+// v1.1.0: Added to support unified server registration architecture.
+type RegistrationSource string
+
+const (
+	// SourceStatic indicates the backend was defined in the config file.
+	SourceStatic RegistrationSource = "static"
+	// SourceAgent indicates the backend was registered via agent gossip.
+	SourceAgent RegistrationSource = "agent"
+	// SourceAPI indicates the backend was registered via API.
+	SourceAPI RegistrationSource = "api"
+)
+
+// Backend represents a registered backend from an agent.
+type Backend struct {
+	// Service is the service name (maps to DNS domain).
+	Service string `json:"service"`
+	// Address is the backend IP address.
+	Address string `json:"address"`
+	// Port is the backend port.
+	Port int `json:"port"`
+	// Weight is the routing weight.
+	Weight int `json:"weight"`
+
+	// AgentID is the ID of the agent that registered this backend.
+	// Empty for static/API-registered backends.
+	AgentID string `json:"agent_id,omitempty"`
+	// Region is the geographic region.
+	Region string `json:"region"`
+
+	// Source indicates how this backend was registered (static, agent, api).
+	// v1.1.0: Added to support unified server registration architecture.
+	Source RegistrationSource `json:"source"`
+	// CreatedAt is when this backend was first registered.
+	CreatedAt time.Time `json:"created_at"`
+	// UpdatedAt is when this backend was last updated.
+	UpdatedAt time.Time `json:"updated_at"`
+
+	// AgentHealthy is the health status claimed by the agent.
+	AgentHealthy bool `json:"agent_healthy"`
+	// AgentLastSeen is when we last received a heartbeat from the agent.
+	AgentLastSeen time.Time `json:"agent_last_seen"`
+
+	// ValidationHealthy is the health status from external validation.
+	// nil means not yet validated.
+	ValidationHealthy *bool `json:"validation_healthy,omitempty"`
+	// ValidationLastCheck is when external validation was last performed.
+	ValidationLastCheck time.Time `json:"validation_last_check,omitempty"`
+	// ValidationError is the last validation error, if any.
+	ValidationError string `json:"validation_error,omitempty"`
+	// ValidationConsecutivePasses counts passing validations since the last failure.
+	ValidationConsecutivePasses int `json:"validation_consecutive_passes,omitempty"`
+	// ValidationConsecutiveFails counts failing validations since the last pass.
+	ValidationConsecutiveFails int `json:"validation_consecutive_fails,omitempty"`
+
+	// OverrideStatus is a manual override status, if set.
+	OverrideStatus *bool `json:"override_status,omitempty"`
+	// OverrideReason is the reason for the override.
+	OverrideReason string `json:"override_reason,omitempty"`
+	// OverrideBy is who set the override.
+	OverrideBy string `json:"override_by,omitempty"`
+	// OverrideAt is when the override was set.
+	OverrideAt time.Time `json:"override_at,omitempty"`
+
+	// Draining indicates the backend is bleeding traffic due to predictive health.
+	Draining bool `json:"draining"`
+	// DrainingReason is the reason for draining (cpu_threshold_exceeded, memory_threshold_exceeded, error_rate_threshold_exceeded).
+	DrainingReason string `json:"draining_reason,omitempty"`
+	// DrainingAt is when draining started.
+	DrainingAt time.Time `json:"draining_at,omitempty"`
+	// CPUPercent is the current CPU utilization from predictive health.
+	CPUPercent float64 `json:"cpu_percent,omitempty"`
+	// MemPercent is the current memory utilization from predictive health.
+	MemPercent float64 `json:"mem_percent,omitempty"`
+	// ErrorRate is the current error rate from predictive health.
+	ErrorRate float64 `json:"error_rate,omitempty"`
+
+	// EffectiveStatus is the computed effective status based on the hierarchy.
+	EffectiveStatus BackendStatus `json:"effective_status"`
+	// Authority is the layer of the hierarchy that produced EffectiveStatus.
+	Authority Authority `json:"authority"`
+
+	// Latency tracking for latency-based routing (Sprint 6)
+	// SmoothedLatency is the EMA of validation latency measurements
+	SmoothedLatency time.Duration `json:"smoothed_latency,omitempty"`
+	// LatencySamples is the number of latency samples collected
+	LatencySamples int `json:"latency_samples,omitempty"`
+	// LastLatency is the most recent raw latency measurement
+	LastLatency time.Duration `json:"last_latency,omitempty"`
+
+	// HealthCheckType is the type of health check to use for validation (http, tcp).
+	// v1.1.1: Added to fix latency routing fallback to round-robin when using TCP health checks.
+	HealthCheckType string `json:"health_check_type,omitempty"`
+}
+
+// RegistryConfig configures the backend registry.
+type RegistryConfig struct {
+	// StaleThreshold is the duration after which a backend is considered stale
+	// if no heartbeat is received.
+	StaleThreshold time.Duration
+
+	// RemoveAfter is the duration after which a stale backend is removed.
+	RemoveAfter time.Duration
+
+	// LatencySmoothingFactor is the EMA alpha for latency smoothing (0-1).
+	// Higher values make the EMA more responsive to recent measurements.
+	// Default: 0.3
+	LatencySmoothingFactor float64
+
+	// ValidationFailureThreshold is the number of consecutive failed
+	// validations before a backend's validation verdict turns unhealthy.
+	// Default: 1 (the latest probe is the verdict).
+	ValidationFailureThreshold int
+
+	// ValidationSuccessThreshold is the number of consecutive passing
+	// validations before a backend's validation verdict turns healthy.
+	// Default: 1 (the latest probe is the verdict).
+	ValidationSuccessThreshold int
+
+	// Logger for registry operations.
+	Logger *slog.Logger
+}
+
+// DefaultRegistryConfig returns sensible defaults.
+func DefaultRegistryConfig() RegistryConfig {
+	return RegistryConfig{
+		StaleThreshold:             30 * time.Second,
+		RemoveAfter:                5 * time.Minute,
+		LatencySmoothingFactor:     0.3, // EMA alpha default
+		ValidationFailureThreshold: 1,
+		ValidationSuccessThreshold: 1,
+		Logger:                     slog.Default(),
+	}
+}
+
+// Registry manages backend registrations from agents.
+type Registry struct {
+	config   RegistryConfig
+	store    store.Store
+	backends map[string]*Backend // key: "service:address:port"
+	mu       sync.RWMutex
+
+	// Callbacks
+	onStatusChange func(backend *Backend, oldStatus, newStatus BackendStatus)
+
+	// Lifecycle
+	ctx    context.Context
+	cancel context.CancelFunc
+	wg     sync.WaitGroup
+}
+
+// NewRegistry creates a new backend registry.
+func NewRegistry(cfg RegistryConfig, st store.Store) *Registry {
+	if cfg.Logger == nil {
+		cfg.Logger = slog.Default()
+	}
+	if cfg.ValidationFailureThreshold < 1 {
+		cfg.ValidationFailureThreshold = 1
+	}
+	if cfg.ValidationSuccessThreshold < 1 {
+		cfg.ValidationSuccessThreshold = 1
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	return &Registry{
+		config:   cfg,
+		store:    st,
+		backends: make(map[string]*Backend),
+		ctx:      ctx,
+		cancel:   cancel,
+	}
+}
+
+// Start begins background tasks (stale detection, persistence).
+func (r *Registry) Start() error {
+	// Load persisted backends from store
+	if r.store != nil {
+		if err := r.loadFromStore(); err != nil {
+			r.config.Logger.Warn("failed to load backends from store", "error", err)
+		}
+	}
+
+	// Start stale detection loop
+	r.wg.Add(1)
+	go r.staleDetectionLoop()
+
+	r.config.Logger.Info("backend registry started",
+		"stale_threshold", r.config.StaleThreshold,
+		"remove_after", r.config.RemoveAfter,
+	)
+	return nil
+}
+
+// Stop halts background tasks.
+func (r *Registry) Stop() error {
+	r.cancel()
+	r.wg.Wait()
+	r.config.Logger.Info("backend registry stopped")
+	return nil
+}
+
+// OnStatusChange sets a callback for backend status changes.
+func (r *Registry) OnStatusChange(fn func(backend *Backend, oldStatus, newStatus BackendStatus)) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.onStatusChange = fn
+}
+
+// Register registers or updates a backend from an agent heartbeat.
+func (r *Registry) Register(agentID, region, service, address string, port, weight int, healthy bool) error {
+	r.mu.Lock()
+
+	key := backendKey(service, address, port)
+	now := time.Now()
+
+	backend, exists := r.backends[key]
+	if !exists {
+		backend = &Backend{
+			Service:         service,
+			Address:         address,
+			Port:            port,
+			Weight:          weight,
+			AgentID:         agentID,
+			Region:          region,
+			Source:          SourceAgent, // v1.1.0: Track registration source
+			CreatedAt:       now,
+			UpdatedAt:       now,
+			AgentHealthy:    healthy,
+			AgentLastSeen:   now,
+			EffectiveStatus: StatusHealthy,
+		}
+		r.backends[key] = backend
+		r.config.Logger.Info("backend registered",
+			"service", service,
+			"address", address,
+			"port", port,
+			"agent_id", agentID,
+			"region", region,
+			"source", "agent",
+		)
+	} else {
+		backend.AgentID = agentID
+		backend.Region = region
+		backend.Weight = weight
+		backend.AgentHealthy = healthy
+		backend.AgentLastSeen = now
+		backend.UpdatedAt = now // v1.1.0: Track updates
+	}
+
+	oldStatus := backend.EffectiveStatus
+	r.computeEffectiveStatus(backend)
+	newStatus := backend.EffectiveStatus
+	statusChanged := oldStatus != newStatus
+
+	// Make a copy for the callback
+	backendCopy := *backend
+
+	// Persist to store
+	if r.store != nil {
+		if err := r.persistBackend(backend); err != nil {
+			r.config.Logger.Warn("failed to persist backend", "key", key, "error", err)
+		}
+	}
+
+	// Release lock before calling callback
+	r.mu.Unlock()
+
+	// Call callback outside the lock
+	if statusChanged && r.onStatusChange != nil {
+		r.onStatusChange(&backendCopy, oldStatus, newStatus)
+	}
+
+	return nil
+}
+
+// RegisterStatic registers a static backend from config file.
+// v1.1.0: Unified architecture - static servers use same validation as agent servers.
+// v1.1.1: Added healthCheckType parameter to fix latency routing with TCP health checks.
+func (r *Registry) RegisterStatic(service, address string, port, weight int, region, healthCheckType string) error {
+	r.mu.Lock()
+
+	key := backendKey(service, address, port)
+	now := time.Now()
+
+	// Default to http if not specified
+	if healthCheckType == "" {
+		healthCheckType = "http"
+	}
+
+	backend, exists := r.backends[key]
+	if !exists {
+		backend = &Backend{
+			Service:         service,
+			Address:         address,
+			Port:            port,
+			Weight:          weight,
+			Region:          region,
+			Source:          SourceStatic, // v1.1.0: Mark as static
+			CreatedAt:       now,
+			UpdatedAt:       now,
+			AgentID:         "", // No agent for static servers
+			AgentHealthy:    false,
+			EffectiveStatus: StatusHealthy, // Assume healthy until validated
+			HealthCheckType: healthCheckType,
+		}
+		r.backends[key] = backend
+		r.config.Logger.Info("static backend registered",
+			"service", service,
+			"address", address,
+			"port", port,
+			"region", region,
+			"source", "static",
+			"health_check_type", healthCheckType,
+		)
+	} else {
+		// Update existing backend (e.g., on config reload)
+		backend.Weight = weight
+		backend.Region = region
+		backend.HealthCheckType = healthCheckType
+		backend.UpdatedAt = now
+		r.config.Logger.Debug("static backend updated",
+			"service", service,
+			"address", address,
+			"port", port,
+			"health_check_type", healthCheckType,
+		)
+	}
+
+	oldStatus := backend.EffectiveStatus
+	r.computeEffectiveStatus(backend)
+	newStatus := backend.EffectiveStatus
+	statusChanged := oldStatus != newStatus
+
+	// Make a copy for the callback to avoid races
+	backendCopy := *backend
+
+	// Persist to store
+	if r.store != nil {
+		if err := r.persistBackend(backend); err != nil {
+			r.config.Logger.Warn("failed to persist backend", "key", key, "error", err)
+		}
+	}
+
+	// Release lock before calling callback to avoid deadlock
+	r.mu.Unlock()
+
+	// Call status change callback outside the lock
+	if statusChanged && r.onStatusChange != nil {
+		r.onStatusChange(&backendCopy, oldStatus, newStatus)
+	}
+
+	return nil
+}
+
+// RegisterAPI registers a backend via API call.
+// v1.1.0: API-registered servers use same validation as agent and static servers.
+func (r *Registry) RegisterAPI(service, address string, port, weight int, region string) error {
+	r.mu.Lock()
+
+	key := backendKey(service, address, port)
+
+	// Check if already exists
+	if _, exists := r.backends[key]; exists {
+		r.mu.Unlock()
+		return fmt.Errorf("server already exists: %s", key)
+	}
+
+	now := time.Now()
+	backend := &Backend{
+		Service:         service,
+		Address:         address,
+		Port:            port,
+		Weight:          weight,
+		Region:          region,
+		Source:          SourceAPI, // v1.1.0: Mark as API-registered
+		CreatedAt:       now,
+		UpdatedAt:       now,
+		AgentID:         "", // No agent for API-registered servers
+		AgentHealthy:    false,
+		AgentLastSeen:   now,           // Initialize to prevent immediate staleness
+		EffectiveStatus: StatusHealthy, // Assume healthy until validated
+	}
+
+	r.backends[key] = backend
+	r.computeEffectiveStatus(backend)
+	newStatus := backend.EffectiveStatus
+
+	// Make a copy for the callback
+	backendCopy := *backend
+
+	// Persist to store
+	if r.store != nil {
+		if err := r.persistBackend(backend); err != nil {
+			r.config.Logger.Warn("failed to persist backend", "key", key, "error", err)
+		}
+	}
+
+	r.config.Logger.Info("API backend registered",
+		"service", service,
+		"address", address,
+		"port", port,
+		"region", region,
+		"source", "api",
+	)
+
+	// Release lock before calling callback
+	r.mu.Unlock()
+
+	// Notify status change (new backend) outside the lock
+	if r.onStatusChange != nil {
+		r.onStatusChange(&backendCopy, "", newStatus)
+	}
+
+	return nil
+}
+
+// Update updates an existing backend's weight and/or region.
+// v1.1.0: Supports updating backends registered via API or static config.
+func (r *Registry) Update(service, address string, port, weight int, region string) error {
+	r.mu.Lock()
+
+	key := backendKey(service, address, port)
+	backend, exists := r.backends[key]
+	if !exists {
+		r.mu.Unlock()
+		return fmt.Errorf("backend %s not found", key)
+	}
+
+	// Update fields
+	backend.Weight = weight
+	backend.Region = region
+	backend.UpdatedAt = time.Now()
+
+	oldStatus := backend.EffectiveStatus
+	r.computeEffectiveStatus(backend)
+	newStatus := backend.EffectiveStatus
+	statusChanged := oldStatus != newStatus
+
+	// Make a copy for the callback
+	backendCopy := *backend
+
+	// Persist to store
+	if r.store != nil {
+		if err := r.persistBackend(backend); err != nil {
+			r.config.Logger.Warn("failed to persist backend", "key", key, "error", err)
+		}
+	}
+
+	r.config.Logger.Info("backend updated",
+		"service", service,
+		"address", address,
+		"port", port,
+		"weight", weight,
+		"region", region,
+	)
+
+	// Release lock before calling callback
+	r.mu.Unlock()
+
+	// Call callback outside the lock
+	if statusChanged && r.onStatusChange != nil {
+		r.onStatusChange(&backendCopy, oldStatus, newStatus)
+	}
+
+	return nil
+}
+
+// Deregister removes a backend.
+func (r *Registry) Deregister(service, address string, port int) error {
+	r.mu.Lock()
+
+	key := backendKey(service, address, port)
+	backend, exists := r.backends[key]
+	if !exists {
+		r.mu.Unlock()
+		return fmt.Errorf("backend %s not found", key)
+	}
+
+	// Make a copy before deletion
+	backendCopy := *backend
+	oldStatus := backend.EffectiveStatus
+
+	delete(r.backends, key)
+	metrics.DeleteBackendHealthy(backend.Service, backend.Region, backend.Address, backend.Port)
+
+	r.config.Logger.Info("backend deregistered",
+		"service", service,
+		"address", address,
+		"port", port,
+	)
+
+	// Remove from store
+	if r.store != nil {
+		if err := r.store.Delete(r.ctx, storeKey(key)); err != nil {
+			r.config.Logger.Warn("failed to delete backend from store", "key", key, "error", err)
+		}
+	}
+
+	// Release lock before calling callback
+	r.mu.Unlock()
+
+	// Notify callback outside the lock
+	if r.onStatusChange != nil {
+		r.onStatusChange(&backendCopy, oldStatus, "")
+	}
+
+	return nil
+}
+
+// UpdateValidation updates the external validation result for a backend.
+func (r *Registry) UpdateValidation(service, address string, port int, healthy bool, validationErr string) error {
+	return r.UpdateValidationWithLatency(service, address, port, healthy, validationErr, 0)
+}
+
+// UpdateValidationWithLatency updates the external validation result for a backend,
+// including latency measurement for latency-based routing.
+func (r *Registry) UpdateValidationWithLatency(service, address string, port int, healthy bool, validationErr string, latency time.Duration) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	key := backendKey(service, address, port)
+	backend, exists := r.backends[key]
+	if !exists {
+		return fmt.Errorf("backend %s not found", key)
+	}
+
+	oldStatus := backend.EffectiveStatus
+	backend.ValidationLastCheck = time.Now()
+	backend.ValidationError = validationErr
+	r.applyValidationResult(backend, healthy)
+
+	// Update latency with EMA smoothing (only for successful healthy checks)
+	if healthy && latency > 0 {
+		r.updateLatencyEMA(backend, latency)
+	}
+
+	r.computeEffectiveStatus(backend)
+
+	if oldStatus != backend.EffectiveStatus {
+		r.config.Logger.Info("backend validation status changed",
+			"service", service,
+			"address", address,
+			"port", port,
+			"old_status", oldStatus,
+			"new_status", backend.EffectiveStatus,
+			"validation_healthy", healthy,
+		)
+		if r.onStatusChange != nil {
+			r.onStatusChange(backend, oldStatus, backend.EffectiveStatus)
+		}
+	}
+
+	// Persist to store
+	if r.store != nil {
+		if err := r.persistBackend(backend); err != nil {
+			r.config.Logger.Warn("failed to persist backend", "key", key, "error", err)
+		}
+	}
+
+	return nil
+}
+
+// applyValidationResult folds one probe result into the backend's validation
+// verdict, honoring the consecutive-result thresholds. With both thresholds
+// at 1 (the default) the latest probe is the verdict, so a backend leaves DNS
+// on the first failed probe and returns on the first passing one.
+func (r *Registry) applyValidationResult(backend *Backend, healthy bool) {
+	if healthy {
+		backend.ValidationConsecutiveFails = 0
+		if backend.ValidationConsecutivePasses < r.config.ValidationSuccessThreshold {
+			backend.ValidationConsecutivePasses++
+		}
+		if backend.ValidationConsecutivePasses >= r.config.ValidationSuccessThreshold {
+			verdict := true
+			backend.ValidationHealthy = &verdict
+		}
+		return
+	}
+
+	backend.ValidationConsecutivePasses = 0
+	if backend.ValidationConsecutiveFails < r.config.ValidationFailureThreshold {
+		backend.ValidationConsecutiveFails++
+	}
+	if backend.ValidationConsecutiveFails >= r.config.ValidationFailureThreshold {
+		verdict := false
+		backend.ValidationHealthy = &verdict
+	}
+}
+
+// updateLatencyEMA updates the backend's smoothed latency using exponential moving average.
+func (r *Registry) updateLatencyEMA(backend *Backend, measured time.Duration) {
+	backend.LastLatency = measured
+
+	if backend.LatencySamples == 0 {
+		// First sample - use it directly
+		backend.SmoothedLatency = measured
+	} else {
+		// Apply EMA: smoothed = alpha * measured + (1 - alpha) * previous
+		alpha := r.config.LatencySmoothingFactor
+		if alpha <= 0 || alpha > 1 {
+			alpha = 0.3 // Default if not configured
+		}
+		backend.SmoothedLatency = time.Duration(
+			alpha*float64(measured) + (1-alpha)*float64(backend.SmoothedLatency),
+		)
+	}
+	backend.LatencySamples++
+
+	// Record metrics
+	metrics.SetBackendLatency(
+		backend.Service,
+		fmt.Sprintf("%s:%d", backend.Address, backend.Port),
+		float64(backend.SmoothedLatency.Milliseconds()),
+		backend.LatencySamples,
+	)
+}
+
+// SetOverride sets a manual override for a backend.
+func (r *Registry) SetOverride(service, address string, port int, healthy bool, reason, by string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	key := backendKey(service, address, port)
+	backend, exists := r.backends[key]
+	if !exists {
+		return fmt.Errorf("backend %s not found", key)
+	}
+
+	oldStatus := backend.EffectiveStatus
+	backend.OverrideStatus = &healthy
+	backend.OverrideReason = reason
+	backend.OverrideBy = by
+	backend.OverrideAt = time.Now()
+
+	r.computeEffectiveStatus(backend)
+
+	r.config.Logger.Info("backend override set",
+		"service", service,
+		"address", address,
+		"port", port,
+		"healthy", healthy,
+		"reason", reason,
+		"by", by,
+	)
+
+	if oldStatus != backend.EffectiveStatus && r.onStatusChange != nil {
+		r.onStatusChange(backend, oldStatus, backend.EffectiveStatus)
+	}
+
+	// Persist to store
+	if r.store != nil {
+		if err := r.persistBackend(backend); err != nil {
+			r.config.Logger.Warn("failed to persist backend", "key", key, "error", err)
+		}
+	}
+
+	return nil
+}
+
+// ClearOverride removes a manual override for a backend.
+func (r *Registry) ClearOverride(service, address string, port int) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	key := backendKey(service, address, port)
+	backend, exists := r.backends[key]
+	if !exists {
+		return fmt.Errorf("backend %s not found", key)
+	}
+
+	if backend.OverrideStatus == nil {
+		return nil // No override to clear
+	}
+
+	oldStatus := backend.EffectiveStatus
+	backend.OverrideStatus = nil
+	backend.OverrideReason = ""
+	backend.OverrideBy = ""
+	backend.OverrideAt = time.Time{}
+
+	r.computeEffectiveStatus(backend)
+
+	r.config.Logger.Info("backend override cleared",
+		"service", service,
+		"address", address,
+		"port", port,
+	)
+
+	if oldStatus != backend.EffectiveStatus && r.onStatusChange != nil {
+		r.onStatusChange(backend, oldStatus, backend.EffectiveStatus)
+	}
+
+	// Persist to store
+	if r.store != nil {
+		if err := r.persistBackend(backend); err != nil {
+			r.config.Logger.Warn("failed to persist backend", "key", key, "error", err)
+		}
+	}
+
+	return nil
+}
+
+// UpdateDraining updates the draining state for all backends from an agent.
+// This is called when predictive health signals are received via gossip.
+func (r *Registry) UpdateDraining(agentID string, draining bool, reason string, drainingAt time.Time, cpuPercent, memPercent, errorRate float64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	for key, backend := range r.backends {
+		if backend.AgentID != agentID {
+			continue
+		}
+
+		oldStatus := backend.EffectiveStatus
+		oldDraining := backend.Draining
+
+		backend.Draining = draining
+		backend.DrainingReason = reason
+		backend.DrainingAt = drainingAt
+		backend.CPUPercent = cpuPercent
+		backend.MemPercent = memPercent
+		backend.ErrorRate = errorRate
+
+		r.computeEffectiveStatus(backend)
+
+		// Log status change
+		if oldDraining != draining {
+			if draining {
+				r.config.Logger.Info("backend draining started",
+					"service", backend.Service,
+					"address", backend.Address,
+					"port", backend.Port,
+					"agent_id", agentID,
+					"reason", reason,
+					"cpu_percent", cpuPercent,
+					"mem_percent", memPercent,
+					"error_rate", errorRate,
+				)
+			} else {
+				r.config.Logger.Info("backend draining stopped",
+					"service", backend.Service,
+					"address", backend.Address,
+					"port", backend.Port,
+					"agent_id", agentID,
+				)
+			}
+		}
+
+		if oldStatus != backend.EffectiveStatus && r.onStatusChange != nil {
+			r.onStatusChange(backend, oldStatus, backend.EffectiveStatus)
+		}
+
+		// Persist to store
+		if r.store != nil {
+			if err := r.persistBackend(backend); err != nil {
+				r.config.Logger.Warn("failed to persist backend", "key", key, "error", err)
+			}
+		}
+	}
+}
+
+// GetBackend returns a backend by key.
+func (r *Registry) GetBackend(service, address string, port int) (*Backend, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	key := backendKey(service, address, port)
+	backend, exists := r.backends[key]
+	if !exists {
+		return nil, false
+	}
+	// Return a copy to prevent external modification
+	copy := *backend
+	return &copy, true
+}
+
+// GetBackends returns all backends for a service.
+func (r *Registry) GetBackends(service string) []*Backend {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	var result []*Backend
+	for _, backend := range r.backends {
+		if backend.Service == service {
+			copy := *backend
+			result = append(result, &copy)
+		}
+	}
+	return result
+}
+
+// GetHealthyBackends returns all healthy backends for a service.
+func (r *Registry) GetHealthyBackends(service string) []*Backend {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	var result []*Backend
+	for _, backend := range r.backends {
+		if backend.Service == service && backend.EffectiveStatus == StatusHealthy {
+			copy := *backend
+			result = append(result, &copy)
+		}
+	}
+	return result
+}
+
+// GetAllBackends returns all registered backends.
+func (r *Registry) GetAllBackends() []*Backend {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	result := make([]*Backend, 0, len(r.backends))
+	for _, backend := range r.backends {
+		copy := *backend
+		result = append(result, &copy)
+	}
+	return result
+}
+
+// IsHealthy returns true if the backend is healthy (for DNS handler).
+func (r *Registry) IsHealthy(address string, port int) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	// Search for backend by address:port (service-agnostic for DNS)
+	for _, backend := range r.backends {
+		if backend.Address == address && backend.Port == port {
+			return backend.EffectiveStatus == StatusHealthy
+		}
+	}
+	return false
+}
+
+// LatencyInfo contains latency information for a backend.
+type LatencyInfo struct {
+	// SmoothedLatency is the EMA of validation latency measurements.
+	SmoothedLatency time.Duration
+	// Samples is the number of latency samples collected.
+	Samples int
+	// LastLatency is the most recent raw latency measurement.
+	LastLatency time.Duration
+	// HasData indicates whether latency data is available.
+	HasData bool
+}
+
+// GetLatency returns latency information for a backend (for latency-based routing).
+func (r *Registry) GetLatency(address string, port int) LatencyInfo {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	// Search for backend by address:port (service-agnostic for DNS)
+	for _, backend := range r.backends {
+		if backend.Address == address && backend.Port == port {
+			return LatencyInfo{
+				SmoothedLatency: backend.SmoothedLatency,
+				Samples:         backend.LatencySamples,
+				LastLatency:     backend.LastLatency,
+				HasData:         backend.LatencySamples > 0,
+			}
+		}
+	}
+	return LatencyInfo{HasData: false}
+}
+
+// BackendCount returns the total number of registered backends.
+func (r *Registry) BackendCount() int {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return len(r.backends)
+}
+
+// computeEffectiveStatus computes the effective status based on the hierarchy:
+// 1. Manual override (if set) - takes precedence
+// 2. Predictive health draining (if agent is bleeding) - removes from DNS rotation
+// 3. External validation (if performed) - Overwatch ALWAYS wins, can recover stale backends
+// 4. Staleness detection (if no validation)
+// 5. Agent health claim (default)
+//
+// Note: Validation is checked BEFORE staleness to allow Overwatch external checks
+// to recover backends when agents are unavailable but the backend service is still running.
+//
+// The decision is applied immediately: there is no dwell time, debounce or
+// agreement requirement between layers. The authority that produced the status
+// is recorded on the backend and the per-backend health gauge is updated.
+func (r *Registry) computeEffectiveStatus(backend *Backend) {
+	status, authority := r.decideStatus(backend)
+	backend.EffectiveStatus = status
+	backend.Authority = authority
+	metrics.SetBackendHealthy(backend.Service, backend.Region, backend.Address, backend.Port, status == StatusHealthy)
+}
+
+// decideStatus walks the hierarchy and returns the status together with the
+// authority that decided it.
+func (r *Registry) decideStatus(backend *Backend) (BackendStatus, Authority) {
+	now := time.Now()
+	isStale := now.Sub(backend.AgentLastSeen) > r.config.StaleThreshold
+
+	// Manual override takes highest precedence
+	if backend.OverrideStatus != nil {
+		if *backend.OverrideStatus {
+			return StatusHealthy, AuthorityOverride
+		}
+		return StatusUnhealthy, AuthorityOverride
+	}
+
+	// Predictive health draining - agent is bleeding traffic due to resource pressure
+	// This takes precedence over validation because the agent knows its own state best
+	if backend.Draining {
+		return StatusDraining, AuthorityDraining
+	}
+
+	// External validation ALWAYS wins over agent claims (ADR-015 hierarchy)
+	// This also allows validation to "recover" stale backends when agent is
+	// unavailable but the backend service is still healthy
+	if backend.ValidationHealthy != nil {
+		if *backend.ValidationHealthy {
+			return StatusHealthy, AuthorityValidation
+		}
+		return StatusUnhealthy, AuthorityValidation
+	}
+
+	// No validation result - check staleness (only for agent-registered backends)
+	// Static and API backends don't send heartbeats, so staleness doesn't apply
+	if backend.Source == SourceAgent && isStale {
+		return StatusStale, AuthorityStale
+	}
+
+	// Fall back to agent claim for agent backends, assume healthy for static/API
+	if backend.Source == SourceAgent {
+		if backend.AgentHealthy {
+			return StatusHealthy, AuthorityAgent
+		}
+		return StatusUnhealthy, AuthorityAgent
+	}
+
+	// Static and API backends are healthy by default (unless validation says otherwise)
+	return StatusHealthy, AuthorityStatic
+}
+
+// staleDetectionLoop periodically checks for and removes stale backends.
+func (r *Registry) staleDetectionLoop() {
+	defer r.wg.Done()
+
+	ticker := time.NewTicker(r.config.StaleThreshold / 2)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-r.ctx.Done():
+			return
+		case <-ticker.C:
+			r.checkStaleBackends()
+		}
+	}
+}
+
+// checkStaleBackends checks for stale backends and removes expired ones.
+// Note: This function uses computeEffectiveStatus to properly respect the health
+// authority hierarchy. A backend with successful external validation can be
+// "recovered" even if the agent heartbeat is stale.
+func (r *Registry) checkStaleBackends() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	now := time.Now()
+	var toRemove []string
+
+	for key, backend := range r.backends {
+		// v1.1.1: Skip staleness check for static servers - they don't have agent heartbeats
+		// Static servers are defined in config and validated externally, not via agent gossip
+		if backend.Source == SourceStatic {
+			// Still recompute effective status for static servers (validation results, overrides)
+			oldStatus := backend.EffectiveStatus
+			r.computeEffectiveStatus(backend)
+			if oldStatus != backend.EffectiveStatus && r.onStatusChange != nil {
+				r.onStatusChange(backend, oldStatus, backend.EffectiveStatus)
+			}
+			continue
+		}
+
+		timeSinceLastSeen := now.Sub(backend.AgentLastSeen)
+
+		// Check if backend should be removed (no heartbeat for too long)
+		// Note: Even backends with validation get removed if no heartbeat for RemoveAfter
+		// This prevents orphaned backends from accumulating
+		if timeSinceLastSeen > r.config.RemoveAfter {
+			toRemove = append(toRemove, key)
+			continue
+		}
+
+		// Recompute effective status - this respects the health authority hierarchy
+		// and allows external validation to "recover" stale backends
+		oldStatus := backend.EffectiveStatus
+		r.computeEffectiveStatus(backend)
+
+		// Log if status changed to stale (no validation to recover it)
+		if backend.EffectiveStatus == StatusStale && oldStatus != StatusStale {
+			r.config.Logger.Warn("backend marked stale",
+				"service", backend.Service,
+				"address", backend.Address,
+				"port", backend.Port,
+				"last_seen", backend.AgentLastSeen,
+			)
+
+			if r.onStatusChange != nil {
+				r.onStatusChange(backend, oldStatus, StatusStale)
+			}
+		} else if oldStatus != backend.EffectiveStatus && r.onStatusChange != nil {
+			// Status changed for other reasons (validation result, override, etc.)
+			r.onStatusChange(backend, oldStatus, backend.EffectiveStatus)
+		}
+	}
+
+	// Remove expired backends
+	for _, key := range toRemove {
+		backend := r.backends[key]
+		delete(r.backends, key)
+		metrics.DeleteBackendHealthy(backend.Service, backend.Region, backend.Address, backend.Port)
+
+		r.config.Logger.Info("stale backend removed",
+			"service", backend.Service,
+			"address", backend.Address,
+			"port", backend.Port,
+		)
+
+		if r.store != nil {
+			if err := r.store.Delete(r.ctx, storeKey(key)); err != nil {
+				r.config.Logger.Warn("failed to delete backend from store", "key", key, "error", err)
+			}
+		}
+
+		if r.onStatusChange != nil {
+			r.onStatusChange(backend, backend.EffectiveStatus, "")
+		}
+	}
+}
+
+// persistBackend saves a backend to the store.
+func (r *Registry) persistBackend(backend *Backend) error {
+	if r.store == nil {
+		return nil
+	}
+
+	key := backendKey(backend.Service, backend.Address, backend.Port)
+	data, err := json.Marshal(backend)
+	if err != nil {
+		return fmt.Errorf("failed to marshal backend: %w", err)
+	}
+
+	return r.store.Set(r.ctx, storeKey(key), data)
+}
+
+// loadFromStore loads backends from the store.
+func (r *Registry) loadFromStore() error {
+	if r.store == nil {
+		return nil
+	}
+
+	pairs, err := r.store.List(r.ctx, "backends/")
+	if err != nil {
+		return fmt.Errorf("failed to list backends: %w", err)
+	}
+
+	for _, pair := range pairs {
+		var backend Backend
+		if err := json.Unmarshal(pair.Value, &backend); err != nil {
+			r.config.Logger.Warn("failed to unmarshal backend", "key", pair.Key, "error", err)
+			continue
+		}
+
+		key := backendKey(backend.Service, backend.Address, backend.Port)
+		r.backends[key] = &backend
+
+		// Recompute effective status
+		r.computeEffectiveStatus(&backend)
+
+		// v1.1.0: Trigger status change callback for loaded backends
+		// This ensures API-registered servers loaded from persistence get registered in DNS
+		if r.onStatusChange != nil {
+			// Treat as new registration (oldStatus = "") to trigger DNS registration
+			backendCopy := backend
+			r.onStatusChange(&backendCopy, "", backend.EffectiveStatus)
+		}
+	}
+
+	r.config.Logger.Info("loaded backends from store", "count", len(r.backends))
+	return nil
+}
+
+// backendKey generates a unique key for a backend.
+func backendKey(service, address string, port int) string {
+	return fmt.Sprintf("%s:%s:%d", service, address, port)
+}
+
+// storeKey generates the store key for a backend.
+func storeKey(backendKey string) string {
+	return "backends/" + backendKey
+}
