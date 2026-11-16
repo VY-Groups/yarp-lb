@@ -1,5 +1,6 @@
 using System.Buffers.Binary;
 using System.Net;
+using System.Net.Sockets;
 using System.Text;
 
 // Independent DNS wire-format implementation. External GSLB references are reviewed
