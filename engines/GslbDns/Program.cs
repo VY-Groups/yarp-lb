@@ -21,6 +21,7 @@ if (!IPAddress.TryParse(config.ListenHost, out var listen) ||
     config.ListenPort is < 1025 or > 65535 ||
     config.ProbeIntervalSeconds is < 1 or > 60 ||
     config.MaxResponsesPerSecondPerClient is < 20 or > 20000 ||
+    config.MaxConcurrentHealthProbes is < 1 or > 128 ||
     config.Zones is not { Length: >= 1 and <= 64 })
     throw new InvalidDataException("Invalid DNS listener or zones. Non-loopback binding requires explicit opt-in.");
 var names=new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -93,35 +94,38 @@ using var healthClient = new HttpClient(new SocketsHttpHandler {
     { Timeout=TimeSpan.FromSeconds(1.5) };
 async Task ProbeAll(CancellationToken ct)
 {
-    foreach(var group in groups.Values)
-    foreach(var site in group.Sites)
-    {
-        var healthy = false;
-        try
+    // Per-cycle bounded parallelism avoids N * 1.5s serial timeouts across
+    // many zones. The existing outer loop always awaits this entire batch;
+    // no new cycle can mutate a Site before its previous probe completes.
+    await BoundedDnsProbes.RunAsync(
+        groups.Values.SelectMany(group => group.Sites),
+        config.MaxConcurrentHealthProbes,
+        async (site, token) =>
         {
-            if(site.HealthCheckType == "Tcp")
+            var healthy = false;
+            try
             {
-                // This only proves that the configured TCP port accepted a
-                // connection. It does not prove application/DB transaction health.
-                using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
-                deadline.CancelAfter(TimeSpan.FromSeconds(1.5));
-                using var tcp = new TcpClient(site.Address.AddressFamily);
-                await tcp.ConnectAsync(site.Address, site.TcpPort, deadline.Token);
-                healthy = tcp.Connected;
+                if (site.HealthCheckType == "Tcp")
+                {
+                    // Connection alone is not an application/transaction health check.
+                    using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
+                    deadline.CancelAfter(TimeSpan.FromSeconds(1.5));
+                    using var tcp = new TcpClient(site.Address.AddressFamily);
+                    await tcp.ConnectAsync(site.Address, site.TcpPort, deadline.Token);
+                    healthy = tcp.Connected;
+                }
+                else
+                {
+                    using var response = await healthClient.GetAsync(site.HealthUrl!,
+                        HttpCompletionOption.ResponseHeadersRead, token);
+                    healthy = response.IsSuccessStatusCode;
+                }
             }
-            else
-            {
-                using var response=await healthClient.GetAsync(site.HealthUrl!,
-                    HttpCompletionOption.ResponseHeadersRead,ct);
-                healthy = response.IsSuccessStatusCode;
-            }
-        }
-        catch(Exception e) when(e is HttpRequestException or SocketException or
-            OperationCanceledException) { }
-        // Probe results pass through bounded hysteresis before publication.
-        // A single probe does not flap DNS when thresholds are configured.
-        Volatile.Write(ref site.Healthy, site.Health.Observe(healthy) ? 1 : 0);
-    }
+            catch (Exception e) when (e is HttpRequestException or SocketException or
+                OperationCanceledException) { }
+            // Publish a single verdict for each distinct zone/site per cycle.
+            Volatile.Write(ref site.Healthy, site.Health.Observe(healthy) ? 1 : 0);
+        }, ct);
 }
 await ProbeAll(stop.Token);
 var probes=Task.Run(async()=>{
@@ -225,6 +229,7 @@ sealed record DnsConfig(bool AllowNonLoopbackListeners,string ListenHost,int Lis
     int ProbeIntervalSeconds,DnsZone[] Zones)
 {
     public int MaxResponsesPerSecondPerClient {get;init;} = 500;
+    public int MaxConcurrentHealthProbes {get;init;} = 32;
 }
 sealed record DnsZone(string Name,int TtlSeconds,DnsSite[] Sites,
     bool FailClosedWhenAllSitesDown=false)
