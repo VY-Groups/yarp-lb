@@ -185,7 +185,7 @@ byte[] DnsRequest(string domain, ushort type, byte? ednsVersion=null)
     {
         // OPT: root, type 41, UDP payload 1232, ext rcode 0, version as configured,
         // DO bit supplied (must not be reflected without DNSSEC support).
-        request.AddRange(new byte[]{0,0,41,4,208,0,ednsVersion.Value,0x80,0,0,0});
+        request.AddRange(new byte[]{0,0,41,4,208,0,ednsVersion.Value,0x80,0,0,7,253,233,0,3,1,2,3});
     }
     return request.ToArray();
 }
