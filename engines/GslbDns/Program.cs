@@ -35,8 +35,15 @@ foreach(var zone in config.Zones)
         zone.NameServers is {Length: >4} || zone.SoaSerial == 0 ||
         zone.FailureThreshold is < 1 or > 10 ||
         zone.SuccessThreshold is < 1 or > 10 ||
-        zone.RoutingPolicy is not ("Weighted" or "Failover"))
-        throw new InvalidDataException("Invalid GSLB zone or TTL");
+        zone.RoutingPolicy is not ("Weighted" or "Failover" or "CidrRegion") ||
+        (zone.RoutingPolicy == "CidrRegion" &&
+             zone.CidrRoutes is not { Length: >= 1 and <= 256 }) ||
+        (zone.RoutingPolicy != "CidrRegion" && zone.CidrRoutes is { Length: > 0 }))
+        throw new InvalidDataException("Invalid GSLB zone, policy, CIDR or TTL");
+    // Only explicit operator-supplied resolver-network routes; never infer a
+    // client location or parse untrusted ECS options.
+    var cidrTable = zone.RoutingPolicy == "CidrRegion"
+        ? new DnsCidrRegionTable(zone.CidrRoutes!) : null;
     var sites=new List<Site>();
     foreach(var site in zone.Sites)
     {
@@ -49,6 +56,8 @@ foreach(var zone in config.Zones)
             address.AddressFamily is not (AddressFamily.InterNetwork or AddressFamily.InterNetworkV6) ||
             site.Weight is < 1 or > 100 ||
             site.Priority is < 0 or > 1000 ||
+            (site.Region is not null && !DnsCidrRegionTable.ValidRegion(site.Region)) ||
+            (cidrTable is not null && !DnsCidrRegionTable.ValidRegion(site.Region)) ||
             site.HealthCheckType is not ("Http" or "Tcp") ||
             (site.HealthCheckType == "Http" && (!validHttpUrl || site.TcpPort != 0)) ||
             (site.HealthCheckType == "Tcp" &&
@@ -56,7 +65,7 @@ foreach(var zone in config.Zones)
             throw new InvalidDataException("Invalid GSLB site address, weight, probe type, URL or port");
         sites.Add(new Site(address,site.HealthCheckType == "Http" ? health : null,
             site.Weight,site.Priority,zone.FailureThreshold,zone.SuccessThreshold,
-            site.HealthCheckType,site.TcpPort));
+            site.HealthCheckType,site.TcpPort,site.Region));
     }
     var origin = zone.Name.TrimEnd('.').ToLowerInvariant();
     var servers = new List<DnsNameServer>();
@@ -77,9 +86,16 @@ foreach(var zone in config.Zones)
     var contact = (zone.SoaContact ?? ("hostmaster." + origin)).TrimEnd('.').ToLowerInvariant();
     if (!DnsWireProtocol.ValidName(contact))
         throw new InvalidDataException("Invalid SOA contact name");
+    if(cidrTable is not null)
+    {
+        var siteRegions=sites.Select(site => site.Region!)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        if(cidrTable.Regions.Any(region => !siteRegions.Contains(region)))
+            throw new InvalidDataException("CIDR route references undefined backend region");
+    }
     groups.Add(origin, new SiteGroup(sites.ToArray(), zone.TtlSeconds,
         zone.FailClosedWhenAllSitesDown, servers.ToArray(), contact, zone.SoaSerial,
-        zone.RoutingPolicy));
+        zone.RoutingPolicy,cidrTable));
 }
 using var stop=new CancellationTokenSource();
 Console.CancelKeyPress += (_, e)=>{e.Cancel=true;stop.Cancel();};
@@ -173,7 +189,9 @@ var tcpAccept = Task.Run(async () =>
                     if (size is < 17 or > 4096) return;
                     var packet = new byte[size];
                     await stream.ReadExactlyAsync(packet, deadline.Token);
-                    var response = DnsWireProtocol.Build(packet, groups, tcp: true);
+                    var resolverIp=(session.Client.RemoteEndPoint as IPEndPoint)?.Address;
+                    var response = DnsWireProtocol.Build(packet, groups, tcp: true,
+                        resolverIp:resolverIp);
                     if (response is null) return;
                     BinaryPrimitives.WriteUInt16BigEndian(length, checked((ushort)response.Length));
                     await stream.WriteAsync(length, deadline.Token);
@@ -207,7 +225,8 @@ try
         // Loopback is still the required default deployment boundary.
         var source=((IPEndPoint)received.RemoteEndPoint).Address;
         if(!responseLimiter.Allow(source,Environment.TickCount64))continue;
-        var response=DnsWireProtocol.Build(buffer.AsSpan(0,received.ReceivedBytes),groups,tcp:false);
+        var response=DnsWireProtocol.Build(buffer.AsSpan(0,received.ReceivedBytes),groups,
+            tcp:false,resolverIp:source);
         if(response is null)continue;
         try { await dnsSocket.SendToAsync(response,SocketFlags.None,received.RemoteEndPoint,stop.Token); }
         catch(SocketException) when(stop.IsCancellationRequested){break;}
@@ -240,6 +259,7 @@ sealed record DnsZone(string Name,int TtlSeconds,DnsSite[] Sites,
     public string RoutingPolicy { get; init; } = "Weighted";
     public int FailureThreshold { get; init; } = 1;
     public int SuccessThreshold { get; init; } = 1;
+    public DnsCidrRegionRule[]? CidrRoutes { get; init; }
 }
 sealed record DnsNameServerConfig(string Host,string Address);
 sealed record DnsNameServer(string Host,IPAddress Address);
@@ -247,20 +267,23 @@ sealed record DnsSite(string Address,string? HealthUrl,int Weight,int Priority=0
 {
     public string HealthCheckType { get; init; } = "Http";
     public int TcpPort { get; init; }
+    public string? Region { get; init; }
 }
 sealed class Site
 {
     public Site(IPAddress address,Uri? healthUrl,int weight,int priority,
-        int failureThreshold,int successThreshold,string healthCheckType,int tcpPort)
+        int failureThreshold,int successThreshold,string healthCheckType,int tcpPort,
+        string? region)
     {
         Address=address;HealthUrl=healthUrl;Weight=weight;Priority=priority;
-        HealthCheckType=healthCheckType;TcpPort=tcpPort;
+        HealthCheckType=healthCheckType;TcpPort=tcpPort;Region=region;
         Health=new DnsHealthHysteresis(failureThreshold,successThreshold);
     }
     public IPAddress Address {get;}
     public Uri? HealthUrl {get;}
     public string HealthCheckType {get;}
     public int TcpPort {get;}
+    public string? Region {get;}
     public int Weight {get;}
     public int Priority {get;}
     public DnsHealthHysteresis Health {get;}
@@ -269,10 +292,12 @@ sealed class Site
 sealed class SiteGroup
 {
     public SiteGroup(Site[] sites,int ttl,bool failClosedWhenAllSitesDown,
-        DnsNameServer[] nameServers,string soaContact,uint soaSerial,string routingPolicy)
-        =>(Sites,Ttl,FailClosedWhenAllSitesDown,NameServers,SoaContact,SoaSerial,RoutingPolicy)
-        =(sites,ttl,failClosedWhenAllSitesDown,nameServers,soaContact,soaSerial,routingPolicy);
+        DnsNameServer[] nameServers,string soaContact,uint soaSerial,string routingPolicy,
+        DnsCidrRegionTable? cidrTable)
+        =>(Sites,Ttl,FailClosedWhenAllSitesDown,NameServers,SoaContact,SoaSerial,RoutingPolicy,CidrTable)
+        =(sites,ttl,failClosedWhenAllSitesDown,nameServers,soaContact,soaSerial,routingPolicy,cidrTable);
     public string RoutingPolicy { get; }
+    public DnsCidrRegionTable? CidrTable { get; }
     public DnsNameServer[] NameServers { get; }
     public string SoaContact { get; }
     public uint SoaSerial { get; }
