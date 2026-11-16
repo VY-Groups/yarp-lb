@@ -6,5 +6,6 @@
     <Compile Include="../../engines/GslbDns/DnsHealthHysteresis.cs" Link="DnsHealthHysteresis.cs" />
     <Compile Include="../../engines/GslbDns/BoundedDnsProbes.cs" Link="BoundedDnsProbes.cs" />
     <Compile Include="../../engines/GslbDns/DnsCidrRegionTable.cs" Link="DnsCidrRegionTable.cs" />
+    <Compile Include="../../engines/GslbDns/DnsProbeLatency.cs" Link="DnsProbeLatency.cs" />
   </ItemGroup>
 </Project>
