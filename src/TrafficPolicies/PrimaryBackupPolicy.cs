@@ -22,6 +22,7 @@ public sealed class PrimaryBackupPolicy : ILoadBalancingPolicy
         Span<int> primaryWeights = availableDestinations.Count <= 128
             ? stackalloc int[availableDestinations.Count]
             : new int[availableDestinations.Count];
+        primaryWeights.Clear(); // stackalloc memory must never carry stale weights
         DestinationState? backup = null;
         for (var i = 0; i < availableDestinations.Count; i++)
         {
