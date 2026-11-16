@@ -317,8 +317,31 @@ static async Task ProbeServer(TcpListener server,ProbeState state,CancellationTo
                         : state.Healthy==2
                         ? "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:19712/ready\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
                         : "HTTP/1.1 503 Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
-                    try {await client.GetStream().WriteAsync(bytes,ct);}
-                    catch(Exception ex) when(ex is IOException or ObjectDisposedException or OperationCanceledException){}
+                    try
+                    {
+                        // Read complete HTTP headers before closing the accepted
+                        // connection. Immediate close with unread request bytes can
+                        // cause TCP RST / spurious HttpClient failure on Windows.
+                        var stream=client.GetStream();
+                        using var timeout=CancellationTokenSource.CreateLinkedTokenSource(ct);
+                        timeout.CancelAfter(TimeSpan.FromSeconds(2));
+                        var request=new byte[4096]; var used=0; var complete=false;
+                        while(used<request.Length && !complete)
+                        {
+                            var previous=used;
+                            var n=await stream.ReadAsync(request.AsMemory(used),timeout.Token);
+                            if(n==0) return;
+                            used+=n;
+                            for(var i=Math.Max(0,previous-3);i<=used-4;i++)
+                                if(request[i]==13 && request[i+1]==10 &&
+                                   request[i+2]==13 && request[i+3]==10)
+                                { complete=true; break; }
+                        }
+                        if(!complete) return;
+                        await stream.WriteAsync(bytes,timeout.Token);
+                    }
+                    catch(Exception ex) when(ex is IOException or SocketException or
+                        ObjectDisposedException or OperationCanceledException){}
                 }
             },ct);
         }
