@@ -114,7 +114,7 @@ File.WriteAllText(configuration,JsonSerializer.Serialize(new {
     new { Address="2001:db8::99",HealthUrl="http://127.0.0.1:19711/ready",Weight=1,Priority=20,HealthCheckType="Http",TcpPort=0 }
  },NameServers=new []{
      new {Host="ns1.app.integration.test",Address="127.0.0.31"},
-     new {Host="ns2.app.integration.test",Address="127.0.0.32"}
+     new {Host="ns2.edge.app.integration.test",Address="127.0.0.32"}
  },SoaContact="hostmaster.app.integration.test",SoaSerial=2026111601u,
    RoutingPolicy="Weighted",FailureThreshold=1,SuccessThreshold=1,
    FailClosedWhenAllSitesDown=false },
@@ -173,6 +173,31 @@ try
         return seen.Contains("127.0.0.21") && seen.Contains("127.0.0.22");
     });
     Console.WriteLine("PASS: both IPv4 sites healthy before distribution sampling");
+    // An NS address below edge makes edge an empty non-terminal, not a missing
+    // subtree (RFC 8020 section 3.1). Test both transports and several QTYPEs.
+    foreach (var type in new ushort[] { 1, 28, 2, 16 })
+    {
+        var (_, entUdp) = await QueryWire("edge.app.integration.test", type);
+        var entTcp = await TcpQuery(DnsRequest("edge.app.integration.test", type));
+        foreach (var packet in new[] { entUdp, entTcp })
+            Must((Dns16(packet,2)&0x040F)==0x0400 &&
+                Dns16(packet,6)==0 && Dns16(packet,8)==1,
+                "empty non-terminal is authoritative NODATA with negative SOA");
+    }
+    var nestedNs = await TcpQuery(DnsRequest("ns2.edge.app.integration.test",1));
+    Must(Dns16(nestedNs,6)==1 &&
+         nestedNs.AsSpan(nestedNs.Length-4).SequenceEqual(new byte[]{127,0,0,32}),
+         "descendant NS address remains resolvable after empty-parent queries");
+    foreach (var missing in new[] { "xedge.app.integration.test",
+                                  "missing.edge.app.integration.test" })
+    {
+        var packet = await TcpQuery(DnsRequest(missing,1));
+        Must((Dns16(packet,2)&0x040F)==0x0403 &&
+             Dns16(packet,6)==0 && Dns16(packet,8)==1,
+             "absent sibling or descendant remains authoritative NXDOMAIN");
+    }
+    Console.WriteLine("PASS: empty non-terminal NODATA, descendant address and true NXDOMAIN");
+
     await Wait(async()=> (await Query("geo.integration.test")).Address=="127.0.0.21");
     var geoTcp=await TcpQuery(DnsRequest("geo.integration.test",1));
     Must(Dns16(geoTcp,6)==1 &&
