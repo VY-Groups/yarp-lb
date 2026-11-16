@@ -23,6 +23,32 @@ public static class PeerSyncTests
         Check(!frame.Counters.Keys.Single().Contains("10.123"),"no plaintext peer IP transmitted");
         Check(b.Apply(frame,now),"accept first bounded peer snapshot");
         Check(b.PeerTelemetry(now)==(1,2L),"peer telemetry matches signed source counts");
+        // Accepted snapshots must have a recent receipt time, not merely
+        // share the same UTC minute. Use an injected clock to avoid sleeps.
+        var clock = DateTimeOffset.UtcNow;
+        var ageLimited = new PeerStateJournal("node-b", "node-a", secret, 2,
+            TimeSpan.FromSeconds(6), () => clock);
+        Check(ageLimited.Apply(frame,now) && ageLimited.Status(now).RemoteReportedInCurrentMinute,
+            "fresh remote frame is visible to operational status");
+        clock = clock.AddSeconds(7);
+        Check(!ageLimited.Status(now).RemoteReportedInCurrentMinute &&
+              ageLimited.Status(now).RemoteIdentities == 0 &&
+              ageLimited.PeerTelemetry(now)==(0,0L),
+            "stale remote frame expires within the same minute");
+        Check(!ageLimited.Apply(frame,now),
+            "expired frame cannot be replayed to revive stale counters");
+        var recovered = a.Snapshot(now);
+        Check(ageLimited.Apply(recovered,now) &&
+              ageLimited.PeerTelemetry(now)==(1,2L),
+            "new higher-sequence frame restores live remote telemetry");
+        clock = clock.AddSeconds(-30);
+        Check(!ageLimited.Status(now).RemoteReportedInCurrentMinute,
+            "backward local clock does not present stale telemetry as live");
+        var invalidFreshness = false;
+        try { _ = new PeerStateJournal("node-b","node-a",secret,2,
+                          TimeSpan.FromSeconds(61)); }
+        catch(ArgumentOutOfRangeException) { invalidFreshness = true; }
+        Check(invalidFreshness, "unbounded remote freshness rejected");
         Check(!b.Apply(frame,now),"duplicate sequence rejected");
         var rollback=a.Snapshot(now);
         rollback.Counters.Clear();
