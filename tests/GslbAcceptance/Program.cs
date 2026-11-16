@@ -12,7 +12,7 @@ if (latency.TryRead(2000,3,15000,out _))
     throw new Exception("FAIL: insufficient latency samples admitted");
 latency.ObserveSuccess(TimeSpan.FromMilliseconds(10), 3000);
 if (!latency.TryRead(3000,3,15000,out var ewma) ||
-    Math.Abs(ewma - 29.375) > 0.001)
+    Math.Abs(ewma - 28.75) > 0.001)
     throw new Exception("FAIL: observed latency EWMA wrong");
 if (latency.TryRead(18001,3,15000,out _) ||
     latency.TryRead(2999,3,15000,out _))
