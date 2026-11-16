@@ -1,3 +1,7 @@
+> **Historical source reference:** This report applies only to the old Polaris
+> branch at the commit below. The user replaced `gslb` with OpenGSLB under
+> AGPL-3.0-or-later / commercial terms. See `OPENGSLB_REFERENCE_REVIEW.md`.
+
 # gslb branch (Polaris) architectural review
 
 Compared against gslb at commit 73c0b121f802bc6a3221a6d41f97d27e40f7f651
