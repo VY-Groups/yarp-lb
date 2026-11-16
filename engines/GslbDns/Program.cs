@@ -76,8 +76,8 @@ foreach(var zone in config.Zones)
         if (source is null || string.IsNullOrWhiteSpace(source.Host) ||
             !DnsWireProtocol.ValidName(source.Host.TrimEnd('.')) ||
             !IPAddress.TryParse(source.Address, out var nsAddress) ||
-            nsAddress.AddressFamily != AddressFamily.InterNetwork)
-            throw new InvalidDataException("Invalid authoritative NS host or IPv4 glue");
+            nsAddress.IsIPv4MappedToIPv6 || nsAddress.AddressFamily is not (AddressFamily.InterNetwork or AddressFamily.InterNetworkV6))
+            throw new InvalidDataException("Invalid authoritative NS hostname or address");
         var host = source.Host.TrimEnd('.').ToLowerInvariant();
         if (!serverNames.Add(host))
             throw new InvalidDataException("Duplicate authoritative NS hostname");
@@ -267,7 +267,10 @@ sealed record DnsZone(string Name,int TtlSeconds,DnsSite[] Sites,
     public DnsCidrRegionRule[]? CidrRoutes { get; init; }
 }
 sealed record DnsNameServerConfig(string Host,string Address);
-sealed record DnsNameServer(string Host,IPAddress Address);
+sealed record DnsNameServer(string Host,IPAddress Address)
+{
+    public ushort RecordType => Address.AddressFamily == AddressFamily.InterNetwork ? (ushort)1 : (ushort)28;
+}
 sealed record DnsSite(string Address,string? HealthUrl,int Weight,int Priority=0)
 {
     public string HealthCheckType { get; init; } = "Http";

@@ -170,8 +170,8 @@ internal static class DnsWireProtocol
                     }
                 }
             }
-            else if (qtype == A && ns is not null)
-                answers.Add(new Resource(domain, A, (uint)zone.Ttl, ns.Address.GetAddressBytes()));
+            else if (ns is not null && qtype == ns.RecordType)
+                answers.Add(new Resource(domain, ns.RecordType, (uint)zone.Ttl, ns.Address.GetAddressBytes()));
             else if (qtype == Soa && atApex && zone.NameServers.Length != 0)
                 answers.Add(SoaRecord(apex!, zone));
             else if (qtype == Ns && atApex && zone.NameServers.Length != 0)
@@ -180,7 +180,7 @@ internal static class DnsWireProtocol
                 {
                     answers.Add(new Resource(apex!, Ns, (uint)zone.Ttl, WireName(server.Host)));
                     if (server.Host.EndsWith("." + apex!, StringComparison.OrdinalIgnoreCase))
-                        extra.Add(new Resource(server.Host, A, (uint)zone.Ttl, server.Address.GetAddressBytes()));
+                        extra.Add(new Resource(server.Host, server.RecordType, (uint)zone.Ttl, server.Address.GetAddressBytes()));
                 }
             }
             else AddNegativeSoa(); // NODATA (including AAAA, ANY and unsupported QTYPE)

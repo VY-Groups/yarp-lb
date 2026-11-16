@@ -37,7 +37,9 @@ def main():
         config = Path(directory) / "config.json"
         config.write_text(json.dumps({
             "ListenHost": "::1", "ListenPort": port, "ProbeIntervalSeconds": 1,
-            "Zones": [{"Name": "lab.example", "TtlSeconds": 10, "Sites": [{
+            "Zones": [{"Name": "lab.example", "TtlSeconds": 10,
+                       "NameServers": [{"Host": "ns.lab.example", "Address": "2001:db8::53"}],
+                       "Sites": [{
                 "Address": "2001:db8::17", "Weight": 1,
                 "HealthUrl": "http://127.0.0.1:1/health"
             }]}]
@@ -62,6 +64,24 @@ def main():
                 tcp.sendall(struct.pack("!H", len(query)) + query)
                 size, = struct.unpack("!H", read_exact(tcp, 2))
                 verify(read_exact(tcp, size))
+            with socket.socket(socket.AF_INET6, socket.SOCK_DGRAM) as udp:
+                udp.connect(("::1", port))
+                udp.settimeout(3)
+                ns_query = query[:-4] + struct.pack("!2H", 2, 1)
+                udp.send(ns_query)
+                answer = udp.recv(4096)
+                assert struct.unpack("!3H", answer[6:12]) == (1, 0, 1)
+                glue = struct.pack("!HHIH", 28, 1, 10, 16) + socket.inet_pton(socket.AF_INET6, "2001:db8::53")
+                assert answer.endswith(glue)
+                owner = b"\x02ns" + query[12:-4]
+                for qtype in (1, 28):
+                    udp.send(query[:12] + owner + struct.pack("!2H", qtype, 1))
+                    response = udp.recv(4096)
+                    assert response[3] & 15 == 0
+                    if qtype == 28:
+                        assert response.endswith(glue)
+                    else:
+                        assert struct.unpack("!3H", response[6:12]) == (0, 1, 0)
             if args.interop:
                 for client in ("dig", "kdig"):
                     for transport in ("+tcp", "+notcp"):

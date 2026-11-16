@@ -62,7 +62,7 @@ Example IPv6 site: `{"Address":"2001:db8::99","HealthUrl":"http://127.0.0.1:1971
 The address and the readiness probe target are deliberately separate.
 **A successful IPv4 HTTP probe is not proof of IPv6 reachability.** Production
 acceptance must probe over the network/address family actually advertised.
-IPv6 DNS UDP/TCP listener binding, IPv6 NS glue and DNSSEC are still missing.
+IPv6 DNS UDP/TCP listeners and IPv6 NS glue are supported. DNSSEC remains open.
 
 ## Newly supported in lab
 
@@ -72,7 +72,7 @@ IPv6 DNS UDP/TCP listener binding, IPv6 NS glue and DNSSEC are still missing.
   AXFR/IXFR or dynamic zone writes.
 - Explicit SOA and NS answers only when NameServers are configured. Static
   serial must be deliberately bumped in config when site authority changes.
-  In-bailiwick name server IPv4 address answers and additional glue are available;
+  In-bailiwick name server IPv4 or IPv6 address answers and additional glue are available;
   out-of-bailiwick NS targets are listed without forging glue.
 - In-zone missing names return NXDOMAIN with an SOA negative-cache record;
   existing names with unsupported types return NODATA with SOA; names outside
@@ -231,7 +231,7 @@ and isolation across two independent sites remain mandatory for production.
 ## Remaining NO-GO areas
 
 DNSSEC signatures/keys, TLS/DoT/DoH, TSIG, DNS NOTIFY, zone transfer, true
-zone-cut/delegation conformance, CNAME/MX, IPv6 NS glue, geographic/ASN policy with licensed data and privacy, verified multi-site
+zone-cut/delegation conformance, CNAME/MX, geographic/ASN policy with licensed data and privacy, verified multi-site
 health quorum and authenticated state propagation, split-brain protection,
 ECMP/multi-NS physical hosting, public resolver interoperability and
 spoofed-source reflection protection are NOT complete.
