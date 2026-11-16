@@ -100,7 +100,13 @@ var healthC=new TcpListener(IPAddress.Loopback,19714);
 healthA.Start();healthB.Start();healthC.Start();
 var tcpHealth=new TcpListener(IPAddress.Loopback,19713);
 tcpHealth.Start();
-var tcpTasks=new List<Task> { ProbeTcpServer(tcpHealth,cancel.Token) };
+// TCP readiness probes connect to the advertised address (unlike HTTP URLs).
+// Bind each disposable loopback backend to its actual advertised address.
+var chainTcpA=new TcpListener(IPAddress.Parse("127.0.0.43"),19713);
+var chainTcpB=new TcpListener(IPAddress.Parse("127.0.0.44"),19713);
+chainTcpA.Start();chainTcpB.Start();
+var tcpTasks=new List<Task> { ProbeTcpServer(tcpHealth,cancel.Token),
+    ProbeTcpServer(chainTcpA,cancel.Token),ProbeTcpServer(chainTcpB,cancel.Token) };
 var tasks=new []{ProbeServer(healthA,s1,cancel.Token),ProbeServer(healthB,s2,cancel.Token),
     ProbeServer(healthC,s3,cancel.Token)};
 var temp=Path.Combine(Path.GetTempPath(),"yarp-dns-"+Guid.NewGuid().ToString("N"));
@@ -300,7 +306,7 @@ try
     Must((await Query("geo.integration.test")).Status==2,
         "strict CIDR region zone returns SERVFAIL when all sites down");
     await CheckChainWeights("chain.integration.test",40,"127.0.0.43",10,"127.0.0.44",30);
-    tcpHealth.Stop();
+    chainTcpA.Stop();chainTcpB.Stop();
     await Wait(async()=> (await Query("chain.integration.test")).Address=="127.0.0.45");
     for(var i=0;i<12;i++)
         Must((await Query("chain.integration.test")).Address=="127.0.0.45",
@@ -359,6 +365,7 @@ finally
 {
     cancel.Cancel();
     healthA.Stop();healthB.Stop();healthC.Stop();tcpHealth.Stop();
+    chainTcpA.Stop();chainTcpB.Stop();
     if(!dns.HasExited)dns.Kill(entireProcessTree:true);
     await dns.WaitForExitAsync();
     try {await Task.WhenAll(tasks);}catch{}
