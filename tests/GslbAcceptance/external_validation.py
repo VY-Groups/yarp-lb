@@ -1,6 +1,7 @@
 """Disposable Linux Actions test for local readiness plus two mTLS validators."""
 import base64
 import contextlib
+import hashlib
 import http.server
 import json
 import os
@@ -138,6 +139,40 @@ def main():
             check(nodes, 2)
             observers[0].mode = "signed"
             check(nodes, 0)
+
+        # Run the shipped .NET observers with separate keys and upstream checks.
+        actual = []
+        upstreams = []
+        observer_dll = dll.parents[4] / "GslbObserver/bin/Release/net10.0/GslbObserver.dll"
+        for index, fixture in enumerate(observers):
+            with socket.socket() as reservation:
+                reservation.bind(("127.0.0.1", 0))
+                port = reservation.getsockname()[1]
+            origin = f"https://127.0.0.1:{port}"
+            upstream = serve(stack)
+            upstreams.append(upstream)
+            conf = root / f"observer-{index}.json"
+            fingerprint = hashlib.sha256(ssl.PEM_cert_to_DER_cert((root / "client.pem").read_text())).hexdigest()
+            conf.write_text(json.dumps({"ListenAddress": "127.0.0.1", "Port": port,
+                "PublicUrl": origin + "/ready", "HealthUrl": f"http://127.0.0.1:{upstream.server_port}/ready",
+                "ServerCertificatePem": str(root / "server.pem"), "ServerKeyPem": str(root / "server.key"),
+                "SigningKeyPem": str(fixture.signer), "AllowedClientSha256": [fingerprint]}))
+            proc = subprocess.Popen(["dotnet", observer_dll, conf], env=env)
+            stack.callback(proc.wait)
+            stack.callback(proc.kill)
+            keys[origin] = keys[fixture.origin]
+            actual.append(origin)
+        fixture_origins = origins
+        origins = actual
+        actual_env = dict(env, GSLB_VALIDATOR_SIGNING_KEYS=json.dumps(keys), GSLB_VALIDATOR_ORIGINS=",".join(actual))
+        deployed = [start_node(1, actual_env), start_node(1, actual_env)]
+        check(deployed, 0)
+        for upstream in upstreams:
+            upstream.verdict = 503
+            check(deployed, 2)
+            upstream.verdict = 200
+            check(deployed, 0)
+        origins = fixture_origins
 
         # No scheduler refresh before the ten-second lease expires.
         slow = [start_node(30, env)]
