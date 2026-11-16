@@ -101,7 +101,7 @@ async Task<int> InFlight(string url)
     return json.RootElement.GetProperty("count").GetInt32();
 }
 
-void Configure(string policy, int aWeight, int bWeight, bool drainA = false, int slowStartA = 0, bool drainKillA = false, bool riseFall = false)
+void Configure(string policy, int aWeight, int bWeight, bool drainA = false, int slowStartA = 0, bool drainKillA = false, bool riseFall = false, bool backupB = false)
 {
     var config = new {
         ReverseProxy = new {
@@ -126,7 +126,7 @@ void Configure(string policy, int aWeight, int bWeight, bool drainA = false, int
                     },
                     Destinations = new Dictionary<string, object> {
                         ["A"] = new { Address = aUrl + "/", Metadata = new Dictionary<string,string> { ["Weight"] = aWeight.ToString(), ["TrafficState"] = drainA ? "draining" : "active", ["SlowStartSeconds"] = slowStartA.ToString() } },
-                        ["B"] = new { Address = bUrl + "/", Metadata = new Dictionary<string,string> { ["Weight"] = bWeight.ToString() } }
+                        ["B"] = new { Address = bUrl + "/", Metadata = new Dictionary<string,string> { ["Weight"] = bWeight.ToString(), ["TrafficRole"] = backupB ? "backup" : "primary" } }
                     }
                 },
                 ["kill"] = new { Destinations = new Dictionary<string, object> {
@@ -373,6 +373,25 @@ try
     await WaitFor("RiseFall returns A after consecutive successes", async () =>
         (await Sample(100)).Nodes.ContainsKey("A"));
     Record("rise-fall-active-health", new { rise = 2, fall = 3 });
+
+    // HAProxy-inspired first-backup behavior is entirely opt-in. The existing
+    // WeightedRandom/SourceIpHash policies must keep their original behavior.
+    Configure("PrimaryBackup", 80, 20, backupB: true);
+    await WaitFor("primary selected while healthy", () => RoutesOnly("A"), 25);
+    Record("primary-backup-primary", new { policy = "PrimaryBackup", primary = "A", backup = "B" });
+    await SetReady(aUrl, false);
+    await WaitFor("primary unhealthy triggers standby", () => RoutesOnly("B"), 30);
+    var standbyTraffic = await Sample(120);
+    Require(standbyTraffic.Success == 120 && standbyTraffic.Nodes.Count == 1 &&
+        standbyTraffic.Nodes.ContainsKey("B"), "backup B alone serves requests during primary A failure");
+    Record("primary-backup-failover", new { backup = "B", requests = 120, failures = 0 });
+    await SetReady(bUrl, false);
+    await WaitFor("both primary and backup down fail closed",
+        () => IsStatus(proxy + "/api/identity", HttpStatusCode.ServiceUnavailable), 30);
+    await SetReady(aUrl, true);
+    await SetReady(bUrl, true);
+    await WaitFor("recovered primary receives traffic before backup", () => RoutesOnly("A"), 30);
+    Record("primary-backup-recovery", new { restoredPrimary = "A", backupStayedIdle = true });
     Configure("WeightedRandom", 80, 20);
     await Task.Delay(2500);
 
