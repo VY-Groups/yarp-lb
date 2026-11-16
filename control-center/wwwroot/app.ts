@@ -4,7 +4,7 @@ let data:State = {name:'GatewayCore',gateway:'unknown',time:'',routes:{},cluster
 let viewHistory:string[]=[];let lastRenderedView='setup';let restoringNavigation=false;
 function navigateBack(){if(viewHistory.length){restoringNavigation=true;view=viewHistory.pop()!;render()}else if(view!=='setup'){restoringNavigation=true;view='setup';render()}}
 let view='setup';let dirty=false;let probes:Obj[]=[];let csrf='';let currentRole='';let currentUser='';let otpChallenge='';
-let authGeneration=0;let gatewayReadyLabel='● Backend readiness not checked';let gatewayReadyWarn=true;let readinessGeneration=0;
+let authGeneration=0;let gatewayReadyLabel='● Backend readiness not checked';let gatewayReadyWarn=true;let readinessGeneration=0;let readinessAbort:AbortController|null=null;
 const $=(id:string)=>document.getElementById(id)!;
 const esc=(s:any)=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'} as Obj)[c]);
 const keys=(o:Obj)=>Object.keys(o||{});
@@ -38,7 +38,7 @@ function editOrganization(){if(currentRole!=='Administrator')return show('Admini
 }
 
 const show=(message:string,error=false)=>{const el=$('notice');el.hidden=false;el.className='notice'+(error?' error':'');el.textContent=message;setTimeout(()=>{el.hidden=true},8000)};
-async function api(url:string,method='GET',body?:any){const opts:RequestInit={method,credentials:'same-origin',headers:{}};if(method!=='GET'){(opts.headers as Obj)['Content-Type']='application/json';(opts.headers as Obj)['X-CSRF-Token']=csrf;opts.body=JSON.stringify(body??{})}const generation=authGeneration;const r=await fetch(url,opts);if(generation!==authGeneration)throw Error('Management session changed. Outdated response ignored.');if(r.status===401){if(!['/admin/api/session','/admin/api/login','/admin/api/bootstrap','/admin/api/login/verify'].includes(url)){if(!$('app-shell').hidden){showLogin(false);$('auth-message').textContent='Your administrator session has expired or was invalidated. Sign in again. No security settings were changed.'}throw Error('Administrator session expired; please sign in again')}throw Error('Authentication failed. Check your credentials or verification code.')}if(r.status===403)throw Error('Access denied. This action requires an authorized role or valid CSRF token.');if(!r.ok){let e='HTTP '+r.status;try{e=(await r.json()).error??e}catch{}throw Error(e)}const json=await r.json();if(generation!==authGeneration)throw Error('Management session changed. Outdated response ignored.');return json}
+async function api(url:string,method='GET',body?:any,signal?:AbortSignal){const opts:RequestInit={method,credentials:'same-origin',headers:{},signal,cache:'no-store'};if(method!=='GET'){(opts.headers as Obj)['Content-Type']='application/json';(opts.headers as Obj)['X-CSRF-Token']=csrf;opts.body=JSON.stringify(body??{})}const generation=authGeneration;const r=await fetch(url,opts);if(generation!==authGeneration)throw Error('Management session changed. Outdated response ignored.');if(r.status===401){if(!['/admin/api/session','/admin/api/login','/admin/api/bootstrap','/admin/api/login/verify'].includes(url)){if(!$('app-shell').hidden){showLogin(false);$('auth-message').textContent='Your administrator session has expired or was invalidated. Sign in again. No security settings were changed.'}throw Error('Administrator session expired; please sign in again')}throw Error('Authentication failed. Check your credentials or verification code.')}if(r.status===403)throw Error('Access denied. This action requires an authorized role or valid CSRF token.');if(!r.ok){let e='HTTP '+r.status;try{e=(await r.json()).error??e}catch{}throw Error(e)}const json=await r.json();if(generation!==authGeneration)throw Error('Management session changed. Outdated response ignored.');return json}
 async function reload(){if(dirty&&!confirm('Discard unsaved changes and reload?'))return;try{data=await api('/admin/api/state');dirty=false;render();void refreshGatewayReadiness();show('Latest configuration loaded')}catch(e){show(String(e),true)}}
 function edit(){dirty=true;render()}
 async function save(){
@@ -197,20 +197,36 @@ async function setupFreeze(frozen:boolean){
  try {await api('/admin/api/setup/freeze','POST',{frozen,reason});show(frozen?'Routing changes frozen locally.':'Local routing change freeze lifted.');await setupPage()}
  catch(e){show('Freeze operation denied: '+String(e),true)}
 }
+function renderGatewayReadiness(){
+ const pill=$('gateway-pill');pill.textContent=gatewayReadyLabel;pill.className=gatewayReadyWarn?'pill warn':'pill';
+ if(view==='overview')$('content').innerHTML=overview();
+}
 async function refreshGatewayReadiness(){
  if($('app-shell').hidden)return;
+ readinessAbort?.abort();
+ const controller=new AbortController();readinessAbort=controller;
  const generation=++readinessGeneration;
+ gatewayReadyLabel='● Checking backend readiness';gatewayReadyWarn=true;renderGatewayReadiness();
+ let timer:ReturnType<typeof setTimeout>|undefined;
  try{
-  const r=await fetch('/gateway/health/ready',{credentials:'same-origin',cache:'no-store'});
+  const result=await Promise.race([
+   api('/admin/api/gateway-readiness','GET',undefined,controller.signal),
+   new Promise<never>((_,reject)=>{
+    timer=setTimeout(()=>{controller.abort();reject(new Error('Readiness request timed out'))},5000);
+   })
+  ]);
   if(generation!==readinessGeneration||$('app-shell').hidden)return;
-  gatewayReadyLabel=r.ok?'● Backend readiness observed':r.status===503?'● No healthy backend reported':'● Readiness unavailable';
-  gatewayReadyWarn=!r.ok;
+  if(typeof result?.ready!=='boolean')throw new Error('Invalid readiness response');
+  gatewayReadyLabel=result.ready?'● Backend readiness observed':'● No healthy backend reported';
+  gatewayReadyWarn=!result.ready;
  }catch{
   if(generation!==readinessGeneration||$('app-shell').hidden)return;
   gatewayReadyLabel='● Readiness unavailable';gatewayReadyWarn=true;
+ }finally{
+  if(timer!==undefined)clearTimeout(timer);
+  if(generation===readinessGeneration)readinessAbort=null;
  }
- const pill=$('gateway-pill');pill.textContent=gatewayReadyLabel;pill.className=gatewayReadyWarn?'pill warn':'pill';
- if(view==='overview')$('content').innerHTML=overview();
+ renderGatewayReadiness();
 }
 function updateTopologyNavigation(){const finished=topologyResponse?.status==='design-confirmed';const prereqViews=['organization','setup','onboarding','users','mail','directory'];document.querySelectorAll<HTMLButtonElement>('.nav').forEach(b=>{const dest=b.dataset.view||'';const adminOnly=['users','mail','directory'].includes(dest);b.hidden=(!finished&&!prereqViews.includes(dest))||(dest==='fleet'&&finished&&topologyResponse?.plan?.mode==='standalone')||(adminOnly&&currentRole!=='Administrator')});$('save').hidden=!finished||currentRole==='Viewer'||view==='onboarding'||view==='setup'}
 
@@ -377,7 +393,7 @@ async function initSession(){
     await reload();
   } catch(err){$('auth-message').textContent=String(err);$('auth-screen').hidden=false;$('app-shell').hidden=true}
 }
-function showLogin(first:boolean){authGeneration++;readinessGeneration++;gatewayReadyLabel='● Backend readiness not checked';gatewayReadyWarn=true;csrf='';currentRole='';currentUser='';otpChallenge='';view='setup';viewHistory=[];lastRenderedView='setup';
+function showLogin(first:boolean){authGeneration++;readinessGeneration++;readinessAbort?.abort();readinessAbort=null;gatewayReadyLabel='● Backend readiness not checked';gatewayReadyWarn=true;csrf='';currentRole='';currentUser='';otpChallenge='';view='setup';viewHistory=[];lastRenderedView='setup';
  dirty=false;data={name:'GatewayCore',gateway:'unknown',time:'',routes:{},clusters:{},disabled:{},mode:'Local testing',telemetry:'',revision:''};
  probes=[];orgProfile=null;topologyResponse=null;topologyDraft=null;topologyStep=0;topologyChecks=[];topologyWarnings=[];
  $('content').innerHTML='';$('user-badge').textContent='';$('notice').hidden=true;

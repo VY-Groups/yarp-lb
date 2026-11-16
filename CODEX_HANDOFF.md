@@ -1,7 +1,7 @@
 # GatewayCore — Codex handoff, verified repository snapshot
 
 **Snapshot date:** 2026-11-16 (UTC; refresh all live status before acting)  
-**Repository:** https://github.com/VY-Groups/yarp-lb  
+**Repository:** this checkout’s configured `origin` remote (verify with `git remote -v`)
 **Product:** GatewayCore — .NET 10 / YARP ADC-style single-organization on-premises L7 gateway and management UI, with separate experimental L4, WAF integration, and GSLB/DNS engines.  
 **Canonical baseline at handoff:** `main` = `cdee959d8c5f66a5bb8edf9b432de48bcd27ca1a` (PR #107).  
 **Release decision:** **GO for isolated development and controlled test/staging; NO-GO for production.**  
@@ -25,7 +25,7 @@ You are continuing this repository, **not creating a fresh project**. All source
 ## 1. Immediate current state — what is actually pending
 
 At this snapshot, `main` contains all merged work through PR #107. **PR #108 is still OPEN and DRAFT, not merged**:
-- PR: https://github.com/VY-Groups/yarp-lb/pull/108
+- PR: ../../pull/108
 - Branch: `feature/gslb-observed-latency-policy-20261116`
 - Head: `471bb8356af4a2a3e44e527700d3b723795f5390`
 - Last observed **11/11 triggered GitHub check runs succeeded** at this exact head, after an earlier Windows/Ubuntu GSLB acceptance failure was corrected. The earlier failure was that the test asserted a faster-site winner before the 3-measurement sample floor had completed; tests now wait for enough real probe cycles.
@@ -79,40 +79,40 @@ The following rows come from merged PR metadata, not guessed from branch names. 
 
 | PR | Merged deliverable | Status/date |
 | --- | --- | --- |
-| [#70](https://github.com/VY-Groups/yarp-lb/pull/70) | docs: refresh root README for GatewayCore Windows test.10 and integration acceptance | Merged 2026-11-14 |
-| [#71](https://github.com/VY-Groups/yarp-lb/pull/71) | Add Gmail/Microsoft OAuth2 SMTP, multi-provider setup and enforced security CI | Merged 2026-11-14 |
-| [#72](https://github.com/VY-Groups/yarp-lb/pull/72) | Publish Windows test.11 with multi-provider OAuth2 and security gate | Merged 2026-11-14 |
-| [#74](https://github.com/VY-Groups/yarp-lb/pull/74) | Add isolated HAProxy reference for GatewayCore L7 comparison | Merged 2026-11-15 |
-| [#75](https://github.com/VY-Groups/yarp-lb/pull/75) | Bound YARP proxy concurrency and add passive failure hysteresis | Merged 2026-11-15 |
-| [#76](https://github.com/VY-Groups/yarp-lb/pull/76) | Observe active YARP health independently of client traffic for recovery warmup | Merged 2026-11-15 |
-| [#78](https://github.com/VY-Groups/yarp-lb/pull/78) | Add opt-in YARP RiseFall active health hysteresis (rebased after recovery observer) | Merged 2026-11-15 |
-| [#79](https://github.com/VY-Groups/yarp-lb/pull/79) | Fix recurring EC2 CI failure when live backend variables are absent | Merged 2026-11-15 |
-| [#80](https://github.com/VY-Groups/yarp-lb/pull/80) | Fix passive-ejection false recovery in idle YARP health observer | Merged 2026-11-15 |
-| [#81](https://github.com/VY-Groups/yarp-lb/pull/81) | Experimental shared Redis atomic peer rate quota with fail-closed partitions | Merged 2026-11-15 |
-| [#82](https://github.com/VY-Groups/yarp-lb/pull/82) | E2E: two shipping GatewayCore instances sharing authenticated TLS Redis quota | Merged 2026-11-15 |
-| [#83](https://github.com/VY-Groups/yarp-lb/pull/83) | Add opt-in signed HTTPS peer counter synchronization (no quota double-spend) | Merged 2026-11-15 |
-| [#84](https://github.com/VY-Groups/yarp-lb/pull/84) | Test GatewayCore website and synthetic HTTP bandwidth on two distinct Ubuntu Actions VMs | Merged 2026-11-15 |
-| [#85](https://github.com/VY-Groups/yarp-lb/pull/85) | Manual two independent Ubuntu VMs with encrypted cross-host HAProxy ingress failover | Merged 2026-11-15 |
-| [#86](https://github.com/VY-Groups/yarp-lb/pull/86) | Security: reject extreme peer-sync timestamps without arithmetic overflow | Merged 2026-11-15 |
-| [#87](https://github.com/VY-Groups/yarp-lb/pull/87) | Fix peer sync 256KiB frame limit and add authenticated operational diagnostics | Merged 2026-11-15 |
-| [#88](https://github.com/VY-Groups/yarp-lb/pull/88) | Rebuild GatewayCore login and operator UI shell with grouped navigation and peer diagnostics | Merged 2026-11-15 |
-| [#89](https://github.com/VY-Groups/yarp-lb/pull/89) | Peer recovery: signed process boot epoch and safe restart resynchronization | Merged 2026-11-15 |
-| [#90](https://github.com/VY-Groups/yarp-lb/pull/90) | Enterprise operator UX: isolate sessions, guard draft logout and display real backend readiness | Merged 2026-11-15 |
-| [#91](https://github.com/VY-Groups/yarp-lb/pull/91) | Enterprise customer UAT checklist for login-to-operations, mobile UX, peer recovery and 500Mbps | Merged 2026-11-15 |
-| [#92](https://github.com/VY-Groups/yarp-lb/pull/92) | Polish customer launch branding: consistent GatewayCore identity throughout management UI | Merged 2026-11-15 |
-| [#93](https://github.com/VY-Groups/yarp-lb/pull/93) | Stop obsolete EC2 nightly CI and unblock safe replacement test targets | Merged 2026-11-15 |
-| [#94](https://github.com/VY-Groups/yarp-lb/pull/94) | HA 10x CI: verify every Windows artifact and report worst observed failover | Merged 2026-11-15 |
-| [#95](https://github.com/VY-Groups/yarp-lb/pull/95) | Add opt-in HAProxy-style primary/backup routing with UI and real L7 failover acceptance | Merged 2026-11-16 |
-| [#96](https://github.com/VY-Groups/yarp-lb/pull/96) | Audit all 73 legacy branches and map safe HAProxy 3.4 roadmap | Merged 2026-11-16 |
-| [#97](https://github.com/VY-Groups/yarp-lb/pull/97) | Correct operator capability inventory after PrimaryBackup CI verification | Merged 2026-11-16 |
-| [#98](https://github.com/VY-Groups/yarp-lb/pull/98) | GSLB: authoritative NS/SOA, bounded UDP/EDNS0 and TCP fallback (lab) | Merged 2026-11-16 |
-| [#99](https://github.com/VY-Groups/yarp-lb/pull/99) | Bound peer telemetry freshness and prevent stale counter resurrection | Merged 2026-11-16 |
-| [#102](https://github.com/VY-Groups/yarp-lb/pull/102) | GSLB: independent active/standby DNS failover and rise/fall health thresholds | Merged 2026-11-16 |
-| [#103](https://github.com/VY-Groups/yarp-lb/pull/103) | GSLB: opt-in TCP backend health and direct HTTP readiness without redirects | Merged 2026-11-16 |
-| [#104](https://github.com/VY-Groups/yarp-lb/pull/104) | GSLB: health-aware IPv6 AAAA and family-correct DNS behavior | Merged 2026-11-16 |
-| [#105](https://github.com/VY-Groups/yarp-lb/pull/105) | GSLB: bounded parallel DNS health sweeps with non-overlapping cycles | Merged 2026-11-16 |
-| [#106](https://github.com/VY-Groups/yarp-lb/pull/106) | GSLB: opt-in private CIDR-to-region selection with health-aware DR fallback | Merged 2026-11-16 |
-| [#107](https://github.com/VY-Groups/yarp-lb/pull/107) | docs: publish precise experimental GSLB capability and licensing boundaries | Merged 2026-11-16 |
+| [#70](../../pull/70) | docs: refresh root README for GatewayCore Windows test.10 and integration acceptance | Merged 2026-11-14 |
+| [#71](../../pull/71) | Add Gmail/Microsoft OAuth2 SMTP, multi-provider setup and enforced security CI | Merged 2026-11-14 |
+| [#72](../../pull/72) | Publish Windows test.11 with multi-provider OAuth2 and security gate | Merged 2026-11-14 |
+| [#74](../../pull/74) | Add isolated HAProxy reference for GatewayCore L7 comparison | Merged 2026-11-15 |
+| [#75](../../pull/75) | Bound YARP proxy concurrency and add passive failure hysteresis | Merged 2026-11-15 |
+| [#76](../../pull/76) | Observe active YARP health independently of client traffic for recovery warmup | Merged 2026-11-15 |
+| [#78](../../pull/78) | Add opt-in YARP RiseFall active health hysteresis (rebased after recovery observer) | Merged 2026-11-15 |
+| [#79](../../pull/79) | Fix recurring EC2 CI failure when live backend variables are absent | Merged 2026-11-15 |
+| [#80](../../pull/80) | Fix passive-ejection false recovery in idle YARP health observer | Merged 2026-11-15 |
+| [#81](../../pull/81) | Experimental shared Redis atomic peer rate quota with fail-closed partitions | Merged 2026-11-15 |
+| [#82](../../pull/82) | E2E: two shipping GatewayCore instances sharing authenticated TLS Redis quota | Merged 2026-11-15 |
+| [#83](../../pull/83) | Add opt-in signed HTTPS peer counter synchronization (no quota double-spend) | Merged 2026-11-15 |
+| [#84](../../pull/84) | Test GatewayCore website and synthetic HTTP bandwidth on two distinct Ubuntu Actions VMs | Merged 2026-11-15 |
+| [#85](../../pull/85) | Manual two independent Ubuntu VMs with encrypted cross-host HAProxy ingress failover | Merged 2026-11-15 |
+| [#86](../../pull/86) | Security: reject extreme peer-sync timestamps without arithmetic overflow | Merged 2026-11-15 |
+| [#87](../../pull/87) | Fix peer sync 256KiB frame limit and add authenticated operational diagnostics | Merged 2026-11-15 |
+| [#88](../../pull/88) | Rebuild GatewayCore login and operator UI shell with grouped navigation and peer diagnostics | Merged 2026-11-15 |
+| [#89](../../pull/89) | Peer recovery: signed process boot epoch and safe restart resynchronization | Merged 2026-11-15 |
+| [#90](../../pull/90) | Enterprise operator UX: isolate sessions, guard draft logout and display real backend readiness | Merged 2026-11-15 |
+| [#91](../../pull/91) | Enterprise customer UAT checklist for login-to-operations, mobile UX, peer recovery and 500Mbps | Merged 2026-11-15 |
+| [#92](../../pull/92) | Polish customer launch branding: consistent GatewayCore identity throughout management UI | Merged 2026-11-15 |
+| [#93](../../pull/93) | Stop obsolete EC2 nightly CI and unblock safe replacement test targets | Merged 2026-11-15 |
+| [#94](../../pull/94) | HA 10x CI: verify every Windows artifact and report worst observed failover | Merged 2026-11-15 |
+| [#95](../../pull/95) | Add opt-in HAProxy-style primary/backup routing with UI and real L7 failover acceptance | Merged 2026-11-16 |
+| [#96](../../pull/96) | Audit all 73 legacy branches and map safe HAProxy 3.4 roadmap | Merged 2026-11-16 |
+| [#97](../../pull/97) | Correct operator capability inventory after PrimaryBackup CI verification | Merged 2026-11-16 |
+| [#98](../../pull/98) | GSLB: authoritative NS/SOA, bounded UDP/EDNS0 and TCP fallback (lab) | Merged 2026-11-16 |
+| [#99](../../pull/99) | Bound peer telemetry freshness and prevent stale counter resurrection | Merged 2026-11-16 |
+| [#102](../../pull/102) | GSLB: independent active/standby DNS failover and rise/fall health thresholds | Merged 2026-11-16 |
+| [#103](../../pull/103) | GSLB: opt-in TCP backend health and direct HTTP readiness without redirects | Merged 2026-11-16 |
+| [#104](../../pull/104) | GSLB: health-aware IPv6 AAAA and family-correct DNS behavior | Merged 2026-11-16 |
+| [#105](../../pull/105) | GSLB: bounded parallel DNS health sweeps with non-overlapping cycles | Merged 2026-11-16 |
+| [#106](../../pull/106) | GSLB: opt-in private CIDR-to-region selection with health-aware DR fallback | Merged 2026-11-16 |
+| [#107](../../pull/107) | docs: publish precise experimental GSLB capability and licensing boundaries | Merged 2026-11-16 |
 
 **PR #108 is not in this table because it is draft/open.** A green check is not authorization to merge without reviewing the exact branch and preserving branch protections.
 
@@ -122,22 +122,22 @@ The snapshot contains **16 open issues**. Priority is the existing GitHub label;
 
 | Issue | Priority | Work | State |
 | --- | --- | --- | --- |
-| [#109](https://github.com/VY-Groups/yarp-lb/issues/109) | P0 | P0 GSLB: authenticated multi-vantage health agents, signed snapshots, validation authority and partition fencing | Open |
-| [#101](https://github.com/VY-Groups/yarp-lb/issues/101) | P1 | P1 bounded peer-state registry: TTL, restart teaching, deltas and partition recovery | Open |
-| [#100](https://github.com/VY-Groups/yarp-lb/issues/100) | P1 | P1 HAProxy-style per-backend admission: max connections, bounded queue, drain and overload | Open |
-| [#61](https://github.com/VY-Groups/yarp-lb/issues/61) | P2 | Post-v1: Redis Sentinel shared-state integration, fencing and partition safety | Open |
-| [#53](https://github.com/VY-Groups/yarp-lb/issues/53) | P1 | P1 L4: real TCP/UDP load balancer functionality and sustained soak testing | Open |
-| [#52](https://github.com/VY-Groups/yarp-lb/issues/52) | P0 | P0 GSLB: authoritative DNS NS/SOA, TCP fallback, EDNS0 and geo-routing completeness | Open |
-| [#51](https://github.com/VY-Groups/yarp-lb/issues/51) | P1 | P1 WAF: false-positive/false-negative tuning, OWASP coverage and load benchmarks | Open |
-| [#50](https://github.com/VY-Groups/yarp-lb/issues/50) | P1 | P1 observability: OpenTelemetry traces/metrics/logs and Grafana dashboards | Open |
-| [#49](https://github.com/VY-Groups/yarp-lb/issues/49) | P1 | P1 GitOps: declarative gateway config, Terraform provider/module and Kubernetes Gateway API | Open |
-| [#48](https://github.com/VY-Groups/yarp-lb/issues/48) | P1 | P1 platforms: Windows DPAPI support matrix and secure Linux Data Protection key persistence | Open |
-| [#39](https://github.com/VY-Groups/yarp-lb/issues/39) | P2 | P2 future multi-tenant SaaS: tenant isolation across Control Center, gateway config and logs | Open |
-| [#38](https://github.com/VY-Groups/yarp-lb/issues/38) | P1 | P1 identity: OIDC SSO, FIDO2/MFA enforcement and tamper-evident immutable external audit | Open |
-| [#37](https://github.com/VY-Groups/yarp-lb/issues/37) | P1 | P1 TLS: ACME HTTP-01/DNS-01 certificate issuance, renewal and safe zero-downtime rotation | Open |
-| [#36](https://github.com/VY-Groups/yarp-lb/issues/36) | P0 | P0 v1 HA: two independent signed-config gateways behind VRRP VIP/ECMP (no Redis) | Open |
-| [#35](https://github.com/VY-Groups/yarp-lb/issues/35) | P1 | P1: production PKI mTLS trust, CRL/OCSP failure behavior, and fleet-wide certificate rotation | Open |
-| [#34](https://github.com/VY-Groups/yarp-lb/issues/34) | P1 | P1: reduce remaining ~8.6 KiB allocated per proxied request (real YARP hot-path profiling) | Open |
+| [#109](../../issues/109) | P0 | P0 GSLB: authenticated multi-vantage health agents, signed snapshots, validation authority and partition fencing | Open |
+| [#101](../../issues/101) | P1 | P1 bounded peer-state registry: TTL, restart teaching, deltas and partition recovery | Open |
+| [#100](../../issues/100) | P1 | P1 HAProxy-style per-backend admission: max connections, bounded queue, drain and overload | Open |
+| [#61](../../issues/61) | P2 | Post-v1: Redis Sentinel shared-state integration, fencing and partition safety | Open |
+| [#53](../../issues/53) | P1 | P1 L4: real TCP/UDP load balancer functionality and sustained soak testing | Open |
+| [#52](../../issues/52) | P0 | P0 GSLB: authoritative DNS NS/SOA, TCP fallback, EDNS0 and geo-routing completeness | Open |
+| [#51](../../issues/51) | P1 | P1 WAF: false-positive/false-negative tuning, OWASP coverage and load benchmarks | Open |
+| [#50](../../issues/50) | P1 | P1 observability: OpenTelemetry traces/metrics/logs and Grafana dashboards | Open |
+| [#49](../../issues/49) | P1 | P1 GitOps: declarative gateway config, Terraform provider/module and Kubernetes Gateway API | Open |
+| [#48](../../issues/48) | P1 | P1 platforms: Windows DPAPI support matrix and secure Linux Data Protection key persistence | Open |
+| [#39](../../issues/39) | P2 | P2 future multi-tenant SaaS: tenant isolation across Control Center, gateway config and logs | Open |
+| [#38](../../issues/38) | P1 | P1 identity: OIDC SSO, FIDO2/MFA enforcement and tamper-evident immutable external audit | Open |
+| [#37](../../issues/37) | P1 | P1 TLS: ACME HTTP-01/DNS-01 certificate issuance, renewal and safe zero-downtime rotation | Open |
+| [#36](../../issues/36) | P0 | P0 v1 HA: two independent signed-config gateways behind VRRP VIP/ECMP (no Redis) | Open |
+| [#35](../../issues/35) | P1 | P1: production PKI mTLS trust, CRL/OCSP failure behavior, and fleet-wide certificate rotation | Open |
+| [#34](../../issues/34) | P1 | P1: reduce remaining ~8.6 KiB allocated per proxied request (real YARP hot-path profiling) | Open |
 
 **Suggested work order after PR #108 review:**
 1. P0 **#52 DNS correctness and multi-NS conformance**: independent dig/kdig/resolver, DNSSEC decision, correct delegation/serial/negative caching, malformed input/fuzz and anti-amplification before public DNS exposure.
@@ -161,7 +161,7 @@ Before choosing a change, open its issue body and read the required acceptance c
 ### Start a new Codex task (safe commands)
 
 ~~~sh
-git clone https://github.com/VY-Groups/yarp-lb.git
+git clone <approved-origin-url>.git
 cd yarp-lb
 git fetch origin --prune --tags
 git switch main
@@ -172,7 +172,7 @@ cat AGENTS.md
 cat CODEX_HANDOFF.md
 
 # Read a specific issue and check the current code before deciding to implement
-gh issue view 52 -R VY-Groups/yarp-lb
+gh issue view 52
 git grep -n 'DnsWireProtocol' -- engines/GslbDns tests/GslbAcceptance
 git switch -c codex/issue52-dns-correctness
 # Work in small, reviewable commits, then:
@@ -183,10 +183,10 @@ gh pr create --draft --base main --head codex/issue52-dns-correctness
 For the existing draft PR:
 
 ~~~sh
-gh pr view 108 -R VY-Groups/yarp-lb
-gh pr checks 108 -R VY-Groups/yarp-lb
-gh pr diff 108 -R VY-Groups/yarp-lb
-gh pr checkout 108 -R VY-Groups/yarp-lb
+gh pr view 108
+gh pr checks 108
+gh pr diff 108
+gh pr checkout 108
 # Review implementation and exact-head tests. Do not blindly auto-merge.
 ~~~
 
@@ -391,50 +391,29 @@ For every Codex task, produce: (a) short issue-linked scope and current `main` S
 
 **Handoff snapshot end. Refresh live GitHub state before every code change.**
 
-## Continuation review — 2026-11-16
+## Continuation — management readiness (2026-11-16)
 
-Live baseline after documentation PR #110: main
-`82c7b863e3674bb7c0a4ba368f4c11b3c7636152`; 88 remote branches before
-this continuation branch; 16 open issues. Main's seven reported L7/load/HA
-checks passed. Branch protection API reports main is not protected; this
-does not waive the reviewed-PR policy.
+Main remains `82c7b863e3674bb7c0a4ba368f4c11b3c7636152`.
+[PR #111](../../pull/111) and [PR #112](../../pull/112) are open for
+independent review after 9/9 reported exact-head checks each. Neither is
+merged; [PR #108](../../pull/108) remains draft with policy-test gaps.
 
-PR #108 remains draft at `471bb8356af4a2a3e44e527700d3b723795f5390`.
-Complete six-file diff and surrounding selection/probe paths reviewed:
-11 successful GitHub checks and a local Windows .NET 10.0.404 Release build
-and full socket acceptance passed. Review requests direct policy tests for
-fast-site failure, all-down, recovery, missing/stale samples and near-equal
-weighted fallback before merging. It remains outside main.
+[PR #113](../../pull/113), `codex/management-readiness-isolation`, adds an
+authenticated management readiness observation without relaxing data-listener
+isolation. Dashboard requests have a five-second deadline, no-store caching,
+explicit boolean validation, cancellation and old-session/result fencing.
+The test-only commit `95ef33227c3e88cf5849aeb154ecf0cb538232fd` failed 7/8
+new browser regressions against unchanged source. The local full UI suite
+subsequently passed 14/14; Release application build passed with four existing
+warnings. Real HTTP and browser acceptance must be verified at the final head.
+CI also reproduced a branding regression introduced by absolute organization
+URLs in this handoff; these are now relative links and repo-local CLI examples.
+The branding check remains unchanged.
 
-P0 #52 continuation on `codex/issue52-empty-nonterminal` independently fixes
-empty non-terminal answers above static configured NS address records.
-At test-only commit `9f2ae7a6260b11d513a7c5c526ec4602d6b1a3dc`, the
-new UDP/TCP NODATA regression failed against unchanged main DNS source.
-No licensed reference source was copied. This is a bounded part of DNS
-negative-answer correctness, not complete delegation, DNSSEC or public
-resolver qualification. Exact final-head CI must be checked on its PR.
-P0 #36/#52/#109 and remaining P1 issues stay open; physical acceptance and
-the production NO-GO decision are unchanged.
-## Continuation — weighted priority groups (2026-11-16)
-
-Live main remains `82c7b863e3674bb7c0a4ba368f4c11b3c7636152`.
-PR #111 (DNS empty non-terminal fix) is open, ready for independent review at
-`1689e92304d52ec3a3afb69088dc945fd688866e`; its 9 reported DNS/L7/HA/load
-checks passed. PR #108 remains draft at `471bb8356af4a2a3e44e527700d3b723795f5390`
-with routing-policy edge-test gaps documented in its review. Neither is merged.
-
-`codex/gslb-weighted-failover-groups` starts from current main and proposes
-`WeightedFailover`: choose the best healthy priority per address family,
-then use existing weighted selection within it. This independently implements
-one requested routing feature without OpenGSLB source/module reuse.
-ECC 2.2.3 is installed/enabled and its TDD/verification process is being used.
-The test-only commit `7160066e9c4e80eabbe6e06551dde91646b197e1` compiled
-but failed at startup because unchanged main correctly rejects the not-yet
-implemented policy. Final-head CI and maintainer review are required.
-
-The feature comparison table and supplied topology are requirements, not
-evidence that either product satisfies them. Authenticated multi-vantage
-health agents, mTLS/signed freshness/quorum and partition fencing (#109),
-DNSSEC/GeoIP/ECS/delegation (#52), secure management and independent
-physical HA/capacity (#36) remain incomplete. Prediction stays advisory.
-Production remains NO-GO; no source-level feature test closes these issues.
+Mandatory ECC 2.2.3 TDD/security/verification guidance is in use. The user has
+Windows Server 2022 and Ubuntu test machines but has explicitly requested
+GitHub Actions-only testing and cannot provide access. Physical-host acceptance
+remains NOT PERFORMED. Treat 99.9% as an availability target pending its precise
+SLI/window definition, never as a correctness guarantee. Source parity, DNSSEC,
+signed agent authority/quorum/partition fencing, GeoIP/ECS, calibrated prediction
+and remaining P0/P1 operational evidence remain incomplete. Production NO-GO.
