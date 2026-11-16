@@ -15,6 +15,7 @@ public static class CapabilityRegistry
         new("power-of-two", "Power of Two Choices", "Balancing", "native-config", "YARP", "Built in and YARP default."),
         new("weighted-random", "Weighted Random", "Balancing", "lab-verified", "YARP Control Center extension", "Compiled and validated with real L7 distribution traffic on Windows and Ubuntu; production capacity and NAT identity still require testing."),
         new("source-hash", "Source-IP Rendezvous Hash", "Balancing", "lab-verified", "YARP Control Center extension", "Real HTTP affinity/rebalance tests passed on Windows and Ubuntu; source-IP identity depends on ingress/SNAT."),
+        new("primary-backup", "Primary/backup HTTP server selection", "Balancing", "lab-verified", "GatewayCore managed YARP policy", "Opt-in PrimaryBackup policy; active health required; weighted healthy primaries take precedence, a fixed backup serves only if primaries fail. Real two-backend L7 failover, all-down and recovery CI passed. No transaction replay or physical HA claim."),
         new("latency-aware", "Least observed response time", "Balancing", "planned", "Custom policy", "Requires EWMA, outlier resistance, feedback isolation, load tests."),
         new("l4-tcp-udp", "Layer-4 TCP / UDP proxy", "L4", "external-lab-verified", "engines/L4 independent .NET process", "TCP bidirectional and UDP source-session real-socket CI passed on Windows/Ubuntu. No lifecycle integration, production health, distributed state or public deployment approval."),
         new("tls", "TLS, SNI and outbound backend mTLS", "Transport", "partial-implementation", "Kestrel + certificate store", "BackendClientCertificateThumbprint selects a validated LocalMachine/My client-auth certificate for YARP cluster HTTPS egress. TLS lab builds; real enterprise mTLS enrollment and rotation still require independent validation."),
@@ -29,7 +30,7 @@ public static class CapabilityRegistry
         new("gslb", "DNS health/weighted/DR routing", "GSLB", "external-lab-verified", "engines/GslbDns independent .NET process", "UDP A-record responder passes health withdrawal, weighted answers and recovery on Windows/Ubuntu. No production authoritative DNS TCP, delegation, DNSSEC or regional probes."),
         new("anycast", "Anycast", "GSLB", "network-design", "BGP/network", "Cannot be enabled from YARP alone."),
         new("ha-ingress", "Active–Active gateway VIP", "HA", "lab-verified", "isolated health-aware YARP ingress lab", "Two gateways survive one abrupt kill and pre-drained graceful stop in single-runner CI. NOT proven: redundant ingress, VIP, multi-host partitions, realistic WAN latency, production scale and cluster-wide consistency."),
-        new("redis", "Shared rate-limit and session state", "HA", "planned", "Redis + application adapters", "Redis is not a plug-and-play YARP distributed state store."),
+        new("redis", "Optional atomic shared rate limiting", "Protection", "lab-verified", "GatewayCore TLS Redis rate limiter", "Two-gateway Docker/TLS CI verifies atomic request quota and fail-closed disconnect behavior. Session state, Sentinel quorum/fencing and physical partition correctness remain NOT IMPLEMENTED or NOT VERIFIED."),
         new("waf", "OWASP CRS / WAF / bot protection", "Security", "external-lab-verified", "ModSecurity/OWASP CRS official container", "Docker CI passes benign HTTP and blocks XSS with 403; no production provisioning, TLS trust, bot policy, tuning, false-positive review or DDoS certification."),
         new("jwt", "JWT/OAuth at edge", "Security", "integration-required", "ASP.NET Core auth", "Issuer, audience and signing key trust must be configured per route."),
         new("audit-rbac", "RBAC, audit and approvals", "Control Plane", "local-implemented", "YARP Control Center", "Local RBAC/approvals exist; WORM/SSO security verification pending."),
@@ -45,7 +46,8 @@ public static class CapabilityRegistry
         app.MapGet("/admin/api/capabilities", () => Results.Ok(new
         {
             productVersion = "0.1", source = "declared capabilities - not live infrastructure state",
-            policies = new[] { "RoundRobin", "PowerOfTwoChoices", "LeastRequests", "Random", "FirstAlphabetical", "WeightedRandom", "SourceIpHash" },
+            policies = new[] { "RoundRobin", "PowerOfTwoChoices", "LeastRequests", "Random", "FirstAlphabetical", "WeightedRandom", "SourceIpHash", "PrimaryBackup" },
+            backupMetadata = new { key = "TrafficRole", primary = "primary", backup = "backup", @default = "primary", requiresActiveHealth = true },
             weightedMetadata = new { key = "Weight", min = LoadBalancingCore.MinWeight, max = LoadBalancingCore.MaxWeight, @default = 1 },
             capabilities = Items
         })).RequireAuthorization();

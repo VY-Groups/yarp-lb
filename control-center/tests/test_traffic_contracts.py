@@ -9,6 +9,15 @@ inst=(root/'INSTALL.ps1').read_text()
 assert 'AddSingleton<ILoadBalancingPolicy, WeightedRandomPolicy>()' in code
 assert 'AddSingleton<ILoadBalancingPolicy, SourceIpHashPolicy>()' in code
 assert 'MapCapabilityRegistry()' in code
+assert 'AddSingleton<ILoadBalancingPolicy, PrimaryBackupPolicy>()' in code
+assert '"PrimaryBackup"' in code
+assert 'requires enabled active health checks for safe fallback' in code
+assert 'PrimaryBackup' in front and 'TrafficRole' in front
+assert '"PrimaryBackup"' in registry and 'backupMetadata' in registry
+assert 'requiresActiveHealth = true' in registry
+assert 'Sentinel quorum/fencing' in registry
+assert 'physical HA' in registry
+
 assert 'JsonNode weightValue' in code
 assert 'SourceIpHash' in code and 'WeightedRandom' in code
 assert 'LoadBalancingCore.TryWeight' in code
