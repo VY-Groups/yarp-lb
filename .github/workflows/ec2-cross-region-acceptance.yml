@@ -56,8 +56,42 @@ jobs:
                   expect(hosts[0],[hosts[1-i]])
                   call(host,"resume")
                   expect(hosts[0])
+              import json
+              def l7(expected, nodes=hosts):
+                  until=time.monotonic()+15
+                  while time.monotonic()<until:
+                      with concurrent.futures.ThreadPoolExecutor() as pool:
+                          actual=list(pool.map(lambda h: call(h,"l7"),nodes))
+                      if actual==[expected]*len(nodes):
+                          print("YARP",nodes,actual,flush=True)
+                          return
+                  raise RuntimeError((expected,actual))
+              l7("200:mumbai")
+              with concurrent.futures.ThreadPoolExecutor() as pool:
+                  streams = [pool.submit(subprocess.check_output, ["ssh","-o","BatchMode=yes","ec2-user@"+h,"traffic"],text=True,timeout=150) for h in hosts]
+                  call(hosts[0],"withdraw")
+                  l7("200:osaka")
+                  call(hosts[0],"restore")
+                  l7("200:mumbai")
+                  for h,future in zip(hosts,streams):
+                      metrics=json.loads(future.result())
+                      print("YARP request sample",h,metrics,flush=True)
+                      assert metrics["requests"]==90 and sum(metrics["counts"].get("200:"+city,0) for city in ["mumbai","osaka"])==90
+              for h in hosts:
+                  call(h,"withdraw")
+              l7("503")
+              call(hosts[1],"restore")
+              l7("200:osaka")
+              call(hosts[0],"restore")
+              l7("200:mumbai")
+              for i,h in enumerate(hosts):
+                  call(h,"pause-l7")
+                  l7("200:mumbai",[hosts[1-i]])
+                  call(h,"resume-l7")
+                  l7("200:mumbai")
           finally:
               for host in hosts:
                   call(host,"resume")
+                  call(host,"resume-l7")
                   call(host,"restore")
           PY
