@@ -128,6 +128,8 @@ RecoveryTransitionTests.Run();
 
 RiseFallTests.Run();
 
+PrimaryBackupTests.Run();
+
 RecoveryHealthGateTests.Run();
 
 PeerSyncTests.Run();
