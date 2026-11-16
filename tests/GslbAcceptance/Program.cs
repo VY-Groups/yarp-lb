@@ -120,7 +120,7 @@ try
          "EDNS0 OPT answered without leaking unknown client options or DO bit");
     var (_, badVers) = await QueryWire("app.integration.test",1,ednsVersion:1);
     Must(Dns16(badVers,6)==0 && Dns16(badVers,10)==1 &&
-         badVers[^7]==1,"EDNS version mismatch signals BADVERS, without A answer");
+         badVers[^6]==1,"EDNS version mismatch signals BADVERS, without A answer");
     var glue = await TcpQuery(DnsRequest("ns1.app.integration.test",1));
     Must(Dns16(glue,6)==1 && glue.AsSpan(glue.Length-4).SequenceEqual(new byte[]{127,0,0,31}),
         "bailiwick NS hostname resolves to configured glue A");
