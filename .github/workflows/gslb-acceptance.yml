@@ -2,9 +2,9 @@ name: GSLB authoritative DNS health/failover acceptance
 on:
   push:
     branches: [main, "feature/**"]
-    paths: ["engines/GslbDns/**", "tests/GslbAcceptance/**", ".github/workflows/gslb-acceptance.yml"]
+    paths: ["engines/GslbDns/**", "engines/GslbObserver/**", "tests/GslbAcceptance/**", ".github/workflows/gslb-acceptance.yml"]
   pull_request:
-    paths: ["engines/GslbDns/**", "tests/GslbAcceptance/**", ".github/workflows/gslb-acceptance.yml"]
+    paths: ["engines/GslbDns/**", "engines/GslbObserver/**", "tests/GslbAcceptance/**", ".github/workflows/gslb-acceptance.yml"]
   workflow_dispatch:
 permissions: {contents: read}
 jobs:
