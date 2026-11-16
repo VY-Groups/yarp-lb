@@ -4,5 +4,6 @@
  </PropertyGroup>  <ItemGroup>
     <Compile Include="../../engines/GslbDns/DnsResponseRateLimiter.cs" Link="DnsResponseRateLimiter.cs" />
     <Compile Include="../../engines/GslbDns/DnsHealthHysteresis.cs" Link="DnsHealthHysteresis.cs" />
+    <Compile Include="../../engines/GslbDns/BoundedDnsProbes.cs" Link="BoundedDnsProbes.cs" />
   </ItemGroup>
 </Project>
