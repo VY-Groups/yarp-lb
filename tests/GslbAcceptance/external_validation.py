@@ -84,26 +84,39 @@ def main():
                    GSLB_VALIDATOR_KEY_PEM=str(root / "client.key"),
                    GSLB_VALIDATOR_ORIGINS=",".join(origins))
         nodes = []
-        for _ in range(2):
+        def start_node(interval, environment):
             with socket.socket() as reservation:
                 reservation.bind(("127.0.0.1", 0))
                 port = reservation.getsockname()[1]
             config = root / f"{port}.json"
             config.write_text(json.dumps({"ListenHost": "127.0.0.1", "ListenPort": port,
-                "ProbeIntervalSeconds": 1, "Zones": [{"Name": "lab.example", "TtlSeconds": 5,
+                "ProbeIntervalSeconds": interval, "Zones": [{"Name": "lab.example", "TtlSeconds": 5,
                 "FailClosedWhenAllSitesDown": True, "Sites": [{"Address": "192.0.2.17", "Weight": 1,
                 "HealthUrl": f"http://127.0.0.1:{local.server_port}/ready",
                 "ValidatorUrls": [o + "/ready" for o in origins]}]}]}))
-            proc = subprocess.Popen(["dotnet", dll, config], env=env)
+            proc = subprocess.Popen(["dotnet", dll, config], env=environment)
             stack.callback(proc.wait)
             stack.callback(proc.kill)
-            nodes.append((proc, port))
+            return proc, port
+
+        for _ in range(2):
+            nodes.append(start_node(1, env))
             check(nodes, 0)
         for server in [*observers, local]:
             server.verdict = 503
             check(nodes, 2)
             server.verdict = 200
             check(nodes, 0)
+
+        # No scheduler refresh before the ten-second lease expires.
+        slow = [start_node(30, env)]
+        check(slow, 0)
+        check(slow, 2)
+
+        # A certificate with only serverAuth cannot authenticate as an observer client.
+        wrong = dict(env, GSLB_VALIDATOR_CERT_PEM=str(root / "server.pem"),
+                     GSLB_VALIDATOR_KEY_PEM=str(root / "server.key"))
+        check([start_node(1, wrong)], 2)
 
 
 if __name__ == "__main__":
