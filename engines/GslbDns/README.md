@@ -74,6 +74,10 @@ IPv6 DNS UDP/TCP listener binding, IPv6 NS glue and DNSSEC are still missing.
   serial must be deliberately bumped in config when site authority changes.
   In-bailiwick name server IPv4 address answers and additional glue are available;
   out-of-bailiwick NS targets are listed without forging glue.
+- Empty non-terminals above configured in-zone NS address records return
+  NODATA with negative SOA (RFC 8020 section 3.1), preserving resolution of
+  their descendants. Label-boundary matching does not invent sibling names.
+  This is static-name correctness, not delegation/zone-cut support.
 - In-zone missing names return NXDOMAIN with an SOA negative-cache record;
   existing names with unsupported types return NODATA with SOA; names outside
   the configured zones are REFUSED.

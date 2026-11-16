@@ -390,3 +390,28 @@ For every Codex task, produce: (a) short issue-linked scope and current `main` S
 | `engines/L4/README.md` and `integrations/WafCrs/README.md` | Separate experimental L4/WAF architecture and limits |
 
 **Handoff snapshot end. Refresh live GitHub state before every code change.**
+
+## Continuation review — 2026-11-16
+
+Live baseline after documentation PR #110: main
+`82c7b863e3674bb7c0a4ba368f4c11b3c7636152`; 88 remote branches before
+this continuation branch; 16 open issues. Main's seven reported L7/load/HA
+checks passed. Branch protection API reports main is not protected; this
+does not waive the reviewed-PR policy.
+
+PR #108 remains draft at `471bb8356af4a2a3e44e527700d3b723795f5390`.
+Complete six-file diff and surrounding selection/probe paths reviewed:
+11 successful GitHub checks and a local Windows .NET 10.0.404 Release build
+and full socket acceptance passed. Review requests direct policy tests for
+fast-site failure, all-down, recovery, missing/stale samples and near-equal
+weighted fallback before merging. It remains outside main.
+
+P0 #52 continuation on `codex/issue52-empty-nonterminal` independently fixes
+empty non-terminal answers above static configured NS address records.
+At test-only commit `9f2ae7a6260b11d513a7c5c526ec4602d6b1a3dc`, the
+new UDP/TCP NODATA regression failed against unchanged main DNS source.
+No licensed reference source was copied. This is a bounded part of DNS
+negative-answer correctness, not complete delegation, DNSSEC or public
+resolver qualification. Exact final-head CI must be checked on its PR.
+P0 #36/#52/#109 and remaining P1 issues stay open; physical acceptance and
+the production NO-GO decision are unchanged.
