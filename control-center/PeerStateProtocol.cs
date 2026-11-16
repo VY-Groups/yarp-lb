@@ -22,6 +22,8 @@ public sealed class PeerStateJournal
     private readonly string localId;
     private readonly string remoteId;
     private readonly int maxIdentities;
+    private readonly TimeSpan remoteFreshness;
+    private readonly Func<DateTimeOffset> clock;
     private long localMinute = -1, sequence, receivedMinute = -1, receivedSequence = -1;
     private long receivedSourceEpoch;
     private readonly long sourceEpoch = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
@@ -29,7 +31,8 @@ public sealed class PeerStateJournal
     private readonly Dictionary<string,int> local = new(StringComparer.Ordinal);
     private Dictionary<string,int> remote = new(StringComparer.Ordinal);
 
-    public PeerStateJournal(string localId, string remoteId, byte[] secret, int capacity)
+    public PeerStateJournal(string localId, string remoteId, byte[] secret, int capacity,
+        TimeSpan? remoteFreshness = null, Func<DateTimeOffset>? clock = null)
     {
         if (string.IsNullOrWhiteSpace(localId) || string.IsNullOrWhiteSpace(remoteId) ||
             localId == remoteId || localId.Length > 48 || remoteId.Length > 48)
@@ -40,6 +43,12 @@ public sealed class PeerStateJournal
         this.remoteId = remoteId;
         this.secret = (byte[])secret.Clone();
         maxIdentities = capacity;
+        this.remoteFreshness = remoteFreshness ?? TimeSpan.FromSeconds(60);
+        if (this.remoteFreshness < TimeSpan.FromSeconds(1) ||
+            this.remoteFreshness > TimeSpan.FromSeconds(60))
+            throw new ArgumentOutOfRangeException(nameof(remoteFreshness),
+                "Peer telemetry freshness must be 1..60 seconds");
+        this.clock = clock ?? (() => DateTimeOffset.UtcNow);
     }
 
     public static long CurrentMinute() => DateTimeOffset.UtcNow.ToUnixTimeSeconds() / 60;
@@ -107,9 +116,18 @@ public sealed class PeerStateJournal
             receivedMinute = frame.Minute;
             receivedSequence = frame.Sequence;
             receivedSourceEpoch = frame.SourceEpoch;
-            lastAcceptedUtc = DateTimeOffset.UtcNow;
+            lastAcceptedUtc = clock();
             return true;
         }
+    }
+
+    // Remote state is operational telemetry, not quota authority. Ageing out
+    // preserves replay/sequence fencing so an older snapshot cannot resurrect.
+    private bool RemoteFresh(long minute)
+    {
+        if (receivedMinute != minute || lastAcceptedUtc is null) return false;
+        var age = clock() - lastAcceptedUtc.Value;
+        return age >= TimeSpan.Zero && age <= remoteFreshness;
     }
 
     public PeerSyncStatus Status(long minute)
@@ -117,7 +135,7 @@ public sealed class PeerStateJournal
         lock (gate)
         {
             var validLocal = localMinute == minute;
-            var validRemote = receivedMinute == minute;
+            var validRemote = RemoteFresh(minute);
             return new PeerSyncStatus(true, localId, remoteId,
                 validLocal ? local.Count : 0,
                 validLocal ? local.Values.Sum(x => (long)x) : 0,
@@ -131,7 +149,7 @@ public sealed class PeerStateJournal
     public (int identities, long requests) PeerTelemetry(long minute)
     {
         lock (gate)
-            return receivedMinute == minute ? (remote.Count, remote.Values.Sum(x => (long)x)) : (0, 0);
+            return RemoteFresh(minute) ? (remote.Count, remote.Values.Sum(x => (long)x)) : (0, 0);
     }
 }
 

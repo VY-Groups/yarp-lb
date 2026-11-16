@@ -25,3 +25,26 @@ The signed protocol has deterministic unit tests; a full production mTLS/PKI pee
 The signed snapshot now carries a process boot-epoch (UTC milliseconds), plus the per-minute sequence. Within one epoch and minute, sequence and counters must progress monotonically; after a peer restarts with a strictly newer boot epoch, the receiving peer can intentionally reset that sender's counters and resume normal gossip. Older epochs are rejected even if they present a higher sequence. Epoch changes are never permission to use gossip for strict admission.
 
 **Clock requirement:** Restart epochs rely on non-regressing host clocks. If a node's clock moves backward before an earlier accepted boot epoch, synchronization intentionally fails closed until the issue is corrected. Tomorrow's live drill should check NTP time synchronization, process restarts while requests continue, delayed/duplicate peer frames, and recovery within the minute. The in-memory signed protocol remains two-node only and does not implement HAProxy's multi-table wire protocol or peer full-state learning.
+
+
+## Freshness expiry (operational telemetry only)
+
+Remote counters are visible only when the signed snapshot is from the current
+minute AND the last accepted receipt is sufficiently recent. The shipping
+service configures the freshness window as three configured publish intervals,
+clamped to 6–60 seconds (default publisher interval 2s, so default 6s).
+When a peer stops sending, the status API and remote telemetry counts become
+unavailable even before the current minute rolls over. The last receipt time
+remains available to the operator to diagnose outages, but expired request
+counts are withheld.
+
+A higher-sequence, properly authenticated fresh snapshot restores reporting.
+Expiry NEVER resets the remote boot epoch or previously accepted sequence:
+replaying an old signed frame cannot revive stale counts. A local clock moved
+backward also fails closed for freshness. Tests use a controllable clock for
+deterministic expiry, recovery and replay checks.
+
+**Strict enforcement is not provided**: this expiry is about best-effort
+telemetry only. No synchronized HAProxy stick tables, request admission,
+session persistence, signed config consensus or physical HA are claimed.
+Network partitions and stale distributed quota remain production NO-GO.
