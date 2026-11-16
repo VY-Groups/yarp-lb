@@ -24,6 +24,7 @@ let authGeneration = 0;
 let gatewayReadyLabel = '● Backend readiness not checked';
 let gatewayReadyWarn = true;
 let readinessGeneration = 0;
+let readinessAbort = null;
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const keys = (o) => Object.keys(o || {});
@@ -72,7 +73,7 @@ function editOrganization() {
     });
 }
 const show = (message, error = false) => { const el = $('notice'); el.hidden = false; el.className = 'notice' + (error ? ' error' : ''); el.textContent = message; setTimeout(() => { el.hidden = true; }, 8000); };
-async function api(url, method = 'GET', body) { const opts = { method, credentials: 'same-origin', headers: {} }; if (method !== 'GET') {
+async function api(url, method = 'GET', body, signal) { const opts = { method, credentials: 'same-origin', headers: {}, signal, cache: 'no-store' }; if (method !== 'GET') {
     opts.headers['Content-Type'] = 'application/json';
     opts.headers['X-CSRF-Token'] = csrf;
     opts.body = JSON.stringify(body ?? {});
@@ -356,16 +357,37 @@ async function setupFreeze(frozen) {
         show('Freeze operation denied: ' + String(e), true);
     }
 }
+function renderGatewayReadiness() {
+    const pill = $('gateway-pill');
+    pill.textContent = gatewayReadyLabel;
+    pill.className = gatewayReadyWarn ? 'pill warn' : 'pill';
+    if (view === 'overview')
+        $('content').innerHTML = overview();
+}
 async function refreshGatewayReadiness() {
     if ($('app-shell').hidden)
         return;
+    readinessAbort?.abort();
+    const controller = new AbortController();
+    readinessAbort = controller;
     const generation = ++readinessGeneration;
+    gatewayReadyLabel = '● Checking backend readiness';
+    gatewayReadyWarn = true;
+    renderGatewayReadiness();
+    let timer;
     try {
-        const r = await fetch('/gateway/health/ready', { credentials: 'same-origin', cache: 'no-store' });
+        const result = await Promise.race([
+            api('/admin/api/gateway-readiness', 'GET', undefined, controller.signal),
+            new Promise((_, reject) => {
+                timer = setTimeout(() => { controller.abort(); reject(new Error('Readiness request timed out')); }, 5000);
+            })
+        ]);
         if (generation !== readinessGeneration || $('app-shell').hidden)
             return;
-        gatewayReadyLabel = r.ok ? '● Backend readiness observed' : r.status === 503 ? '● No healthy backend reported' : '● Readiness unavailable';
-        gatewayReadyWarn = !r.ok;
+        if (typeof result?.ready !== 'boolean')
+            throw new Error('Invalid readiness response');
+        gatewayReadyLabel = result.ready ? '● Backend readiness observed' : '● No healthy backend reported';
+        gatewayReadyWarn = !result.ready;
     }
     catch {
         if (generation !== readinessGeneration || $('app-shell').hidden)
@@ -373,11 +395,13 @@ async function refreshGatewayReadiness() {
         gatewayReadyLabel = '● Readiness unavailable';
         gatewayReadyWarn = true;
     }
-    const pill = $('gateway-pill');
-    pill.textContent = gatewayReadyLabel;
-    pill.className = gatewayReadyWarn ? 'pill warn' : 'pill';
-    if (view === 'overview')
-        $('content').innerHTML = overview();
+    finally {
+        if (timer !== undefined)
+            clearTimeout(timer);
+        if (generation === readinessGeneration)
+            readinessAbort = null;
+    }
+    renderGatewayReadiness();
 }
 function updateTopologyNavigation() { const finished = topologyResponse?.status === 'design-confirmed'; const prereqViews = ['organization', 'setup', 'onboarding', 'users', 'mail', 'directory']; document.querySelectorAll('.nav').forEach(b => { const dest = b.dataset.view || ''; const adminOnly = ['users', 'mail', 'directory'].includes(dest); b.hidden = (!finished && !prereqViews.includes(dest)) || (dest === 'fleet' && finished && topologyResponse?.plan?.mode === 'standalone') || (adminOnly && currentRole !== 'Administrator'); }); $('save').hidden = !finished || currentRole === 'Viewer' || view === 'onboarding' || view === 'setup'; }
 function render() {
@@ -912,6 +936,8 @@ async function initSession() {
 function showLogin(first) {
     authGeneration++;
     readinessGeneration++;
+    readinessAbort?.abort();
+    readinessAbort = null;
     gatewayReadyLabel = '● Backend readiness not checked';
     gatewayReadyWarn = true;
     csrf = '';
