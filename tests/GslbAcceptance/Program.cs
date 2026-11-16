@@ -204,8 +204,10 @@ try
         return seen.Contains("127.0.0.21") && seen.Contains("127.0.0.22");
     });
     Console.WriteLine("PASS: both IPv4 sites healthy before distribution sampling");
-    // Both sites start healthy; the opt-in policy waits for enough measured
-    // independent HTTP probe samples before making a latency decision.
+    // The policy deliberately falls back to weighted while samples accumulate.
+    // Wait for three independently scheduled one-second probe cycles before
+    // asserting a deterministic winner; a single weighted reply is not proof.
+    await Task.Delay(4200);
     await Wait(async()=> (await Query("latency.integration.test")).Address=="127.0.0.22");
     for(var i=0;i<12;i++)
         Must((await Query("latency.integration.test")).Address=="127.0.0.22",
