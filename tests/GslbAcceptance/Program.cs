@@ -53,6 +53,32 @@ try
 catch(ArgumentOutOfRangeException){invalidParallelism=true;}
 if(!invalidParallelism) throw new Exception("FAIL: unsafe DNS probe concurrency accepted");
 Console.WriteLine("PASS: DNS health probe concurrency hard cap, drain and validation");
+var cidrTable = new DnsCidrRegionTable(new[]{
+    new DnsCidrRegionRule("127.0.0.0/8","regional"),
+    new DnsCidrRegionRule("127.0.0.1/32","local"),
+    new DnsCidrRegionRule("2001:db8::/32","ipv6")
+});
+if(cidrTable.RegionFor(IPAddress.Parse("127.0.0.1"))!="local" ||
+   cidrTable.RegionFor(IPAddress.Parse("127.0.0.7"))!="regional" ||
+   cidrTable.RegionFor(IPAddress.Parse("2001:db8::beef"))!="ipv6" ||
+   cidrTable.RegionFor(IPAddress.Parse("203.0.113.2")) is not null ||
+   cidrTable.RegionFor(IPAddress.Parse("127.0.0.1").MapToIPv6())!="local")
+    throw new Exception("FAIL: canonical longest-prefix region selection");
+foreach(var bad in new[]{"127.0.0.9/24","127.0.0.0/33","not-an-address",
+                        "2001:db8::1/32"})
+{
+    var rejected=false;
+    try { _=new DnsCidrRegionTable(new[]{new DnsCidrRegionRule(bad,"local")}); }
+    catch(ArgumentException){rejected=true;}
+    if(!rejected)throw new Exception("FAIL: malformed or noncanonical CIDR accepted: "+bad);
+}
+var duplicateRejected=false;
+try { _=new DnsCidrRegionTable(new[]{
+    new DnsCidrRegionRule("127.0.0.0/8","local"),
+    new DnsCidrRegionRule("127.0.0.0/8","other")}); }
+catch(ArgumentException){duplicateRejected=true;}
+if(!duplicateRejected)throw new Exception("FAIL: conflicting duplicate CIDR accepted");
+Console.WriteLine("PASS: IPv4/IPv6 longest prefix, resolver-IP mapping and CIDR validation");
 // Verify response limiting with deterministic monotonic timestamps: no flaky UDP flood.
 var rate=new DnsResponseRateLimiter(2,2);
 var ip1=IPAddress.Parse("127.0.0.31");
@@ -81,7 +107,7 @@ var configuration=Path.Combine(temp,"zones.json");
 File.WriteAllText(configuration,JsonSerializer.Serialize(new {
  AllowNonLoopbackListeners=false,
  ListenHost="127.0.0.1",ListenPort=15353,ProbeIntervalSeconds=1,
- Zones=new []{
+ Zones=new object[]{
  new{ Name="app.integration.test",TtlSeconds=10,Sites=new []{
     new { Address="127.0.0.21",HealthUrl="http://127.0.0.1:19711/ready",Weight=2,Priority=0,HealthCheckType="Http",TcpPort=0 },
     new { Address="127.0.0.22",HealthUrl="http://127.0.0.1:19712/ready",Weight=1,Priority=10,HealthCheckType="Http",TcpPort=0 },
@@ -108,7 +134,22 @@ File.WriteAllText(configuration,JsonSerializer.Serialize(new {
      new {Host="ns2.tcp.integration.test",Address="127.0.0.32"}
  },SoaContact="hostmaster.tcp.integration.test",SoaSerial=2026111601u,
    RoutingPolicy="Failover",FailureThreshold=1,SuccessThreshold=1,
-   FailClosedWhenAllSitesDown=true }
+   FailClosedWhenAllSitesDown=true },
+ new{ Name="geo.integration.test",TtlSeconds=10,Sites=new []{
+    new { Address="127.0.0.21",HealthUrl="http://127.0.0.1:19711/ready",
+          Weight=1,Priority=0,HealthCheckType="Http",TcpPort=0,Region="local" },
+    new { Address="127.0.0.22",HealthUrl="http://127.0.0.1:19712/ready",
+          Weight=1,Priority=10,HealthCheckType="Http",TcpPort=0,Region="dr" }
+ },NameServers=new []{
+     new {Host="ns1.geo.integration.test",Address="127.0.0.31"},
+     new {Host="ns2.geo.integration.test",Address="127.0.0.32"}
+ },SoaContact="hostmaster.geo.integration.test",SoaSerial=2026111601u,
+   RoutingPolicy="CidrRegion",FailureThreshold=1,SuccessThreshold=1,
+   FailClosedWhenAllSitesDown=true,
+   CidrRoutes=new[]{
+       new {Cidr="127.0.0.0/8",Region="dr"},
+       new {Cidr="127.0.0.1/32",Region="local"}
+   }}
  }
 }));
 var info=new ProcessStartInfo("dotnet"){ UseShellExecute=false,CreateNoWindow=true,
@@ -132,6 +173,14 @@ try
         return seen.Contains("127.0.0.21") && seen.Contains("127.0.0.22");
     });
     Console.WriteLine("PASS: both IPv4 sites healthy before distribution sampling");
+    await Wait(async()=> (await Query("geo.integration.test")).Address=="127.0.0.21");
+    var geoTcp=await TcpQuery(DnsRequest("geo.integration.test",1));
+    Must(Dns16(geoTcp,6)==1 &&
+         geoTcp.AsSpan(geoTcp.Length-4,4).SequenceEqual(new byte[]{127,0,0,21}),
+         "TCP queries use actual resolver source IP for CIDR region");
+    for(var i=0;i<12;i++)
+        Must((await Query("geo.integration.test")).Address=="127.0.0.21",
+            "IPv4 resolver /32 specific region beats broader /8 mapping");
     var aaaa = await TcpQuery(DnsRequest("app.integration.test",28));
     Must((Dns16(aaaa,2)&0x0F)==0 && Dns16(aaaa,6)==1 &&
          Dns16(aaaa,aaaa.Length-18)==16 &&
@@ -183,6 +232,9 @@ try
     for (var i=0;i<12;i++)
         Must((await Query("ha.integration.test")).Address=="127.0.0.22",
             "failed primary selects configured standby after fall threshold");
+    await Wait(async()=> (await Query("geo.integration.test")).Address=="127.0.0.22");
+    Must((await Query("geo.integration.test")).Address=="127.0.0.22",
+        "no healthy preferred-region site falls back to healthy DR region");
     // A 302 to healthy standby must NOT incorrectly rehabilitate primary.
     // This fails if HTTP readiness follows redirects to a healthy login/backend.
     s1.Healthy=2;
@@ -207,12 +259,18 @@ try
     await Wait(async () => (await Query("ha.integration.test")).Status==2);
     Must((await Query("ha.integration.test")).Status==2,
         "strict failover zone SERVFAIL when every site is down");
+    await Wait(async()=> (await Query("geo.integration.test")).Status==2);
+    Must((await Query("geo.integration.test")).Status==2,
+        "strict CIDR region zone returns SERVFAIL when all sites down");
     s1.Healthy=1;
     await Task.Delay(2500);
     await Wait(async()=> (await Query("app.integration.test")).Address=="127.0.0.21");
     await Wait(async()=> (await Query("ha.integration.test")).Address=="127.0.0.21");
     Must((await Query("ha.integration.test")).Address=="127.0.0.21",
         "recovered primary preferred after success threshold");
+    await Wait(async()=> (await Query("geo.integration.test")).Address=="127.0.0.21");
+    Must((await Query("geo.integration.test")).Address=="127.0.0.21",
+        "recovered preferred-region site selected again");
     Must((await Query("unknown.integration.test")).Status==5,"unknown zones explicitly refused");
     var (nsReq, nsUdp) = await QueryWire("app.integration.test", 2);
     Must((Dns16(nsUdp,2)&0x0200)!=0 &&
