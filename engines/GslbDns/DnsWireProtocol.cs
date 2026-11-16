@@ -22,7 +22,8 @@ internal static class DnsWireProtocol
             label[0] != '-' && label[^1] != '-');
     }
 
-    public static byte[]? Build(ReadOnlySpan<byte> query, IReadOnlyDictionary<string, SiteGroup> zones, bool tcp)
+    public static byte[]? Build(ReadOnlySpan<byte> query, IReadOnlyDictionary<string, SiteGroup> zones,
+        bool tcp, IPAddress? resolverIp = null)
     {
         if (query.Length is < 17 or > 4096) return null;
         var id = BinaryPrimitives.ReadUInt16BigEndian(query);
@@ -132,6 +133,21 @@ internal static class DnsWireProtocol
                     }
                     if (eligible.Length > 0 && rcode == 0)
                     {
+                        // CIDR mapping uses only the direct DNS resolver socket
+                        // source, NOT forwarded headers or untrusted EDNS ECS.
+                        // If this region has no healthy endpoint, fall back to the
+                        // other healthy sites before applying the weighted policy.
+                        if (zone.RoutingPolicy == "CidrRegion")
+                        {
+                            var region = zone.CidrTable?.RegionFor(resolverIp);
+                            if (region is not null)
+                            {
+                                var regional = eligible.Where(s =>
+                                    string.Equals(s.Region,region,
+                                        StringComparison.OrdinalIgnoreCase)).ToArray();
+                                if (regional.Length > 0) eligible = regional;
+                            }
+                        }
                         Site? chosen = null;
                         if (zone.RoutingPolicy == "Failover")
                         {
