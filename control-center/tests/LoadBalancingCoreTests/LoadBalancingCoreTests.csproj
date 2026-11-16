@@ -10,6 +10,8 @@
     <Compile Include="PeerRateTableTests.cs" />
     <Compile Include="../../LoadBalancingCore.cs" Link="LoadBalancingCore.cs" />
     <Compile Include="../../../src/TrafficPolicies/EjectionBudget.cs" Link="EjectionBudget.cs" />
+    <Compile Include="../../../src/TrafficPolicies/PrimaryBackupCore.cs" Link="PrimaryBackupCore.cs" />
+    <Compile Include="PrimaryBackupTests.cs" />
     <Compile Include="../../RecoveryTransition.cs" Link="RecoveryTransition.cs" />
     <Compile Include="RecoveryTransitionTests.cs" />
     <Compile Include="../../RecoveryHealthGate.cs" Link="RecoveryHealthGate.cs" />
