@@ -38,11 +38,12 @@ public static class EngineConfigContract
         n is JsonValue v && v.TryGetValue<int>(out var num) && num >= min && num <= max;
     private static bool Bool(JsonNode? n) =>
         n is JsonValue v && v.TryGetValue<bool>(out _);
-    private static bool Ip(JsonNode? n, out IPAddress address)
+    private static bool Ip(JsonNode? n, out IPAddress address, bool allowIpv6 = false)
     {
         address = IPAddress.None;
         if (!Str(n, out var literal) || !IPAddress.TryParse(literal, out var parsed) ||
-            parsed.AddressFamily != AddressFamily.InterNetwork) return false;
+            (parsed.AddressFamily != AddressFamily.InterNetwork &&
+             !(allowIpv6 && parsed.AddressFamily == AddressFamily.InterNetworkV6 && !parsed.IsIPv4MappedToIPv6))) return false;
         address = parsed;
         return true;
     }
@@ -50,7 +51,7 @@ public static class EngineConfigContract
     public static bool Validate(string engineId, JsonObject config, bool allowPublicBind)
     {
         if (!ValidEngineId(engineId) || config.ToJsonString().Length > 524288) return false;
-        if (!Ip(config["ListenHost"], out var bind) && engineId == "gslb") return false;
+        if (!Ip(config["ListenHost"], out var bind, allowIpv6: true) && engineId == "gslb") return false;
         if (config["AllowNonLoopbackListeners"] is not null &&
             !Bool(config["AllowNonLoopbackListeners"])) return false;
         var publicOptIn = config["AllowNonLoopbackListeners"] is JsonValue v &&
@@ -72,11 +73,24 @@ public static class EngineConfigContract
                     return false;
                 foreach (var s in sites)
                 {
-                    if (s is not JsonObject site || !Ip(site["Address"],out _) ||
-                        !Num(site["Weight"],1,100) || !Str(site["HealthUrl"],out var url) ||
-                        !Uri.TryCreate(url,UriKind.Absolute,out var uri) ||
-                        (uri.Scheme!="http" && uri.Scheme!="https") ||
-                        !string.IsNullOrEmpty(uri.UserInfo)) return false;
+                    if (s is not JsonObject site || !Ip(site["Address"],out _, allowIpv6: true) ||
+                        !Num(site["Weight"],1,100)) return false;
+                    var probeType = "Http";
+                    if (site["HealthCheckType"] is not null &&
+                        !Str(site["HealthCheckType"], out probeType)) return false;
+                    if (probeType == "Tcp")
+                    {
+                        if (!Num(site["TcpPort"],1,65535) ||
+                            (site["HealthUrl"] is not null &&
+                             !(site["HealthUrl"] is JsonValue text && text.TryGetValue<string>(out var empty) &&
+                               string.IsNullOrWhiteSpace(empty)))) return false;
+                    }
+                    else if (probeType != "Http" ||
+                             (site["TcpPort"] is not null && !Num(site["TcpPort"],0,0)) ||
+                             !Str(site["HealthUrl"],out var url) ||
+                             !Uri.TryCreate(url,UriKind.Absolute,out var uri) ||
+                             (uri.Scheme!="http" && uri.Scheme!="https") ||
+                             !string.IsNullOrEmpty(uri.UserInfo)) return false;
                 }
             }
             return true;
