@@ -4,7 +4,8 @@ using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
 
-// Standalone, NON-recursive authoritative DNS/GSLB prototype. UDP A queries only.
+// Standalone, non-recursive authoritative DNS/GSLB lab engine (UDP and TCP).
+// NS/SOA responses require explicit per-zone name server metadata.
 // No traffic passes through the YARP HTTP reverse proxy.
 if(args.Length != 1 || !File.Exists(args[0]))
 {
@@ -28,7 +29,9 @@ foreach(var zone in config.Zones)
 {
     if (string.IsNullOrWhiteSpace(zone.Name) || zone.Name.Length > 253 ||
         !names.Add(zone.Name.TrimEnd('.')) || zone.TtlSeconds is < 5 or > 300 ||
-        zone.Sites is not {Length: >=1 and <=16})
+        !DnsWireProtocol.ValidName(zone.Name.TrimEnd('.')) ||
+        zone.Sites is not {Length: >=1 and <=16} ||
+        zone.NameServers is {Length: >4} || zone.SoaSerial == 0)
         throw new InvalidDataException("Invalid GSLB zone or TTL");
     var sites=new List<Site>();
     foreach(var site in zone.Sites)
@@ -42,7 +45,27 @@ foreach(var zone in config.Zones)
             throw new InvalidDataException("Invalid GSLB site address, weight or health probe URL");
         sites.Add(new Site(address,health,site.Weight));
     }
-    groups.Add(zone.Name.TrimEnd('.').ToLowerInvariant(), new SiteGroup(sites.ToArray(),zone.TtlSeconds,zone.FailClosedWhenAllSitesDown));
+    var origin = zone.Name.TrimEnd('.').ToLowerInvariant();
+    var servers = new List<DnsNameServer>();
+    var serverNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    foreach (var source in zone.NameServers ?? Array.Empty<DnsNameServerConfig>())
+    {
+        if (source is null || string.IsNullOrWhiteSpace(source.Host) ||
+            !DnsWireProtocol.ValidName(source.Host.TrimEnd('.')) ||
+            !IPAddress.TryParse(source.Address, out var nsAddress) ||
+            nsAddress.AddressFamily != AddressFamily.InterNetwork)
+            throw new InvalidDataException("Invalid authoritative NS host or IPv4 glue");
+        var host = source.Host.TrimEnd('.').ToLowerInvariant();
+        if (!serverNames.Add(host))
+            throw new InvalidDataException("Duplicate authoritative NS hostname");
+        // Explicit out-of-bailiwick servers may be NS targets; their A data is not advertised.
+        servers.Add(new DnsNameServer(host, nsAddress));
+    }
+    var contact = (zone.SoaContact ?? ("hostmaster." + origin)).TrimEnd('.').ToLowerInvariant();
+    if (!DnsWireProtocol.ValidName(contact))
+        throw new InvalidDataException("Invalid SOA contact name");
+    groups.Add(origin, new SiteGroup(sites.ToArray(), zone.TtlSeconds,
+        zone.FailClosedWhenAllSitesDown, servers.ToArray(), contact, zone.SoaSerial));
 }
 using var stop=new CancellationTokenSource();
 Console.CancelKeyPress += (_, e)=>{e.Cancel=true;stop.Cancel();};
@@ -82,7 +105,57 @@ var probes=Task.Run(async()=>{
 });
 using var dnsSocket=new Socket(AddressFamily.InterNetwork,SocketType.Dgram,ProtocolType.Udp);
 dnsSocket.Bind(new IPEndPoint(listen,config.ListenPort));
-Console.WriteLine($"GSLB_DNS_READY UDP={config.ListenHost}:{config.ListenPort} zones={groups.Count}");
+using var tcpListener = new TcpListener(listen, config.ListenPort);
+tcpListener.Start(32);
+using var tcpSlots = new SemaphoreSlim(32);
+var tcpSessions = new List<Task>();
+var tcpAccept = Task.Run(async () =>
+{
+    while (!stop.IsCancellationRequested)
+    {
+        TcpClient session;
+        try { session = await tcpListener.AcceptTcpClientAsync(stop.Token); }
+        catch (OperationCanceledException) when (stop.IsCancellationRequested) { break; }
+        catch (SocketException) when (stop.IsCancellationRequested) { break; }
+        if (!await tcpSlots.WaitAsync(0, stop.Token))
+        {
+            session.Dispose(); // bounded concurrency, no unbounded pending requests
+            continue;
+        }
+        var task = Task.Run(async () =>
+        {
+            using (session)
+            using (var deadline = CancellationTokenSource.CreateLinkedTokenSource(stop.Token))
+            {
+                deadline.CancelAfter(TimeSpan.FromSeconds(5));
+                try
+                {
+                    var stream = session.GetStream();
+                    var length = new byte[2];
+                    await stream.ReadExactlyAsync(length, deadline.Token);
+                    var size = BinaryPrimitives.ReadUInt16BigEndian(length);
+                    if (size is < 17 or > 4096) return;
+                    var packet = new byte[size];
+                    await stream.ReadExactlyAsync(packet, deadline.Token);
+                    var response = DnsWireProtocol.Build(packet, groups, tcp: true);
+                    if (response is null) return;
+                    BinaryPrimitives.WriteUInt16BigEndian(length, checked((ushort)response.Length));
+                    await stream.WriteAsync(length, deadline.Token);
+                    await stream.WriteAsync(response, deadline.Token);
+                }
+                catch (Exception ex) when (ex is IOException or SocketException or
+                    OperationCanceledException or ObjectDisposedException) { }
+                finally { tcpSlots.Release(); }
+            }
+        });
+        lock (tcpSessions)
+        {
+            tcpSessions.RemoveAll(t => t.IsCompleted);
+            tcpSessions.Add(task);
+        }
+    }
+});
+Console.WriteLine($"GSLB_DNS_READY UDP+TCP={config.ListenHost}:{config.ListenPort} zones={groups.Count}");
 var buffer=new byte[4096];
 var responseLimiter=new DnsResponseRateLimiter(config.MaxResponsesPerSecondPerClient);
 try
@@ -98,95 +171,38 @@ try
         // Loopback is still the required default deployment boundary.
         var source=((IPEndPoint)received.RemoteEndPoint).Address;
         if(!responseLimiter.Allow(source,Environment.TickCount64))continue;
-        var response=BuildResponse(buffer.AsSpan(0,received.ReceivedBytes),groups);
+        var response=DnsWireProtocol.Build(buffer.AsSpan(0,received.ReceivedBytes),groups,tcp:false);
         if(response is null)continue;
         try { await dnsSocket.SendToAsync(response,SocketFlags.None,received.RemoteEndPoint,stop.Token); }
         catch(SocketException) when(stop.IsCancellationRequested){break;}
     }
 }
-finally { stop.Cancel();try{await probes;}catch(OperationCanceledException){} }
+finally
+{
+    stop.Cancel();
+    tcpListener.Stop();
+    try { await tcpAccept; } catch (OperationCanceledException) when (stop.IsCancellationRequested) { }
+    Task[] pending;
+    lock (tcpSessions) pending = tcpSessions.ToArray();
+    await Task.WhenAll(pending);
+    try { await probes; } catch (OperationCanceledException) when (stop.IsCancellationRequested) { }
+}
 return 0;
 
-static byte[]? BuildResponse(ReadOnlySpan<byte> query, Dictionary<string, SiteGroup> zones)
-{
-    if(query.Length<17 || query.Length>1232)return null;
-    var id=BinaryPrimitives.ReadUInt16BigEndian(query);
-    var flags=BinaryPrimitives.ReadUInt16BigEndian(query[2..]);
-    if((flags & 0x8000)!=0)return null; // reject responses
-    if(BinaryPrimitives.ReadUInt16BigEndian(query[4..])!=1)return null;
-    var pos=12;
-    var labels=new List<string>(12);
-    while(true)
-    {
-        if(pos>=query.Length)return null;
-        var n=query[pos++];
-        if(n==0)break;
-        if(n>63 || labels.Count>=32 || pos+n>query.Length)return null; // reject compressed input
-        for(var i=pos;i<pos+n;i++)if(query[i]<33 || query[i]>126)return null;
-        labels.Add(Encoding.ASCII.GetString(query.Slice(pos,n)));
-        pos+=n;
-    }
-    if(pos+4>query.Length)return null;
-    var type=BinaryPrimitives.ReadUInt16BigEndian(query.Slice(pos,2));
-    var cls=BinaryPrimitives.ReadUInt16BigEndian(query.Slice(pos+2,2));
-    pos+=4;
-    var domain=string.Join('.',labels).ToLowerInvariant();
-    var code=0; // NOERROR, no recursion
-    Site? selected=null;
-    SiteGroup? group=null;
-    if(!zones.TryGetValue(domain,out group))code=5; // REFUSED; never recurse
-    else if(cls==1 && type==1)
-    {
-        var eligible=group.Sites.Where(x=>Volatile.Read(ref x.Healthy)==1).ToArray();
-        var total=eligible.Sum(x=>x.Weight);
-        if(total==0)
-        {
-            if(group.FailClosedWhenAllSitesDown)code=2; // explicit strict policy
-            else
-            {
-                // Probe failures may be regional or systemic: retain DNS availability.
-                // This is intentionally NOT a claim that any returned site is healthy.
-                eligible=group.Sites;
-                total=eligible.Sum(x=>x.Weight);
-            }
-        }
-        if(total>0)
-        {
-            var ticket=(int)(Interlocked.Increment(ref group.Counter) % total);
-            foreach(var site in eligible)
-            {
-                ticket-=site.Weight;
-                if(ticket<0){selected=site;break;}
-            }
-        }
-    }
-    var hasAnswer=selected is not null;
-    var response=new byte[pos+(hasAnswer?16:0)];
-    BinaryPrimitives.WriteUInt16BigEndian(response.AsSpan(0,2),id);
-    // QR=1, AA=1, RA=0. RD echoed, remaining flags zero.
-    BinaryPrimitives.WriteUInt16BigEndian(response.AsSpan(2,2),(ushort)(0x8400|(flags&0x0100)|code));
-    BinaryPrimitives.WriteUInt16BigEndian(response.AsSpan(4,2),1); // question
-    BinaryPrimitives.WriteUInt16BigEndian(response.AsSpan(6,2),(ushort)(hasAnswer?1:0));
-    query.Slice(12,pos-12).CopyTo(response.AsSpan(12));
-    if(hasAnswer)
-    {
-        var ans=response.AsSpan(pos);
-        ans[0]=0xc0;ans[1]=0x0c; // pointer to question name
-        BinaryPrimitives.WriteUInt16BigEndian(ans.Slice(2,2),1); // A
-        BinaryPrimitives.WriteUInt16BigEndian(ans.Slice(4,2),1); // IN
-        BinaryPrimitives.WriteUInt32BigEndian(ans.Slice(6,4),(uint)group!.Ttl);
-        BinaryPrimitives.WriteUInt16BigEndian(ans.Slice(10,2),4);
-        selected!.Address.GetAddressBytes().CopyTo(ans.Slice(12,4));
-    }
-    return response;
-}
 sealed record DnsConfig(bool AllowNonLoopbackListeners,string ListenHost,int ListenPort,
     int ProbeIntervalSeconds,DnsZone[] Zones)
 {
     public int MaxResponsesPerSecondPerClient {get;init;} = 500;
 }
 sealed record DnsZone(string Name,int TtlSeconds,DnsSite[] Sites,
-    bool FailClosedWhenAllSitesDown=false);
+    bool FailClosedWhenAllSitesDown=false)
+{
+    public DnsNameServerConfig[]? NameServers { get; init; }
+    public string? SoaContact { get; init; }
+    public uint SoaSerial { get; init; } = 1;
+}
+sealed record DnsNameServerConfig(string Host,string Address);
+sealed record DnsNameServer(string Host,IPAddress Address);
 sealed record DnsSite(string Address,string HealthUrl,int Weight);
 sealed class Site
 {
@@ -198,8 +214,13 @@ sealed class Site
 }
 sealed class SiteGroup
 {
-    public SiteGroup(Site[] sites,int ttl,bool failClosedWhenAllSitesDown)
-        =>(Sites,Ttl,FailClosedWhenAllSitesDown)=(sites,ttl,failClosedWhenAllSitesDown);
+    public SiteGroup(Site[] sites,int ttl,bool failClosedWhenAllSitesDown,
+        DnsNameServer[] nameServers,string soaContact,uint soaSerial)
+        =>(Sites,Ttl,FailClosedWhenAllSitesDown,NameServers,SoaContact,SoaSerial)
+        =(sites,ttl,failClosedWhenAllSitesDown,nameServers,soaContact,soaSerial);
+    public DnsNameServer[] NameServers { get; }
+    public string SoaContact { get; }
+    public uint SoaSerial { get; }
     public bool FailClosedWhenAllSitesDown {get;}
     public Site[] Sites {get;}
     public int Ttl {get;}
