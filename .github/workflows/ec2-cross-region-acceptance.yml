@@ -1,0 +1,63 @@
+name: Temporary EC2 cross-region GSLB acceptance
+on:
+  pull_request:
+    branches: [main]
+    paths: [".github/workflows/ec2-cross-region-acceptance.yml"]
+permissions: {}
+jobs:
+  test:
+    if: github.head_ref == 'codex/ec2-cross-region-acceptance'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 6
+    steps:
+      - name: Verify both origins and both authoritative DNS processes
+        env:
+          TEST_KEY: ${{ secrets.EC2_GC_TEST_87323 }}
+        shell: bash
+        run: |
+          set -eu
+          umask 077
+          mkdir -p ~/.ssh
+          printf '%s\n' "$TEST_KEY" > ~/.ssh/id_ed25519
+          unset TEST_KEY
+          cat > ~/.ssh/known_hosts <<'HOSTS'
+          15.252.99.51 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGQ97ugAw9W3k0V2cXp1/vcQMj/NmMd3D3r+RUOq21nJ
+          15.152.85.231 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJyf0HehH6+kSAn8e8BKPO+IImCf/nh5xIXdWeE44VNy
+          HOSTS
+          python - <<'PY'
+          import concurrent.futures, subprocess, time, urllib.request
+          hosts = ["15.252.99.51","15.152.85.231"]
+          def call(host, cmd):
+              return subprocess.check_output(["ssh","-o","BatchMode=yes","-o","ConnectTimeout=5","-o","StrictHostKeyChecking=yes","ec2-user@"+host,cmd], timeout=9,text=True).strip()
+          def expect(answer, nodes=hosts):
+              start=time.monotonic()
+              while time.monotonic()-start < 20:
+                  with concurrent.futures.ThreadPoolExecutor() as pool:
+                      observed=list(pool.map(lambda h: call(h,"query"),nodes))
+                  if observed == [answer]*len(nodes):
+                      print("DNS",nodes,answer,"observed after",round(time.monotonic()-start,2),"seconds",flush=True)
+                      if answer != "SERVFAIL":
+                          with urllib.request.urlopen("http://"+answer+"/gc-87323-test/ready",timeout=4) as resp:
+                              assert resp.read().strip()==b"ready"
+                      return
+              raise RuntimeError((answer,observed))
+          try:
+              expect(hosts[0])
+              call(hosts[0],"withdraw")
+              expect(hosts[1])
+              call(hosts[1],"withdraw")
+              expect("SERVFAIL")
+              call(hosts[1],"restore")
+              expect(hosts[1])
+              call(hosts[0],"restore")
+              expect(hosts[0])
+              for i, host in enumerate(hosts):
+                  call(host,"pause")
+                  expect(hosts[0],[hosts[1-i]])
+                  call(host,"resume")
+                  expect(hosts[0])
+          finally:
+              for host in hosts:
+                  call(host,"resume")
+                  call(host,"restore")
+          PY
