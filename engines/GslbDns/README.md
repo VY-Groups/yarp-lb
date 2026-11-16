@@ -228,6 +228,25 @@ plus an HTTP 302 redirect to a separately healthy backend. DNS must never
 restore the redirected primary. A real external TLS/health acceptance drill
 and isolation across two independent sites remain mandatory for production.
 
+## Opt-in observed probe latency (not user RTT)
+
+`RoutingPolicy: "ObservedLatency"` measures successful HTTP/TCP health probe
+completion time from **this DNS instance** to its configured endpoint. It
+is not end-user-to-datacenter latency and does not imply geographic proximity.
+A bounded exponentially smoothed measurement (alpha 0.25) is available only
+after 3 successful samples, is invalidated on probe failure and must be at most
+15 seconds old. If any currently eligible backend has insufficient/stale
+measurements, the policy uses the preexisting weighted algorithm. If two
+endpoints are within 15% of each other, weighted fallback avoids choosing a
+winner based on small probe jitter. A failed or drained backend is never
+made eligible by an apparently favorable latency score.
+
+`Weighted`, `Failover`, and `CidrRegion` still behave exactly as before.
+No external telemetry, service probes on your infrastructure, or
+client IP/ECS geolocation is enabled. A multi-region RTT architecture needs
+licensed geographic data, independently authenticated vantage-point agents,
+sample freshness/replay fencing, privacy and failover acceptance before GO.
+
 ## Remaining NO-GO areas
 
 DNSSEC signatures/keys, TLS/DoT/DoH, TSIG, DNS NOTIFY, zone transfer, true
