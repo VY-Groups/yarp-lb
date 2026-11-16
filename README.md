@@ -47,6 +47,7 @@ Real-process integration tests start the shipping ASP.NET Core application with 
 | Control Center & browser | Administrator bootstrap, sign-in/out, role restrictions, session invalidation, Setup Center, Architecture, Add Website, Edit Route, Reset Password, navigation and mobile-width UI | Not a substitute for testing every browser or your own deployment |
 | Administrative API/workflows | Cookie/CSRF authorization, onboarding revisions, inventory, separate requester/approver, freeze, live route reload, backups/rollback, audit records and process restart | Real external systems and failure recovery remain site-specific |
 | HTTP L7 gateway | Real requests through YARP, load balancing, metrics, health and controlled failover | Actual traffic mix, TLS policies, hardware HA and sustained throughput require physical testing |
+| Experimental GSLB DNS engine | Independent .NET authoritative-style A/AAAA + NS/SOA, UDP/TCP/EDNS0, weighted/failover/CIDR-resolver routing, HTTP/TCP health and Windows/Linux DNS acceptance | Separate process with static JSON; not a complete authoritative DNS, public GeoIP service, DNSSEC system or UI-managed production deployment |
 | Web servers | Real **Apache httpd** and **Nginx** HTTP origins plus an Nginx → YARP → origin ingress-style chain | This is **not** a Kubernetes Ingress Controller, nor proof of actual IIS/Apache/Nginx site TLS/redirect/auth behavior |
 | SMTP & email OTP | Isolated authenticated STARTTLS SMTP server, certificate verification, protected credentials, message acceptance and OTP sign-in | **Live Zoho inbox delivery remains NOT VERIFIED** |
 | AD/LDAPS | Backend support and local validation/security gates | Live domain controller, CA trust, nested-role mapping and revocation not accepted |
@@ -59,9 +60,42 @@ Relevant tests and workflows:
 - [Isolated authenticated SMTP STARTTLS and OTP](.github/workflows/smtp-starttls-e2e.yml)
 - [Windows and Linux Control Center source checks](.github/workflows/control-center-ci.yml)
 - [L7 HTTP traffic and failover tests](tests/L7/)
+- [Standalone DNS/GSLB acceptance (Windows & Linux)](.github/workflows/gslb-acceptance.yml) — [test code](tests/GslbAcceptance/)
 - [External integration evidence and manual acceptance ledger](control-center/docs/EXTERNAL_INTEGRATION_ACCEPTANCE.md)
 
 **Verified source reference:** [PR #71](../../pull/71) passed **11/11 exact-commit CI workflows**, including the new mail-provider security gate; [PR #68](../../pull/68) delivered the earlier browser fixes. The [test.11 Windows release workflow](.github/workflows/windows-test-release.yml) independently gates source parity, Windows executable smoke and security tests. These results apply only to their verified commits, not to future changes. Check the [latest Actions status](../../actions) before installation.
+
+## Experimental GSLB engine — opt-in lab only
+
+The standalone `engines/GslbDns` process provides **DNS-based global site
+selection**, separate from the YARP HTTP load-balancing dataplane and the
+Control Center's currently managed routes. It is **not automatically deployed,
+configured or controlled by the main GatewayCore management UI**.
+
+Implemented in independently authored .NET code and verified in disposable
+Windows/Linux DNS acceptance: non-recursive UDP/TCP responses for A, AAAA,
+NS and SOA (where configured), EDNS0, address-family-correct negative answers,
+weighted site distribution, optional priority failover, optional private
+resolver-CIDR region mapping, bounded health hysteresis, HTTP(S) / TCP checks,
+and capped parallel health sweeps.
+
+The private CIDR mapping uses the **DNS resolver socket address**, not the
+end-user's presumed geography. It does **not** implement licensed GeoIP or
+ECS-based client location. Do not delegate production DNS domains to this
+prototype. DNSSEC, TSIG, true zone delegation/zone cut, distributed signed
+health quorum, remote API configuration, multi-authority propagation,
+public-network DNS interoperability and physical DC/DR failover remain open.
+
+- [GSLB configuration, behavior and limitations](engines/GslbDns/README.md)
+- [Enterprise feature-parity and release evidence matrix](engines/GslbDns/GSLB_CAPABILITY_PARITY.md)
+- [Updated OpenGSLB source review and licensing boundary](engines/GslbDns/OPENGSLB_REFERENCE_REVIEW.md)
+- [P0 authoritative GSLB issue #52](../../issues/52)
+
+The `gslb` reference branch is currently **OpenGSLB v1.1.10**, with AGPL
+or separate commercial licensing. GatewayCore has **not** copied or linked
+OpenGSLB Go modules; direct code reuse for a proprietary/commercial product
+requires appropriate licensing review. Marketing feature and cost tables
+are requirements inputs, not vendor certifications.
 
 ## SMTP providers and security verification
 
