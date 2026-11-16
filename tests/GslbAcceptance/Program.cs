@@ -48,7 +48,8 @@ File.WriteAllText(configuration,JsonSerializer.Serialize(new {
  Zones=new []{
  new{ Name="app.integration.test",TtlSeconds=10,Sites=new []{
     new { Address="127.0.0.21",HealthUrl="http://127.0.0.1:19711/ready",Weight=2,Priority=0,HealthCheckType="Http",TcpPort=0 },
-    new { Address="127.0.0.22",HealthUrl="http://127.0.0.1:19712/ready",Weight=1,Priority=10,HealthCheckType="Http",TcpPort=0 }
+    new { Address="127.0.0.22",HealthUrl="http://127.0.0.1:19712/ready",Weight=1,Priority=10,HealthCheckType="Http",TcpPort=0 },
+    new { Address="2001:db8::99",HealthUrl="http://127.0.0.1:19711/ready",Weight=1,Priority=20,HealthCheckType="Http",TcpPort=0 }
  },NameServers=new []{
      new {Host="ns1.app.integration.test",Address="127.0.0.31"},
      new {Host="ns2.app.integration.test",Address="127.0.0.32"}
@@ -94,7 +95,16 @@ try
         }
         return seen.Contains("127.0.0.21") && seen.Contains("127.0.0.22");
     });
-    Console.WriteLine("PASS: both sites healthy before distribution sampling");
+    Console.WriteLine("PASS: both IPv4 sites healthy before distribution sampling");
+    var aaaa = await TcpQuery(DnsRequest("app.integration.test",28));
+    Must((Dns16(aaaa,2)&0x0F)==0 && Dns16(aaaa,6)==1 &&
+         Dns16(aaaa,aaaa.Length-18)==16 &&
+         aaaa.AsSpan(aaaa.Length-16,16).SequenceEqual(IPAddress.Parse("2001:db8::99").GetAddressBytes()),
+         "health-aware AAAA returns configured IPv6 address with 16-byte RDATA");
+    var aaaUdp = await QueryWire("app.integration.test",28);
+    Must(Dns16(aaaUdp.Reply,6)==1 && (Dns16(aaaUdp.Reply,2)&0x0F)==0 &&
+        aaaUdp.Reply.AsSpan(aaaUdp.Reply.Length-16).SequenceEqual(IPAddress.Parse("2001:db8::99").GetAddressBytes()),
+        "UDP AAAA record is valid and family-correct");
     await Wait(async()=> (await Query("tcp.integration.test")).Address=="127.0.0.1");
     Must((await Query("tcp.integration.test")).Address=="127.0.0.1",
         "opt-in TCP-connect probe admits ready TCP backend");
@@ -182,7 +192,7 @@ try
     var nx = await TcpQuery(DnsRequest("missing.app.integration.test",1));
     Must((Dns16(nx,2)&0xF)==3 && Dns16(nx,6)==0 && Dns16(nx,8)==1,
         "in-zone unknown name uses NXDOMAIN with SOA negative cache");
-    var nodata = await TcpQuery(DnsRequest("app.integration.test",28));
+    var nodata = await TcpQuery(DnsRequest("ha.integration.test",28));
     Must((Dns16(nodata,2)&0xF)==0 && Dns16(nodata,6)==0 && Dns16(nodata,8)==1,
         "unsupported AAAA is NODATA, not a fabricated IPv6 address");
     var (_, edns) = await QueryWire("app.integration.test",1,ednsVersion:0);

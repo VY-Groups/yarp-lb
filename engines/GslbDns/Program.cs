@@ -45,7 +45,7 @@ foreach(var zone in config.Zones)
             (health.Scheme == Uri.UriSchemeHttp || health.Scheme == Uri.UriSchemeHttps) &&
             string.IsNullOrWhiteSpace(health.UserInfo);
         if(!IPAddress.TryParse(site.Address,out var address) ||
-            address.AddressFamily != AddressFamily.InterNetwork ||
+            address.AddressFamily is not (AddressFamily.InterNetwork or AddressFamily.InterNetworkV6) ||
             site.Weight is < 1 or > 100 ||
             site.Priority is < 0 or > 1000 ||
             site.HealthCheckType is not ("Http" or "Tcp") ||
