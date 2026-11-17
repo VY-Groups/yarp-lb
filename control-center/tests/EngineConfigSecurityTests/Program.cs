@@ -8,6 +8,50 @@ static void Must(bool condition, string name)
     if (!condition) throw new Exception("FAIL: "+name);
     Console.WriteLine("PASS: "+name);
 }
+static bool RejectsOtlpEndpoint(string value)
+{
+    try { OtlpEndpointPolicy.Parse(value); return false; }
+    catch (InvalidOperationException) { return true; }
+}
+Must(OtlpEndpointPolicy.Parse(null) is null && OtlpEndpointPolicy.Parse(" ") is null,
+    "OTLP remains disabled without an endpoint");
+Must(OtlpEndpointPolicy.Parse("https://collector.example:4318") is not null,
+    "remote OTLP collector requires and accepts HTTPS");
+Must(OtlpEndpointPolicy.Parse("http://127.0.0.1:4318") is not null &&
+     OtlpEndpointPolicy.Parse("http://[::1]:4318") is not null,
+    "loopback OTLP collector permits local HTTP for development");
+Must(RejectsOtlpEndpoint("http://collector.example:4318") &&
+     RejectsOtlpEndpoint("http://10.0.0.10:4318"),
+    "remote OTLP collector rejects plaintext HTTP");
+Must(RejectsOtlpEndpoint("https://user:secret@collector.example") &&
+     RejectsOtlpEndpoint("https://collector.example/v1/traces") &&
+     RejectsOtlpEndpoint("https://collector.example?token=secret") &&
+     RejectsOtlpEndpoint("https://collector.example#fragment"),
+    "OTLP endpoint rejects embedded credentials, path, query and fragment");
+Must(RejectsOtlpEndpoint("not a URL") && RejectsOtlpEndpoint("ftp://collector.example"),
+    "malformed and unsupported OTLP endpoints reject startup");
+using (var privacyActivity = new System.Diagnostics.Activity("privacy-contract"))
+{
+    privacyActivity.SetTag("client.address", "203.0.113.8");
+    privacyActivity.SetTag("network.peer.address", "203.0.113.8");
+    privacyActivity.SetTag("url.full", "https://gateway.example/private?id=secret");
+    privacyActivity.SetTag("url.path", "/private");
+    privacyActivity.SetTag("url.query", "id=secret");
+    privacyActivity.SetTag("http.request.header.authorization", "Bearer secret");
+    privacyActivity.SetTag("gateway.route.id", "public_route");
+    privacyActivity.Start();
+    new GatewayTelemetryPrivacyProcessor().OnEnd(privacyActivity);
+    Must(privacyActivity.GetTagItem("client.address") is null &&
+         privacyActivity.GetTagItem("network.peer.address") is null &&
+         privacyActivity.GetTagItem("url.full") is null &&
+         privacyActivity.GetTagItem("url.path") is null &&
+         privacyActivity.GetTagItem("url.query") is null &&
+         privacyActivity.GetTagItem("http.request.header.authorization") is null,
+        "OTLP privacy processor removes client address, raw URL and secret attributes");
+    Must((string?)privacyActivity.GetTagItem("gateway.route.id") == "public_route",
+        "OTLP privacy processor preserves bounded route attribution");
+}
+await GatewayOtlpExporterAcceptance.RunAsync();
 using var key=ECDsa.Create(ECCurve.NamedCurves.nistP256);
 using var wrong=ECDsa.Create(ECCurve.NamedCurves.nistP256);
 var privatePem=key.ExportPkcs8PrivateKeyPem();

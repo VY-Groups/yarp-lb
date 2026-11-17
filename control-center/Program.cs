@@ -37,6 +37,7 @@ var keyDir = Path.Combine(privateDir, "data-protection-keys");
 if (!OperatingSystem.IsLinux() || ec2Lab)
     Directory.CreateDirectory(keyDir);
 var builder = WebApplication.CreateBuilder(args);
+GatewayOpenTelemetry.Configure(builder.Services);
 // Explicit v0.1 multi-socket mode; legacy loopback remains CI migration-only.
 var isolatedListeners = GatewayListenerIsolation.FromEnvironment();
 isolatedListeners?.Configure(builder.WebHost);
@@ -1696,15 +1697,30 @@ app.MapReverseProxy(proxyPipeline =>
     proxyPipeline.Use(async (context, next) =>
     {
         var clock = System.Diagnostics.Stopwatch.GetTimestamp();
-        await next();
-        var feature = context.GetReverseProxyFeature();
-        var destination = feature.ProxiedDestination;
-        if (destination != null)
+        var activity = GatewayOpenTelemetry.StartProxyActivity(context);
+        try
         {
-            var id = feature.Cluster.Config.ClusterId + "/" + destination.DestinationId;
-            var stats = destinationTelemetry.GetOrAdd(id, _ => new DestinationCounters());
-            stats.Record(context.Response.StatusCode,
-                (System.Diagnostics.Stopwatch.GetTimestamp() - clock) * 1000.0 / System.Diagnostics.Stopwatch.Frequency);
+            await next();
+        }
+        catch (Exception ex)
+        {
+            GatewayOpenTelemetry.RecordProxyException(activity, ex);
+            throw;
+        }
+        finally
+        {
+            var elapsedMs = (System.Diagnostics.Stopwatch.GetTimestamp() - clock) * 1000.0 /
+                System.Diagnostics.Stopwatch.Frequency;
+            var feature = context.GetReverseProxyFeature();
+            var destination = feature.ProxiedDestination;
+            GatewayOpenTelemetry.CompleteProxyActivity(activity, context, destination?.DestinationId);
+            GatewayOpenTelemetry.RecordProxyResult(context, elapsedMs);
+            if (destination != null)
+            {
+                var id = feature.Cluster.Config.ClusterId + "/" + destination.DestinationId;
+                var stats = destinationTelemetry.GetOrAdd(id, _ => new DestinationCounters());
+                stats.Record(context.Response.StatusCode, elapsedMs);
+            }
         }
     });
     proxyPipeline.UseSessionAffinity();
