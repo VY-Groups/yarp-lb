@@ -17,6 +17,7 @@ var allowActions = builder.Configuration.GetValue<bool>("Agent:EnableServiceActi
 var allowConfigChanges = builder.Configuration.GetValue<bool>("Agent:EnableConfigChanges");
 var allowEngineConfigChanges = builder.Configuration.GetValue<bool>("Agent:EnableEngineConfigChanges");
 var allowEnginePublicBind = builder.Configuration.GetValue<bool>("Agent:AllowEngineNonLoopbackListeners");
+var gslbMetricsPort = builder.Configuration.GetValue<int>("Agent:GslbMetricsPort");
 var enginePaths = builder.Configuration.GetSection("Agent:EngineConfigPaths")
     .Get<Dictionary<string,string>>() ?? new Dictionary<string,string>();
 var gatewayConfigPath = builder.Configuration["Agent:GatewayConfigPath"] ?? "";
@@ -28,6 +29,8 @@ if (keyPaths.Length == 0 && !string.IsNullOrWhiteSpace(builder.Configuration["Ag
 if ((allowConfigChanges || allowEngineConfigChanges) && (keyPaths.Length is < 1 or > 3 ||
     keyPaths.Any(p => !Path.IsPathFullyQualified(p) || !File.Exists(p))))
     throw new InvalidOperationException("Config rollout requires 1-3 existing absolute pinned public-key paths");
+if (gslbMetricsPort != 0 && (gslbMetricsPort is < 1025 or > 65535))
+    throw new InvalidOperationException("GSLB runtime metrics port must be 0 (disabled) or 1025..65535");
 var signingKeys = new Dictionary<string, string>(StringComparer.Ordinal);
 if (allowConfigChanges || allowEngineConfigChanges)
 foreach (var path in keyPaths)
@@ -123,6 +126,46 @@ app.MapGet("/agent/v1/status", () => Results.Ok(new
     // This reports agent responsiveness only. NOT YARP's internal destination health.
     kind = "authenticated-agent-status"
 }));
+
+app.MapGet("/agent/v1/engines/gslb/runtime-status", async (CancellationToken cancellationToken) =>
+{
+    if (gslbMetricsPort == 0) return Results.NotFound();
+    using var handler = new HttpClientHandler { AllowAutoRedirect = false, UseProxy = false };
+    using var client = new HttpClient(handler)
+    {
+        Timeout = TimeSpan.FromSeconds(2),
+        MaxResponseContentBufferSize = 16_384
+    };
+    try
+    {
+        using var response = await client.GetAsync(
+            $"http://127.0.0.1:{gslbMetricsPort}/metrics", cancellationToken);
+        if (!response.IsSuccessStatusCode ||
+            response.Content.Headers.ContentType?.MediaType != "text/plain")
+            return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
+        var body = await response.Content.ReadAsStringAsync(cancellationToken);
+        if (!GslbRuntimeMetricsParser.TryParse(body, out var snapshot) || snapshot is null)
+            return Results.StatusCode(StatusCodes.Status502BadGateway);
+        return Results.Ok(new
+        {
+            type = "loopback-gslb-runtime-metrics",
+            checkedUtc = DateTimeOffset.UtcNow,
+            quorumTargets = new { configured = snapshot.ConfiguredTargets,
+                quorum = snapshot.QuorumTargets, belowQuorum = snapshot.BelowQuorumTargets },
+            observerReports = new { healthy = snapshot.HealthyReports,
+                unhealthy = snapshot.UnhealthyReports, unknown = snapshot.UnknownReports,
+                staleOrMissing = snapshot.StaleOrMissingReports }
+        });
+    }
+    catch (HttpRequestException)
+    {
+        return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
+    }
+    catch (TaskCanceledException) when (!cancellationToken.IsCancellationRequested)
+    {
+        return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
+    }
+});
 
 app.MapGet("/agent/v1/services/{serviceName}", async (string serviceName) =>
 {

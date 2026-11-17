@@ -30,6 +30,20 @@ the transition comparison. A staged file still requires a controlled service
 restart, and serial equality across independent DNS nodes requires coordinated
 signed rollout.
 
+### Optional read-only GSLB runtime summary
+
+Set `Agent:GslbMetricsPort` to the DNS process's loopback-only
+`MetricsListenPort` to enable `GET /agent/v1/engines/gslb/runtime-status`;
+`0` disables it. The GatewayAgent contacts only `127.0.0.1` on this configured
+port, with redirects and proxy use disabled, a two-second timeout, and a 16 KiB
+response cap. It returns only fixed quorum and observer-freshness counts after
+validating the expected metric series. The Control Center calls this endpoint
+with its existing pinned mTLS client and displays the per-authority snapshot.
+This does not query DNS answers, confirm that the DNS process is actually
+serving, or compare authority nodes. Configure a local Prometheus collector to
+scrape the DNS metrics listener as well; this management view is not durable
+metrics storage.
+
 ## Explicit limitations and deployment gate
 
 - No Control Center UI or fleet-wide orchestration yet invokes these engine endpoints.

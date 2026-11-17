@@ -497,9 +497,8 @@ survives and any replies remain ID-correlated and amplification-bounded. Full
 local Windows GSLB acceptance passed; exact-head tests are pending.
 
 A manually dispatched one-hour, 75-VU, 1-KiB HTTP soak on disposable GitHub
-runners is running at
-https://github.com/VY-Groups/yarp-lb/actions/runs/44074344501. It is L7
-runtime/memory evidence, not GSLB consensus or annual uptime evidence.
+runners is running (Actions run ID `44074344501`). It is L7 runtime/memory
+evidence, not GSLB consensus or annual uptime evidence.
 
 At this snapshot, open P0 issues #36, #52 and #109 remain open. #109 still needs
 cross-authority partition fencing/consensus, dynamic operator trust/evidence
@@ -510,3 +509,41 @@ resolver/load/chaos acceptance, even if the current child-referral branch passes
 VRRP/ECMP and capacity/fault acceptance. Other P0/P1 issues also remain open;
 refresh the live GitHub issue list before the next action. Availability SLO,
 CI and static quarantine are not substitutes for these gates.
+
+## Continuation — authenticated runtime metrics and test-environment requirements (2026-11-17)
+
+PR #129 is merged at `356901897376bb549b6a936d0e6996cac9fc5874`. It verifies
+the explicitly unsupported DNSSEC wire behavior and a deterministic malformed
+UDP parser corpus; this does **not** implement DNSSEC signing. The live GitHub
+issue query for #52 and #109 still returned OPEN, and there were no open PRs at
+the time this continuation was written.
+
+Branch `codex/issue109-gslb-runtime-evidence-ui` is preparing the next focused
+PR. It adds a bounded, read-only GSLB metric parser and optional loopback scrape
+on GatewayAgent, relays a fixed quorum/freshness snapshot over the existing
+pinned mTLS connection, and displays that snapshot in the fleet page. Local
+Release builds for GatewayAgent and Control Center passed with zero warnings;
+the actual temporary-CA Kestrel mTLS integration passed, including rejection
+of a malformed metrics contract; TypeScript compilation and 14 browser/UI
+contract tests passed. Exact-head GitHub Actions are still required. The
+metrics view is not a DNS query, authority agreement, durable report store or
+production health check.
+
+The one-hour 75-VU GitHub-hosted HTTP soak remains at
+Actions run ID `44074344501`. At the latest query the run was still
+`in_progress` and its job had no completion timestamp;
+do not claim a completed soak until the workflow produces a final result and
+artifact. Even if it passes, it is an L7 synthetic runner test, not annual
+availability or physical gateway capacity acceptance.
+
+The user's planned company test environment has more than ten mixed public and
+private application servers behind a firewall. Required next product work
+includes explicit HTTP and HTTPS upstream support, trustworthy client-IP
+logging with UTC timestamps, operator dashboards/charts, and downloadable
+customer reports. Client addresses must come from the socket peer or explicitly
+configured trusted proxies; arbitrary forwarding headers are untrusted. DNSSEC
+signing is a required capability and remains absent. These requirements are
+not complete in this branch. Rolling annual 99.9% availability remains an
+8h45m36s error budget objective whose production SLI is unmeasured; production
+remains NO-GO pending DNSSEC, trust/quorum/fencing, real network/fault/capacity
+acceptance, and an externally monitored annual period.
