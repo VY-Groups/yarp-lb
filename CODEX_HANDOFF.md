@@ -413,14 +413,17 @@ The branding check remains unchanged.
 Mandatory ECC 2.2.3 TDD/security/verification guidance is in use. The user has
 Windows Server 2022 and Ubuntu test machines but has explicitly requested
 GitHub Actions-only testing and cannot provide access. Physical-host acceptance
-remains NOT PERFORMED. Treat 99.9% as an availability target pending its precise
-SLI/window definition, never as a correctness guarantee. Source parity, DNSSEC,
+remains NOT PERFORMED. Treat 99.9% as an annual rolling availability target
+(365 days; 8h 45m 36s error budget), never as a correctness guarantee. Its
+production SLI remains unmeasured. Source parity, DNSSEC,
 signed agent authority/quorum/partition fencing, GeoIP/ECS, calibrated prediction
 and remaining P0/P1 operational evidence remain incomplete. Production NO-GO.
 
 ## Continuation — annual objective, GSLB observability and quarantine (2026-11-17)
 
-Current `main` is `abbe1751d169260e936b304ee1ad3ce8ab646894`; PR #121 merged
+Current `main` is `8c0986705d176a42c1c42a84c098bb5d3b2cace8`.
+
+On `main`, PR #121 merged
 opt-in loopback-only GSLB metrics, bounded Prometheus alerts, synthetic alert
 fixtures and an importable Grafana dashboard. Its exact-head Windows/Linux,
 Prometheus, application and integration Actions passed. This was a Codex
@@ -447,15 +450,19 @@ assumptions, not observed production availability; the SLI remains unknown
 until an externally monitored service and sufficient annual probe coverage
 exist. Do not report the objective as achieved or production GO.
 
-Current feature branch `codex/issue109-two-authority-partition-acceptance`
-extends Linux multi-process acceptance to two DNS authorities with isolated
-report replay state. It partitions the observer feed to one authority, checks
-that node fail-closes after the 8-second report TTL while the other remains
-healthy, and checks recovery only after fresh quorum returns. Python syntax
-and real .NET/OpenSSL multi-process execution passed locally on Windows; Linux
-GitHub Actions must still execute its exact-head version. This tests
+PR #124 merged the two-authority observer-feed partition acceptance case. It
+uses isolated report replay state, verifies the affected DNS authority
+fail-closes after the 8-second TTL while the other continues serving, and
+requires fresh quorum before recovery. Windows and Linux exact-head GSLB
+acceptance, BIND/Knot DNS interoperability, and all L7/HA/load Actions passed;
+merged-main GSLB and L7 Actions also passed on `8c09867...`. This tests
 observer-to-authority partition behavior only, not node-to-node consensus or
-fencing.
+fencing. GitHub had no independent reviewer recorded.
+
+Current feature branch `codex/issue52-dns-malformed-packet-acceptance` adds an
+eight-case malformed DNS/EDNS UDP corpus. Local Windows GSLB acceptance passed:
+malformed packets received no replies and a valid DNS query still succeeded
+afterward. Exact-head GitHub Actions have not run yet.
 
 At this snapshot, open P0 issues #36, #52 and #109 remain open. #109 still needs
 cross-authority partition fencing/consensus, dynamic operator trust/evidence
