@@ -46,13 +46,16 @@ try
     using var signing1 = ECDsa.Create(ECCurve.NamedCurves.nistP256);
     using var signing1Rotated = ECDsa.Create(ECCurve.NamedCurves.nistP256);
     using var signing2 = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+    using var signing3 = ECDsa.Create(ECCurve.NamedCurves.nistP256);
     using var client1Key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
     using var client1RotatedKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
     using var client2Key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+    using var client3Key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
     var client1Request = new CertificateRequest("CN=agent-1", client1Key, HashAlgorithmName.SHA256);
     var client1RotatedRequest = new CertificateRequest("CN=agent-1-rotated", client1RotatedKey, HashAlgorithmName.SHA256);
     var client2Request = new CertificateRequest("CN=agent-2", client2Key, HashAlgorithmName.SHA256);
-    foreach (var request in new[] { client1Request, client1RotatedRequest, client2Request })
+    var client3Request = new CertificateRequest("CN=agent-3", client3Key, HashAlgorithmName.SHA256);
+    foreach (var request in new[] { client1Request, client1RotatedRequest, client2Request, client3Request })
     {
         request.CertificateExtensions.Add(new X509BasicConstraintsExtension(false, false, 0, true));
         var eku = new OidCollection { new Oid("1.3.6.1.5.5.7.3.2") };
@@ -61,19 +64,35 @@ try
     using var client1 = client1Request.CreateSelfSigned(DateTimeOffset.UtcNow.AddMinutes(-1), DateTimeOffset.UtcNow.AddHours(1));
     using var client1Rotated = client1RotatedRequest.CreateSelfSigned(DateTimeOffset.UtcNow.AddMinutes(-1), DateTimeOffset.UtcNow.AddHours(1));
     using var client2 = client2Request.CreateSelfSigned(DateTimeOffset.UtcNow.AddMinutes(-1), DateTimeOffset.UtcNow.AddHours(1));
+    using var client3 = client3Request.CreateSelfSigned(DateTimeOffset.UtcNow.AddMinutes(-1), DateTimeOffset.UtcNow.AddHours(1));
     var key1Path = Path.Combine(reportRoot, "agent-1.pem");
     var key1RotatedPath = Path.Combine(reportRoot, "agent-1-rotated.pem");
     var key2Path = Path.Combine(reportRoot, "agent-2.pem");
+    var key3Path = Path.Combine(reportRoot, "agent-3.pem");
     File.WriteAllText(key1Path, signing1.ExportSubjectPublicKeyInfoPem());
     File.WriteAllText(key1RotatedPath, signing1Rotated.ExportSubjectPublicKeyInfoPem());
     File.WriteAllText(key2Path, signing2.ExportSubjectPublicKeyInfoPem());
+    File.WriteAllText(key3Path, signing3.ExportSubjectPublicKeyInfoPem());
     var agents = new[] {
-        new AgentTrust("agent-1", [Convert.ToHexString(client1.GetCertHash(HashAlgorithmName.SHA256)),
+        new AgentTrust("agent-1", "vantage-mumbai", [Convert.ToHexString(client1.GetCertHash(HashAlgorithmName.SHA256)),
             Convert.ToHexString(client1Rotated.GetCertHash(HashAlgorithmName.SHA256))], [key1Path, key1RotatedPath]),
-        new AgentTrust("agent-2", [Convert.ToHexString(client2.GetCertHash(HashAlgorithmName.SHA256))], [key2Path])
+        new AgentTrust("agent-2", "vantage-osaka", [Convert.ToHexString(client2.GetCertHash(HashAlgorithmName.SHA256))], [key2Path]),
+        new AgentTrust("agent-3", "vantage-singapore", [Convert.ToHexString(client3.GetCertHash(HashAlgorithmName.SHA256))], [key3Path])
     };
-    var targets = new[] { new AgentReportTarget("lab.example.test", "mumbai", ["agent-1", "agent-2"]) };
+    var targets = new[] { new AgentReportTarget("lab.example.test", "mumbai",
+        ["agent-1", "agent-2", "agent-3"], MinimumHealthyVantageGroups: 2) };
     var statePath = Path.Combine(reportRoot, "replay-state.json");
+    var duplicateVantageRejected = false;
+    try
+    {
+        using var invalidReports = new AgentHealthReportStore(
+            [agents[0], agents[1] with { VantageGroup = agents[0].VantageGroup }],
+            [new AgentReportTarget("lab.example.test", "duplicate-vantage", ["agent-1", "agent-2"], 2)],
+            Path.Combine(reportRoot, "duplicate-vantage-state.json"), 10, 5, 2);
+    }
+    catch (InvalidDataException) { duplicateVantageRejected = true; }
+    if (!duplicateVantageRejected)
+        throw new Exception("FAIL: two agent identities from the same declared vantage group were counted as independent votes");
     var observed = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
     AgentHealthReport Report(string agent, long sequence, string verdict, int confidence, int? latency, ECDsa signer) {
         var unsigned = new AgentHealthReport(1, agent, AgentHealthReportContract.KeyId(signer),
@@ -92,27 +111,31 @@ try
         if (!reports.TryAccept(Report("agent-1", 1, "healthy", 1000, 12, signing1), client1,
                 DateTimeOffset.FromUnixTimeSeconds(observed), 100) ||
             reports.IsHealthy("lab.example.test", "mumbai", 101))
-            throw new Exception("FAIL: one observer satisfied the configured two-agent unanimous policy");
+            throw new Exception("FAIL: one vantage group satisfied a two-group threshold");
         if (!reports.TryAccept(Report("agent-2", 1, "healthy", 1000, 20, signing2), client2,
                 DateTimeOffset.FromUnixTimeSeconds(observed), 100) ||
             !reports.IsHealthy("lab.example.test", "mumbai", 101))
-            throw new Exception("FAIL: fresh independent reports did not satisfy target policy");
+            throw new Exception("FAIL: two fresh independent reports did not satisfy 2-of-3 policy");
+        var unknown = Report("agent-3", 1, "unknown", 0, null, signing3);
+        if (!reports.TryAccept(unknown, client3, DateTimeOffset.FromUnixTimeSeconds(observed), 100) ||
+            !reports.IsHealthy("lab.example.test", "mumbai", 101))
+            throw new Exception("FAIL: unknown evidence incorrectly counted as a negative quorum vote");
         if (reports.TryAccept(Report("agent-1", 1, "healthy", 1000, 12, signing1), client1,
                 DateTimeOffset.FromUnixTimeSeconds(observed), 100) ||
             reports.TryAccept(Report("agent-1", 2, "healthy", 1000, 12, signing1), client2,
                 DateTimeOffset.FromUnixTimeSeconds(observed), 100))
             throw new Exception("FAIL: replay or certificate/report identity mismatch accepted");
-        if (!reports.TryAccept(Report("agent-1", 2, "unhealthy", 1000, null, signing1), client1,
+        if (!reports.TryAccept(Report("agent-3", 2, "unhealthy", 1000, null, signing3), client3,
                 DateTimeOffset.FromUnixTimeSeconds(observed), 100) ||
             reports.IsHealthy("lab.example.test", "mumbai", 101))
-            throw new Exception("FAIL: fresh negative agent evidence did not fail closed");
+            throw new Exception("FAIL: fresh negative evidence did not veto positive quorum reports");
     }
     using (var recovered = new AgentHealthReportStore(agents, targets, statePath, 10, 5, 2))
     {
         if (recovered.IsHealthy("lab.example.test", "mumbai", 101) ||
-            recovered.TryAccept(Report("agent-1", 2, "healthy", 1000, 12, signing1), client1,
+            recovered.TryAccept(Report("agent-1", 1, "healthy", 1000, 12, signing1), client1,
                 DateTimeOffset.FromUnixTimeSeconds(observed), 101) ||
-            !recovered.TryAccept(Report("agent-1", 3, "healthy", 1000, 12, signing1), client1,
+            !recovered.TryAccept(Report("agent-1", 2, "healthy", 1000, 12, signing1), client1,
                 DateTimeOffset.FromUnixTimeSeconds(observed), 101) ||
             !recovered.TryAccept(Report("agent-2", 2, "healthy", 1000, 20, signing2), client2,
                 DateTimeOffset.FromUnixTimeSeconds(observed), 101) ||
@@ -122,13 +145,13 @@ try
         if (recovered.TryAccept(Report("agent-2", 3, "healthy", 1000, 20, signing2), client2,
                 DateTimeOffset.FromUnixTimeSeconds(observed + 6), 103))
             throw new Exception("FAIL: stale observer report accepted");
-        if (!recovered.TryAccept(Report("agent-1", 4, "healthy", 1000, 14, signing1Rotated), client1Rotated,
+        if (!recovered.TryAccept(Report("agent-1", 3, "healthy", 1000, 14, signing1Rotated), client1Rotated,
                 DateTimeOffset.FromUnixTimeSeconds(observed), 104))
             throw new Exception("FAIL: overlapping client certificate and signing-key rotation rejected");
     }
 }
 finally { Directory.Delete(reportRoot, recursive: true); }
-Console.WriteLine("PASS: agent identity, unanimous-vantage reports, replay persistence, expiry and fail-closed recovery");
+Console.WriteLine("PASS: agent identity, 2-of-3 vantage quorum, negative veto, replay persistence, expiry and recovery");
 LatencyRoutingTests.Run();
 // Exercise opt-in probe-latency state with deterministic monotonic timestamps.
 var latency = new DnsProbeLatency();

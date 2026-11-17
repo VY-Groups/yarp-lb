@@ -299,7 +299,7 @@ The versioned signed report includes agent and key IDs, scoped zone/site, probe 
 
 The receiver requires a client certificate pinned by SHA-256, a matching ECDSA P-256 report-signing key, a bounded HTTP body, a bounded per-agent request rate, a valid timestamp/expiry, and an increasing `(epoch, sequence)` for each agent/site. Certificate pins support up to four overlapping leaves per identity for rotation; an emergency SHA-256 denylist rejects revoked leaves. Agent IDs are limited to 64 ASCII identifier characters. Replay high-water marks are written atomically before a report is accepted; the state file is mode `0600` on Linux. Protect its parent directory and Windows ACLs, include it in secure backups, and do not delete it during restart/restore. The actual live report is memory-only, so a restarted DNS node begins unknown and requires new reports.
 
-Every `RequiredAgentIds` entry is mandatory (a strict unanimous policy, not an N-of-M majority quorum). A site's DNS eligibility is the conjunction of its local active health probe, any existing synchronous external validators, and a fresh positive report from **every configured required agent**. Missing, stale, negative, unknown, unsigned, replayed or misidentified reports keep it ineligible; the strict all-down policy then returns SERVFAIL when no other eligible site exists. Reports never promote a failed local probe. Predicted-health scores are not accepted by this protocol and cannot affect DNS selection. Each DNS node keeps its own replay state; configure agents to send to each authoritative node independently.
+`RequiredAgentIds` names the bounded candidate reporter set (2..16). Each trusted agent must have an operator-configured `VantageGroup`; the group is a configuration label, not independently verified proof of geographic or network-path diversity. Reports from multiple agents in one group count as only one vote. `MinimumHealthyAgentReports` sets the minimum number of distinct fresh healthy groups and must be 2..N; when omitted, it defaults to N to preserve the original strict unanimous behavior. A fresh `unhealthy` report from any configured candidate vetoes eligibility. Missing, stale and `unknown` reports do not vote. The threshold is satisfied only by distinct fresh healthy groups. A site's DNS eligibility is also conjunctive with its local active health probe and any synchronous external validators. The strict all-down policy then returns SERVFAIL when no other eligible site exists. Reports never promote a failed local probe. Predicted-health scores are not accepted by this protocol and cannot affect DNS selection. Each DNS node keeps its own replay state; configure agents to send to each authoritative node independently.
 
 When an observer uses a custom server CA, `ReportServerRevocationMode` defaults to `Online` and fails closed if revocation status cannot be established. `NoCheck` is only appropriate for isolated disposable test PKI without CRL/OCSP; it disables server-certificate revocation checks and must not be copied into production configuration. Agent client leaves are pinned directly and can be revoked through the receiver's explicit denylist.
 
@@ -319,9 +319,9 @@ Example shape (paths, certificate pins, keys, limits and addresses below are pla
         "MaxReportsPerMinute": 120,
         "RevokedCertificateSha256": [],
         "Agents": [
-          {"AgentId":"region-a","CertificateSha256":["<64-hex-SHA256-leaf-pin>"],
+          {"AgentId":"region-a","VantageGroup":"region-a","CertificateSha256":["<64-hex-SHA256-leaf-pin>"],
            "SigningPublicKeyPems":["/secure/region-a-report.pub.pem"]},
-          {"AgentId":"region-b","CertificateSha256":["<64-hex-SHA256-leaf-pin>"],
+          {"AgentId":"region-b","VantageGroup":"region-b","CertificateSha256":["<64-hex-SHA256-leaf-pin>"],
            "SigningPublicKeyPems":["/secure/region-b-report.pub.pem"]}
         ]
       },
@@ -329,13 +329,14 @@ Example shape (paths, certificate pins, keys, limits and addresses below are pla
         "Name":"app.example.test", "TtlSeconds":5,
         "FailClosedWhenAllSitesDown":true,
         "Sites":[{"Address":"192.0.2.10", "HealthUrl":"https://app.example.test/ready",
-          "Weight":1, "AgentSiteId":"primary", "RequiredAgentIds":["region-a","region-b"]}]
+          "Weight":1, "AgentSiteId":"primary", "RequiredAgentIds":["region-a","region-b"],
+          "MinimumHealthyAgentReports":2}]
       }]
     }
 
 Each observer's optional report configuration includes `ReportUrl` ending in `/agent-health/v1/reports`, its `AgentId`, `Zone`, `SiteId`, a P-256 `SigningKeyPem`, a client certificate/key with clientAuth EKU, an optional `ReportServerCaPem` custom CA, a protected absolute `ReportSequenceStatePath`, `ReportIntervalSeconds` and `ReportTtlSeconds`. The report carries the SHA-256 key ID of its signer; the receiver can trust up to four public signing keys per agent during rotation. Without `ReportServerCaPem`, normal system TLS trust and hostname checks apply. The observer increments and persists a sender epoch at each restart and persists each sequence before sending. A lost sender sequence file causes old epochs to be rejected; restore it or explicitly re-enroll with a new identity.
 
-The receiver binds only to the configured address; non-loopback binding requires explicit opt-in and a private firewall rule. Its default concurrency, body, identity and rate bounds do not replace network ACLs, certificate rotation/revocation operations, protected state backups or production key custody. GitHub/Linux integration tests cover disposable two-agent mTLS, signed positive/negative reports, expiry, restart and recovery. This is a new protocol foundation, **not** complete partition fencing, multi-node quorum consensus, predictive health, fleet UI/metrics, CA-sensitive authority validation, 60-minute physical acceptance or production GO.
+The receiver binds only to the configured address; non-loopback binding requires explicit opt-in and a private firewall rule. Its default concurrency, body, identity and rate bounds do not replace network ACLs, certificate rotation/revocation operations, protected state backups or production key custody. GitHub/Linux integration tests cover disposable three-agent mTLS, two-of-three group quorum, one-agent outage tolerance, below-quorum fail-closed, negative veto, expiry, restart and recovery. This local per-target threshold is **not** consensus or fencing between authoritative DNS nodes: each node evaluates its own incoming reports and can disagree during a partition. Predictive health, fleet UI/metrics, CA-sensitive authority validation, 60-minute physical acceptance and production GO remain open.
 ## Opt-in weighted priority groups
 
 Set `RoutingPolicy: "WeightedFailover"` to select the lowest numeric

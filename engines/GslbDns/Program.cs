@@ -65,8 +65,11 @@ foreach(var zone in config.Zones)
                 (!zone.FailClosedWhenAllSitesDown ||
                  !AgentHealthReportContract.IsValidIdentifier(site.AgentSiteId) ||
                  site.RequiredAgentIds.Length is < 2 or > 16 ||
+                 (site.MinimumHealthyAgentReports is int minimumReports &&
+                    (minimumReports < 2 || minimumReports > site.RequiredAgentIds.Length)) ||
                  site.RequiredAgentIds.Distinct(StringComparer.Ordinal).Count() != site.RequiredAgentIds.Length)) ||
-            (site.RequiredAgentIds is null && site.AgentSiteId is not null) ||
+            (site.RequiredAgentIds is null &&
+                (site.AgentSiteId is not null || site.MinimumHealthyAgentReports is not null)) ||
             site.HealthCheckType is not ("Http" or "Tcp") ||
             (site.HealthCheckType == "Http" && (!validHttpUrl || site.TcpPort != 0)) ||
             (site.HealthCheckType == "Tcp" &&
@@ -81,7 +84,8 @@ foreach(var zone in config.Zones)
             { Validators = observers });
         if (site.RequiredAgentIds is { Length: > 0 })
             reportTargets.Add(new AgentReportTarget(zone.Name.TrimEnd('.').ToLowerInvariant(),
-                site.AgentSiteId!, site.RequiredAgentIds));
+                site.AgentSiteId!, site.RequiredAgentIds,
+                site.MinimumHealthyAgentReports ?? site.RequiredAgentIds.Length));
     }
     if (sites.Any(site => site.RequiredAgentIds.Length > 0) &&
         sites.Any(site => site.RequiredAgentIds.Length == 0))
@@ -330,6 +334,7 @@ sealed record DnsSite(string Address,string? HealthUrl,int Weight,int Priority=0
     public string? Region { get; init; }
     public string? AgentSiteId { get; init; }
     public string[]? RequiredAgentIds { get; init; }
+    public int? MinimumHealthyAgentReports { get; init; }
 }
 sealed class Site
 {

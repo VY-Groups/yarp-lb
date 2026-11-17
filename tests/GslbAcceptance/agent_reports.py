@@ -95,7 +95,9 @@ def main():
         dns_cert, dns_key = issue("dns-report", "serverAuth")
         server_cert, server_key = issue("observer-server", "serverAuth")
         agents = []
-        for agent_id in ("agent-1", "agent-2"):
+        for agent_id, vantage_group in (("agent-1", "vantage-mumbai"),
+                                        ("agent-2", "vantage-osaka"),
+                                        ("agent-3", "vantage-singapore")):
             cert, key = issue(agent_id, "clientAuth")
             public_key = root / f"{agent_id}-signing.pub"
             signer = root / f"{agent_id}-signing.key"
@@ -103,7 +105,8 @@ def main():
             openssl("pkey", "-in", str(signer), "-pubout", "-out", str(public_key))
             der = subprocess.run(["openssl", "x509", "-in", str(cert), "-outform", "DER"],
                                  capture_output=True, check=True).stdout
-            agents.append({"id": agent_id, "cert": cert, "key": key, "signer": signer,
+            agents.append({"id": agent_id, "vantage_group": vantage_group,
+                           "cert": cert, "key": key, "signer": signer,
                            "public": public_key, "pin": hashlib.sha256(der).hexdigest().upper()})
 
         local = serve(stack)
@@ -119,7 +122,8 @@ def main():
             "ReplayStatePath": str(root / "dns-replay-state.json"),
             "MaxTtlSeconds": 8, "MaxAgeSeconds": 6, "MaxClockSkewSeconds": 2,
             "MaxReportsPerMinute": 120, "RevokedCertificateSha256": [],
-            "Agents": [{"AgentId": a["id"], "CertificateSha256": [a["pin"]],
+            "Agents": [{"AgentId": a["id"], "VantageGroup": a["vantage_group"],
+                        "CertificateSha256": [a["pin"]],
                         "SigningPublicKeyPems": [str(a["public"])]} for a in agents]
         }
         dns_config = root / "zones.json"
@@ -131,7 +135,8 @@ def main():
                        "Sites": [{"Address": "192.0.2.17",
                                   "HealthUrl": f"http://127.0.0.1:{local.server_port}/ready",
                                   "Weight": 1, "AgentSiteId": "mumbai",
-                                  "RequiredAgentIds": [a["id"] for a in agents]}]}]
+                                  "RequiredAgentIds": [a["id"] for a in agents],
+                                  "MinimumHealthyAgentReports": 2}]}]
         }))
         dns_log = root / "dns.log"
         dns_log_handle = dns_log.open("w")
@@ -179,7 +184,7 @@ def main():
         for agent in agents:
             start_agent(agent)
         expect_dns(dns, dns_port, 0, "192.0.2.17", log_paths=[dns_log, *agent_logs])
-        print("PASS: two mTLS agents with signed fresh reports admit a locally healthy site")
+        print("PASS: three mTLS agents with two fresh independent vantage groups admit the site")
 
         # One independent observer reports a real failure while the DNS node's
         # local readiness endpoint stays healthy; the quorum must withdraw it.
@@ -189,14 +194,18 @@ def main():
         agents[0]["upstream"].verdict = 200
         expect_dns(dns, dns_port, 0, "192.0.2.17", log_paths=[dns_log, *agent_logs])
 
-        # Stopping one agent lets its signed lease expire. Restart increments its
-        # durable epoch; the DNS node accepts fresh evidence but rejects replays.
+        # Two of three independent groups remain sufficient when one reporter
+        # disappears; one remaining group is below threshold and fails closed.
         processes[0].kill()
         processes[0].wait(timeout=5)
+        expect_dns(dns, dns_port, 0, "192.0.2.17", timeout=12,
+                   log_paths=[dns_log, *agent_logs])
+        processes[1].kill()
+        processes[1].wait(timeout=5)
         expect_dns(dns, dns_port, 2, timeout=12, log_paths=[dns_log, *agent_logs])
         processes[0] = start_agent(agents[0])
         expect_dns(dns, dns_port, 0, "192.0.2.17", log_paths=[dns_log, *agent_logs])
-        print("PASS: expired-agent fail-closed, durable epoch restart and recovery")
+        print("PASS: N-of-M tolerance, below-quorum fail-closed, durable epoch restart and recovery")
 
 
 if __name__ == "__main__":

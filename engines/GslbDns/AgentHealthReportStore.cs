@@ -4,12 +4,15 @@ using System.Security.Cryptography.X509Certificates;
 using System.Text.Json;
 using GatewayCore.Gslb.Contracts;
 
-internal sealed record AgentTrust(string AgentId, string[] CertificateSha256, string[] SigningPublicKeyPems);
-internal sealed record AgentReportTarget(string Zone, string SiteId, string[] RequiredAgentIds);
+internal sealed record AgentTrust(string AgentId, string VantageGroup,
+    string[] CertificateSha256, string[] SigningPublicKeyPems);
+internal sealed record AgentReportTarget(string Zone, string SiteId, string[] RequiredAgentIds,
+    int MinimumHealthyVantageGroups);
 
 /// <summary>
-/// Bounded report store. Every configured agent is required for a target;
-/// fresh negative evidence or missing evidence keeps that target ineligible.
+/// Bounded report store. A target requires a configured number of fresh
+/// positive, independently declared vantage groups; any fresh negative
+/// report remains a veto, and missing/unknown evidence never counts.
 /// Replay high-water marks survive DNS process restarts; report health itself
 /// does not, so a restarted DNS node waits for fresh reports.
 /// </summary>
@@ -17,11 +20,12 @@ internal sealed class AgentHealthReportStore : IDisposable
 {
     private sealed record ReplayPoint(long Epoch, long Sequence);
     private sealed record ReplayFile(int Version, Dictionary<string, ReplayPoint> Points);
-    private sealed record LiveReport(bool Healthy, long ExpiresAtTick);
+    private sealed record LiveReport(string Verdict, long ExpiresAtTick);
+    private sealed record ReportPolicy(string[] AgentIds, int MinimumHealthyVantageGroups);
 
     private readonly object gate = new();
     private readonly Dictionary<string, AgentTrustEntry> agents;
-    private readonly Dictionary<string, string[]> targets;
+    private readonly Dictionary<string, ReportPolicy> targets;
     private readonly Dictionary<string, ReplayPoint> highWater;
     private FileStream? stateLock;
     private readonly Dictionary<string, LiveReport> live = new(StringComparer.Ordinal);
@@ -53,6 +57,7 @@ internal sealed class AgentHealthReportStore : IDisposable
             foreach (var item in trust)
             {
                 if (item is null || !AgentHealthReportContract.IsValidIdentifier(item.AgentId) ||
+                    !AgentHealthReportContract.IsValidIdentifier(item.VantageGroup) ||
                     item.CertificateSha256 is not { Length: >= 1 and <= 4 } ||
                     item.SigningPublicKeyPems is not { Length: >= 1 and <= 4 } ||
                     item.SigningPublicKeyPems.Any(path => !Path.IsPathFullyQualified(path)))
@@ -81,29 +86,36 @@ internal sealed class AgentHealthReportStore : IDisposable
                     if (!publicKeys.TryAdd(AgentHealthReportContract.KeyId(key), encodedKey))
                         throw new InvalidDataException("Duplicate agent report signing key");
                 }
-                if (!agents.TryAdd(item.AgentId, new AgentTrustEntry(certPins, publicKeys)))
+                if (!agents.TryAdd(item.AgentId, new AgentTrustEntry(item.VantageGroup, certPins, publicKeys)))
                     throw new InvalidDataException("Duplicate agent identity");
             }
 
             var targetRows = configuredTargets?.ToArray() ?? throw new InvalidDataException("Agent report targets required");
             if (targetRows.Length is < 1 or > 1024)
                 throw new InvalidDataException("Agent report targets must contain 1..1024 zone/site pairs");
-            targets = new Dictionary<string, string[]>(StringComparer.OrdinalIgnoreCase);
+            targets = new Dictionary<string, ReportPolicy>(StringComparer.OrdinalIgnoreCase);
             foreach (var target in targetRows)
             {
                 if (target is null || string.IsNullOrWhiteSpace(target.Zone) ||
                     string.IsNullOrWhiteSpace(target.SiteId) ||
                     target.RequiredAgentIds is not { Length: >= 2 and <= 16 } ||
+                    target.MinimumHealthyVantageGroups is < 2 or > 16 ||
+                    target.MinimumHealthyVantageGroups > target.RequiredAgentIds.Length ||
                     target.RequiredAgentIds.Distinct(StringComparer.Ordinal).Count() != target.RequiredAgentIds.Length ||
                     target.RequiredAgentIds.Any(id => !agents.ContainsKey(id)))
-                    throw new InvalidDataException("Each report-gated site needs 2..16 distinct trusted agents");
-                if (!targets.TryAdd(TargetKey(target.Zone, target.SiteId), target.RequiredAgentIds.ToArray()))
+                    throw new InvalidDataException("Each report-gated site needs a bounded agent set and healthy-vantage threshold");
+                var vantageGroups = target.RequiredAgentIds.Select(id => agents[id].VantageGroup)
+                    .Distinct(StringComparer.Ordinal).Count();
+                if (target.MinimumHealthyVantageGroups > vantageGroups)
+                    throw new InvalidDataException("Healthy-vantage threshold exceeds distinct configured vantage groups");
+                if (!targets.TryAdd(TargetKey(target.Zone, target.SiteId), new ReportPolicy(
+                    target.RequiredAgentIds.ToArray(), target.MinimumHealthyVantageGroups)))
                     throw new InvalidDataException("Duplicate report-gated zone/site");
             }
             stateLock = AcquireStateLock(statePath);
             highWater = LoadReplayState(statePath);
-            var maximumPoints = targets.Values.Sum(ids => ids.Length);
-            var allowedPoints = targets.SelectMany(target => target.Value.Select(agentId =>
+            var maximumPoints = targets.Values.Sum(policy => policy.AgentIds.Length);
+            var allowedPoints = targets.SelectMany(target => target.Value.AgentIds.Select(agentId =>
                 ReplayKey(agentId, target.Key.Split('\n')[0], target.Key.Split('\n')[1])))
                 .ToHashSet(StringComparer.Ordinal);
             if (highWater.Count > maximumPoints || highWater.Keys.Any(key => !allowedPoints.Contains(key)))
@@ -123,8 +135,8 @@ internal sealed class AgentHealthReportStore : IDisposable
         ArgumentNullException.ThrowIfNull(clientCertificate);
         if (!AgentHealthReportContract.IsValid(report, maxTtlSeconds)) return false;
         var agent = agents.GetValueOrDefault(report.AgentId);
-        if (agent is null || !targets.TryGetValue(TargetKey(report.Zone, report.SiteId), out var required) ||
-            !required.Contains(report.AgentId, StringComparer.Ordinal)) return false;
+        if (agent is null || !targets.TryGetValue(TargetKey(report.Zone, report.SiteId), out var policy) ||
+            !policy.AgentIds.Contains(report.AgentId, StringComparer.Ordinal)) return false;
 
         var nowSeconds = now.ToUnixTimeSeconds();
         if (report.ObservedAtUnixSeconds > nowSeconds + maxClockSkewSeconds ||
@@ -159,7 +171,7 @@ internal sealed class AgentHealthReportStore : IDisposable
                 throw;
             }
             live[LiveKey(targetKey, report.AgentId)] = new LiveReport(
-                report.Verdict == "healthy", checked(nowTick + remainingSeconds * 1000));
+                report.Verdict, checked(nowTick + remainingSeconds * 1000));
         }
         return true;
     }
@@ -208,16 +220,18 @@ internal sealed class AgentHealthReportStore : IDisposable
     public bool IsHealthy(string zone, string siteId, long nowTick)
     {
         var targetKey = TargetKey(zone, siteId);
-        if (!targets.TryGetValue(targetKey, out var required)) return true;
+        if (!targets.TryGetValue(targetKey, out var policy)) return true;
         lock (gate)
         {
-            foreach (var agentId in required)
+            var positiveVantages = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var agentId in policy.AgentIds)
             {
                 if (!live.TryGetValue(LiveKey(targetKey, agentId), out var report) ||
-                    nowTick >= report.ExpiresAtTick || !report.Healthy)
-                    return false;
+                    nowTick >= report.ExpiresAtTick) continue;
+                if (report.Verdict == "unhealthy") return false;
+                if (report.Verdict == "healthy") positiveVantages.Add(agents[agentId].VantageGroup);
             }
-            return true;
+            return positiveVantages.Count >= policy.MinimumHealthyVantageGroups;
         }
     }
 
@@ -225,7 +239,7 @@ internal sealed class AgentHealthReportStore : IDisposable
     {
         if (!File.Exists(path)) return new Dictionary<string, ReplayPoint>(StringComparer.Ordinal);
         EnsurePrivateFile(path);
-        var maximumBytes = Math.Max(4096, targets.Values.Sum(ids => ids.Length) * 512);
+        var maximumBytes = Math.Max(4096, targets.Values.Sum(policy => policy.AgentIds.Length) * 512);
         if (new FileInfo(path).Length > maximumBytes)
             throw new InvalidDataException("Replay state exceeds configured storage bound");
         var file = JsonSerializer.Deserialize<ReplayFile>(File.ReadAllBytes(path))
@@ -310,9 +324,10 @@ internal sealed class AgentHealthReportStore : IDisposable
         stateLock?.Dispose();
     }
 
-    private sealed class AgentTrustEntry(byte[][] certificateSha256,
+    private sealed class AgentTrustEntry(string vantageGroup, byte[][] certificateSha256,
         Dictionary<string, byte[]> signingPublicKeys) : IDisposable
     {
+        public string VantageGroup { get; } = vantageGroup;
         public byte[][] CertificateSha256 { get; } = certificateSha256;
         public Dictionary<string, byte[]> SigningPublicKeys { get; } = signingPublicKeys;
         public void Dispose()
