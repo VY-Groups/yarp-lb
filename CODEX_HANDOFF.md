@@ -619,3 +619,32 @@ failure/recovery acceptance remain open. #52 stays OPEN. #50 is also still
 OPEN: PR #131 gives per-request logs, one local latency chart and process-life
 JSON/CSV exports, but not central durable OTel/Grafana reports. #36 and #109
 remain OPEN. Rolling annual availability remains unmeasured; production NO-GO.
+
+## Continuation — merged DNSSEC verification and GeoIP/ECS routing (2026-11-17)
+
+PR #132 merged at `b3740d2022762b3c50f28c956ba56fd9ab776fca`. Its merged-main
+GSLB and L7 Actions runs `44087251727` and `44087251747` both completed with
+`success` on that exact SHA. This confirms source CI, not public parent
+delegation, DNSSEC rollover, multi-authority convergence or production DNS.
+
+Current branch `codex/issue52-geoip-ecs` starts at that merge and adds opt-in
+`RoutingPolicy="GeoIpEcs"` using operator-provided local MaxMind Country and/or
+ASN MMDB files, explicit region maps, trusted-resolver ECS, a 45-day default
+database freshness guard and privacy caps of IPv4 `/24` and IPv6 `/56`.
+Database records more specific than the masked ECS network, conflicting
+configured country/ASN routes, unknown/unmapped data, untrusted resolvers or
+unhealthy regional targets do not steer or echo ECS. The existing weighted
+policy remains the fallback. No client subnet is logged or retained. CI uses
+only the small synthetic upstream test MMDB fixtures documented in
+`tests/GslbAcceptance/testdata/README.md`; production data is not included.
+
+Local Windows Release build passed with zero warnings and the full real-socket
+GSLB acceptance suite passed, including country/ASN MMDB lookups, narrower
+record fallback, ECS trust/privacy and DNS response behavior. Exact-head
+Windows/Linux Actions and PR review are pending. This advances issue #52 but
+does not close it: customer database licensing/update operations, real resolver
+privacy/cache tests, independent parent delegation, multi-authority acceptance
+and deployment operations remain open. #36 physical gateway acceptance, #109
+distributed health trust/fencing and #50 durable centralized observability also
+remain open. Annual 99.9% production availability remains unmeasured; production
+NO-GO.

@@ -62,8 +62,10 @@ No Go binaries were executed during this comparison.
   transactional signing/PKI correctness guarantee.
 - DNS 5–300s TTL and client caching mean DNS answer changes do not cause
   immediate failover at the connection layer.
-- No IPv6 AAAA GSLB, licensed GeoIP/ASN database, ECS client privacy controls,
-  DDoS edge shield, or DNS zone-cut/referral conformance suite.
+- IPv6 AAAA, opt-in DNSSEC, trusted-resolver ECS, and local MMDB country/ASN
+  routing are implemented in the lab; independent public delegation,
+  customer database licensing/update operations, multi-authority and resolver
+  cache acceptance remain open. There is no DDoS edge shield.
 - Benchmark matched direct/other-GSLB baseline, fuzz malformed EDNS/DNS
   packets, resolve from independent public and private network vantage
   points, verify multi-NS SOA convergence, serial lifecycle and physical

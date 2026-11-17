@@ -237,6 +237,25 @@ internal static class DnsWireProtocol
                                 if (regional.Length > 0) eligible = regional;
                             }
                         }
+                        else if (zone.RoutingPolicy == "GeoIpEcs" &&
+                            zone.EnableEcsGeoRouting && ecsInput is not null &&
+                            zone.TrustedEcsResolvers?.RegionFor(resolverIp) == "trusted")
+                        {
+                            var scopedInput = ApplyEcsPrivacyLimit(ecsInput);
+                            var geoRegion = zone.GeoIpTable?.RegionForEcs(
+                                scopedInput.Address, scopedInput.SourcePrefix);
+                            if (geoRegion is { } match)
+                            {
+                                var regional = eligible.Where(s =>
+                                    string.Equals(s.Region, match.Region,
+                                        StringComparison.OrdinalIgnoreCase)).ToArray();
+                                if (regional.Length > 0)
+                                {
+                                    eligible = regional;
+                                    AddEcsResponse(scopedInput, match.PrefixLength, responseEcs);
+                                }
+                            }
+                        }
                         Site? chosen = null;
                         if (zone.RoutingPolicy == "Failover")
                         {

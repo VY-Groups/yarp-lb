@@ -282,6 +282,36 @@ if(!rate.Allow(ip1,0) || !rate.Allow(ip1,100) || rate.Allow(ip1,200) ||
 Console.WriteLine("PASS: UDP response rate limit, table capacity, expiry and recovery");
 var repo=args.Length==1?Path.GetFullPath(args[0]):Directory.GetCurrentDirectory();
 var dll=Path.Combine(repo,"engines","GslbDns","bin","Release","net10.0","GslbDns.dll");
+var countryFixture = Path.Combine(repo, "tests", "GslbAcceptance", "testdata", "GeoIP2-Country-Test.mmdb");
+var asnFixture = Path.Combine(repo, "tests", "GslbAcceptance", "testdata", "GeoLite2-ASN-Test.mmdb");
+if (Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(countryFixture))) !=
+        "FC12D6470B35B70BD3E4534DD433D3E262A6C73F7682F85C344E832D4190F02B" ||
+    Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(asnFixture))) !=
+        "A0F9E8614AD582BA1AF3EEB18EAD666F73AD6E4CBD5280F80D5D4D95BBE6C3F1")
+    throw new Exception("FAIL: upstream synthetic MaxMind fixture digest changed");
+using (var geoDatabase = new GeoIpEcsDatabase(countryFixture, asnFixture, 0))
+{
+    var routes = geoDatabase.CreateTable(
+        [new GeoCountryRoute("GB", "uk")], [new GeoAsnRoute(15169, "mumbai")]);
+    if (routes.RegionForEcs(IPAddress.Parse("1.0.0.1"), 24) is not
+        { Region: "mumbai", PrefixLength: 24 })
+        throw new Exception("FAIL: bounded MaxMind ASN MMDB lookup did not select the explicitly mapped region");
+    if (routes.RegionForEcs(IPAddress.Parse("81.2.69.160"), 24) is not null)
+        throw new Exception("FAIL: country MMDB record more specific than privacy-limited ECS incorrectly routed");
+    if (routes.RegionForEcs(IPAddress.Parse("81.2.69.160"), 27) is not
+        { Region: "uk", PrefixLength: 27 })
+        throw new Exception("FAIL: explicit country ISO route did not map the synthetic fixture");
+    if (GeoIpEcsRegionTable.ResolveConfiguredRegions("osaka", "mumbai", 24) is not null ||
+        GeoIpEcsRegionTable.ResolveConfiguredRegions(null, "mumbai", 24) is not
+            { Region: "mumbai", PrefixLength: 24 })
+        throw new Exception("FAIL: conflicting country/ASN routes did not fail closed or single-source route failed");
+}
+Console.WriteLine("PASS: MaxMind MMDB route mapping, privacy-boundary fallback, and unknown-country handling");
+var staleGeoDatabaseRejected = false;
+try { using var _ = new GeoIpEcsDatabase(countryFixture, null, 1); }
+catch (InvalidDataException) { staleGeoDatabaseRejected = true; }
+if (!staleGeoDatabaseRejected)
+    throw new Exception("FAIL: a GeoIP database outside the configured freshness window was accepted");
 if(!File.Exists(dll))throw new FileNotFoundException("Compile DNS server first",dll);
 using var cancel=new CancellationTokenSource();
 var s1=new ProbeState { DelayMs=180 };var s2=new ProbeState();var s3=new ProbeState();
@@ -320,6 +350,8 @@ File.WriteAllText(configuration,JsonSerializer.Serialize(new {
  AllowNonLoopbackListeners=false,
  ListenHost="127.0.0.1",ListenPort=15353,ProbeIntervalSeconds=1,
  MetricsListenHost="127.0.0.1",MetricsListenPort=metricsPort,
+ GeoIpCountryDatabasePath=countryFixture,GeoIpAsnDatabasePath=asnFixture,
+ GeoIpMaxDatabaseAgeDays=0,
  Zones=new object[]{
  new {Name="chain.integration.test",TtlSeconds=10,Sites=chainSites,
       NameServers=new[]{new {Host="ns.chain.integration.test",Address="127.0.0.31"}},
@@ -394,6 +426,19 @@ File.WriteAllText(configuration,JsonSerializer.Serialize(new {
        new {Cidr="198.51.101.0/24",Region="local"},
        new {Cidr="2001:db8:abcd::/56",Region="dr"}
    }},
+ new{ Name="geoip.integration.test",TtlSeconds=10,Sites=new []{
+    new { Address="127.0.0.21",HealthUrl="http://127.0.0.1:19711/ready",
+          Weight=1,Priority=0,HealthCheckType="Http",TcpPort=0,Region="mumbai" },
+    new { Address="127.0.0.22",HealthUrl="http://127.0.0.1:19712/ready",
+          Weight=1,Priority=1,HealthCheckType="Http",TcpPort=0,Region="osaka" }
+ },NameServers=new []{
+     new {Host="ns1.geoip.integration.test",Address="127.0.0.31"}
+ },SoaContact="hostmaster.geoip.integration.test",SoaSerial=2026111601u,
+   RoutingPolicy="GeoIpEcs",FailureThreshold=1,SuccessThreshold=1,
+   FailClosedWhenAllSitesDown=true,EnableEcsGeoRouting=true,
+   TrustedEcsResolverCidrs=new[]{"127.0.0.1/32"},
+   GeoCountryRoutes=new[]{new {CountryCode="GB",Region="osaka"}},
+   GeoAsnRoutes=new[]{new {Asn=15169L,Region="mumbai"}}},
  new{ Name="latency.integration.test",TtlSeconds=10,Sites=new []{
     new { Address="127.0.0.21",HealthUrl="http://127.0.0.1:19711/ready",
           Weight=1,Priority=0,HealthCheckType="Http",TcpPort=0 },
@@ -434,7 +479,7 @@ try
     Must(metricsText.Contains("# TYPE gatewaycore_gslb_dns_queries_total counter", StringComparison.Ordinal) &&
          metricsText.Contains("gatewaycore_gslb_dns_queries_total{transport=\"udp\"} ", StringComparison.Ordinal) &&
          metricsText.Contains("gatewaycore_gslb_dns_responses_total{transport=\"udp\",rcode=\"NOERROR\"} ", StringComparison.Ordinal) &&
-         metricsText.Contains("gatewaycore_gslb_configured_zones 10", StringComparison.Ordinal) &&
+         metricsText.Contains("gatewaycore_gslb_configured_zones 11", StringComparison.Ordinal) &&
          metricsText.Contains("gatewaycore_gslb_administratively_quarantined_sites 2", StringComparison.Ordinal) &&
          !metricsText.Contains("app.integration.test", StringComparison.Ordinal) &&
          !metricsText.Contains("127.0.0.21", StringComparison.Ordinal),
@@ -582,6 +627,22 @@ try
     for(var i=0;i<12;i++)
         Must((await Query("geo.integration.test")).Address=="127.0.0.21",
             "IPv4 resolver /32 specific region beats broader /8 mapping");
+    var (_, geoIpReply) = await QueryEcsWire("geoip.integration.test", 1,
+        IPAddress.Parse("1.0.0.1"), 32);
+    Must(Dns16(geoIpReply, 6) == 1 &&
+         geoIpReply.AsSpan(geoIpReply.Length - 26, 4).SequenceEqual(new byte[] {127,0,0,21}) &&
+         geoIpReply.AsSpan(geoIpReply.Length - 3, 3).SequenceEqual(new byte[] {1,0,0}),
+         "trusted privacy-capped ECS uses the explicit MaxMind ASN-to-region map and returns only /24 cache scope");
+    var (_, narrowGeoReply) = await QueryEcsWire("geoip.integration.test", 1,
+        IPAddress.Parse("81.2.69.160"), 32);
+    Must(narrowGeoReply.AsSpan(narrowGeoReply.Length - 11, 11).SequenceEqual(
+             new byte[] {0,0,41,4,208,0,0,0,0,0,0}),
+         "more-specific country MMDB data falls back without echoing a misleading /24 ECS scope");
+    var (_, untrustedGeoReply) = await QueryEcsWire("geoip.integration.test", 1,
+        IPAddress.Parse("1.0.0.1"), 32, IPAddress.Parse("127.0.0.2"));
+    Must(untrustedGeoReply.AsSpan(untrustedGeoReply.Length - 11, 11).SequenceEqual(
+             new byte[] {0,0,41,4,208,0,0,0,0,0,0}),
+         "untrusted resolver cannot use MaxMind ECS routing or receive an ECS echo");
     var aaaa = await TcpQuery(DnsRequest("app.integration.test",28));
     Must((Dns16(aaaa,2)&0x0F)==0 && Dns16(aaaa,6)==1 &&
          Dns16(aaaa,aaaa.Length-18)==16 &&
