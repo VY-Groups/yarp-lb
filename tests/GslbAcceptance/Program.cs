@@ -724,6 +724,34 @@ try
     var (_, badVers) = await QueryWire("app.integration.test",1,ednsVersion:1);
     Must(Dns16(badVers,6)==0 && Dns16(badVers,10)==1 &&
          badVers[^6]==1,"EDNS version mismatch signals BADVERS, without A answer");
+    var malformedBase = DnsRequest("app.integration.test",1);
+    var noQuestions = (byte[])malformedBase.Clone();
+    BinaryPrimitives.WriteUInt16BigEndian(noQuestions.AsSpan(4,2),0);
+    var multipleQuestions = (byte[])malformedBase.Clone();
+    BinaryPrimitives.WriteUInt16BigEndian(multipleQuestions.AsSpan(4,2),2);
+    var badLabel = (byte[])malformedBase.Clone();
+    badLabel[12]=64;
+    var compressedQuestion = (byte[])malformedBase.Clone();
+    compressedQuestion[12]=0xC0;
+    var trailingData = malformedBase.Concat(new byte[]{0}).ToArray();
+    var multipleAdditionals = (byte[])malformedBase.Clone();
+    BinaryPrimitives.WriteUInt16BigEndian(multipleAdditionals.AsSpan(10,2),2);
+    var truncatedOpt = DnsRequest("app.integration.test",1,ednsVersion:0)[..^1];
+    var malformedPackets = new (byte[] Packet,string Case)[] {
+        (malformedBase[..12],"short DNS header"),
+        (noQuestions,"zero-question frame"),
+        (multipleQuestions,"multiple-question frame"),
+        (badLabel,"oversized DNS label"),
+        (compressedQuestion,"compressed question name"),
+        (trailingData,"unaccounted trailing byte"),
+        (multipleAdditionals,"multiple additional records"),
+        (truncatedOpt,"truncated EDNS OPT")
+    };
+    foreach (var malformed in malformedPackets)
+        await ExpectUdpDrop(malformed.Packet,malformed.Case);
+    Must(!dns.HasExited && (await Query("app.integration.test")).Address is not null,
+        "DNS listener remains healthy after malformed packet corpus");
+    Console.WriteLine("PASS: malformed DNS/EDNS packet corpus is dropped without responses; listener stays healthy");
     var glue = await TcpQuery(DnsRequest("ns1.app.integration.test",1));
     Must(Dns16(glue,6)==1 && glue.AsSpan(glue.Length-4).SequenceEqual(new byte[]{127,0,0,31}),
         "bailiwick NS hostname resolves to configured glue A");
@@ -861,6 +889,19 @@ async Task<(byte[] Request,byte[] Reply)> QueryWire(string domain,ushort type,by
     Must(reply.Buffer.Length>=12 && Dns16(reply.Buffer,0)==0x4613,
         "DNS UDP transaction matching");
     return(packet,reply.Buffer);
+}
+async Task ExpectUdpDrop(byte[] packet,string scenario)
+{
+    using var sender = new UdpClient(AddressFamily.InterNetwork);
+    sender.Connect(IPAddress.Loopback,15353);
+    await sender.SendAsync(packet,CancellationToken.None);
+    using var timeout = new CancellationTokenSource(TimeSpan.FromMilliseconds(200));
+    try
+    {
+        _ = await sender.ReceiveAsync(timeout.Token);
+        throw new Exception("FAIL: malformed DNS packet received a response: "+scenario);
+    }
+    catch (OperationCanceledException) when (timeout.IsCancellationRequested) { }
 }
 async Task<(byte[] Request,byte[] Reply)> QueryEcsWire(
     string domain, ushort type, IPAddress clientAddress, int sourcePrefix, IPAddress? resolverSource = null)
