@@ -22,7 +22,8 @@ if (!IPAddress.TryParse(config.ListenHost, out var listen) ||
     listen.IsIPv4MappedToIPv6 ||
     listen.AddressFamily is not (AddressFamily.InterNetwork or AddressFamily.InterNetworkV6) ||
     (!config.AllowNonLoopbackListeners && !IPAddress.IsLoopback(listen)) ||
-    config.ListenPort is < 1025 or > 65535 ||
+    (config.ListenPort is < 1025 or > 65535) &&
+        !(config.ListenPort == 53 && config.AllowNonLoopbackListeners && !IPAddress.IsLoopback(listen)) ||
     config.ProbeIntervalSeconds is < 1 or > 60 ||
     config.MaxResponsesPerSecondPerClient is < 20 or > 20000 ||
     config.MaxConcurrentHealthProbes is < 1 or > 128 ||

@@ -63,7 +63,9 @@ public static class EngineConfigContract
                           v.TryGetValue<bool>(out var opted) && opted;
         if (engineId == "gslb")
         {
-            if (!Num(config["ListenPort"],1025,65535) ||
+            var listenPortAllowed = Num(config["ListenPort"],1025,65535) ||
+                Num(config["ListenPort"],53,53) && allowPublicBind && publicOptIn && !IPAddress.IsLoopback(bind);
+            if (!listenPortAllowed ||
                 !Num(config["ProbeIntervalSeconds"],1,60) ||
                 (config["MaxResponsesPerSecondPerClient"] is not null &&
                  !Num(config["MaxResponsesPerSecondPerClient"],20,20000)) ||

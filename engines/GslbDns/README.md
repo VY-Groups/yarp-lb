@@ -4,7 +4,7 @@ This separate, non-recursive .NET 10 engine is NOT the HTTP YARP dataplane and
 must not be delegated a production domain. It serves explicit IPv4 A and
 IPv6 AAAA GSLB backends, with HTTP(S) and opt-in TCP health probes,
 weighted/Failover selection, response rate limits and per-zone all-down policy.
-The DNS listener remains IPv4-only even when answering AAAA queries.
+The DNS listener supports IPv4 and IPv6, including the standard public DNS port 53 when an operator explicitly opts in to a non-loopback listener. A privileged bind requires the service identity to have OS permission (for example, Linux `CAP_NET_BIND_SERVICE`); do not run the production service as root. The default test configuration remains loopback-only on port 15353.
 
 ## Private CIDR-to-region routing (opt-in)
 
@@ -199,6 +199,14 @@ The sample health URLs are placeholders, not functioning external services.
 Use a disposable lab. Query A, SOA and NS via:
 dig @127.0.0.1 -p 15353 app.example.test A
 Then retry with +tcp as necessary. Never expose this lab service to the Internet.
+
+For a separately approved authoritative deployment on the standard public port,
+set `ListenHost` to the intended service address, `ListenPort` to `53`, and
+`AllowNonLoopbackListeners` to `true`. Signed engine staging also requires the
+independent local public-bind permission. Configure OS capabilities/service
+permissions for UDP and TCP port 53 rather than running as root. Keep the
+management and metrics listeners private; this engine is non-recursive and
+serves only explicitly configured zones.
 
 ## Original behavior preserved
 
