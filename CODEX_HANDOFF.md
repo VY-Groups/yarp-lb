@@ -600,7 +600,7 @@ establish annual 99.9% availability, physical gateway capacity, or DNS
 consensus.
 
 Current branch `codex/issue52-dnssec-signing` is rebased on PR #131's main.
-Commit `ba13101d9a86cf1aa273cf656bfa3dab6081f731` adds opt-in per-zone
+Source commit `836c6a8` adds opt-in per-zone
 ECDSA P-256/SHA-256 (algorithm 13) signing from a separately provisioned PEM
 key; DNSKEY/DS presentation, dynamic A/AAAA signatures, signed SOA/NS and NSEC
 proofs for NODATA, NXDOMAIN, and unsigned child DS absence. Unsigned zones
