@@ -338,6 +338,15 @@ File.WriteAllText(configuration,JsonSerializer.Serialize(new {
       Sites=new[]{new {Address="127.0.0.21",HealthUrl="http://127.0.0.1:19711/ready",Weight=1,Priority=0,HealthCheckType="Http",TcpPort=0,AdministrativelyQuarantined=true}},
       RoutingPolicy="Weighted",FailureThreshold=1,SuccessThreshold=1,
       FailClosedWhenAllSitesDown=false},
+ new {Name="delegated.integration.test",TtlSeconds=10,
+      Sites=new[]{new {Address="127.0.0.21",HealthUrl="http://127.0.0.1:19711/ready",Weight=1,Priority=0,HealthCheckType="Http",TcpPort=0}},
+      NameServers=new[]{new {Host="ns1.delegated.integration.test",Address="127.0.0.31"}},
+      Delegations=new[]{new {Name="child.delegated.integration.test",
+        NameServers=new[]{
+          new {Host="ns.child.delegated.integration.test",Address="127.0.0.61"},
+          new {Host="ns.other.example.net",Address="192.0.2.53"}}}},
+      RoutingPolicy="Failover",FailureThreshold=1,SuccessThreshold=1,
+      FailClosedWhenAllSitesDown=true},
  new{ Name="app.integration.test",TtlSeconds=10,Sites=new []{
     new { Address="127.0.0.21",HealthUrl="http://127.0.0.1:19711/ready",Weight=2,Priority=0,HealthCheckType="Http",TcpPort=0 },
     new { Address="127.0.0.22",HealthUrl="http://127.0.0.1:19712/ready",Weight=1,Priority=10,HealthCheckType="Http",TcpPort=0 },
@@ -425,11 +434,16 @@ try
     Must(metricsText.Contains("# TYPE gatewaycore_gslb_dns_queries_total counter", StringComparison.Ordinal) &&
          metricsText.Contains("gatewaycore_gslb_dns_queries_total{transport=\"udp\"} ", StringComparison.Ordinal) &&
          metricsText.Contains("gatewaycore_gslb_dns_responses_total{transport=\"udp\",rcode=\"NOERROR\"} ", StringComparison.Ordinal) &&
-         metricsText.Contains("gatewaycore_gslb_configured_zones 9", StringComparison.Ordinal) &&
+         metricsText.Contains("gatewaycore_gslb_configured_zones 10", StringComparison.Ordinal) &&
          metricsText.Contains("gatewaycore_gslb_administratively_quarantined_sites 2", StringComparison.Ordinal) &&
          !metricsText.Contains("app.integration.test", StringComparison.Ordinal) &&
          !metricsText.Contains("127.0.0.21", StringComparison.Ordinal),
          "loopback-only GSLB exporter reports bounded runtime series without zone names or backend addresses");
+    _ = await TcpQuery(DnsRequest("app.integration.test", 1));
+    metricsText = await metricsClient.GetStringAsync($"http://127.0.0.1:{metricsPort}/metrics");
+    Must(metricsText.Contains("gatewaycore_gslb_dns_queries_total{transport=\"tcp\"} 1", StringComparison.Ordinal) &&
+         metricsText.Contains("gatewaycore_gslb_dns_responses_total{transport=\"tcp\",rcode=\"NOERROR\"} 1", StringComparison.Ordinal),
+         "GSLB exporter counts an actual DNS-over-TCP query and response");
     await Wait(async () =>
     {
         var response = await Query("quarantine.integration.test");
@@ -445,11 +459,22 @@ try
     Must(fullyQuarantined.Status == 2 && fullyQuarantined.Address is null,
         "availability-first fallback never selects an administratively quarantined site");
     Console.WriteLine("PASS: operator quarantine keeps a healthy primary out of DNS failover selection");
-    _ = await TcpQuery(DnsRequest("app.integration.test", 1));
-    metricsText = await metricsClient.GetStringAsync($"http://127.0.0.1:{metricsPort}/metrics");
-    Must(metricsText.Contains("gatewaycore_gslb_dns_queries_total{transport=\"tcp\"} 1", StringComparison.Ordinal) &&
-         metricsText.Contains("gatewaycore_gslb_dns_responses_total{transport=\"tcp\",rcode=\"NOERROR\"} 1", StringComparison.Ordinal),
-         "GSLB exporter counts an actual DNS-over-TCP query and response");
+    var delegatedNs = await TcpQuery(DnsRequest("child.delegated.integration.test", 2));
+    Must((Dns16(delegatedNs, 2) & 0x0400) == 0 && (Dns16(delegatedNs, 2) & 0x000f) == 0 &&
+         Dns16(delegatedNs, 6) == 0 && Dns16(delegatedNs, 8) == 2 && Dns16(delegatedNs, 10) == 1 &&
+         DnsRecordTypes(delegatedNs, 1).SequenceEqual(new ushort[] { 2, 2 }) &&
+         DnsRecordTypes(delegatedNs, 2).SequenceEqual(new ushort[] { 1 }),
+         "delegation apex returns non-authoritative NS referral and in-bailiwick glue only");
+    var delegatedChild = await TcpQuery(DnsRequest("www.child.delegated.integration.test", 1));
+    Must((Dns16(delegatedChild, 2) & 0x0400) == 0 && Dns16(delegatedChild, 6) == 0 &&
+         Dns16(delegatedChild, 8) == 2 && Dns16(delegatedChild, 10) == 1,
+         "names beneath a delegation receive the nearest referral instead of parent-zone answers");
+    var delegatedDs = await TcpQuery(DnsRequest("child.delegated.integration.test", 43));
+    Must((Dns16(delegatedDs, 2) & 0x0400) != 0 && (Dns16(delegatedDs, 2) & 0x000f) == 0 &&
+         Dns16(delegatedDs, 6) == 0 && Dns16(delegatedDs, 8) == 1 &&
+         DnsRecordTypes(delegatedDs, 1).SequenceEqual(new ushort[] { 6 }),
+         "unsigned-parent DS absence returns authoritative negative SOA instead of referral");
+    Console.WriteLine("PASS: DNS child-zone referrals, authority flags, in-bailiwick glue and DS absence");
     Console.WriteLine("PASS: loopback GSLB runtime metrics, transport counters and low-cardinality privacy contract");
     // The policy deliberately falls back to weighted while samples accumulate.
     // Wait for three independently scheduled one-second probe cycles before
@@ -761,6 +786,50 @@ async Task<(int Status,string? Address,int Ttl)> Query(string domain)
 }
 
 ushort Dns16(byte[] packet, int index) => BinaryPrimitives.ReadUInt16BigEndian(packet.AsSpan(index,2));
+
+ushort[] DnsRecordTypes(byte[] packet, int section)
+{
+    if (section is < 0 or > 2) throw new ArgumentOutOfRangeException(nameof(section));
+    var counts = new[] { Dns16(packet, 6), Dns16(packet, 8), Dns16(packet, 10) };
+    var offset = 12;
+    SkipDnsName(packet, ref offset);
+    offset += 4;
+    var types = new List<ushort>();
+    for (var currentSection = 0; currentSection <= section; currentSection++)
+    {
+        for (var record = 0; record < counts[currentSection]; record++)
+        {
+            SkipDnsName(packet, ref offset);
+            if (offset + 10 > packet.Length) throw new InvalidDataException("Truncated DNS resource record");
+            var type = Dns16(packet, offset);
+            var dataLength = Dns16(packet, offset + 8);
+            offset += 10;
+            if (offset + dataLength > packet.Length) throw new InvalidDataException("Truncated DNS RDATA");
+            if (currentSection == section) types.Add(type);
+            offset += dataLength;
+        }
+    }
+    return types.ToArray();
+}
+
+void SkipDnsName(byte[] packet, ref int offset)
+{
+    while (offset < packet.Length)
+    {
+        var labelLength = packet[offset++];
+        if (labelLength == 0) return;
+        if ((labelLength & 0xC0) == 0xC0)
+        {
+            if (offset >= packet.Length) throw new InvalidDataException("Truncated DNS name pointer");
+            offset++;
+            return;
+        }
+        if (labelLength > 63 || offset + labelLength > packet.Length)
+            throw new InvalidDataException("Invalid DNS name in response");
+        offset += labelLength;
+    }
+    throw new InvalidDataException("Unterminated DNS name in response");
+}
 
 byte[] DnsRequest(string domain, ushort type, byte? ednsVersion=null)
 {
