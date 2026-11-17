@@ -62,7 +62,8 @@ jobs:
             sleep 2
           done
 
-          dotnet run --project control-center/tests/EngineConfigSecurityTests/EngineConfigSecurityTests.csproj -c Release
+          dotnet build control-center/GatewayAgent/GatewayCoreGatewayAgent.csproj -c Release
+          (cd control-center && dotnet run --project tests/EngineConfigSecurityTests/EngineConfigSecurityTests.csproj -c Release)
 
           query_until_present() {
             local query="$1"
