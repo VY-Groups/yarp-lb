@@ -82,7 +82,11 @@ if (reportEnabled)
     reportHandler.SslOptions.ClientCertificates = new X509CertificateCollection { reportClientCertificate };
     reportHandler.SslOptions.RemoteCertificateValidationCallback = (_, certificate, _, errors) =>
     {
-        if (certificate is null || errors.HasFlag(SslPolicyErrors.RemoteCertificateNameMismatch)) return false;
+        if (certificate is null || errors.HasFlag(SslPolicyErrors.RemoteCertificateNameMismatch))
+        {
+            Console.Error.WriteLine($"Health report server certificate rejected by TLS name check: {errors}");
+            return false;
+        }
         if (reportServerCa is null) return errors == SslPolicyErrors.None;
         using var chain = new X509Chain();
         chain.ChainPolicy.TrustMode = X509ChainTrustMode.CustomRootTrust;
@@ -91,7 +95,11 @@ if (reportEnabled)
         chain.ChainPolicy.RevocationFlag = X509RevocationFlag.ExcludeRoot;
         chain.ChainPolicy.UrlRetrievalTimeout = TimeSpan.FromSeconds(1);
         using var serverLeaf = new X509Certificate2(certificate);
-        return chain.Build(serverLeaf);
+        var valid = chain.Build(serverLeaf);
+        if (!valid)
+            Console.Error.WriteLine("Health report server certificate rejected: " +
+                string.Join(",", chain.ChainStatus.Select(status => status.Status.ToString())));
+        return valid;
     };
     reportClient = new HttpClient(reportHandler) { Timeout = TimeSpan.FromSeconds(2) };
 }
