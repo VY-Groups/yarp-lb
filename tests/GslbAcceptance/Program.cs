@@ -721,6 +721,15 @@ try
     Must((Dns16(edns,2)&0xF)==0 && Dns16(edns,10)==1 &&
          edns[^11]==0 && edns[^10]==0 && edns[^9]==41 && edns[^1]==0,
          "EDNS0 OPT answered without leaking unknown client options or DO bit");
+    foreach (var dnssecType in new ushort[] { 43, 46, 48 }) // DS, RRSIG, DNSKEY
+    {
+        var dnssecReply = await TcpQuery(DnsRequest("app.integration.test", dnssecType, ednsVersion: 0));
+        Must((Dns16(dnssecReply,2)&0x0020)==0 && (Dns16(dnssecReply,2)&0xF)==0 &&
+             Dns16(dnssecReply,6)==0 && Dns16(dnssecReply,8)==1 &&
+             Dns16(dnssecReply,10)==1 && dnssecReply[^1]==0,
+             $"DNSSEC type {dnssecType} with DO=1 receives unsigned NODATA, no AD claim and no DO advertisement");
+    }
+    Console.WriteLine("PASS: DNSSEC is explicitly unsupported; DO queries receive unsigned NODATA without AD or fabricated signatures");
     var (_, badVers) = await QueryWire("app.integration.test",1,ednsVersion:1);
     Must(Dns16(badVers,6)==0 && Dns16(badVers,10)==1 &&
          badVers[^6]==1,"EDNS version mismatch signals BADVERS, without A answer");

@@ -27,7 +27,7 @@ performance. No AGPL OpenGSLB source is incorporated.
 | Predictive health | Not implemented | Evidence-based confidence, false predictions, strict safety policy |
 | Agent-side failure prediction | Not implemented; signed async health reports are evidence, not prediction | Calibrated advisory model with false-positive/negative, drift and rollback evaluation |
 | External health validation | Local HTTP(S)/TCP probes plus optional signed async observer reports and synchronous external validators; each DNS process evaluates its own quorum; this branch tests independent nodes under an observer-feed partition | Authority precedence, application-specific readiness, node-to-node fencing/consensus and independent deployment acceptance |
-| DNSSEC | Not implemented | Signed zones, DS workflow, RFC conformance, key rotation and recovery |
+| DNSSEC | Unsupported policy is explicit: DO=1 DS/RRSIG/DNSKEY queries return unsigned NODATA without AD or fabricated signatures; DO is not advertised in OPT | Signed zones, DS workflow, RFC conformance, key rotation and recovery |
 | GSLB server-management API | Static startup JSON only; this branch adds a static operator quarantine veto | RBAC, strong schema, signed revisions, live staged rollout and rollback |
 | Agent gossip / health-state sync | Signed report fan-in is per DNS node; there is no DNS-node gossip or shared consensus | Versioned cross-node state, fencing and partition fault tests |
 | Observability | Gateway metrics/logging plus opt-in loopback GSLB metrics, Prometheus alerts and Grafana import; no OTel tracing/Collector pipeline | OTel trace/export/backpressure, deployed collector/Grafana, overhead and retention evidence |
