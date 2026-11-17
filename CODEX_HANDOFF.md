@@ -497,9 +497,8 @@ survives and any replies remain ID-correlated and amplification-bounded. Full
 local Windows GSLB acceptance passed; exact-head tests are pending.
 
 A manually dispatched one-hour, 75-VU, 1-KiB HTTP soak on disposable GitHub
-runners is running at
-https://github.com/VY-Groups/yarp-lb/actions/runs/44074344501. It is L7
-runtime/memory evidence, not GSLB consensus or annual uptime evidence.
+runners is running (Actions run ID `44074344501`). It is L7 runtime/memory
+evidence, not GSLB consensus or annual uptime evidence.
 
 At this snapshot, open P0 issues #36, #52 and #109 remain open. #109 still needs
 cross-authority partition fencing/consensus, dynamic operator trust/evidence
