@@ -245,4 +245,3 @@ public static class GatewayOtlpExporterAcceptance
         catch (SocketException) when (cancellationToken.IsCancellationRequested) { }
     }
 }
-

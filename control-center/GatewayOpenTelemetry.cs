@@ -172,4 +172,3 @@ internal sealed class GatewayTelemetryPrivacyProcessor : BaseProcessor<Activity>
         base.OnEnd(data);
     }
 }
-

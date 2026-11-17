@@ -107,4 +107,3 @@ jobs:
             ${{ runner.temp }}/otel-collector-live.log
             ${{ runner.temp }}/observability-compose-state.txt
           if-no-files-found: ignore
-
