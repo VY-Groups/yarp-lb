@@ -3,8 +3,8 @@
 Source of comparison: user-supplied OpenGSLB feature matrix and the *reference*
 `gslb` branch at `48f020c3f0d7d3d353485c9a0d701061a3014c08`
 (OpenGSLB Go v1.1.10). GatewayCore base `main`:
-`b19cb7cd187959dd6ced17701afda14d5b0127be`. This branch adds an explicit
-operator-configured quarantine control; it is not merged until its PR is reviewed.
+`e1e88e9c905e74ad3c52664b74bad6b0f4d91857`. This branch proposes child-zone
+referrals and glue; it is not merged until its PR is reviewed.
 
 The matrix compares desired **features**, NOT commercial/product certifications,
 vendor prices, security guarantees or claims that other providers lack a feature.
@@ -15,7 +15,7 @@ performance. No AGPL OpenGSLB source is incorporated.
 | --- | --- | --- |
 | Self-hosted data sovereignty | On-prem .NET DNS prototype | Two independent gateway hosts, network/privacy audit |
 | No vendor lock-in | Independent source/runtime design goal | Dependency/license inventory, reproducible image builds |
-| Authoritative DNS A/NS/SOA/EDNS/TCP | Limited lab implementation | Zone cut/delegation, conformance, transport, fuzz, DNSSEC |
+| Authoritative DNS A/NS/SOA/EDNS/TCP | Limited lab implementation; this branch adds child-cut referrals, authority flags and in-bailiwick glue | Full delegation conformance, automatic serial lifecycle, fuzz/load, DNSSEC and independent resolver acceptance |
 | DNS AAAA / IPv6 | Merged lab implementation; Windows/Linux acceptance exists | IPv6 listener and NS glue, real dual-stack probes and public resolvers |
 | Weighted traffic selection | Existing opt-in per-zone selection | Predictable fairness under health churn, matched load |
 | Ordered primary/standby failover | Existing opt-in `RoutingPolicy=Failover` | DNS caching, DR state, physical failover behavior |
@@ -27,7 +27,7 @@ performance. No AGPL OpenGSLB source is incorporated.
 | Agent-side failure prediction | Not implemented; signed async health reports are evidence, not prediction | Calibrated advisory model with false-positive/negative, drift and rollback evaluation |
 | External health validation | Local HTTP(S)/TCP probes plus optional signed async observer reports and synchronous external validators; each DNS process evaluates its own quorum | Authority precedence, application-specific readiness, cross-node partition fencing and independent deployment acceptance |
 | DNSSEC | Not implemented | Signed zones, DS workflow, RFC conformance, key rotation and recovery |
-| GSLB server-management API | Static startup JSON only | RBAC, strong schema, signed revisions, staged rollout and rollback |
+| GSLB server-management API | Static startup JSON only; this branch adds a static operator quarantine veto | RBAC, strong schema, signed revisions, live staged rollout and rollback |
 | Agent gossip / health-state sync | Signed report fan-in is per DNS node; there is no DNS-node gossip or shared consensus | Versioned cross-node state, fencing and partition fault tests |
 | Observability | Gateway metrics/logging plus opt-in loopback GSLB metrics, Prometheus alerts and Grafana import; no OTel tracing/Collector pipeline | OTel trace/export/backpressure, deployed collector/Grafana, overhead and retention evidence |
 | Configuration reload | Requires engine restart | Atomic validated revision swap, no dropped queries, rollback |

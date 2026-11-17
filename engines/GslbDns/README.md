@@ -409,3 +409,30 @@ quarantined site remains health-probed and counted in the local health metric,
 but DNS will never select it, even when every other probe or signed observer
 reports healthy. The setting takes effect when the DNS process loads the updated
 configuration; this is not a live management API. The default is `false`.
+
+## Child-zone delegations
+
+An authoritative zone may declare up to 256 `Delegations`. Each cut must be a
+strict child of the configured zone and has 1–4 unique name-server names with
+IPv4 or IPv6 addresses. The parent returns a non-authoritative referral for the
+cut and all names below it; it does not answer those names from the parent
+GSLB site pool. In-bailiwick name servers receive additional-section glue;
+out-of-bailiwick name servers never receive glue from the parent. Referral TTLs
+use the parent zone TTL. The current engine does not load or serve the child
+zone's data; configure its nameservers to serve that child authority.
+
+Example fragment:
+
+    "Delegations": [{
+      "Name": "child.example.test",
+      "NameServers": [
+        {"Host": "ns1.child.example.test", "Address": "192.0.2.53"},
+        {"Host": "ns.other.example.net", "Address": "198.51.100.53"}
+      ]
+    }]
+
+The parent returns an authoritative negative SOA for a DS query at an unsigned
+delegation. This is not DNSSEC denial-of-existence proof: DNSSEC signing,
+DS/DNSKEY/RRSIG generation and key rollover are unsupported. Zone serials are
+operator-configured and do not automatically increment. AXFR/IXFR, NOTIFY,
+TSIG and recursive service are also unsupported.

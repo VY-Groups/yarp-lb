@@ -9,7 +9,7 @@ using System.Text;
 // DNSSEC, EDNS Client Subnet routing by default, or zone transfer.
 internal static class DnsWireProtocol
 {
-    private const ushort A = 1, Ns = 2, Soa = 6, Aaaa = 28, Opt = 41, EcsOption = 8;
+    private const ushort A = 1, Ns = 2, Soa = 6, Aaaa = 28, Ds = 43, Opt = 41, EcsOption = 8;
     private const ushort ClassIn = 1;
     private sealed record Resource(string Owner, ushort Type, uint Ttl, byte[] Rdata);
     private sealed record EcsInput(ushort Family, int SourcePrefix, IPAddress Address);
@@ -110,12 +110,18 @@ internal static class DnsWireProtocol
         var extra = new List<Resource>();
         var responseEcs = new List<byte>();
         var rcode = 0;
+        var authoritativeAnswer = zone is not null;
         if (unsupportedEdns) rcode = 0; // extended RCODE BADVERS is carried in OPT
         else if (zone is null) rcode = 5; // REFUSED for names outside explicitly hosted zones
         else if (qclass != ClassIn) rcode = 5;
         else
         {
             var atApex = domain == apex;
+            var delegation = zone.Delegations
+                .Where(cut => domain.Equals(cut.Name, StringComparison.OrdinalIgnoreCase) ||
+                    domain.EndsWith("." + cut.Name, StringComparison.OrdinalIgnoreCase))
+                .OrderByDescending(cut => cut.Name.Length)
+                .FirstOrDefault();
             var ns = zone.NameServers.FirstOrDefault(n =>
                 n.Host.Equals(domain, StringComparison.OrdinalIgnoreCase));
             // A configured address below this name makes it an existing empty
@@ -124,7 +130,25 @@ internal static class DnsWireProtocol
             var emptyNonTerminal = !atApex && ns is null &&
                 zone.NameServers.Any(n =>
                     n.Host.EndsWith("." + domain, StringComparison.OrdinalIgnoreCase));
-            if (!atApex && ns is null)
+            if (delegation is not null && domain.Equals(delegation.Name, StringComparison.OrdinalIgnoreCase) && qtype == Ds)
+            {
+                // DNSSEC is not implemented: an unsigned parent has no DS RRset
+                // at this cut, so return the parent's negative SOA, not a referral.
+                AddNegativeSoa();
+            }
+            else if (delegation is not null)
+            {
+                authoritativeAnswer = false;
+                foreach (var server in delegation.NameServers)
+                {
+                    authority.Add(new Resource(delegation.Name, Ns, (uint)zone.Ttl, WireName(server.Host)));
+                    if (server.Host.Equals(delegation.Name, StringComparison.OrdinalIgnoreCase) ||
+                        server.Host.EndsWith("." + delegation.Name, StringComparison.OrdinalIgnoreCase))
+                        extra.Add(new Resource(server.Host, server.RecordType, (uint)zone.Ttl,
+                            server.Address.GetAddressBytes()));
+                }
+            }
+            else if (!atApex && ns is null)
             {
                 rcode = emptyNonTerminal ? 0 : 3; // NODATA vs true NXDOMAIN
                 AddNegativeSoa();
@@ -312,7 +336,7 @@ internal static class DnsWireProtocol
         var reply = bytes.ToArray();
         BinaryPrimitives.WriteUInt16BigEndian(reply.AsSpan(0, 2), id);
         BinaryPrimitives.WriteUInt16BigEndian(reply.AsSpan(2, 2),
-            (ushort)(0x8000 | (zone is null ? 0 : 0x0400) |
+            (ushort)(0x8000 | (authoritativeAnswer ? 0x0400 : 0) |
                 (truncated ? 0x0200 : 0) | (flags & 0x0100) | rcode));
         BinaryPrimitives.WriteUInt16BigEndian(reply.AsSpan(4, 2), 1);
         BinaryPrimitives.WriteUInt16BigEndian(reply.AsSpan(6, 2), (ushort)an);

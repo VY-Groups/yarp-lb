@@ -420,12 +420,18 @@ and remaining P0/P1 operational evidence remain incomplete. Production NO-GO.
 
 ## Continuation — annual objective, GSLB observability and quarantine (2026-11-17)
 
-Current `main` is `b19cb7cd187959dd6ced17701afda14d5b0127be`; PR #121 merged
+Current `main` is `e1e88e9c905e74ad3c52664b74bad6b0f4d91857`; PR #121 merged
 opt-in loopback-only GSLB metrics, bounded Prometheus alerts, synthetic alert
 fixtures and an importable Grafana dashboard. Its exact-head Windows/Linux,
 Prometheus, application and integration Actions passed. This was a Codex
 code-review and CI merge; GitHub had no independent review recorded and no
 branch protection requirement was configured.
+
+PR #122 also merged the static per-site `AdministrativelyQuarantined` veto.
+Windows/Linux DNS acceptance confirmed that quarantine overrides healthy
+probes and signed reports and that availability-first fallback does not route
+to an all-quarantined pool. The configuration is loaded at process startup;
+there is no live management API.
 
 The 99.9% objective is rolling 365 days (8h 45m 36s maximum error budget), not
 30 days. `control-center/docs/AVAILABILITY_SLO.md` records a provisional
@@ -434,19 +440,19 @@ assumptions, not observed production availability; the SLI remains unknown
 until an externally monitored service and sufficient annual probe coverage
 exist. Do not report the objective as achieved or production GO.
 
-Current feature branch `codex/issue109-partition-acceptance` adds
-`AdministrativelyQuarantined` as a static per-site configuration veto. It
-overrides healthy local probes and signed reports, including when legacy
-availability-first fallback is configured; the site remains probed for
-diagnostics. The setting requires configuration reload by process restart and
-is not a live management API. Windows/Linux real DNS acceptance covers
-withdrawal and failover behavior. This is only one authority-precedence item.
+Current feature branch `codex/issue52-dns-zone-cuts` adds explicit child-zone
+cuts. Parent referrals now use Authority NS records, AA=0 and in-bailiwick
+glue; names below a cut cannot leak parent-zone GSLB answers. DS queries at an
+unsigned cut get the parent negative SOA. The Windows real-socket acceptance
+passes locally; exact-head Actions are pending. This is not DNSSEC, automatic
+serial management, or full delegation conformance.
 
 At this snapshot, open P0 issues #36, #52 and #109 remain open. #109 still needs
 cross-authority partition fencing/consensus, dynamic operator trust/evidence
 management and independent multi-node partition acceptance. #52 still needs
-DNSSEC, delegation/zone-cut conformance, licensed GeoIP/ASN data and broader
-resolver/load/chaos acceptance. #36 still needs independent gateways behind
+DNSSEC, automatic serial lifecycle, licensed GeoIP/ASN data and broader
+resolver/load/chaos acceptance, even if the current child-referral branch passes.
+#36 still needs independent gateways behind
 VRRP/ECMP and capacity/fault acceptance. Other P0/P1 issues also remain open;
 refresh the live GitHub issue list before the next action. Availability SLO,
 CI and static quarantine are not substitutes for these gates.

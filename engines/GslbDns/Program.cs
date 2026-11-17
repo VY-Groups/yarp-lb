@@ -126,6 +126,39 @@ foreach(var zone in config.Zones)
         // Explicit out-of-bailiwick servers may be NS targets; their A data is not advertised.
         servers.Add(new DnsNameServer(host, nsAddress));
     }
+    var delegationRows = zone.Delegations ?? Array.Empty<DnsDelegationConfig>();
+    if (delegationRows.Length > 256)
+        throw new InvalidDataException("A zone may configure at most 256 delegation cuts");
+    var delegations = new List<DnsDelegation>();
+    var delegationNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    foreach (var source in delegationRows)
+    {
+        if (source is null || string.IsNullOrWhiteSpace(source.Name) ||
+            !DnsWireProtocol.ValidName(source.Name.TrimEnd('.')) ||
+            source.Name.TrimEnd('.').Equals(origin, StringComparison.OrdinalIgnoreCase) ||
+            !source.Name.TrimEnd('.').EndsWith("." + origin, StringComparison.OrdinalIgnoreCase) ||
+            source.NameServers is not { Length: >= 1 and <= 4 })
+            throw new InvalidDataException("Delegation must be a strict child of the hosted zone with 1..4 name servers");
+        var cut = source.Name.TrimEnd('.').ToLowerInvariant();
+        if (!delegationNames.Add(cut))
+            throw new InvalidDataException("Duplicate delegation cut");
+        var childServers = new List<DnsNameServer>();
+        var childServerNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var child in source.NameServers)
+        {
+            if (child is null || string.IsNullOrWhiteSpace(child.Host) ||
+                !DnsWireProtocol.ValidName(child.Host.TrimEnd('.')) ||
+                !IPAddress.TryParse(child.Address, out var childAddress) ||
+                childAddress.IsIPv4MappedToIPv6 ||
+                childAddress.AddressFamily is not (AddressFamily.InterNetwork or AddressFamily.InterNetworkV6))
+                throw new InvalidDataException("Invalid delegated name-server hostname or address");
+            var host = child.Host.TrimEnd('.').ToLowerInvariant();
+            if (!childServerNames.Add(host))
+                throw new InvalidDataException("Duplicate delegated name-server hostname");
+            childServers.Add(new DnsNameServer(host, childAddress));
+        }
+        delegations.Add(new DnsDelegation(cut, childServers.ToArray()));
+    }
     var contact = (zone.SoaContact ?? ("hostmaster." + origin)).TrimEnd('.').ToLowerInvariant();
     if (!DnsWireProtocol.ValidName(contact))
         throw new InvalidDataException("Invalid SOA contact name");
@@ -138,7 +171,8 @@ foreach(var zone in config.Zones)
     }
     groups.Add(origin, new SiteGroup(sites.ToArray(), zone.TtlSeconds,
         zone.FailClosedWhenAllSitesDown, servers.ToArray(), contact, zone.SoaSerial,
-        zone.RoutingPolicy,cidrTable,zone.EnableEcsGeoRouting,trustedEcsResolvers));
+        zone.RoutingPolicy,cidrTable,zone.EnableEcsGeoRouting,trustedEcsResolvers,
+        delegations.ToArray()));
 }
 if ((reportTargets.Count > 0) != (config.AgentReports is not null))
     throw new InvalidDataException("Agent report listener and report-gated sites must be configured together");
@@ -373,12 +407,15 @@ sealed record DnsZone(string Name,int TtlSeconds,DnsSite[] Sites,
     public int FailureThreshold { get; init; } = 1;
     public int SuccessThreshold { get; init; } = 1;
     public DnsCidrRegionRule[]? CidrRoutes { get; init; }
+    public DnsDelegationConfig[]? Delegations { get; init; }
 }
 sealed record DnsNameServerConfig(string Host,string Address);
 sealed record DnsNameServer(string Host,IPAddress Address)
 {
     public ushort RecordType => Address.AddressFamily == AddressFamily.InterNetwork ? (ushort)1 : (ushort)28;
 }
+sealed record DnsDelegationConfig(string Name,DnsNameServerConfig[] NameServers);
+sealed record DnsDelegation(string Name,DnsNameServer[] NameServers);
 sealed record DnsSite(string Address,string? HealthUrl,int Weight,int Priority=0)
 {
     public string[]? ValidatorUrls { get; init; }
@@ -422,12 +459,13 @@ sealed class SiteGroup
     public SiteGroup(Site[] sites,int ttl,bool failClosedWhenAllSitesDown,
         DnsNameServer[] nameServers,string soaContact,uint soaSerial,string routingPolicy,
         DnsCidrRegionTable? cidrTable,bool enableEcsGeoRouting,
-        DnsCidrRegionTable? trustedEcsResolvers)
+        DnsCidrRegionTable? trustedEcsResolvers,DnsDelegation[]? delegations = null)
     {
         (Sites,Ttl,FailClosedWhenAllSitesDown,NameServers,SoaContact,SoaSerial,RoutingPolicy,CidrTable)
             =(sites,ttl,failClosedWhenAllSitesDown,nameServers,soaContact,soaSerial,routingPolicy,cidrTable);
         EnableEcsGeoRouting=enableEcsGeoRouting;
         TrustedEcsResolvers=trustedEcsResolvers;
+        Delegations=delegations ?? [];
     }
     public string RoutingPolicy { get; }
     // 3 local successful measurements; at most 3 probe periods, clamped 6..60s.
@@ -437,6 +475,7 @@ sealed class SiteGroup
     public bool EnableEcsGeoRouting { get; }
     public DnsCidrRegionTable? TrustedEcsResolvers { get; }
     public DnsNameServer[] NameServers { get; }
+    public DnsDelegation[] Delegations { get; }
     public string SoaContact { get; }
     public uint SoaSerial { get; }
     public bool FailClosedWhenAllSitesDown {get;}
