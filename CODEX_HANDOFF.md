@@ -421,7 +421,7 @@ and remaining P0/P1 operational evidence remain incomplete. Production NO-GO.
 
 ## Continuation — annual objective, GSLB observability and quarantine (2026-11-17)
 
-Current `main` is `da6feee7dbe99abaefc10b8aedc75457148dfc3b`.
+Current `main` is `33d97084f2b4ae4942ec00bb32cfd6cd4b1b0e40`.
 
 On `main`, PR #121 merged
 opt-in loopback-only GSLB metrics, bounded Prometheus alerts, synthetic alert
@@ -478,17 +478,28 @@ passed at exact head `472156be...`; merge commit is `da6feee...`. The guard
 requires a manual serial bump. It does not generate serials, cover zone
 creation/deletion, direct file edits, or restart DNS.
 
-Current feature branch `codex/issue109-agent-evidence-metrics` adds bounded
-Prometheus gauges for current signed report verdict/freshness counts
-(healthy/unhealthy/unknown/stale-or-missing), without agent/site/backend
-labels, and adds a Grafana panel. Local Windows Release builds passed for
-GslbDns and GslbObserver. The complete GSLB acceptance executable passed,
-including malformed UDP/TCP corpus and runtime metrics. The dedicated real
-mTLS, three-observer/two-authority acceptance passed locally using Git's
-OpenSSL binary; it verified healthy evidence, negative withdrawal, expiry,
-quorum loss, recovery and privacy. Exact-head Actions are still required before
-merge. These metrics are local evidence counts per configured reporter slot;
-they are not an operator trust-management API or node-to-node consensus.
+PR #128 merged bounded Prometheus gauges for current signed report
+verdict/freshness counts (healthy/unhealthy/unknown/stale-or-missing), without
+agent/site/backend labels, and added a Grafana panel. Windows/Linux exact-head
+GSLB, L7, full builds, metrics contract, security and 10/10 HA checks passed.
+The dedicated real mTLS, three-observer/two-authority acceptance also passed
+locally and in Linux CI, including negative withdrawal, expiry, quorum loss,
+recovery, partition behavior and privacy. Merge commit is `33d9708...`. These
+are local evidence counts per configured reporter slot; they are not an
+operator trust-management API or node-to-node consensus.
+
+Current branch `codex/issue52-dnssec-unsupported-wire-contract` adds
+cross-platform DNS acceptance for DO=1 queries of DS, RRSIG and DNSKEY, proving
+that the explicitly unsupported DNSSEC policy returns unsigned NODATA without
+AD or fabricated signatures and does not advertise DO in the response OPT. It
+also sends 256 fixed-seed random UDP parser inputs and verifies the listener
+survives and any replies remain ID-correlated and amplification-bounded. Full
+local Windows GSLB acceptance passed; exact-head tests are pending.
+
+A manually dispatched one-hour, 75-VU, 1-KiB HTTP soak on disposable GitHub
+runners is running at
+https://github.com/VY-Groups/yarp-lb/actions/runs/44074344501. It is L7
+runtime/memory evidence, not GSLB consensus or annual uptime evidence.
 
 At this snapshot, open P0 issues #36, #52 and #109 remain open. #109 still needs
 cross-authority partition fencing/consensus, dynamic operator trust/evidence

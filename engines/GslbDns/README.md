@@ -86,8 +86,9 @@ IPv6 DNS UDP/TCP listeners and IPv6 NS glue are supported. DNSSEC remains open.
   the configured zones are REFUSED.
 - EDNS0 OPT input is syntax checked with a 512–1232-byte UDP buffer limit;
   unknown options are ignored, not logged or echoed. Unsupported EDNS versions
-  return BADVERS via the OPT extended response code. DNSSEC DO is NOT advertised,
-  and DNSSEC is not supported.
+  return BADVERS via the OPT extended response code. DNSSEC is unsupported:
+  DO=1 requests for DS, RRSIG or DNSKEY return unsigned NODATA, never set AD,
+  and the response OPT does not advertise DO or fabricate signatures.
 - EDNS Client Subnet is ignored by default. A zone using `CidrRegion` can opt in
   with `EnableEcsGeoRouting: true` and an explicit `TrustedEcsResolverCidrs`
   allowlist; untrusted resolver sources cannot steer answers with forged ECS.
