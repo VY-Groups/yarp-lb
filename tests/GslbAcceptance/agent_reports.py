@@ -49,7 +49,7 @@ def dns_query(dns_port):
     return rcode, address
 
 
-def expect_dns(process, dns_port, wanted_rcode, wanted_address=None, timeout=12):
+def expect_dns(process, dns_port, wanted_rcode, wanted_address=None, timeout=12, log_paths=()):
     deadline = time.monotonic() + timeout
     last = None
     while time.monotonic() < deadline:
@@ -62,7 +62,9 @@ def expect_dns(process, dns_port, wanted_rcode, wanted_address=None, timeout=12)
         except (OSError, TimeoutError):
             pass
         time.sleep(.15)
-    raise AssertionError(f"DNS result {last}, expected rcode={wanted_rcode}, address={wanted_address}")
+    logs = "\n".join(f"--- {path.name} ---\n{path.read_text(errors='replace')[-3000:]}"
+                      for path in log_paths if path.exists())
+    raise AssertionError(f"DNS result {last}, expected rcode={wanted_rcode}, address={wanted_address}\n{logs}")
 
 
 def main():
@@ -131,7 +133,10 @@ def main():
                                   "Weight": 1, "AgentSiteId": "mumbai",
                                   "RequiredAgentIds": [a["id"] for a in agents]}]}]
         }))
-        dns = subprocess.Popen(["dotnet", dns_dll, dns_config], stdout=subprocess.DEVNULL,
+        dns_log = root / "dns.log"
+        dns_log_handle = dns_log.open("w")
+        stack.callback(dns_log_handle.close)
+        dns = subprocess.Popen(["dotnet", dns_dll, dns_config], stdout=dns_log_handle,
                                stderr=subprocess.STDOUT)
         stack.callback(dns.wait)
         stack.callback(dns.kill)
@@ -139,6 +144,7 @@ def main():
 
         configs = []
         processes = []
+        agent_logs = []
 
         def start_agent(agent):
             listen_port = port()
@@ -158,7 +164,11 @@ def main():
                 "ReportIntervalSeconds": 1, "ReportTtlSeconds": 8
             }))
             configs.append(conf)
-            process = subprocess.Popen(["dotnet", observer_dll, conf], stdout=subprocess.DEVNULL,
+            log_path = root / f"{agent['id']}.log"
+            agent_logs.append(log_path)
+            log_handle = log_path.open("a")
+            stack.callback(log_handle.close)
+            process = subprocess.Popen(["dotnet", observer_dll, conf], stdout=log_handle,
                                        stderr=subprocess.STDOUT)
             processes.append(process)
             stack.callback(process.wait)
@@ -167,24 +177,24 @@ def main():
 
         for agent in agents:
             start_agent(agent)
-        expect_dns(dns, dns_port, 0, "192.0.2.17")
+        expect_dns(dns, dns_port, 0, "192.0.2.17", log_paths=[dns_log, *agent_logs])
         print("PASS: two mTLS agents with signed fresh reports admit a locally healthy site")
 
         # One independent observer reports a real failure while the DNS node's
         # local readiness endpoint stays healthy; the quorum must withdraw it.
         agents[0]["upstream"].verdict = 503
-        expect_dns(dns, dns_port, 2)
+        expect_dns(dns, dns_port, 2, log_paths=[dns_log, *agent_logs])
         print("PASS: signed negative evidence withdraws the site without changing local probe health")
         agents[0]["upstream"].verdict = 200
-        expect_dns(dns, dns_port, 0, "192.0.2.17")
+        expect_dns(dns, dns_port, 0, "192.0.2.17", log_paths=[dns_log, *agent_logs])
 
         # Stopping one agent lets its signed lease expire. Restart increments its
         # durable epoch; the DNS node accepts fresh evidence but rejects replays.
         processes[0].kill()
         processes[0].wait(timeout=5)
-        expect_dns(dns, dns_port, 2, timeout=12)
+        expect_dns(dns, dns_port, 2, timeout=12, log_paths=[dns_log, *agent_logs])
         processes[0] = start_agent(agents[0])
-        expect_dns(dns, dns_port, 0, "192.0.2.17")
+        expect_dns(dns, dns_port, 0, "192.0.2.17", log_paths=[dns_log, *agent_logs])
         print("PASS: expired-agent fail-closed, durable epoch restart and recovery")
 
 
