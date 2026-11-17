@@ -31,6 +31,17 @@ var dns=JsonNode.Parse("""
 """)!.AsObject();
 Must(EngineConfigContract.Validate("l4",l4,false), "loopback L4 candidate is valid");
 Must(EngineConfigContract.Validate("gslb",dns,false), "loopback GSLB candidate is valid");
+var publicDns53 = dns.DeepClone().AsObject();
+publicDns53["ListenHost"] = "0.0.0.0";
+publicDns53["ListenPort"] = 53;
+publicDns53["AllowNonLoopbackListeners"] = true;
+Must(!EngineConfigContract.Validate("gslb",publicDns53,false),
+    "public authoritative DNS on port 53 still requires local public-bind approval");
+Must(EngineConfigContract.Validate("gslb",publicDns53,true),
+    "explicitly approved GSLB listener may bind public DNS port 53");
+publicDns53["AllowNonLoopbackListeners"] = false;
+Must(!EngineConfigContract.Validate("gslb",publicDns53,true),
+    "DNS port 53 listener rejects missing engine opt-in");
 Must(!EngineConfigContract.Validate("waf",l4,false), "unimplemented WAF schema fails closed");
 var signed=EngineConfigContract.Sign(privatePem,"l4",tx,revision,l4,now+120,4);
 Must(EngineConfigContract.Verify(trust,"l4",tx,revision,l4,signed,now),
