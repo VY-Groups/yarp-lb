@@ -5,6 +5,8 @@ using System.Net.Sockets;
 using System.Text;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
+using OpenTelemetry.Logs;
 using OpenTelemetry.Metrics;
 using OpenTelemetry.Trace;
 
@@ -33,13 +35,16 @@ public static class GatewayOtlpExporterAcceptance
                        "gateway.proxy.request", ActivityKind.Internal))
                 activity?.SetTag("gateway.route.id", "collector_outage_route");
             GatewayOpenTelemetry.RecordProxyResult(new DefaultHttpContext(), 1.0);
+            EmitAccessLog(provider);
             var elapsedMs = Stopwatch.GetElapsedTime(started).TotalMilliseconds;
             if (elapsedMs > 250)
                 throw new Exception($"Proxy telemetry recording blocked for {elapsedMs:F1}ms while the collector was absent");
             var tracerProvider = provider.GetRequiredService<TracerProvider>();
             var meterProvider = provider.GetRequiredService<MeterProvider>();
+            var loggerProvider = provider.GetRequiredService<LoggerProvider>();
             _ = tracerProvider.ForceFlush(6000);
             _ = meterProvider.ForceFlush(6000);
+            _ = loggerProvider.ForceFlush(6000);
             Console.WriteLine("PASS: request telemetry recording stayed below 250ms with an unreachable collector");
             return Task.CompletedTask;
         }
@@ -65,6 +70,7 @@ public static class GatewayOtlpExporterAcceptance
             using var provider = services.BuildServiceProvider();
             var tracerProvider = provider.GetRequiredService<TracerProvider>();
             var meterProvider = provider.GetRequiredService<MeterProvider>();
+            var loggerProvider = provider.GetRequiredService<LoggerProvider>();
             var parent = new ActivityContext(ActivityTraceId.CreateRandom(), ActivitySpanId.CreateRandom(),
                 ActivityTraceFlags.Recorded);
             using (var activity = GatewayOpenTelemetry.ActivitySource.StartActivity(
@@ -81,7 +87,8 @@ public static class GatewayOtlpExporterAcceptance
             var response = new DefaultHttpContext();
             response.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
             GatewayOpenTelemetry.RecordProxyResult(response, 17.5);
-            if (!tracerProvider.ForceFlush(10000) || !meterProvider.ForceFlush(10000))
+            EmitAccessLog(provider);
+            if (!tracerProvider.ForceFlush(10000) || !meterProvider.ForceFlush(10000) || !loggerProvider.ForceFlush(10000))
                 throw new Exception("Container OTLP exporters failed to flush before acceptance deadline");
             Console.WriteLine("PASS: real OpenTelemetry Collector accepted traces and metrics via OTLP/HTTP");
         }
@@ -113,6 +120,7 @@ public static class GatewayOtlpExporterAcceptance
             using var provider = services.BuildServiceProvider();
             var tracerProvider = provider.GetRequiredService<TracerProvider>();
             var meterProvider = provider.GetRequiredService<MeterProvider>();
+            var loggerProvider = provider.GetRequiredService<LoggerProvider>();
             var parent = new ActivityContext(ActivityTraceId.CreateRandom(), ActivitySpanId.CreateRandom(),
                 ActivityTraceFlags.Recorded);
             using (var activity = GatewayOpenTelemetry.ActivitySource.StartActivity(
@@ -132,17 +140,19 @@ public static class GatewayOtlpExporterAcceptance
             var response = new Microsoft.AspNetCore.Http.DefaultHttpContext();
             response.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
             GatewayOpenTelemetry.RecordProxyResult(response, 12.5);
-            if (!tracerProvider.ForceFlush(10000) || !meterProvider.ForceFlush(10000))
+            EmitAccessLog(provider);
+            if (!tracerProvider.ForceFlush(10000) || !meterProvider.ForceFlush(10000) || !loggerProvider.ForceFlush(10000))
                 throw new Exception("OTLP provider failed to flush before acceptance deadline");
 
             var deadline = DateTimeOffset.UtcNow.AddSeconds(10);
-            while (records.Count < 2 && DateTimeOffset.UtcNow < deadline)
+            while (records.Count < 3 && DateTimeOffset.UtcNow < deadline)
                 await Task.Delay(50, receiverTimeout.Token);
             var captured = records.ToArray();
             var traces = captured.Where(x => x.Path == "/v1/traces").ToArray();
             var metrics = captured.Where(x => x.Path == "/v1/metrics").ToArray();
-            if (traces.Length == 0 || metrics.Length == 0)
-                throw new Exception($"Expected both OTLP signals; received: {string.Join(", ", captured.Select(x => x.Path))}");
+            var logs = captured.Where(x => x.Path == "/v1/logs").ToArray();
+            if (traces.Length == 0 || metrics.Length == 0 || logs.Length == 0)
+                throw new Exception($"Expected OTLP traces, metrics and logs; received: {string.Join(", ", captured.Select(x => x.Path))}");
 
             var tracePayload = Encoding.Latin1.GetString(traces.SelectMany(x => x.Body).ToArray());
             foreach (var sensitive in new[] { "203.0.113.99", "otlp-secret-canary", "/private" })
@@ -156,7 +166,14 @@ public static class GatewayOtlpExporterAcceptance
             foreach (var expected in new[] { "gateway.proxy.requests", "gateway.proxy.request.duration", "5xx" })
                 if (!metricPayload.Contains(expected, StringComparison.Ordinal))
                     throw new Exception($"Expected bounded proxy metric was absent: {expected}");
-            Console.WriteLine("PASS: real OTLP/HTTP collector received traces and metrics; sensitive URL/client values were redacted");
+            var logPayload = Encoding.Latin1.GetString(logs.SelectMany(x => x.Body).ToArray());
+            foreach (var expected in new[] { "GATEWAY_ACCESS", "timestampUtc", "clientIp", "203.0.113.17", "route_acceptance", "statusCode" })
+                if (!logPayload.Contains(expected, StringComparison.Ordinal))
+                    throw new Exception($"Expected access log field was absent from OTLP: {expected}");
+            foreach (var sensitive in new[] { "otlp-secret-canary", "Authorization", "Cookie", "/private" })
+                if (logPayload.Contains(sensitive, StringComparison.OrdinalIgnoreCase))
+                    throw new Exception($"Sensitive request data was present in OTLP log export: {sensitive}");
+            Console.WriteLine("PASS: real OTLP/HTTP collector received traces, metrics and structured access logs; traces redact client IP and logs omit request content");
         }
         finally
         {
@@ -168,6 +185,14 @@ public static class GatewayOtlpExporterAcceptance
             catch (OperationCanceledException) { }
             catch (SocketException) when (receiverTimeout.IsCancellationRequested) { }
         }
+    }
+
+    private static void EmitAccessLog(IServiceProvider provider)
+    {
+        var logger = provider.GetRequiredService<ILoggerFactory>().CreateLogger("GatewayCore.AccessLog");
+        logger.LogInformation(
+            "GATEWAY_ACCESS timestampUtc={TimestampUtc:o} clientIp={ClientIp} clientIpSource={ClientIpSource} method={Method} routeId={RouteId} statusCode={StatusCode} durationMs={DurationMs}",
+            DateTimeOffset.UtcNow, "203.0.113.17", "remote", "GET", "route_acceptance", 200, 12.5);
     }
 
     private static async Task ReceiveAsync(TcpListener listener,

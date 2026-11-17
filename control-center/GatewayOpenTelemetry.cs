@@ -5,9 +5,11 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using OpenTelemetry;
 using OpenTelemetry.Exporter;
 using OpenTelemetry.Metrics;
+using OpenTelemetry.Logs;
 using OpenTelemetry.Resources;
 using OpenTelemetry.Trace;
 using Yarp.ReverseProxy.Model;
@@ -34,6 +36,7 @@ public static class GatewayOpenTelemetry
         var instance = string.IsNullOrWhiteSpace(machineName) ? Environment.MachineName : machineName;
         if (instance.Length > 128) throw new InvalidOperationException("OTel service instance ID exceeds 128 characters");
 
+        services.AddLogging(logging => logging.AddFilter("GatewayCore.AccessLog", LogLevel.Information));
         services.AddOpenTelemetry()
             .ConfigureResource(resource => resource.AddService(
                 serviceName: "gatewaycore-control-center",
@@ -62,6 +65,24 @@ public static class GatewayOpenTelemetry
                     exporter.Protocol = OtlpExportProtocol.HttpProtobuf;
                     exporter.TimeoutMilliseconds = 5000;
                 }))
+            // Access logs use a dedicated logger category below. This prevents application,
+            // authentication and audit messages from being copied into the OTLP log stream.
+            .WithLogging(logging => logging
+                .AddOtlpExporter((exporter, processor) =>
+                {
+                    exporter.Endpoint = new Uri(endpoint, "/v1/logs");
+                    exporter.Protocol = OtlpExportProtocol.HttpProtobuf;
+                    exporter.TimeoutMilliseconds = 5000;
+                    processor.BatchExportProcessorOptions.MaxQueueSize = 2048;
+                    processor.BatchExportProcessorOptions.MaxExportBatchSize = 512;
+                    processor.BatchExportProcessorOptions.ScheduledDelayMilliseconds = 5000;
+                    processor.BatchExportProcessorOptions.ExporterTimeoutMilliseconds = 5000;
+                }), options =>
+                {
+                    options.IncludeFormattedMessage = false;
+                    options.ParseStateValues = true;
+                    options.IncludeScopes = false;
+                })
             .WithMetrics(metrics => metrics
                 .AddMeter(ActivitySourceName)
                 .AddAspNetCoreInstrumentation()

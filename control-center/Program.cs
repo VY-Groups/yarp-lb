@@ -174,6 +174,7 @@ if (peerSyncSettings is not null)
     builder.Services.AddHostedService<PeerSyncPublisher>();
 }
 var app = builder.Build();
+var accessLogger = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("GatewayCore.AccessLog");
 var trustedAccessLogProxies = GatewayClientAddress.ParseTrustedProxyAddresses(
     Environment.GetEnvironmentVariable("GATEWAY_TRUSTED_PROXY_IPS"));
 var peerStateJournal = app.Services.GetService<PeerStateJournal>();
@@ -357,7 +358,7 @@ app.Use(async (ctx, next) =>
         var routeCandidate = ctx.Features.Get<IReverseProxyFeature>()?.Route?.Config.RouteId;
         var routeId = routeCandidate is not null && ValidId(routeCandidate) ? routeCandidate : "unmatched";
         var timestampUtc = DateTimeOffset.UtcNow;
-        app.Logger.LogInformation(
+        accessLogger.LogInformation(
             "GATEWAY_ACCESS timestampUtc={TimestampUtc:o} clientIp={ClientIp} clientIpSource={ClientIpSource} method={Method} routeId={RouteId} statusCode={StatusCode} durationMs={DurationMs}",
             timestampUtc, clientAddress.Address?.ToString() ?? "unknown", clientAddress.Source,
             ctx.Request.Method, routeId, ctx.Response.StatusCode,
