@@ -192,7 +192,12 @@ async Task PublishReports(CancellationToken token)
                     (int)response.StatusCode);
         }
         catch (Exception ex) when (ex is HttpRequestException or OperationCanceledException or IOException)
-        { if (!token.IsCancellationRequested) app.Logger.LogWarning("Health report delivery failed: {ErrorType}", ex.GetType().Name); }
+        {
+            if (!token.IsCancellationRequested)
+                app.Logger.LogWarning("Health report delivery failed: {ErrorType}, inner={InnerType}, detail={Detail}",
+                    ex.GetType().Name, ex.InnerException?.GetType().Name ?? "none",
+                    ex.InnerException?.Message ?? ex.Message);
+        }
         catch (Exception ex) when (ex is InvalidDataException or CryptographicException)
         { app.Logger.LogCritical("Health report sequence/signing state failed: {ErrorType}", ex.GetType().Name); }
 
