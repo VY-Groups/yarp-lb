@@ -1,0 +1,92 @@
+name: OTLP Collector, Prometheus and Grafana container acceptance
+on:
+  pull_request:
+    paths:
+      - "control-center/GatewayOpenTelemetry.cs"
+      - "control-center/OtlpEndpointPolicy.cs"
+      - "control-center/tests/EngineConfigSecurityTests/**"
+      - "control-center/ops/observability/**"
+      - "control-center/ops/prometheus/gateway-dashboard.json"
+      - "control-center/ops/prometheus/gateway-alerts.yml"
+      - ".github/workflows/observability-container-acceptance.yml"
+  push:
+    branches: [main]
+    paths:
+      - "control-center/GatewayOpenTelemetry.cs"
+      - "control-center/OtlpEndpointPolicy.cs"
+      - "control-center/tests/EngineConfigSecurityTests/**"
+      - "control-center/ops/observability/**"
+      - "control-center/ops/prometheus/gateway-dashboard.json"
+      - "control-center/ops/prometheus/gateway-alerts.yml"
+      - ".github/workflows/observability-container-acceptance.yml"
+permissions:
+  contents: read
+jobs:
+  otlp-container-stack:
+    name: Real OTLP Collector to Prometheus and Grafana
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - name: Validate dashboard and container configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 control-center/ops/prometheus/validate_gateway_dashboard.py
+          docker compose -f control-center/ops/observability/compose.yml config --quiet
+      - name: Start isolated observability stack
+        shell: bash
+        run: docker compose -f control-center/ops/observability/compose.yml up -d
+      - name: Export real spans and metrics to Collector, then verify Prometheus and Grafana
+        shell: bash
+        env:
+          GATEWAY_OTLP_CONTAINER_ENDPOINT: http://127.0.0.1:4318
+        run: |
+          set -euo pipefail
+          cleanup() { docker compose -f control-center/ops/observability/compose.yml down --volumes --remove-orphans; }
+          trap cleanup EXIT
+
+          for attempt in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:9090/-/ready >/dev/null && \
+               curl -fsS http://127.0.0.1:3000/api/health >/dev/null; then break; fi
+            if [ "$attempt" -eq 60 ]; then echo "Observability containers did not become ready" >&2; exit 1; fi
+            sleep 2
+          done
+
+          dotnet run --project control-center/tests/EngineConfigSecurityTests/EngineConfigSecurityTests.csproj -c Release
+
+          query_until_present() {
+            local query="$1"
+            for attempt in $(seq 1 30); do
+              local result
+              result=$(curl -fsSG --data-urlencode "query=$query" http://127.0.0.1:9090/api/v1/query)
+              if jq -e '.status == "success" and (.data.result | length > 0)' <<<"$result" >/dev/null; then return 0; fi
+              sleep 2
+            done
+            echo "Prometheus did not expose expected OTLP series: $query" >&2
+            return 1
+          }
+
+          query_until_present 'gateway_proxy_requests_total{http_response_status_class="5xx"}'
+          query_until_present 'gateway_proxy_request_duration_milliseconds_bucket'
+          curl -fsS 'http://127.0.0.1:9090/api/v1/rules' | jq -e 'any(.data.groups[]; .name == "yarp-onprem-ops")' >/dev/null
+          curl -fsS 'http://127.0.0.1:3000/api/search?query=GatewayCore' | jq -e 'any(.[]; .uid == "gatewaycore-http-availability")' >/dev/null
+
+          docker compose -f control-center/ops/observability/compose.yml logs otel-collector > "$RUNNER_TEMP/otel-collector.log"
+          grep -q 'container_acceptance_route' "$RUNNER_TEMP/otel-collector.log"
+          grep -q 'gateway.proxy.requests' "$RUNNER_TEMP/otel-collector.log"
+          if grep -Eq '203\.0\.113\.99|otlp-container-secret-canary|/private' "$RUNNER_TEMP/otel-collector.log"; then
+            echo "Sensitive client or URL value leaked to Collector output" >&2
+            exit 1
+          fi
+          echo "PASS: Collector ingested redacted traces and metrics; Prometheus queried OTLP series; Grafana loaded provisioned dashboard"
+      - name: Upload Collector evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: otlp-container-collector-log
+          path: ${{ runner.temp }}/otel-collector.log
+          if-no-files-found: ignore
