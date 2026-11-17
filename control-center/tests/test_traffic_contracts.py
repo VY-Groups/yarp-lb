@@ -30,7 +30,9 @@ assert '/admin/api/reports/traffic.json' in code
 assert '/admin/api/reports/traffic.csv' in code
 assert 'RequireRole("Administrator", "Operator")' in code
 assert 'durationBuckets = requestHistogram.Snapshot()' in code
-assert 'Download JSON report' in front and 'Download CSV report' in front
+assert 'Traffic JSON' in front and 'Traffic CSV' in front
+assert 'Backend health JSON' in front and 'Backend health CSV' in front
+assert '/admin/api/reports/health.json' in code and '/admin/api/reports/health.csv' in code
 assert 'Request duration distribution' in front
 assert 'DestinationConfig.Metadata' not in core
 assert 'RandomNumberGenerator.GetInt32' in engine

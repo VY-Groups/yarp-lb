@@ -470,6 +470,62 @@ app.MapGet("/admin/api/reports/traffic.csv", () =>
     return Results.File(Encoding.UTF8.GetBytes(string.Join("\r\n", rows) + "\r\n"),
         "text/csv; charset=utf-8", $"gateway-traffic-{generated:yyyyMMdd-HHmmss}Z.csv");
 }).RequireAuthorization(p => p.RequireRole("Administrator", "Operator"));
+GatewayDestinationHealthRow[] DestinationHealthRows(IProxyStateLookup runtime) => runtime.GetClusters()
+    .OrderBy(cluster => cluster.ClusterId, StringComparer.Ordinal)
+    .SelectMany(cluster => cluster.Destinations.Values
+        .OrderBy(destination => destination.DestinationId, StringComparer.Ordinal)
+        .Select(destination =>
+        {
+            var id = cluster.ClusterId + "/" + destination.DestinationId;
+            destinationTelemetry.TryGetValue(id, out var counters);
+            return new GatewayDestinationHealthRow(
+                cluster.ClusterId, destination.DestinationId,
+                destination.Health.Active.ToString(), destination.Health.Passive.ToString(),
+                destination.ConcurrentRequestCount,
+                counters is null ? 0 : Interlocked.Read(ref counters.Requests),
+                counters is null ? 0 : Interlocked.Read(ref counters.ClientErrors),
+                counters is null ? 0 : Interlocked.Read(ref counters.ServerErrors));
+        })).ToArray();
+object DestinationHealthReportSnapshot(IProxyStateLookup runtime)
+{
+    var generated = DateTimeOffset.UtcNow;
+    var destinations = DestinationHealthRows(runtime);
+    return new
+    {
+        generatedUtc = generated,
+        gateway = Environment.MachineName,
+        processStartedUtc = processStartedUtc,
+        destinationCount = destinations.Length,
+        activeHealthy = destinations.Count(x => x.ActiveHealth == "Healthy"),
+        activeUnhealthy = destinations.Count(x => x.ActiveHealth == "Unhealthy"),
+        activeUnknown = destinations.Count(x => x.ActiveHealth is not "Healthy" and not "Unhealthy"),
+        destinations,
+        scope = "point-in-time single-process YARP health snapshot; counters reset after restart; no backend addresses, client IPs, or request paths"
+    };
+}
+app.MapGet("/admin/api/reports/health.json", (IProxyStateLookup runtime) =>
+    Results.Json(DestinationHealthReportSnapshot(runtime)))
+    .RequireAuthorization(p => p.RequireRole("Administrator", "Operator"));
+app.MapGet("/admin/api/reports/health.csv", (IProxyStateLookup runtime) =>
+{
+    var generated = DateTimeOffset.UtcNow;
+    var rows = new List<string>
+    {
+        "record_type,generated_utc,process_started_utc,gateway,cluster_id,destination_id,active_health,passive_health,inflight_requests,requests,http_4xx,http_5xx"
+    };
+    foreach (var destination in DestinationHealthRows(runtime))
+        rows.Add(string.Join(',', new[]
+        {
+            "destination", Csv(generated.ToString("O")), Csv(processStartedUtc.ToString("O")), Csv(Environment.MachineName),
+            Csv(destination.ClusterId), Csv(destination.DestinationId), Csv(destination.ActiveHealth), Csv(destination.PassiveHealth),
+            destination.InflightRequests.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            destination.Requests.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            destination.Http4xx.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            destination.Http5xx.ToString(System.Globalization.CultureInfo.InvariantCulture)
+        }));
+    return Results.File(Encoding.UTF8.GetBytes(string.Join("\r\n", rows) + "\r\n"),
+        "text/csv; charset=utf-8", $"gateway-health-{generated:yyyyMMdd-HHmmss}Z.csv");
+}).RequireAuthorization(p => p.RequireRole("Administrator", "Operator"));
 // Prometheus 0.0.4 text exposition, LOOPBACK SCRAPE ONLY. No public endpoint or credentials.
 // A local collector can scrape and forward to a separately secured metrics backend.
 app.MapGet("/gateway/metrics", (HttpContext ctx) =>
@@ -1718,3 +1774,6 @@ sealed class DestinationCounters
         Interlocked.Add(ref TotalMicros, (long)(elapsedMs * 1000));
     }
 }
+
+sealed record GatewayDestinationHealthRow(string ClusterId, string DestinationId, string ActiveHealth,
+    string PassiveHealth, int InflightRequests, long Requests, long Http4xx, long Http5xx);
