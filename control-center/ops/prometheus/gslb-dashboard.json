@@ -33,7 +33,8 @@
       "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi"}},
       "targets": [
         {"expr": "gatewaycore_gslb_configured_sites{job=~\"$job\"}", "legendFormat": "{{instance}} configured", "refId": "A"},
-        {"expr": "gatewaycore_gslb_locally_healthy_sites{job=~\"$job\"}", "legendFormat": "{{instance}} local healthy", "refId": "B"}
+        {"expr": "gatewaycore_gslb_locally_healthy_sites{job=~\"$job\"}", "legendFormat": "{{instance}} local healthy", "refId": "B"},
+        {"expr": "gatewaycore_gslb_administratively_quarantined_sites{job=~\"$job\"}", "legendFormat": "{{instance}} quarantined", "refId": "C"}
       ],
       "title": "Configured and locally healthy sites",
       "type": "timeseries"

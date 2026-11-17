@@ -402,3 +402,10 @@ runtime metrics support diagnostics and do not claim cross-authority consensus,
 DNSSEC, GeoIP, or service availability by themselves. See
 `control-center/ops/prometheus/METRIC_CONTRACT.md` for the series and scrape
 guidance.
+
+For an operator-planned maintenance withdrawal, set
+`AdministrativelyQuarantined: true` on a site in its zone configuration. A
+quarantined site remains health-probed and counted in the local health metric,
+but DNS will never select it, even when every other probe or signed observer
+reports healthy. The setting takes effect when the DNS process loads the updated
+configuration; this is not a live management API. The default is `false`.

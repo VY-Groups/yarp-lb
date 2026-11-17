@@ -101,7 +101,7 @@ foreach(var zone in config.Zones)
         sites.Add(new Site(address!,site.HealthCheckType == "Http" ? health : null,
             site.Weight,site.Priority,zone.FailureThreshold,zone.SuccessThreshold,
             site.HealthCheckType,site.TcpPort,site.Region,site.AgentSiteId,site.RequiredAgentIds ?? [])
-            { Validators = observers });
+            { Validators = observers, AdministrativelyQuarantined = site.AdministrativelyQuarantined });
         if (site.RequiredAgentIds is { Length: > 0 })
             reportTargets.Add(new AgentReportTarget(zone.Name.TrimEnd('.').ToLowerInvariant(),
                 site.AgentSiteId!, site.RequiredAgentIds,
@@ -388,6 +388,7 @@ sealed record DnsSite(string Address,string? HealthUrl,int Weight,int Priority=0
     public string? AgentSiteId { get; init; }
     public string[]? RequiredAgentIds { get; init; }
     public int? MinimumHealthyAgentReports { get; init; }
+    public bool AdministrativelyQuarantined { get; init; }
 }
 sealed class Site
 {
@@ -411,6 +412,7 @@ sealed class Site
     public int Priority {get;}
     public DnsHealthHysteresis Health {get;}
     public Uri[] Validators { get; init; } = [];
+    public bool AdministrativelyQuarantined { get; init; }
     public long ValidatorDeadline;
     public DnsProbeLatency Latency {get;} = new();
     public int Healthy;

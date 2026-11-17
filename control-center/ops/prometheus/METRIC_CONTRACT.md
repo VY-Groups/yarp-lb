@@ -84,6 +84,7 @@ to an untrusted network.
 | `gatewaycore_gslb_configured_zones` | gauge | none | Configured zones |
 | `gatewaycore_gslb_configured_sites` | gauge | none | Configured backend sites |
 | `gatewaycore_gslb_locally_healthy_sites` | gauge | none | Sites passing their local probe hysteresis |
+| `gatewaycore_gslb_administratively_quarantined_sites` | gauge | none | Sites quarantined by operator configuration |
 | `gatewaycore_gslb_report_gated_sites` | gauge | none | Sites requiring signed-agent quorum (present only when configured) |
 | `gatewaycore_gslb_agent_quorum_targets` | gauge | `state=quorum\|below_quorum` | Report-gated sites by current local quorum state |
 
