@@ -421,7 +421,7 @@ and remaining P0/P1 operational evidence remain incomplete. Production NO-GO.
 
 ## Continuation — annual objective, GSLB observability and quarantine (2026-11-17)
 
-Current `main` is `8d6e09289daf0ebedae18bf8f581f013ffa7af84`.
+Current `main` is `da6feee7dbe99abaefc10b8aedc75457148dfc3b`.
 
 On `main`, PR #121 merged
 opt-in loopback-only GSLB metrics, bounded Prometheus alerts, synthetic alert
@@ -470,12 +470,25 @@ Linux exact-head DNS tests confirmed malformed UDP frames get no response,
 malformed TCP frames close without a DNS response (including Windows RST),
 and valid queries still work. Main GSLB/L7 Actions passed on `8d6e092...`.
 
-Current feature branch `codex/issue52-soa-serial-staging-guard` enforces an
-RFC 1982 serial advance for changed existing authoritative GSLB zones during
-signed GatewayAgent file staging. Windows engine security acceptance passed,
-including unchanged data, stale serial rejection, increment, rollback,
-wraparound and half-range cases. This is an explicit bump guard, not automatic
-serial generation; exact-head GitHub Actions are pending.
+PR #127 merged the RFC 1982 SOA serial advance guard for changed existing
+authoritative zones during signed GatewayAgent staging. Its Windows/Linux
+application builds, Windows/Linux GSLB and L7 acceptance, Windows HA 10-run
+gate, real HTTP integrations, Docker, Control Center and security Actions all
+passed at exact head `472156be...`; merge commit is `da6feee...`. The guard
+requires a manual serial bump. It does not generate serials, cover zone
+creation/deletion, direct file edits, or restart DNS.
+
+Current feature branch `codex/issue109-agent-evidence-metrics` adds bounded
+Prometheus gauges for current signed report verdict/freshness counts
+(healthy/unhealthy/unknown/stale-or-missing), without agent/site/backend
+labels, and adds a Grafana panel. Local Windows Release builds passed for
+GslbDns and GslbObserver. The complete GSLB acceptance executable passed,
+including malformed UDP/TCP corpus and runtime metrics. The dedicated real
+mTLS, three-observer/two-authority acceptance passed locally using Git's
+OpenSSL binary; it verified healthy evidence, negative withdrawal, expiry,
+quorum loss, recovery and privacy. Exact-head Actions are still required before
+merge. These metrics are local evidence counts per configured reporter slot;
+they are not an operator trust-management API or node-to-node consensus.
 
 At this snapshot, open P0 issues #36, #52 and #109 remain open. #109 still needs
 cross-authority partition fencing/consensus, dynamic operator trust/evidence

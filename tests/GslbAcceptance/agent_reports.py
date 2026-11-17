@@ -211,8 +211,12 @@ def main():
         # not make this metrics/privacy assertion depend on its scheduling.
         assert accepted_count >= 1, "authenticated mTLS report accepts were not exported"
         assert 'gatewaycore_gslb_agent_quorum_targets{state="quorum"} 1' in metrics_text
+        healthy_line = 'gatewaycore_gslb_agent_evidence_reports{state="healthy"} '
+        healthy_count = int(next(line[len(healthy_line):] for line in metrics_text.splitlines()
+                                 if line.startswith(healthy_line)))
+        assert healthy_count >= 2, "fresh healthy observer evidence was not exported"
         assert "lab.example.test" not in metrics_text and "192.0.2.17" not in metrics_text
-        print("PASS: mTLS report and quorum metrics export without zone or backend labels")
+        print("PASS: mTLS evidence, freshness and quorum metrics export without zone or backend labels")
 
         # One independent observer reports a real failure while the DNS node's
         # local readiness endpoint stays healthy; the quorum must withdraw it.
@@ -220,6 +224,8 @@ def main():
         for authority in (authority_a, authority_b):
             expect_dns(authority["dns"], authority["dns_port"], 2,
                        log_paths=[authority["dns_log"], *authority["agent_logs"]])
+        negative_metrics = scrape_metrics(authority_a["metrics_port"])
+        assert 'gatewaycore_gslb_agent_evidence_reports{state="unhealthy"} 1' in negative_metrics
         print("PASS: signed negative evidence withdraws the site without changing local probe health")
         agents[0]["upstream"].verdict = 200
         for authority in (authority_a, authority_b):
@@ -237,6 +243,8 @@ def main():
         processes_a[1].wait(timeout=5)
         expect_dns(authority_a["dns"], authority_a["dns_port"], 2, timeout=12,
                    log_paths=[authority_a["dns_log"], *authority_a["agent_logs"]])
+        stale_metrics = scrape_metrics(authority_a["metrics_port"])
+        assert 'gatewaycore_gslb_agent_evidence_reports{state="stale_or_missing"} 2' in stale_metrics
         start_agent(agents[0], "a")
         expect_dns(authority_a["dns"], authority_a["dns_port"], 0, "192.0.2.17",
                    log_paths=[authority_a["dns_log"], *authority_a["agent_logs"]])

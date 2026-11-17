@@ -68,6 +68,16 @@
       "targets": [{"expr": "sum by (instance, transport) (rate(gatewaycore_gslb_dns_dropped_total{job=~\"$job\"}[5m]))", "legendFormat": "{{instance}} {{transport}}", "refId": "A"}],
       "title": "DNS queries dropped without response",
       "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 24},
+      "id": 7,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi"}},
+      "targets": [{"expr": "sum by (instance, state) (gatewaycore_gslb_agent_evidence_reports{job=~\"$job\"})", "legendFormat": "{{instance}} {{state}}", "refId": "A"}],
+      "title": "Observer evidence freshness and verdict",
+      "type": "timeseries"
     }
   ],
   "refresh": "30s",
