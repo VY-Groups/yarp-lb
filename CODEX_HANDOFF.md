@@ -648,3 +648,23 @@ and deployment operations remain open. #36 physical gateway acceptance, #109
 distributed health trust/fencing and #50 durable centralized observability also
 remain open. Annual 99.9% production availability remains unmeasured; production
 NO-GO.
+
+## Continuation — GeoIP merge and agent revocation acceptance (2026-11-17)
+
+PR #133 merged at `84d099458095fe0db81a453c5a3c17a59b0f1c6c`. Exact-head
+Windows/Ubuntu GSLB and L7/HA/load Actions were 9/9 successful. The post-merge
+main GSLB and L7 Actions runs `44127248148` and `44127248295` both completed
+successfully on that merge commit.
+
+PR #133 adds opt-in MaxMind country/ASN GeoIP routing over allowlisted,
+privacy-capped ECS, with explicit maps, freshness checking and safe weighted
+fallback. It is a partial P0 #52 increment, not issue completion. Current
+branch `codex/issue109-partition-fencing` starts at that merge and extends
+Linux multi-process agent acceptance: with two client leaves revoked on one
+DNS authority, the remaining single vantage stays below quorum and DNS stays
+SERVFAIL; after removing the denylist and accepting fresh reports, that node
+recovers. Existing tests already simulate two independent authorities and an
+observer-feed partition. This remains GitHub-hosted simulation, not physical
+network partition evidence or cross-node consensus. Exact-head Actions are
+pending. #109, #36, #52 and #50 remain open; annual 99.9% availability is
+unmeasured and production remains NO-GO.

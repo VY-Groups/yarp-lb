@@ -383,6 +383,8 @@ The receiver requires a client certificate pinned by SHA-256, a matching ECDSA P
 
 When an observer uses a custom server CA, `ReportServerRevocationMode` defaults to `Online` and fails closed if revocation status cannot be established. `NoCheck` is only appropriate for isolated disposable test PKI without CRL/OCSP; it disables server-certificate revocation checks and must not be copied into production configuration. Agent client leaves are pinned directly and can be revoked through the receiver's explicit denylist.
 
+Linux multi-process acceptance runs two independent DNS authorities, partitions one observer feed, and verifies only the node without a fresh quorum withdraws and later recovers. It also restarts one authority with two of three observer leaf pins revoked: the remaining single vantage cannot restore DNS, and removing the denylist restores service only after new quorum reports are accepted. This tests local emergency revocation and partition behavior in CI; it does not establish physical network separation or cross-authority consensus.
+
 Example shape (paths, certificate pins, keys, limits and addresses below are placeholders that must be provisioned and reviewed for a disposable environment):
 
     {
