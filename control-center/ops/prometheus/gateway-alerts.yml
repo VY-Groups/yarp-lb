@@ -80,6 +80,34 @@ groups:
         annotations:
           summary: "An external GatewayCore availability probe is unavailable"
           description: "Probe exporter scrape failed for {{ $labels.service }} in {{ $labels.region }}; count this monitoring gap as unavailable until recovered."
+      - alert: GslbDnsMetricsDown
+        expr: up{job="gatewaycore-gslb"} == 0
+        for: 1m
+        labels: {severity: critical}
+        annotations:
+          summary: "GSLB DNS runtime metrics are unavailable"
+          description: "The local scrape target {{ $labels.instance }} is down; DNS process health is unknown until telemetry returns."
+      - alert: GslbNoLocallyHealthySites
+        expr: (gatewaycore_gslb_configured_sites{job="gatewaycore-gslb"} > 0) and (gatewaycore_gslb_locally_healthy_sites{job="gatewaycore-gslb"} == 0)
+        for: 30s
+        labels: {severity: critical}
+        annotations:
+          summary: "GSLB node has no locally healthy backend sites"
+          description: "All configured sites fail this DNS node's local probe hysteresis. Review the zone-specific DNS and health-check logs."
+      - alert: GslbAgentQuorumBelowThreshold
+        expr: gatewaycore_gslb_agent_quorum_targets{job="gatewaycore-gslb",state="below_quorum"} > 0
+        for: 30s
+        labels: {severity: critical}
+        annotations:
+          summary: "One or more GSLB agent report targets are below quorum"
+          description: "At least one report-gated site lacks its configured local signed-agent quorum on {{ $labels.instance }}."
+      - alert: GslbAgentReportStateWriteFailed
+        expr: increase(gatewaycore_gslb_agent_reports_total{job="gatewaycore-gslb",result="storage_error"}[5m]) > 0
+        for: 0m
+        labels: {severity: critical}
+        annotations:
+          summary: "GSLB could not persist agent report replay state"
+          description: "The DNS node rejected persistence of agent report state; inspect storage availability and filesystem permissions."
       - alert: YarpDroppedLogs
         expr: increase(yarp_logging_dropped_total{job="gatewaycore-gateway"}[5m]) > 0
         for: 1m

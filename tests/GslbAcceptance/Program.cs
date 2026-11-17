@@ -303,6 +303,10 @@ var tasks=new []{ProbeServer(healthA,s1,cancel.Token),ProbeServer(healthB,s2,can
 var temp=Path.Combine(Path.GetTempPath(),"yarp-dns-"+Guid.NewGuid().ToString("N"));
 Directory.CreateDirectory(temp);
 var configuration=Path.Combine(temp,"zones.json");
+using var metricsReservation = new TcpListener(IPAddress.Loopback, 0);
+metricsReservation.Start();
+var metricsPort = ((IPEndPoint)metricsReservation.LocalEndpoint).Port;
+metricsReservation.Stop();
 // Three independently probed priority groups; IPv6 has a separate pool.
 var chainSites=new[]{
     new {Address="127.0.0.41",HealthUrl="http://127.0.0.1:19711/ready",Weight=2,Priority=0,HealthCheckType="Http",TcpPort=0},
@@ -315,6 +319,7 @@ var chainSites=new[]{
 File.WriteAllText(configuration,JsonSerializer.Serialize(new {
  AllowNonLoopbackListeners=false,
  ListenHost="127.0.0.1",ListenPort=15353,ProbeIntervalSeconds=1,
+ MetricsListenHost="127.0.0.1",MetricsListenPort=metricsPort,
  Zones=new object[]{
  new {Name="chain.integration.test",TtlSeconds=10,Sites=chainSites,
       NameServers=new[]{new {Host="ns.chain.integration.test",Address="127.0.0.31"}},
@@ -405,6 +410,21 @@ try
         return seen.Contains("127.0.0.21") && seen.Contains("127.0.0.22");
     });
     Console.WriteLine("PASS: both IPv4 sites healthy before distribution sampling");
+    using var metricsClient = new HttpClient { Timeout = TimeSpan.FromSeconds(2) };
+    var metricsText = await metricsClient.GetStringAsync($"http://127.0.0.1:{metricsPort}/metrics");
+    Must(metricsText.Contains("# TYPE gatewaycore_gslb_dns_queries_total counter", StringComparison.Ordinal) &&
+         metricsText.Contains("gatewaycore_gslb_dns_queries_total{transport=\"udp\"} ", StringComparison.Ordinal) &&
+         metricsText.Contains("gatewaycore_gslb_dns_responses_total{transport=\"udp\",rcode=\"NOERROR\"} ", StringComparison.Ordinal) &&
+         metricsText.Contains("gatewaycore_gslb_configured_zones 7", StringComparison.Ordinal) &&
+         !metricsText.Contains("app.integration.test", StringComparison.Ordinal) &&
+         !metricsText.Contains("127.0.0.21", StringComparison.Ordinal),
+         "loopback-only GSLB exporter reports bounded runtime series without zone names or backend addresses");
+    _ = await TcpQuery(DnsRequest("app.integration.test", 1));
+    metricsText = await metricsClient.GetStringAsync($"http://127.0.0.1:{metricsPort}/metrics");
+    Must(metricsText.Contains("gatewaycore_gslb_dns_queries_total{transport=\"tcp\"} 1", StringComparison.Ordinal) &&
+         metricsText.Contains("gatewaycore_gslb_dns_responses_total{transport=\"tcp\",rcode=\"NOERROR\"} 1", StringComparison.Ordinal),
+         "GSLB exporter counts an actual DNS-over-TCP query and response");
+    Console.WriteLine("PASS: loopback GSLB runtime metrics, transport counters and low-cardinality privacy contract");
     // The policy deliberately falls back to weighted while samples accumulate.
     // Wait for three independently scheduled one-second probe cycles before
     // asserting a deterministic winner; a single weighted reply is not proof.

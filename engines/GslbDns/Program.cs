@@ -24,8 +24,20 @@ if (!IPAddress.TryParse(config.ListenHost, out var listen) ||
     config.ProbeIntervalSeconds is < 1 or > 60 ||
     config.MaxResponsesPerSecondPerClient is < 20 or > 20000 ||
     config.MaxConcurrentHealthProbes is < 1 or > 128 ||
+    config.MetricsListenPort is < 0 or > 65535 ||
     config.Zones is not { Length: >= 1 and <= 64 })
     throw new InvalidDataException("Invalid DNS listener or zones. Non-loopback binding requires explicit opt-in.");
+if (config.MetricsListenPort != 0)
+{
+    if (!IPAddress.TryParse(config.MetricsListenHost, out var metricsListen) ||
+        !IPAddress.IsLoopback(metricsListen) || metricsListen.IsIPv4MappedToIPv6)
+        throw new InvalidDataException("GSLB metrics must use an IPv4 or IPv6 loopback address.");
+    if (metricsListen.Equals(listen) && config.MetricsListenPort == config.ListenPort ||
+        config.AgentReports is { } reports &&
+        IPAddress.TryParse(reports.ListenAddress, out var reportListen) &&
+        metricsListen.Equals(reportListen) && config.MetricsListenPort == reports.ListenPort)
+        throw new InvalidDataException("GSLB DNS, metrics and agent-report listeners must use distinct address/port pairs.");
+}
 var names=new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 var groups=new Dictionary<string, SiteGroup>(StringComparer.OrdinalIgnoreCase);
 var reportTargets = new List<AgentReportTarget>();
@@ -134,8 +146,12 @@ using var reportStore = config.AgentReports is null ? null : new AgentHealthRepo
     config.AgentReports.Agents, reportTargets, config.AgentReports.ReplayStatePath,
     config.AgentReports.MaxTtlSeconds, config.AgentReports.MaxAgeSeconds,
     config.AgentReports.MaxClockSkewSeconds);
+var runtimeMetrics = new DnsRuntimeMetrics();
 await using var reportServer = config.AgentReports is null || reportStore is null
-    ? null : new AgentHealthReportServer(config.AgentReports, reportStore);
+    ? null : new AgentHealthReportServer(config.AgentReports, reportStore, runtimeMetrics);
+await using var metricsServer = config.MetricsListenPort == 0 ? null : new DnsMetricsServer(
+    config.MetricsListenHost, config.MetricsListenPort, runtimeMetrics,
+    groups.Values.ToArray(), reportStore, reportTargets);
 using var validation = groups.Values.SelectMany(group => group.Sites).Any(site => site.Validators.Length > 0)
     ? new ExternalValidation(groups.Values.SelectMany(group => group.Sites).SelectMany(site => site.Validators)) : null;
 using var stop=new CancellationTokenSource();
@@ -145,6 +161,7 @@ using var sigterm=OperatingSystem.IsLinux()
         System.Runtime.InteropServices.PosixSignal.SIGTERM, e=>{e.Cancel=true;stop.Cancel();})
     : null;
 if (reportServer is not null) await reportServer.StartAsync(stop.Token);
+if (metricsServer is not null) await metricsServer.StartAsync(stop.Token);
 // A 301/302/307/308 must NOT become healthy by redirecting readiness to a
 // login page, another server or a public site. Require direct HTTP 2xx.
 using var healthClient = new HttpClient(new SocketsHttpHandler {
@@ -253,16 +270,27 @@ var tcpAccept = Task.Run(async () =>
                     var length = new byte[2];
                     await stream.ReadExactlyAsync(length, deadline.Token);
                     var size = BinaryPrimitives.ReadUInt16BigEndian(length);
-                    if (size is < 17 or > 4096) return;
+                    if (size is < 17 or > 4096)
+                    {
+                        runtimeMetrics.QueryReceived(tcp: true);
+                        runtimeMetrics.RequestDropped(tcp: true);
+                        return;
+                    }
                     var packet = new byte[size];
                     await stream.ReadExactlyAsync(packet, deadline.Token);
+                    runtimeMetrics.QueryReceived(tcp: true);
                     var resolverIp=(session.Client.RemoteEndPoint as IPEndPoint)?.Address;
                     var response = DnsWireProtocol.Build(packet, groups, tcp: true,
                         resolverIp:resolverIp, agentReports:reportStore);
-                    if (response is null) return;
+                    if (response is null)
+                    {
+                        runtimeMetrics.RequestDropped(tcp: true);
+                        return;
+                    }
                     BinaryPrimitives.WriteUInt16BigEndian(length, checked((ushort)response.Length));
                     await stream.WriteAsync(length, deadline.Token);
                     await stream.WriteAsync(response, deadline.Token);
+                    runtimeMetrics.ResponseSent(tcp: true, response);
                 }
                 catch (Exception ex) when (ex is IOException or SocketException or
                     OperationCanceledException or ObjectDisposedException) { }
@@ -288,14 +316,27 @@ try
             receiveEndpoint,stop.Token); }
         catch(OperationCanceledException) when(stop.IsCancellationRequested){break;}
         catch(SocketException) when(stop.IsCancellationRequested){break;}
+        runtimeMetrics.QueryReceived(tcp: false);
         // IP-keyed response budget. Do not echo arbitrary UDP traffic without limits.
         // Loopback is still the required default deployment boundary.
         var source=((IPEndPoint)received.RemoteEndPoint).Address;
-        if(!responseLimiter.Allow(source,Environment.TickCount64))continue;
+        if(!responseLimiter.Allow(source,Environment.TickCount64))
+        {
+            runtimeMetrics.RequestDropped(tcp: false);
+            continue;
+        }
         var response=DnsWireProtocol.Build(buffer.AsSpan(0,received.ReceivedBytes),groups,
             tcp:false,resolverIp:source,agentReports:reportStore);
-        if(response is null)continue;
-        try { await dnsSocket.SendToAsync(response,SocketFlags.None,received.RemoteEndPoint,stop.Token); }
+        if(response is null)
+        {
+            runtimeMetrics.RequestDropped(tcp: false);
+            continue;
+        }
+        try
+        {
+            await dnsSocket.SendToAsync(response,SocketFlags.None,received.RemoteEndPoint,stop.Token);
+            runtimeMetrics.ResponseSent(tcp: false, response);
+        }
         catch(SocketException) when(stop.IsCancellationRequested){break;}
     }
 }
@@ -316,6 +357,8 @@ sealed record DnsConfig(bool AllowNonLoopbackListeners,string ListenHost,int Lis
 {
     public int MaxResponsesPerSecondPerClient {get;init;} = 500;
     public int MaxConcurrentHealthProbes {get;init;} = 32;
+    public string MetricsListenHost { get; init; } = "127.0.0.1";
+    public int MetricsListenPort { get; init; }
     public AgentReportServerConfig? AgentReports { get; init; }
 }
 sealed record DnsZone(string Name,int TtlSeconds,DnsSite[] Sites,

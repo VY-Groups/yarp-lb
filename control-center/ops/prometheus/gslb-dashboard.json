@@ -1,0 +1,82 @@
+{
+  "annotations": {"list": []},
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "links": [],
+  "panels": [
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "fieldConfig": {"defaults": {"unit": "reqps"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+      "id": 1,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi"}},
+      "targets": [{"expr": "sum by (instance, transport) (rate(gatewaycore_gslb_dns_queries_total{job=~\"$job\"}[5m]))", "legendFormat": "{{instance}} {{transport}}", "refId": "A"}],
+      "title": "DNS query rate by transport",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "fieldConfig": {"defaults": {"unit": "reqps"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+      "id": 2,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi"}},
+      "targets": [{"expr": "sum by (instance, rcode) (rate(gatewaycore_gslb_dns_responses_total{job=~\"$job\"}[5m]))", "legendFormat": "{{instance}} {{rcode}}", "refId": "A"}],
+      "title": "DNS responses by response code",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+      "id": 3,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi"}},
+      "targets": [
+        {"expr": "gatewaycore_gslb_configured_sites{job=~\"$job\"}", "legendFormat": "{{instance}} configured", "refId": "A"},
+        {"expr": "gatewaycore_gslb_locally_healthy_sites{job=~\"$job\"}", "legendFormat": "{{instance}} local healthy", "refId": "B"}
+      ],
+      "title": "Configured and locally healthy sites",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+      "id": 4,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi"}},
+      "targets": [{"expr": "gatewaycore_gslb_agent_quorum_targets{job=~\"$job\"}", "legendFormat": "{{instance}} {{state}}", "refId": "A"}],
+      "title": "Signed-agent quorum targets",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "fieldConfig": {"defaults": {"unit": "reqps"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16},
+      "id": 5,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi"}},
+      "targets": [{"expr": "sum by (instance, result) (rate(gatewaycore_gslb_agent_reports_total{job=~\"$job\"}[5m]))", "legendFormat": "{{instance}} {{result}}", "refId": "A"}],
+      "title": "Signed-agent report outcomes",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "fieldConfig": {"defaults": {"unit": "reqps"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16},
+      "id": 6,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi"}},
+      "targets": [{"expr": "sum by (instance, transport) (rate(gatewaycore_gslb_dns_dropped_total{job=~\"$job\"}[5m]))", "legendFormat": "{{instance}} {{transport}}", "refId": "A"}],
+      "title": "DNS queries dropped without response",
+      "type": "timeseries"
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": ["gatewaycore", "gslb", "operations"],
+  "templating": {
+    "list": [{"current": {"selected": false, "text": "gatewaycore-gslb", "value": "gatewaycore-gslb"}, "definition": "label_values(up{job=~\"gatewaycore-gslb\"}, job)", "hide": 0, "includeAll": false, "label": "GSLB scrape job", "multi": false, "name": "job", "options": [], "query": {"query": "label_values(up{job=~\"gatewaycore-gslb\"}, job)", "refId": "PrometheusVariableQueryEditor-VariableQuery"}, "refresh": 1, "regex": "", "type": "query"}]
+  },
+  "time": {"from": "now-6h", "to": "now"},
+  "title": "GatewayCore GSLB Operations",
+  "uid": "gatewaycore-gslb-ops",
+  "version": 1
+}
