@@ -168,6 +168,9 @@ tests:
         alertname: GslbDnsMetricsDown
         exp_alerts:
           - exp_labels: {job: gatewaycore-gslb,instance: dns-01,severity: critical}
+            exp_annotations:
+              summary: "GSLB DNS runtime metrics are unavailable"
+              description: "The local scrape target dns-01 is down; DNS process health is unknown until telemetry returns."
   - interval: 1m
     input_series:
       - series: 'gatewaycore_gslb_configured_sites{job="gatewaycore-gslb",instance="dns-01"}'
@@ -179,6 +182,9 @@ tests:
         alertname: GslbNoLocallyHealthySites
         exp_alerts:
           - exp_labels: {job: gatewaycore-gslb,instance: dns-01,severity: critical}
+            exp_annotations:
+              summary: "GSLB node has no locally healthy backend sites"
+              description: "All configured sites fail this DNS node's local probe hysteresis. Review the zone-specific DNS and health-check logs."
   - interval: 1m
     input_series:
       - series: 'gatewaycore_gslb_agent_quorum_targets{job="gatewaycore-gslb",instance="dns-01",state="below_quorum"}'
@@ -190,6 +196,9 @@ tests:
         alertname: GslbAgentQuorumBelowThreshold
         exp_alerts:
           - exp_labels: {job: gatewaycore-gslb,instance: dns-01,state: below_quorum,severity: critical}
+            exp_annotations:
+              summary: "One or more GSLB agent report targets are below quorum"
+              description: "At least one report-gated site lacks its configured local signed-agent quorum on dns-01."
   - interval: 1m
     input_series:
       - series: 'gatewaycore_gslb_agent_reports_total{job="gatewaycore-gslb",instance="dns-01",result="storage_error"}'
@@ -199,3 +208,6 @@ tests:
         alertname: GslbAgentReportStateWriteFailed
         exp_alerts:
           - exp_labels: {job: gatewaycore-gslb,instance: dns-01,result: storage_error,severity: critical}
+            exp_annotations:
+              summary: "GSLB could not persist agent report replay state"
+              description: "The DNS node rejected persistence of agent report state; inspect storage availability and filesystem permissions."
