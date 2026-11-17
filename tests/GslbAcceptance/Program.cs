@@ -328,6 +328,16 @@ File.WriteAllText(configuration,JsonSerializer.Serialize(new {
  new {Name="chain-open.integration.test",TtlSeconds=10,Sites=chainSites,
       RoutingPolicy="WeightedFailover",FailureThreshold=1,SuccessThreshold=1,
       FailClosedWhenAllSitesDown=false},
+ new {Name="quarantine.integration.test",TtlSeconds=10,
+      Sites=new[]{
+        new {Address="127.0.0.21",HealthUrl="http://127.0.0.1:19711/ready",Weight=1,Priority=0,HealthCheckType="Http",TcpPort=0,AdministrativelyQuarantined=true},
+        new {Address="127.0.0.22",HealthUrl="http://127.0.0.1:19712/ready",Weight=1,Priority=10,HealthCheckType="Http",TcpPort=0,AdministrativelyQuarantined=false}},
+      RoutingPolicy="Failover",FailureThreshold=1,SuccessThreshold=1,
+      FailClosedWhenAllSitesDown=true},
+ new {Name="quarantine-open.integration.test",TtlSeconds=10,
+      Sites=new[]{new {Address="127.0.0.21",HealthUrl="http://127.0.0.1:19711/ready",Weight=1,Priority=0,HealthCheckType="Http",TcpPort=0,AdministrativelyQuarantined=true}},
+      RoutingPolicy="Weighted",FailureThreshold=1,SuccessThreshold=1,
+      FailClosedWhenAllSitesDown=false},
  new{ Name="app.integration.test",TtlSeconds=10,Sites=new []{
     new { Address="127.0.0.21",HealthUrl="http://127.0.0.1:19711/ready",Weight=2,Priority=0,HealthCheckType="Http",TcpPort=0 },
     new { Address="127.0.0.22",HealthUrl="http://127.0.0.1:19712/ready",Weight=1,Priority=10,HealthCheckType="Http",TcpPort=0 },
@@ -415,10 +425,26 @@ try
     Must(metricsText.Contains("# TYPE gatewaycore_gslb_dns_queries_total counter", StringComparison.Ordinal) &&
          metricsText.Contains("gatewaycore_gslb_dns_queries_total{transport=\"udp\"} ", StringComparison.Ordinal) &&
          metricsText.Contains("gatewaycore_gslb_dns_responses_total{transport=\"udp\",rcode=\"NOERROR\"} ", StringComparison.Ordinal) &&
-         metricsText.Contains("gatewaycore_gslb_configured_zones 7", StringComparison.Ordinal) &&
+         metricsText.Contains("gatewaycore_gslb_configured_zones 9", StringComparison.Ordinal) &&
+         metricsText.Contains("gatewaycore_gslb_administratively_quarantined_sites 2", StringComparison.Ordinal) &&
          !metricsText.Contains("app.integration.test", StringComparison.Ordinal) &&
          !metricsText.Contains("127.0.0.21", StringComparison.Ordinal),
          "loopback-only GSLB exporter reports bounded runtime series without zone names or backend addresses");
+    await Wait(async () =>
+    {
+        var response = await Query("quarantine.integration.test");
+        return response.Status == 0 && response.Address == "127.0.0.22";
+    });
+    for (var i = 0; i < 5; i++)
+    {
+        var response = await Query("quarantine.integration.test");
+        Must(response.Status == 0 && response.Address == "127.0.0.22",
+            "manual maintenance quarantine outranks healthy local probes and routes to the next failover site");
+    }
+    var fullyQuarantined = await Query("quarantine-open.integration.test");
+    Must(fullyQuarantined.Status == 2 && fullyQuarantined.Address is null,
+        "availability-first fallback never selects an administratively quarantined site");
+    Console.WriteLine("PASS: operator quarantine keeps a healthy primary out of DNS failover selection");
     _ = await TcpQuery(DnsRequest("app.integration.test", 1));
     metricsText = await metricsClient.GetStringAsync($"http://127.0.0.1:{metricsPort}/metrics");
     Must(metricsText.Contains("gatewaycore_gslb_dns_queries_total{transport=\"tcp\"} 1", StringComparison.Ordinal) &&

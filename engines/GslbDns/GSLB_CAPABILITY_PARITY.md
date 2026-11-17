@@ -3,8 +3,8 @@
 Source of comparison: user-supplied OpenGSLB feature matrix and the *reference*
 `gslb` branch at `48f020c3f0d7d3d353485c9a0d701061a3014c08`
 (OpenGSLB Go v1.1.10). GatewayCore base `main`:
-`82c7b863e3674bb7c0a4ba368f4c11b3c7636152`. This branch additionally
-proposes opt-in weighted priority groups; it is not merged until its PR is approved.
+`b19cb7cd187959dd6ced17701afda14d5b0127be`. This branch adds an explicit
+operator-configured quarantine control; it is not merged until its PR is reviewed.
 
 The matrix compares desired **features**, NOT commercial/product certifications,
 vendor prices, security guarantees or claims that other providers lack a feature.
@@ -19,17 +19,17 @@ performance. No AGPL OpenGSLB source is incorporated.
 | DNS AAAA / IPv6 | Merged lab implementation; Windows/Linux acceptance exists | IPv6 listener and NS glue, real dual-stack probes and public resolvers |
 | Weighted traffic selection | Existing opt-in per-zone selection | Predictable fairness under health churn, matched load |
 | Ordered primary/standby failover | Existing opt-in `RoutingPolicy=Failover` | DNS caching, DR state, physical failover behavior |
-| Weighted failover *chains* | Proposed opt-in `WeightedFailover` with weighted healthy priority groups | Exact-head Windows/Linux CI, review, DNS cache behavior and physical DR evidence; no explicit maintenance/drain API |
+| Weighted failover *chains* | Merged opt-in `WeightedFailover` with weighted healthy priority groups | DNS cache behavior and physical DR evidence; this branch adds static maintenance quarantine, not a live drain API |
 | GeoIP and CIDR routing | Merged explicit resolver CIDR longest-prefix with lab acceptance; **licensed GeoIP still missing** | Resolver/source semantics, GeoIP dataset licensing/version, stale-data policy and real geo tests |
-| Latency / RTT selection | Draft PR #108 proposes local probe elapsed-time EMA, not merged or client RTT | Per-vantage measured RTT, min sample, timeout, bounded EMA and rollback |
+| Latency / RTT selection | Merged `ObservedLatency` policy uses local backend probe elapsed time; it is not client RTT | Per-vantage observations, calibrated policy, timeout and rollback; never infer client RTT from server probes |
 | EDNS Client Subnet (ECS) | Optional zone opt-in over allowlisted recursive resolver CIDRs and explicit region routes; source capped at IPv4 `/24` and IPv6 `/56`; ambiguous prefixes ignored | Production privacy review, RFC vectors, independent resolver and cache tests |
 | Predictive health | Not implemented | Evidence-based confidence, false predictions, strict safety policy |
-| Agent-side failure prediction | Not implemented | Signed agent identity, replay/freshness, bounded metric flow, external validation |
-| External health validation | Local HTTP(S)/TCP probing only | Independent geographic quorum and application-specific readiness |
+| Agent-side failure prediction | Not implemented; signed async health reports are evidence, not prediction | Calibrated advisory model with false-positive/negative, drift and rollback evaluation |
+| External health validation | Local HTTP(S)/TCP probes plus optional signed async observer reports and synchronous external validators; each DNS process evaluates its own quorum | Authority precedence, application-specific readiness, cross-node partition fencing and independent deployment acceptance |
 | DNSSEC | Not implemented | Signed zones, DS workflow, RFC conformance, key rotation and recovery |
 | GSLB server-management API | Static startup JSON only | RBAC, strong schema, signed revisions, staged rollout and rollback |
-| Agent gossip / health-state sync | Not implemented for DNS | mTLS/signed frames, version/epoch/fencing, quorum/partition fault tests |
-| Observability | Gateway metrics exist; GSLB-specific incomplete | Cardinality-bounded DNS/health decisions, trace/alert tests |
+| Agent gossip / health-state sync | Signed report fan-in is per DNS node; there is no DNS-node gossip or shared consensus | Versioned cross-node state, fencing and partition fault tests |
+| Observability | Gateway metrics/logging plus opt-in loopback GSLB metrics, Prometheus alerts and Grafana import; no OTel tracing/Collector pipeline | OTel trace/export/backpressure, deployed collector/Grafana, overhead and retention evidence |
 | Configuration reload | Requires engine restart | Atomic validated revision swap, no dropped queries, rollback |
 | Annual cost / setup effort | Not a software capability certification | Real BOM/TCO and deployment reproducibility study |
 

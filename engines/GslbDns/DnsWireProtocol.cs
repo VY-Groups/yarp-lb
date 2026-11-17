@@ -143,14 +143,21 @@ internal static class DnsWireProtocol
                 else
                 {
                     var now = Environment.TickCount64;
-                    var eligible = configured.Where(s => Volatile.Read(ref s.Healthy) == 1 &&
+                    var eligible = configured.Where(s => !s.AdministrativelyQuarantined &&
+                        Volatile.Read(ref s.Healthy) == 1 &&
                         (s.Validators.Length == 0 || now < Volatile.Read(ref s.ValidatorDeadline)) &&
                         (s.RequiredAgentIds.Length == 0 ||
                          (agentReports?.IsHealthy(apex!, s.AgentSiteId!, now) ?? false))).ToArray();
                     if (eligible.Length == 0)
                     {
                         if (zone.FailClosedWhenAllSitesDown) rcode = 2; // SERVFAIL
-                        else eligible = configured; // family-specific availability-first fallback
+                        else
+                        {
+                            // Availability-first fallback may include failed probes,
+                            // but administrative quarantine always remains a veto.
+                            eligible = configured.Where(s => !s.AdministrativelyQuarantined).ToArray();
+                            if (eligible.Length == 0) rcode = 2;
+                        }
                     }
                     if (eligible.Length > 0 && rcode == 0)
                     {

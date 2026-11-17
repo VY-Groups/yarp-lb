@@ -59,6 +59,10 @@ internal sealed class DnsRuntimeMetrics
         output.AppendLine("# HELP gatewaycore_gslb_locally_healthy_sites Backend sites passing local probe hysteresis");
         output.AppendLine("# TYPE gatewaycore_gslb_locally_healthy_sites gauge");
         output.Append("gatewaycore_gslb_locally_healthy_sites ").Append(sites.Count(site => Volatile.Read(ref site.Healthy) == 1)).Append('\n');
+        output.AppendLine("# HELP gatewaycore_gslb_administratively_quarantined_sites Sites explicitly quarantined by operator configuration");
+        output.AppendLine("# TYPE gatewaycore_gslb_administratively_quarantined_sites gauge");
+        output.Append("gatewaycore_gslb_administratively_quarantined_sites ")
+            .Append(sites.Count(site => site.AdministrativelyQuarantined)).Append('\n');
 
         if (reportStore is not null)
         {
