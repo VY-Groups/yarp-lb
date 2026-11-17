@@ -39,12 +39,12 @@ groups:
         for: 1m
         labels: {severity: critical}
       - alert: GatewayAvailabilityFastBurn
-        expr: ((1 - avg_over_time(gatewaycore:availability_probe_success:sample[5m])) / 0.001 > 14.4) and ((1 - avg_over_time(gatewaycore:availability_probe_success:sample[1h])) / 0.001 > 14.4)
+        expr: ((1 - avg_over_time(gatewaycore:availability_probe_success:sample[30m])) / 0.001 > 14.4) and ((1 - avg_over_time(gatewaycore:availability_probe_success:sample[6h])) / 0.001 > 14.4)
         for: 2m
         labels: {severity: critical}
         annotations:
           summary: "GatewayCore 99.9% availability budget is burning rapidly"
-          description: "The external HTTPS readiness probe is consuming the monthly error budget rapidly for {{ $labels.service }} in {{ $labels.region }}."
+          description: "The external HTTPS readiness probe is consuming the annual error budget rapidly for {{ $labels.service }} in {{ $labels.region }}."
       - alert: GatewayAvailabilityBudgetAtRisk
         expr: ((1 - avg_over_time(gatewaycore:availability_probe_success:sample[24h])) > 0.001) and (count_over_time(gatewaycore:availability_probe_success:sample[24h]) >= 8000)
         for: 5m
@@ -52,6 +52,20 @@ groups:
         annotations:
           summary: "GatewayCore 24-hour availability is below 99.9%"
           description: "Review failed samples and open an incident record for {{ $labels.service }} in {{ $labels.region }}."
+      - alert: GatewayAvailabilityAnnualSLOViolation
+        expr: (avg_over_time(gatewaycore:availability_probe_success:sample[365d]) < 0.999) and (count_over_time(gatewaycore:availability_probe_success:sample[365d]) >= 3090528)
+        for: 5m
+        labels: {severity: critical}
+        annotations:
+          summary: "GatewayCore rolling-year availability is below 99.9%"
+          description: "The annual service objective is missed for {{ $labels.service }} in {{ $labels.region }}. Open an incident and track corrective work."
+      - alert: GatewayAvailabilityAnnualCoverageInsufficient
+        expr: count_over_time(gatewaycore:availability_probe_success:sample[365d]) < 3090528
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "GatewayCore annual availability is not yet measurable"
+          description: "A full rolling-year SLI needs at least 98% of 10-second probe samples for {{ $labels.service }} in {{ $labels.region }}."
       - alert: GatewayAvailabilityProbeMissing
         expr: absent_over_time(gatewaycore:availability_probe_success:sample[2m])
         for: 1m

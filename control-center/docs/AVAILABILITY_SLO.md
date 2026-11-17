@@ -2,7 +2,7 @@
 
 ## Commitment level
 
-The project adopts **99.9% monthly availability as a planning objective** for
+The project adopts **99.9% availability over a rolling 365-day year as a planning objective** for
 the protected GatewayCore HTTP endpoint. This is an operating target, not a
 measured production SLO or warranty. It lets engineering proceed against a
 specific budget while telemetry collects evidence to confirm or revise the
@@ -21,12 +21,14 @@ gateway availability. Production traffic request outcomes should be analyzed
 alongside probes once privacy-safe, low-cardinality central telemetry is
 deployed.
 
-For a rolling 30-day window, 99.9% allows at most **43.2 minutes** of
-unavailability (0.1% of 43,200 minutes). A 10-second probe cadence produces
-259,200 samples per probe region; a 0.1% error budget is 259 failed samples,
-approximately 43 minutes of wall-clock outage when failures are continuous.
-Alerting uses multi-window burn rate so operators see fast budget consumption
-before the rolling window is exhausted.
+For a rolling 365-day window, 99.9% allows at most **8 hours, 45 minutes,
+36 seconds** of unavailability (0.1% of 31,536,000 seconds). A 10-second
+probe cadence produces 3,153,600 samples per probe region; the error budget
+is 3,154 failed samples, approximately 8 hours and 46 minutes of continuous
+outage. Alerting uses short burn-rate windows to detect a fast outage and a
+full 365-day window to calculate the annual SLI. Keep at least 13 months of
+probe history in the production TSDB; before a full year of samples exists,
+the annual SLI is **unknown**, not a pass.
 
 ## Explicit reliability assumptions for engineering
 
@@ -35,17 +37,17 @@ assumptions and must not be presented as measured component availability.
 
 | Element | Planning assumption |
 | --- | ---: |
-| Each gateway node, considered alone | 99.0% monthly availability |
+| Each gateway node, considered alone | 99.0% annual availability |
 | Two nodes | Independent failure domains and successful failover; no shared power, host, NIC, or rack failure |
-| Shared critical paths (DNS/delegation and ingress/network) | 99.98% each |
-| Common-cause outage allowance | No more than 10 minutes per rolling 30 days |
-| Automatic failover allowance | At most six events per 30 days, each losing no more than 10 seconds |
+| Shared critical paths (DNS/delegation and ingress/network) | 99.98% annual availability each |
+| Common-cause outage allowance | No more than 10 minutes per rolling year |
+| Automatic failover allowance | At most six events per month, each losing no more than 10 seconds |
 
 Under independence, two 99.0% nodes yield a theoretical 99.99% parallel-node
 availability. Multiplying by two 99.98% shared paths gives 99.9500%. Adding the
-assumed 10 minutes of common-cause loss and one minute of failover loss yields
-about **32.6 minutes unavailable / 99.9245%** in 30 days, leaving about
-**10.6 minutes** of the 99.9% budget. This calculation is only a planning
+assumed 10 minutes of common-cause loss and 12 minutes of failover loss (72
+events per year) yields about **4.75 hours unavailable / 99.9458%** in a year,
+leaving about **4.01 hours** of the 99.9% budget. This calculation is only a planning
 model: correlated failures, DNS caching, failed failover, operator error,
 capacity exhaustion, or a shared dependency below its assumption can consume
 the margin. A single 99.9% shared dependency plus the other modeled losses is
@@ -74,7 +76,9 @@ expect a separately deployed Blackbox Exporter job named
 `gatewaycore-availability`, with one `probe_success` series per `service` and
 `region` plus a matching `up` target series, sampled every 10 seconds against
 the production HTTPS URL. A failed probe-target scrape is converted to a zero
-sample and alerted. Keep
+sample and alerted. The annual SLI and sample-coverage alerts need 365-day
+retention; the 5-minute/6-hour burn alerts work before a year of history is
+available. Keep
 `service` and `region` labels bounded. Alert delivery must be tested from the
 customer's Alertmanager to its real operator channel; promtool tests validate
 rule behavior only. The monitoring endpoint must not be exposed through the

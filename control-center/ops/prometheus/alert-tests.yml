@@ -103,6 +103,9 @@ tests:
         alertname: GatewayAvailabilityFastBurn
         exp_alerts:
           - exp_labels: {job: gatewaycore-availability,instance: probe-south,service: gatewaycore-http,region: ap-south-1,severity: critical}
+            exp_annotations:
+              summary: "GatewayCore 99.9% availability budget is burning rapidly"
+              description: "The external HTTPS readiness probe is consuming the annual error budget rapidly for gatewaycore-http in ap-south-1."
       - eval_time: 8m
         alertname: GatewayAvailabilityBudgetAtRisk
         exp_alerts: []
@@ -128,6 +131,16 @@ tests:
         alertname: GatewayAvailabilityProbeScrapeFailed
         exp_alerts:
           - exp_labels: {job: gatewaycore-availability,instance: probe-south,service: gatewaycore-http,region: ap-south-1,severity: critical}
+            exp_annotations:
+              summary: "An external GatewayCore availability probe is unavailable"
+              description: "Probe exporter scrape failed for gatewaycore-http in ap-south-1; count this monitoring gap as unavailable until recovered."
+      - eval_time: 7m
+        alertname: GatewayAvailabilityAnnualCoverageInsufficient
+        exp_alerts:
+          - exp_labels: {job: gatewaycore-availability,instance: probe-south,service: gatewaycore-http,region: ap-south-1,severity: warning}
+            exp_annotations:
+              summary: "GatewayCore annual availability is not yet measurable"
+              description: "A full rolling-year SLI needs at least 98% of 10-second probe samples for gatewaycore-http in ap-south-1."
   - interval: 1m
     input_series:
       - series: 'yarp_logging_dropped_high_priority_total{job="gatewaycore-gateway",instance="gateway-01"}'
