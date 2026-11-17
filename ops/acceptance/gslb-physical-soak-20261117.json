@@ -1,0 +1,69 @@
+{
+  "formatVersion": 1,
+  "runId": "gslb-physical-soak-20261117T033053Z",
+  "startedUtc": "2026-11-17T03:30:53.670229+00:00",
+  "finishedUtc": "2026-11-17T03:40:51.377786+00:00",
+  "scope": "Disposable two-region GslbDns local-probe DNS-over-TCP soak; not a production availability test.",
+  "software": {
+    "sourceCommit": "d60404f18e42eb0032b096e0d95868437033da0a",
+    "binary": "self-contained Linux x64 GslbDns",
+    "binarySha256": "518fe0ba96fa1399174b7c96f2b20f897d7c73a19d2f4a8d2dade2998d73fa0f"
+  },
+  "environment": {
+    "client": "WSL Ubuntu 24.04",
+    "nodes": [
+      "Mumbai (AWS ap-south-1)",
+      "Osaka (AWS ap-northeast-3)"
+    ],
+    "dnsBind": "127.0.0.1:15353 on each host",
+    "clientPath": "SSH local TCP port forwards; no public DNS listener",
+    "backends": "Existing Apache HTTP origins; both returned HTTP 200 before the run",
+    "globalization": "DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1 for the ASCII-only disposable test zone"
+  },
+  "workload": {
+    "durationSeconds": 600,
+    "intervalSecondsPerNode": 1,
+    "queryType": "DNS A over TCP",
+    "zone": "physical-gslb.test",
+    "clientDeadlineSeconds": 2,
+    "plannedRequestsPerNode": 600
+  },
+  "results": [
+    {
+      "node": "Mumbai",
+      "validAnswers": 600,
+      "errors": 0,
+      "latencyMs": {
+        "p50": 126.46,
+        "p95": 420.2,
+        "p99": 977.08,
+        "max": 1771.79
+      }
+    },
+    {
+      "node": "Osaka",
+      "validAnswers": 600,
+      "errors": 0,
+      "latencyMs": {
+        "p50": 389.33,
+        "p95": 554.01,
+        "p99": 1020.18,
+        "max": 1682.28
+      }
+    }
+  ],
+  "cleanup": {
+    "apacheActiveOnBothNodes": true,
+    "gslbProcessesStopped": true,
+    "loopbackDnsListenersRemoved": true,
+    "sshTunnelsClosed": true,
+    "temporaryRemoteDeploymentRemoved": true
+  },
+  "limitations": [
+    "This run used local HTTP health probes; it did not exercise signed asynchronous agent reports.",
+    "The SSH-forwarded DNS query RTT includes WSL, public SSH transport and the client path; it is not public-recursive-resolver or end-user DNS latency.",
+    "This was one 10-minute run, not the required 60-minute per-node physical soak or matched capacity test.",
+    "It does not validate authoritative delegation, DNSSEC, GeoIP/ECS, inter-authoritative-node fencing, VRRP/ECMP or 99.9% availability.",
+    "A prior 10-minute run with asynchronous observer report tunnels recorded one query timeout at the same client deadline. This clean repeat used a different local-probe configuration and does not establish that timeout's root cause."
+  ]
+}
