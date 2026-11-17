@@ -83,6 +83,40 @@ tcpSite["HealthUrl"] = "https://localhost/ready";
 Must(!EngineConfigContract.Validate("gslb",tcpDns,true), "TCP probe with conflicting HTTP URL rejected");
 tcpSite["HealthCheckType"] = "Http";
 Must(!EngineConfigContract.Validate("gslb",tcpDns,true), "HTTP probe with nonzero TCP port rejected");
+var authoritativeDns = dns.DeepClone().AsObject();
+authoritativeDns["Zones"]![0]!["SoaSerial"] = 2026111601u;
+authoritativeDns["Zones"]![0]!["SoaContact"] = "hostmaster.test.example";
+authoritativeDns["Zones"]![0]!["NameServers"] = new JsonArray(
+    new JsonObject { ["Host"] = "ns1.test.example", ["Address"] = "127.0.0.53" });
+var sameAuthoritativeDns = authoritativeDns.DeepClone().AsObject();
+Must(EngineConfigContract.ValidSoaSerialTransition(authoritativeDns,sameAuthoritativeDns),
+    "unchanged authoritative GSLB zone may retain its SOA serial");
+var changedZoneWithoutBump = authoritativeDns.DeepClone().AsObject();
+changedZoneWithoutBump["Zones"]![0]!["Sites"]![0]!["Address"] = "127.0.0.21";
+Must(!EngineConfigContract.ValidSoaSerialTransition(authoritativeDns,changedZoneWithoutBump),
+    "changed authoritative GSLB data cannot reuse its SOA serial");
+var changedZoneWithBump = changedZoneWithoutBump.DeepClone().AsObject();
+changedZoneWithBump["Zones"]![0]!["SoaSerial"] = 2026111602u;
+Must(EngineConfigContract.ValidSoaSerialTransition(authoritativeDns,changedZoneWithBump),
+    "changed authoritative GSLB data accepts an increasing SOA serial");
+var serialRollback = authoritativeDns.DeepClone().AsObject();
+serialRollback["Zones"]![0]!["SoaSerial"] = 2026111600u;
+Must(!EngineConfigContract.ValidSoaSerialTransition(authoritativeDns,serialRollback),
+    "authoritative GSLB SOA serial rollback is rejected");
+var serialWrapCurrent = authoritativeDns.DeepClone().AsObject();
+serialWrapCurrent["Zones"]![0]!["SoaSerial"] = uint.MaxValue;
+var serialWrapCandidate = serialWrapCurrent.DeepClone().AsObject();
+serialWrapCandidate["Zones"]![0]!["SoaSerial"] = 1u;
+Must(EngineConfigContract.ValidSoaSerialTransition(serialWrapCurrent,serialWrapCandidate),
+    "RFC 1982 SOA serial wraparound is accepted");
+var serialHalfRange = serialWrapCurrent.DeepClone().AsObject();
+serialHalfRange["Zones"]![0]!["SoaSerial"] = 0x7FFFFFFFu;
+Must(!EngineConfigContract.ValidSoaSerialTransition(serialWrapCurrent,serialHalfRange),
+    "ambiguous half-range SOA serial transition is rejected");
+var zeroSerial = authoritativeDns.DeepClone().AsObject();
+zeroSerial["Zones"]![0]!["SoaSerial"] = 0u;
+Must(!EngineConfigContract.Validate("gslb",zeroSerial,false),
+    "zero GSLB SOA serial is rejected by staging schema");
 // Per-engine replay state must survive process restarts and reject duplicates.
 var stageRoot = Path.Combine(Path.GetTempPath(), "engine-security-"+Guid.NewGuid().ToString("N"));
 Directory.CreateDirectory(stageRoot);

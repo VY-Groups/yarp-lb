@@ -94,8 +94,7 @@ This checks that response identities from BOTH backends are observed. Use `/test
 
 ## Test and security status
 
-- Frontend TypeScript compilation and Node UI tests: executable in build environment.
-- C# source compilation and real HTTP routing: **operator's Windows gate** (not executed in this build environment).
+- Frontend TypeScript/Node tests and GatewayAgent build/security acceptance run in CI. This does not replace real application routing, agent enrollment, or company-specific network/CA acceptance.
 - `/gateway/metrics` is loopback restricted and unauthenticated only to support a local collector. Never forward it publicly.
-- SMTP/LDAPS require actual approved relay/CA trust and network testing. Enterprise OIDC/FIDO2, immutable central audit, PostgreSQL HA control plane, fleet agent enrollment, L4 and GSLB are NOT delivered here.
+- SMTP/LDAPS require actual approved relay/CA trust and network testing. Enterprise OIDC/FIDO2, immutable central audit, PostgreSQL HA control plane and fleet agent enrollment remain incomplete. L4 and GSLB are separate experimental engines; the Control Center does not provide live GSLB zone CRUD or DNS runtime health. Opt-in signed file staging through GatewayAgent is documented in `GatewayAgent/ENGINE_STAGING.md`.
 - Review `docs/UNIVERSAL_PLATFORM_PLAN.md` and `docs/ACCEPTANCE_MATRIX.md` before considering expansion.

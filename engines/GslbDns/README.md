@@ -74,6 +74,9 @@ IPv6 DNS UDP/TCP listeners and IPv6 NS glue are supported. DNSSEC remains open.
   serial must be deliberately bumped in config when site authority changes.
   In-bailiwick name server IPv4 or IPv6 address answers and additional glue are available;
   out-of-bailiwick NS targets are listed without forging glue.
+  Opt-in signed GatewayAgent staging rejects changed existing authoritative
+  zones unless the proposed `SoaSerial` advances under RFC 1982; it does not
+  generate serials and does not guard direct file edits.
 - Empty non-terminals above configured in-zone NS address records return
   NODATA with negative SOA (RFC 8020 section 3.1), preserving resolution of
   their descendants. Label-boundary matching does not invent sibling names.
