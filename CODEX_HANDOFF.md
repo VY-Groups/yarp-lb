@@ -583,3 +583,39 @@ licensed GeoIP and complete authoritative acceptance; #109 distributed trust
 quorum/fencing and independent partition acceptance; #50 central durable
 OpenTelemetry, reports and monitoring. Rolling annual 99.9% has an
 8h45m36s error budget but is still unmeasured; production remains NO-GO.
+
+## Continuation — access evidence and opt-in DNSSEC signing (2026-11-17)
+
+PR #131 merged at `a9d482bba2ff64a5c24f4c12abeaec02ff619622` from exact head
+`f75e53a5bbfa35f8c7f9888ee16127e897388333`. All PR checks passed, including
+Windows/Linux builds, real HTTP/HTTPS integrations, UI/API, HA and load checks.
+The PR was self-reviewed under the user's prior authorization; GitHub showed no
+independent review and main has no branch protection requiring one. Merged-main
+Actions are running at this snapshot and must be checked before describing the
+merge as fully verified on main.
+
+The one-hour, 75-client, 1-KiB GitHub-hosted L7 soak completed successfully at
+Actions run `44074344501`. It is synthetic runner evidence only; it does not
+establish annual 99.9% availability, physical gateway capacity, or DNS
+consensus.
+
+Current branch `codex/issue52-dnssec-signing` is rebased on PR #131's main.
+Commit `ba13101d9a86cf1aa273cf656bfa3dab6081f731` adds opt-in per-zone
+ECDSA P-256/SHA-256 (algorithm 13) signing from a separately provisioned PEM
+key; DNSKEY/DS presentation, dynamic A/AAAA signatures, signed SOA/NS and NSEC
+proofs for NODATA, NXDOMAIN, and unsigned child DS absence. Unsigned zones
+retain their former no-fake-DNSSEC behavior. Windows Release build passed with
+zero warnings; the full local GSLB acceptance suite passed; a separate
+dnspython-based verifier validated DNSKEY, dynamic A over UDP/TCP, tamper
+rejection, SOA/NSEC signatures and denial coverage. Exact-head Windows/Linux
+GitHub Actions remain required after PR creation.
+
+This is a bounded DNSSEC signing increment, not issue #52 completion. Parent
+DS publication is manual, all authorities must be provisioned with the same
+key/serial, and there is no automated KSK/ZSK/algorithm rollover, HSM/KMS,
+child-zone signing or Windows ACL enforcement by the application. Public
+resolver/parent-delegation interoperability, multi-authority signing and
+failure/recovery acceptance remain open. #52 stays OPEN. #50 is also still
+OPEN: PR #131 gives per-request logs, one local latency chart and process-life
+JSON/CSV exports, but not central durable OTel/Grafana reports. #36 and #109
+remain OPEN. Rolling annual availability remains unmeasured; production NO-GO.
