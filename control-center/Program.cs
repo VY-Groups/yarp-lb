@@ -1271,6 +1271,8 @@ app.MapGet("/admin/api/fleet/status", async () =>
             { responses.Add(new { row.Id, state = "http-error", httpStatus = (int)response.StatusCode }); continue; }
             var report = JsonNode.Parse(await response.Content.ReadAsStringAsync());
             var engineConfigState = "disabled";
+            var gslbRuntimeState = "not-staged";
+            JsonNode? gslbRuntime = null;
             JsonNode? engines = null;
             if (report?["engineConfigStagingEnabled"] is JsonValue enabled &&
                 enabled.TryGetValue<bool>(out var isEnabled) && isEnabled)
@@ -1284,7 +1286,25 @@ app.MapGet("/admin/api/fleet/status", async () =>
                 }
                 else engineConfigState = "http-error";
             }
-            responses.Add(new { row.Id, state = "connected", report, engineConfigState, engines });
+            if (engines is JsonArray engineRows && engineRows.Any(engine =>
+                    engine?["engineId"] is JsonValue id && id.TryGetValue<string>(out var engineId) &&
+                    string.Equals(engineId, "gslb", StringComparison.Ordinal)))
+            {
+                using var runtimeResponse = await client.GetAsync(
+                    new Uri(new Uri(row.Url), "agent/v1/engines/gslb/runtime-status"));
+                if (runtimeResponse.IsSuccessStatusCode)
+                {
+                    gslbRuntime = JsonNode.Parse(await runtimeResponse.Content.ReadAsStringAsync());
+                    var validType = gslbRuntime?["type"] is JsonValue type &&
+                        type.TryGetValue<string>(out var typeName) &&
+                        typeName == "loopback-gslb-runtime-metrics";
+                    gslbRuntimeState = validType ? "available" : "invalid-response";
+                }
+                else gslbRuntimeState = runtimeResponse.StatusCode == System.Net.HttpStatusCode.NotFound
+                    ? "disabled" : "unavailable";
+            }
+            responses.Add(new { row.Id, state = "connected", report, engineConfigState, engines,
+                gslbRuntimeState, gslbRuntime });
         }
         catch (Exception ex)
         { responses.Add(new { row.Id, state = "unavailable", errorType = ex.GetType().Name }); }

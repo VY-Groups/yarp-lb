@@ -1239,20 +1239,47 @@ function addFleet() { modal('Register trusted gateway', 'Only HTTPS gateway orig
 catch (e) {
     show(String(e), true);
 } }); }
-async function fleetStatus() { try {
-    show('Connecting to registered mTLS agents...');
-    const r = await api('/admin/api/fleet/status');
-    const gateways = (r.gateways || []).map((g) => { const engines = Array.isArray(g.engines) ? g.engines : []; const gslb = engines.find((engine) => engine.engineId === 'gslb'); let engineView = ''; if (g.engineConfigState === 'available') {
-        engineView = gslb ? `<div class="rowline"><div><b>GSLB DNS configuration</b><div class="subtle">Revision ${esc(String(gslb.revision || '').slice(0, 12))} · ${esc(gslb.mode || 'file staging')}</div></div><span class="chip">${gslb.serviceRestarted ? 'Restarted' : 'Restart required'}</span></div>` : '<div class="rowline"><b>GSLB DNS configuration</b><span class="chip">Not staged</span></div>';
+async function fleetStatus() {
+    try {
+        show('Connecting to registered mTLS agents...');
+        const r = await api('/admin/api/fleet/status');
+        const count = (value) => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? String(value) : '—';
+        const runtimePanel = (gateway) => {
+            const runtime = gateway.gslbRuntime;
+            if (gateway.gslbRuntimeState !== 'available' || !runtime) {
+                const message = gateway.gslbRuntimeState === 'disabled'
+                    ? 'Local GSLB metrics scrape is disabled on this agent.'
+                    : gateway.gslbRuntimeState === 'unavailable'
+                        ? 'Local GSLB metrics could not be read from this agent.'
+                        : gateway.gslbRuntimeState === 'invalid-response'
+                            ? 'The agent returned an invalid GSLB metrics summary.'
+                            : 'GSLB runtime metrics are not configured for this gateway.';
+                return `<p class="subtle">${esc(message)}</p>`;
+            }
+            const quorum = runtime.quorumTargets;
+            const evidence = runtime.observerReports;
+            return `<div class="subtle">Local metrics snapshot · checked ${esc(String(runtime.checkedUtc || 'unknown'))}</div><div class="grid2"><div><b>Observer quorum</b><div>${count(quorum?.quorum)} of ${count(quorum?.configured)} sites meeting quorum</div><div class="subtle">Below quorum: ${count(quorum?.belowQuorum)}</div></div><div><b>Signed observer reports</b><div>Fresh healthy: ${count(evidence?.healthy)} · unhealthy: ${count(evidence?.unhealthy)}</div><div class="subtle">Unknown: ${count(evidence?.unknown)} · stale or missing: ${count(evidence?.staleOrMissing)}</div></div></div>`;
+        };
+        const gateways = (r.gateways || []).map((g) => {
+            const engines = Array.isArray(g.engines) ? g.engines : [];
+            const gslb = engines.find((engine) => engine.engineId === 'gslb');
+            let engineView = '';
+            if (g.engineConfigState === 'available') {
+                engineView = gslb
+                    ? `<div class="rowline"><div><b>GSLB DNS configuration</b><div class="subtle">Revision ${esc(String(gslb.revision || '').slice(0, 12))} · ${esc(gslb.mode || 'file staging')}</div></div><span class="chip">${gslb.serviceRestarted ? 'Restarted' : 'Restart required'}</span></div>`
+                    : '<div class="rowline"><b>GSLB DNS configuration</b><span class="chip">Not staged</span></div>';
+            }
+            else {
+                engineView = `<div class="rowline"><b>GSLB DNS configuration</b><span class="chip">${esc(g.engineConfigState || 'unavailable')}</span></div>`;
+            }
+            return `<div class="card"><div class="rowline"><b>${esc(g.id)}</b><span class="chip">${esc(g.state)}</span></div><div class="subtle">Agent: ${esc(g.report?.machine || 'unknown')} · ${esc(g.report?.engineConfigStagingEnabled ? 'signed file staging enabled' : 'engine staging disabled')}</div>${engineView}<h3>GSLB runtime evidence</h3>${runtimePanel(g)}<p class="healthbanner">These are local exporter metrics relayed over authenticated mTLS. They do not directly query DNS answers or prove agreement between authorities.</p></div>`;
+        }).join('');
+        $('content').innerHTML = `<div class="toolbar"><div><h2>GSLB and gateway status</h2><p class="subtle">Authenticated agent metadata, staged configuration, and optional local DNS metrics.</p></div>${actionBtn('Refresh agent status', 'fleet-probe', '')}</div><div class="grid2">${gateways || '<div class="card"><p>No gateways registered.</p></div>'}</div>`;
     }
-    else {
-        engineView = `<div class="rowline"><b>GSLB DNS configuration</b><span class="chip">${esc(g.engineConfigState || 'unavailable')}</span></div>`;
-    } return `<div class="card"><div class="rowline"><b>${esc(g.id)}</b><span class="chip">${esc(g.state)}</span></div><div class="subtle">Agent: ${esc(g.report?.machine || 'unknown')} · ${esc(g.report?.engineConfigStagingEnabled ? 'signed file staging enabled' : 'engine staging disabled')}</div>${engineView}<p class="healthbanner">Config revision is not proof the DNS process restarted or is healthy. This view does not query DNS answers or authoritative-node quorum.</p></div>`; }).join('');
-    $('content').innerHTML = `<div class="toolbar"><div><h2>GSLB and gateway status</h2><p class="subtle">Authenticated agent metadata and staged engine file revisions.</p></div>${actionBtn('Refresh agent status', 'fleet-probe', '')}</div><div class="grid2">${gateways || '<div class="card"><p>No gateways registered.</p></div>'}</div><div class="card"><p class="subtle">Runtime DNS health, report freshness/quorum, DNSSEC state, and inter-node partition state are not yet exposed by the management API.</p></div>`;
+    catch (e) {
+        show(String(e), true);
+    }
 }
-catch (e) {
-    show(String(e), true);
-} }
 async function performFleetRollout() {
     const changeId = prompt('Enter a two-person APPROVED change request ID for BOTH gateways. Changes can affect live traffic.');
     if (!changeId)

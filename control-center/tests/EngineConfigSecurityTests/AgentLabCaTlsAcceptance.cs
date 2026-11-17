@@ -5,6 +5,9 @@ using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Text.Json;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Http;
 
 /// <summary>
 /// Real Kestrel mTLS test using fresh self-signed CA and CA-issued clients.
@@ -55,6 +58,15 @@ public static class AgentLabCaTlsAcceptance
             File.WriteAllBytes(pfx,server.Export(X509ContentType.Pfx,pass));
             var portSource=new TcpListener(IPAddress.Loopback,0);
             portSource.Start();var port=((IPEndPoint)portSource.LocalEndpoint).Port;portSource.Stop();
+            var metricsPortSource=new TcpListener(IPAddress.Loopback,0);
+            metricsPortSource.Start();var metricsPort=((IPEndPoint)metricsPortSource.LocalEndpoint).Port;metricsPortSource.Stop();
+            var metricsBody = ValidMetrics();
+            var metricsBuilder = WebApplication.CreateSlimBuilder();
+            metricsBuilder.WebHost.ConfigureKestrel(server => server.Listen(IPAddress.Loopback,metricsPort));
+            await using var metricsApp = metricsBuilder.Build();
+            metricsApp.MapGet("/metrics", () => Results.Text(Volatile.Read(ref metricsBody),
+                "text/plain; version=0.0.4; charset=utf-8"));
+            await metricsApp.StartAsync();
             var cfg=Path.Combine(dir,"appsettings.json");
             void SetPins(string[] pins,string[]? revoked=null) =>
                 File.WriteAllText(cfg,JsonSerializer.Serialize(new {
@@ -62,6 +74,7 @@ public static class AgentLabCaTlsAcceptance
                         TrustedClientThumbprints = pins,
                         RevokedClientThumbprints = revoked ?? Array.Empty<string>(),
                         LabOnlyClientCaCertificatePath = caPem,
+                        GslbMetricsPort = metricsPort,
                         EnableConfigChanges=false,
                         EnableEngineConfigChanges=false,
                         EnableServiceActions=false
@@ -104,6 +117,12 @@ public static class AgentLabCaTlsAcceptance
                 using var unpinned=Client(server,wrong);
                 using var tooOld=Client(server,expired);
                 await RequireStatus(a,url,HttpStatusCode.OK,"valid CA-signed and pinned client succeeds");
+                var runtimeUrl="https://127.0.0.1:"+port+"/agent/v1/engines/gslb/runtime-status";
+                await RequireRuntimeStatus(a,runtimeUrl);
+                Volatile.Write(ref metricsBody,"# TYPE gatewaycore_gslb_report_gated_sites gauge\n");
+                await RequireStatus(a,runtimeUrl,HttpStatusCode.BadGateway,
+                    "invalid local metric contract is rejected by authenticated runtime endpoint");
+                Volatile.Write(ref metricsBody,ValidMetrics());
                 await RequireStatus(unpinned,url,HttpStatusCode.Forbidden,
                     "valid CA-signed but unpinned client denied by real agent middleware");
                 // The lab-mode chain policy and the live auth policy both reject expiry.
@@ -135,6 +154,7 @@ public static class AgentLabCaTlsAcceptance
                 if(!process.HasExited)process.Kill(entireProcessTree:true);
                 await process.WaitForExitAsync();
                 _=await stdout;_=await stderr;
+                await metricsApp.StopAsync();
                 Directory.Delete(dir,true);
             }
         }
@@ -191,4 +211,31 @@ public static class AgentLabCaTlsAcceptance
         catch(HttpRequestException){}
         Console.WriteLine("PASS: "+name);
     }
+
+    private static async Task RequireRuntimeStatus(HttpClient client,string url)
+    {
+        using var response=await client.GetAsync(url);
+        if(response.StatusCode!=HttpStatusCode.OK)
+            throw new Exception("FAIL: GSLB runtime status expected 200, got "+response.StatusCode);
+        using var payload=JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        var root=payload.RootElement;
+        if(root.GetProperty("type").GetString()!="loopback-gslb-runtime-metrics" ||
+            root.GetProperty("quorumTargets").GetProperty("quorum").GetInt32()!=1 ||
+            root.GetProperty("quorumTargets").GetProperty("configured").GetInt32()!=2 ||
+            root.GetProperty("observerReports").GetProperty("healthy").GetInt32()!=2 ||
+            root.GetProperty("observerReports").GetProperty("staleOrMissing").GetInt32()!=1)
+            throw new Exception("FAIL: GSLB runtime status summary mismatch");
+        Console.WriteLine("PASS: mTLS agent relays bounded loopback quorum and observer-freshness summary");
+    }
+
+    private static string ValidMetrics() => """
+# TYPE gatewaycore_gslb_report_gated_sites gauge
+gatewaycore_gslb_report_gated_sites 2
+gatewaycore_gslb_agent_quorum_targets{state="quorum"} 1
+gatewaycore_gslb_agent_quorum_targets{state="below_quorum"} 1
+gatewaycore_gslb_agent_evidence_reports{state="healthy"} 2
+gatewaycore_gslb_agent_evidence_reports{state="unhealthy"} 1
+gatewaycore_gslb_agent_evidence_reports{state="unknown"} 0
+gatewaycore_gslb_agent_evidence_reports{state="stale_or_missing"} 1
+""";
 }
