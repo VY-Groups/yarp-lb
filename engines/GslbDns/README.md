@@ -403,7 +403,10 @@ publish it directly to an untrusted network.
 Exported counters cover DNS queries, no-response drops, DNS response codes and
 authenticated agent-report outcomes. Gauges cover configured zones/sites,
 sites passing local probe hysteresis, and (when agent reports are configured)
-report-gated sites meeting quorum. Labels are fixed enums only; zone names,
+report-gated sites meeting quorum plus current healthy, unhealthy, unknown, and
+stale-or-missing signed-report counts. The report counts are per configured
+agent/zone/site slot, not distinct vantage groups; quorum remains separately
+computed from distinct configured groups. Labels are fixed enums only; zone names,
 backend addresses, agent IDs and client addresses are never emitted. These
 runtime metrics support diagnostics and do not claim cross-authority consensus,
 DNSSEC, GeoIP, or service availability by themselves. See

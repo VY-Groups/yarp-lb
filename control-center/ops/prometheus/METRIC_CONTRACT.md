@@ -87,6 +87,7 @@ to an untrusted network.
 | `gatewaycore_gslb_administratively_quarantined_sites` | gauge | none | Sites quarantined by operator configuration |
 | `gatewaycore_gslb_report_gated_sites` | gauge | none | Sites requiring signed-agent quorum (present only when configured) |
 | `gatewaycore_gslb_agent_quorum_targets` | gauge | `state=quorum\|below_quorum` | Report-gated sites by current local quorum state |
+| `gatewaycore_gslb_agent_evidence_reports` | gauge | `state=healthy\|unhealthy\|unknown\|stale_or_missing` | Current signed report count across configured agent/zone/site slots; not unique vantage groups |
 
 No zone, hostname, backend address, agent ID, certificate or client-address
 labels are exported. The local health and quorum gauges are separate inputs;

@@ -235,6 +235,35 @@ internal sealed class AgentHealthReportStore : IDisposable
         }
     }
 
+    public (int Healthy, int Unhealthy, int Unknown, int StaleOrMissing) EvidenceCounts(long nowTick)
+    {
+        lock (gate)
+        {
+            var healthy = 0;
+            var unhealthy = 0;
+            var unknown = 0;
+            var staleOrMissing = 0;
+            foreach (var target in targets)
+            foreach (var agentId in target.Value.AgentIds)
+            {
+                if (!live.TryGetValue(LiveKey(target.Key, agentId), out var report) ||
+                    nowTick >= report.ExpiresAtTick)
+                {
+                    staleOrMissing++;
+                    continue;
+                }
+                switch (report.Verdict)
+                {
+                    case "healthy": healthy++; break;
+                    case "unhealthy": unhealthy++; break;
+                    case "unknown": unknown++; break;
+                    default: throw new InvalidDataException("Unexpected stored agent report verdict");
+                }
+            }
+            return (healthy, unhealthy, unknown, staleOrMissing);
+        }
+    }
+
     private Dictionary<string, ReplayPoint> LoadReplayState(string path)
     {
         if (!File.Exists(path)) return new Dictionary<string, ReplayPoint>(StringComparer.Ordinal);

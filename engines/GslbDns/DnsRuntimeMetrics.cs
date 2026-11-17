@@ -68,6 +68,7 @@ internal sealed class DnsRuntimeMetrics
         {
             var inQuorum = reportTargets.Count(target => reportStore.IsHealthy(
                 target.Zone, target.SiteId, nowTick));
+            var evidence = reportStore.EvidenceCounts(nowTick);
             output.AppendLine("# HELP gatewaycore_gslb_report_gated_sites Configured sites requiring signed-agent quorum");
             output.AppendLine("# TYPE gatewaycore_gslb_report_gated_sites gauge");
             output.Append("gatewaycore_gslb_report_gated_sites ").Append(reportTargets.Count).Append('\n');
@@ -76,11 +77,21 @@ internal sealed class DnsRuntimeMetrics
             output.Append("gatewaycore_gslb_agent_quorum_targets{state=\"quorum\"} ").Append(inQuorum).Append('\n');
             output.Append("gatewaycore_gslb_agent_quorum_targets{state=\"below_quorum\"} ")
                 .Append(reportTargets.Count - inQuorum).Append('\n');
+            output.AppendLine("# HELP gatewaycore_gslb_agent_evidence_reports Current signed observer reports by freshness and verdict");
+            output.AppendLine("# TYPE gatewaycore_gslb_agent_evidence_reports gauge");
+            AppendEvidence(output, "healthy", evidence.Healthy);
+            AppendEvidence(output, "unhealthy", evidence.Unhealthy);
+            AppendEvidence(output, "unknown", evidence.Unknown);
+            AppendEvidence(output, "stale_or_missing", evidence.StaleOrMissing);
         }
         return output.ToString();
     }
 
     private static int Transport(bool tcp) => tcp ? 1 : 0;
+
+    private static void AppendEvidence(StringBuilder output, string state, int count) =>
+        output.Append("gatewaycore_gslb_agent_evidence_reports{state=\"").Append(state).Append("\"} ")
+            .Append(count.ToString(CultureInfo.InvariantCulture)).Append('\n');
 
     private static void WriteCounter(StringBuilder output, string name, string help,
         string labelName, string[] labels, long[] values)
