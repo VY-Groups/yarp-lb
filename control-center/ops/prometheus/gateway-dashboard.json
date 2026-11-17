@@ -1,0 +1,120 @@
+{
+  "annotations": {"list": []},
+  "editable": true,
+  "graphTooltip": 1,
+  "links": [],
+  "panels": [
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "description": "Gateway process request rate. Select a bounded job and region in the dashboard variables.",
+      "fieldConfig": {"defaults": {"unit": "reqps"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+      "id": 1,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi"}},
+      "targets": [{"expr": "sum by (instance) (rate(yarp_control_http_requests_total{job=~\"$job\"}[5m]))", "legendFormat": "{{instance}}", "refId": "A"}],
+      "title": "HTTP requests per second",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "description": "5xx response rate from the gateway's own request counters.",
+      "fieldConfig": {"defaults": {"unit": "reqps"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+      "id": 2,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi"}},
+      "targets": [{"expr": "sum by (instance) (rate(yarp_control_http_responses_total{job=~\"$job\",status_class=\"5xx\"}[5m]))", "legendFormat": "{{instance}} 5xx/s", "refId": "A"}],
+      "title": "HTTP 5xx responses per second",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "description": "Gateway-observed histogram. For customer availability SLI, use independent external HTTPS probes below.",
+      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+      "id": 3,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi"}},
+      "targets": [
+        {"expr": "histogram_quantile(0.50, sum by (instance,le) (rate(yarp_control_http_duration_seconds_bucket{job=~\"$job\"}[5m])))", "legendFormat": "{{instance}} p50", "refId": "A"},
+        {"expr": "histogram_quantile(0.95, sum by (instance,le) (rate(yarp_control_http_duration_seconds_bucket{job=~\"$job\"}[5m])))", "legendFormat": "{{instance}} p95", "refId": "B"},
+        {"expr": "histogram_quantile(0.99, sum by (instance,le) (rate(yarp_control_http_duration_seconds_bucket{job=~\"$job\"}[5m])))", "legendFormat": "{{instance}} p99", "refId": "C"}
+      ],
+      "title": "Gateway request latency",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "description": "Independent external HTTP readiness probes are required. Missing samples are not counted as healthy. Annual result is shown only after sufficient coverage.",
+      "fieldConfig": {"defaults": {"min": 0, "max": 1, "unit": "percentunit"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+      "id": 4,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi"}},
+      "targets": [
+        {"expr": "avg_over_time(gatewaycore:availability_probe_success:sample{job=~\"$job\"}[24h])", "legendFormat": "{{service}} {{region}} 24h", "refId": "A"},
+        {"expr": "(count_over_time(gatewaycore:availability_probe_success:sample{job=~\"$job\"}[365d]) >= 3090528) * on(instance,service,region) group_left avg_over_time(gatewaycore:availability_probe_success:sample{job=~\"$job\"}[365d])", "legendFormat": "{{service}} {{region}} rolling year (coverage-gated)", "refId": "B"}
+      ],
+      "title": "External availability SLI (not a CI test score)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "description": "Active health is 1 healthy, 0 unknown and -1 unhealthy. Destination labels come only from configured clusters.",
+      "fieldConfig": {"defaults": {"min": -1, "max": 1, "unit": "short"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16},
+      "id": 5,
+      "options": {"legend": {"displayMode": "table", "placement": "bottom"}, "tooltip": {"mode": "multi"}},
+      "targets": [{"expr": "yarp_control_destination_active_health{job=~\"$job\"}", "legendFormat": "{{instance}} {{destination}}", "refId": "A"}],
+      "title": "Backend health by configured destination",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "description": "Live in-flight request gauges for configured destinations.",
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16},
+      "id": 6,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi"}},
+      "targets": [{"expr": "yarp_control_destination_inflight_requests{job=~\"$job\"}", "legendFormat": "{{instance}} {{destination}}", "refId": "A"}],
+      "title": "In-flight requests by backend",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "description": "Any increase indicates log messages were lost or the log writer failed.",
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 24},
+      "id": 7,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi"}},
+      "targets": [
+        {"expr": "increase(yarp_logging_dropped_total{job=~\"$job\"}[5m])", "legendFormat": "{{instance}} dropped", "refId": "A"},
+        {"expr": "increase(yarp_logging_dropped_high_priority_total{job=~\"$job\"}[5m])", "legendFormat": "{{instance}} high priority dropped", "refId": "B"},
+        {"expr": "increase(yarp_logging_write_errors_total{job=~\"$job\"}[5m])", "legendFormat": "{{instance}} writer errors", "refId": "C"}
+      ],
+      "title": "Logging pipeline loss and errors (5m)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "description": "Process resource indicators; investigate sustained growth alongside request volume and errors.",
+      "fieldConfig": {"defaults": {"unit": "bytes"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 24},
+      "id": 8,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi"}},
+      "targets": [
+        {"expr": "yarp_control_process_working_set_bytes{job=~\"$job\"}", "legendFormat": "{{instance}} working set", "refId": "A"},
+        {"expr": "yarp_control_gc_heap_bytes{job=~\"$job\"}", "legendFormat": "{{instance}} managed heap", "refId": "B"}
+      ],
+      "title": "Gateway process memory",
+      "type": "timeseries"
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": ["gatewaycore", "load-balancer", "operations"],
+  "templating": {"list": [{"current": {}, "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"}, "definition": "label_values(up, job)", "includeAll": true, "multi": true, "name": "job", "options": [], "query": {"query": "label_values(up, job)", "refId": "PrometheusVariableQueryEditor-VariableQuery"}, "refresh": 2, "type": "query"}]},
+  "time": {"from": "now-6h", "to": "now"},
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "GatewayCore HTTP and Availability",
+  "uid": "gatewaycore-http-availability",
+  "version": 1
+}

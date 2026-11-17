@@ -98,3 +98,13 @@ independent HTTPS probe and rolling 365-day SLI above do. The importable
 Grafana dashboard is `gslb-dashboard.json`; its JSON syntax was checked locally.
 The existing CI workflow parses Prometheus rules and exercises synthetic alert
 behavior.
+
+The importable `gateway-dashboard.json` presents request rate, 5xx rate, p50/p95/p99
+latency, backend health and in-flight requests, log loss, process memory, and
+external availability. Its rolling-year SLI panel is hidden until at least 98%
+of the expected 10-second probe samples exist. Import it into Grafana with the
+Prometheus datasource UID variable `DS_PROMETHEUS`; select only the bounded
+gateway or availability scrape jobs. CI validates the JSON, required series,
+panel IDs, coverage gate and absence of request/client identity labels. This is
+an importable dashboard artifact, not a deployed Grafana service or a live
+Alertmanager notification path.
