@@ -26,14 +26,27 @@ def verify(answer):
     assert answer.endswith(socket.inet_pton(socket.AF_INET6, "2001:db8::17"))
 
 
+def reserve_ipv6_udp_tcp_port():
+    """Select a loopback port bindable for both transports on the test host."""
+    for _ in range(16):
+        with socket.socket(socket.AF_INET6, socket.SOCK_DGRAM) as udp:
+            udp.bind(("::1", 0))
+            port = udp.getsockname()[1]
+            try:
+                with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as tcp:
+                    tcp.bind(("::1", port))
+            except OSError:
+                continue
+            return port
+    raise RuntimeError("Could not reserve an IPv6 loopback port for both UDP and TCP")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--interop", action="store_true")
     args = parser.parse_args()
     with tempfile.TemporaryDirectory() as directory:
-        with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as reservation:
-            reservation.bind(("::1", 0))
-            port = reservation.getsockname()[1]
+        port = reserve_ipv6_udp_tcp_port()
         config = Path(directory) / "config.json"
         config.write_text(json.dumps({
             "ListenHost": "::1", "ListenPort": port, "ProbeIntervalSeconds": 1,
