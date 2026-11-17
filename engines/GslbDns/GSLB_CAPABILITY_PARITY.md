@@ -3,8 +3,9 @@
 Source of comparison: user-supplied OpenGSLB feature matrix and the *reference*
 `gslb` branch at `48f020c3f0d7d3d353485c9a0d701061a3014c08`
 (OpenGSLB Go v1.1.10). GatewayCore base `main`:
-`8c0986705d176a42c1c42a84c098bb5d3b2cace8`. The current branch adds a finite
-malformed DNS/EDNS acceptance corpus; it does not represent full fuzzing.
+`473ffe9dcff02aee990acdc074a046576064070f`. The current branch extends a
+finite malformed DNS/EDNS acceptance corpus to TCP; it does not represent full
+fuzzing.
 
 The matrix compares desired **features**, NOT commercial/product certifications,
 vendor prices, security guarantees or claims that other providers lack a feature.
@@ -15,7 +16,7 @@ performance. No AGPL OpenGSLB source is incorporated.
 | --- | --- | --- |
 | Self-hosted data sovereignty | On-prem .NET DNS prototype | Two independent gateway hosts, network/privacy audit |
 | No vendor lock-in | Independent source/runtime design goal | Dependency/license inventory, reproducible image builds |
-| Authoritative DNS A/NS/SOA/EDNS/TCP | Limited lab implementation; merged child-cut referrals, authority flags, in-bailiwick glue, two-authority observer-feed partition checks, and a finite malformed DNS/EDNS corpus | Full delegation conformance, automatic serial lifecycle, fuzz/load, DNSSEC and independent resolver acceptance |
+| Authoritative DNS A/NS/SOA/EDNS/TCP | Limited lab implementation; merged child-cut referrals, authority flags, in-bailiwick glue, two-authority observer-feed partition checks, and a finite malformed UDP/TCP DNS/EDNS corpus | Full delegation conformance, automatic serial lifecycle, fuzz/load, DNSSEC and independent resolver acceptance |
 | DNS AAAA / IPv6 | Merged lab implementation; Windows/Linux acceptance exists | IPv6 listener and NS glue, real dual-stack probes and public resolvers |
 | Weighted traffic selection | Existing opt-in per-zone selection | Predictable fairness under health churn, matched load |
 | Ordered primary/standby failover | Existing opt-in `RoutingPolicy=Failover` | DNS caching, DR state, physical failover behavior |

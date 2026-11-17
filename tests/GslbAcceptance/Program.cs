@@ -749,9 +749,11 @@ try
     };
     foreach (var malformed in malformedPackets)
         await ExpectUdpDrop(malformed.Packet,malformed.Case);
+    foreach (var malformed in malformedPackets)
+        await ExpectTcpDrop(malformed.Packet,malformed.Case);
     Must(!dns.HasExited && (await Query("app.integration.test")).Address is not null,
         "DNS listener remains healthy after malformed packet corpus");
-    Console.WriteLine("PASS: malformed DNS/EDNS packet corpus is dropped without responses; listener stays healthy");
+    Console.WriteLine("PASS: malformed DNS/EDNS UDP/TCP corpus gets no response; listener stays healthy");
     var glue = await TcpQuery(DnsRequest("ns1.app.integration.test",1));
     Must(Dns16(glue,6)==1 && glue.AsSpan(glue.Length-4).SequenceEqual(new byte[]{127,0,0,31}),
         "bailiwick NS hostname resolves to configured glue A");
@@ -902,6 +904,29 @@ async Task ExpectUdpDrop(byte[] packet,string scenario)
         throw new Exception("FAIL: malformed DNS packet received a response: "+scenario);
     }
     catch (OperationCanceledException) when (timeout.IsCancellationRequested) { }
+}
+async Task ExpectTcpDrop(byte[] packet,string scenario)
+{
+    using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+    using var client = new TcpClient(AddressFamily.InterNetwork);
+    await client.ConnectAsync(IPAddress.Loopback,15353,timeout.Token);
+    var stream = client.GetStream();
+    var prefix = new byte[2];
+    BinaryPrimitives.WriteUInt16BigEndian(prefix,checked((ushort)packet.Length));
+    await stream.WriteAsync(prefix,timeout.Token);
+    await stream.WriteAsync(packet,timeout.Token);
+    // RST is a normal way for a peer to discard a malformed frame with no DNS
+    // response; Windows reports it as IOException wrapping SocketException.
+    // Any payload still fails above, and unrelated I/O errors remain failures.
+    // (The read can throw before returning zero on this close path.)
+    var response = new byte[1];
+    try
+    {
+        var received = await stream.ReadAsync(response,timeout.Token);
+        Must(received==0,"malformed TCP DNS packet must close without a response: "+scenario);
+    }
+    catch (IOException ex) when (ex.InnerException is SocketException socket &&
+        socket.SocketErrorCode is SocketError.ConnectionReset or SocketError.ConnectionAborted) { }
 }
 async Task<(byte[] Request,byte[] Reply)> QueryEcsWire(
     string domain, ushort type, IPAddress clientAddress, int sourcePrefix, IPAddress? resolverSource = null)
