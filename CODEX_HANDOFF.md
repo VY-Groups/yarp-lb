@@ -420,7 +420,7 @@ and remaining P0/P1 operational evidence remain incomplete. Production NO-GO.
 
 ## Continuation — annual objective, GSLB observability and quarantine (2026-11-17)
 
-Current `main` is `e1e88e9c905e74ad3c52664b74bad6b0f4d91857`; PR #121 merged
+Current `main` is `abbe1751d169260e936b304ee1ad3ce8ab646894`; PR #121 merged
 opt-in loopback-only GSLB metrics, bounded Prometheus alerts, synthetic alert
 fixtures and an importable Grafana dashboard. Its exact-head Windows/Linux,
 Prometheus, application and integration Actions passed. This was a Codex
@@ -433,6 +433,13 @@ probes and signed reports and that availability-first fallback does not route
 to an all-quarantined pool. The configuration is loaded at process startup;
 there is no live management API.
 
+PR #123 merged bounded child-zone referral handling: delegated cuts return
+Authority NS records with AA clear, only in-bailiwick glue, referrals for child
+names, and a parent negative SOA for absent DS at unsigned cuts. Exact-head
+Windows/Linux GSLB acceptance and BIND/Knot interoperability passed; main GSLB
+and L7 Actions also passed on `abbe1751...`. DNSSEC, automatic serial changes,
+licensed GeoIP/ASN and complete authoritative DNS conformance remain open.
+
 The 99.9% objective is rolling 365 days (8h 45m 36s maximum error budget), not
 30 days. `control-center/docs/AVAILABILITY_SLO.md` records a provisional
 independent-failure model and monitoring contract. Those modeled numbers are
@@ -440,12 +447,15 @@ assumptions, not observed production availability; the SLI remains unknown
 until an externally monitored service and sufficient annual probe coverage
 exist. Do not report the objective as achieved or production GO.
 
-Current feature branch `codex/issue52-dns-zone-cuts` adds explicit child-zone
-cuts. Parent referrals now use Authority NS records, AA=0 and in-bailiwick
-glue; names below a cut cannot leak parent-zone GSLB answers. DS queries at an
-unsigned cut get the parent negative SOA. The Windows real-socket acceptance
-passes locally; exact-head Actions are pending. This is not DNSSEC, automatic
-serial management, or full delegation conformance.
+Current feature branch `codex/issue109-two-authority-partition-acceptance`
+extends Linux multi-process acceptance to two DNS authorities with isolated
+report replay state. It partitions the observer feed to one authority, checks
+that node fail-closes after the 8-second report TTL while the other remains
+healthy, and checks recovery only after fresh quorum returns. Python syntax
+and real .NET/OpenSSL multi-process execution passed locally on Windows; Linux
+GitHub Actions must still execute its exact-head version. This tests
+observer-to-authority partition behavior only, not node-to-node consensus or
+fencing.
 
 At this snapshot, open P0 issues #36, #52 and #109 remain open. #109 still needs
 cross-authority partition fencing/consensus, dynamic operator trust/evidence
