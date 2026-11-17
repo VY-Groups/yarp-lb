@@ -530,8 +530,8 @@ metrics view is not a DNS query, authority agreement, durable report store or
 production health check.
 
 The one-hour 75-VU GitHub-hosted HTTP soak remains at
-https://github.com/VY-Groups/yarp-lb/actions/runs/44074344501. At the latest
-query the run was still `in_progress` and its job had no completion timestamp;
+Actions run ID `44074344501`. At the latest query the run was still
+`in_progress` and its job had no completion timestamp;
 do not claim a completed soak until the workflow produces a final result and
 artifact. Even if it passes, it is an L7 synthetic runner test, not annual
 availability or physical gateway capacity acceptance.
