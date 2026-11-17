@@ -33,6 +33,14 @@ jobs:
       - name: Install independent DNS clients
         if: runner.os == 'Linux'
         run: sudo apt-get update -qq && sudo apt-get install -y dnsutils knot-dnsutils
+      - name: Validate DNSSEC signatures and denial proofs independently
+        if: runner.os == 'Linux'
+        run: |
+          python -m venv .venv-dnssec
+          . .venv-dnssec/bin/activate
+          python -m pip install --disable-pip-version-check dnspython==2.9.2 cryptography==50.0.2
+          python tests/GslbAcceptance/dnssec_signing.py
       - name: Query IPv6 authority with BIND and Knot over UDP and TCP
         if: runner.os == 'Linux'
         run: python tests/GslbAcceptance/ipv6_transport.py --interop
+
