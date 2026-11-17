@@ -99,6 +99,13 @@ Grafana dashboard is `gslb-dashboard.json`; its JSON syntax was checked locally.
 The existing CI workflow parses Prometheus rules and exercises synthetic alert
 behavior.
 
+The authenticated operator Metrics page also provides point-in-time backend
+health exports in JSON and CSV. These include cluster/destination IDs, active
+and passive health, in-flight request counts, and process-lifetime status
+counters. They deliberately omit backend URLs/IPs, client addresses, and request
+paths. Exports are local to one process and do not represent historical uptime
+or a fleet-wide SLI.
+
 The importable `gateway-dashboard.json` presents request rate, 5xx rate, p50/p95/p99
 latency, backend health and in-flight requests, log loss, process memory, and
 external availability. Its rolling-year SLI panel is hidden until at least 98%

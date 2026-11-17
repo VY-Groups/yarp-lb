@@ -28,6 +28,10 @@ assert.ok(js.includes("aria-current"));
 assert.ok(ts.includes("aria-current"));
 assert.ok(js.includes("async function peerSyncPage()"));
 assert.ok(ts.includes("async function peerSyncPage()"));
+for (const report of ['/admin/api/reports/traffic.json','/admin/api/reports/traffic.csv','/admin/api/reports/health.json','/admin/api/reports/health.csv']) {
+  assert.ok(js.includes(report), 'compiled management UI must expose downloadable report '+report);
+  assert.ok(ts.includes(report), 'TypeScript source must expose downloadable report '+report);
+}
 assert.ok(css.includes('@media(max-width:950px)'));
 
 const elements=new Map();
