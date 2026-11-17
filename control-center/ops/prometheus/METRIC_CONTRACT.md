@@ -50,7 +50,7 @@ at least one backend is Active=Healthy), only on the configured data-plane
 listener in isolated mode. `/gateway/health` is process liveness only.
 
 For the provisional 99.9% HTTP objective, scrape one
-`probe_success{job="gatewaycore-availability",service="gatewaycore-http",region="<bounded-region>"}`
+`probe_success{job="gatewaycore-availability",instance="<probe-target>",service="gatewaycore-http",region="<bounded-region>"}`
 and matching `up` series every 10 seconds from each independent external probe
 region. Scrape failures are recorded as failed samples; missing series alert
 and are never filled with success. Burn alerts are

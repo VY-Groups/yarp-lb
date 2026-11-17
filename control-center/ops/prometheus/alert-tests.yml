@@ -94,7 +94,7 @@ tests:
           - exp_labels: {job: gatewaycore-tls-probe,instance: gateway-01,severity: critical}
   - interval: 1m
     input_series:
-      - series: 'probe_success{job="gatewaycore-availability",service="gatewaycore-http",region="ap-south-1"}'
+      - series: 'probe_success{job="gatewaycore-availability",instance="probe-south",service="gatewaycore-http",region="ap-south-1"}'
         values: '1 1 0 0 0 0 0 0 0 0'
       - series: 'up{job="gatewaycore-availability",instance="probe-south",service="gatewaycore-http",region="ap-south-1"}'
         values: '1 1 1 1 1 1 1 1 1 1'
@@ -102,13 +102,13 @@ tests:
       - eval_time: 8m
         alertname: GatewayAvailabilityFastBurn
         exp_alerts:
-          - exp_labels: {job: gatewaycore-availability,service: gatewaycore-http,region: ap-south-1,severity: critical}
+          - exp_labels: {job: gatewaycore-availability,instance: probe-south,service: gatewaycore-http,region: ap-south-1,severity: critical}
       - eval_time: 8m
         alertname: GatewayAvailabilityBudgetAtRisk
         exp_alerts: []
   - interval: 1m
     input_series:
-      - series: 'probe_success{job="gatewaycore-availability",service="gatewaycore-http",region="ap-northeast-3"}'
+      - series: 'probe_success{job="gatewaycore-availability",instance="probe-north",service="gatewaycore-http",region="ap-northeast-3"}'
         values: '1 1 1 1 1 1 1 1 1 1'
       - series: 'up{job="gatewaycore-availability",instance="probe-north",service="gatewaycore-http",region="ap-northeast-3"}'
         values: '1 1 1 1 1 1 1 1 1 1'
