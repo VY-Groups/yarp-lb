@@ -153,12 +153,26 @@ def main():
             stack.callback(dns_log_handle.close)
             dns = subprocess.Popen(["dotnet", dns_dll, dns_config], stdout=dns_log_handle,
                                    stderr=subprocess.STDOUT)
-            stack.callback(dns.wait)
-            stack.callback(dns.kill)
+            stack.callback(lambda process=dns: process.wait())
+            stack.callback(lambda process=dns: process.kill() if process.poll() is None else None)
             expect_dns(dns, dns_port, 2, log_paths=[dns_log])
             authorities[node] = {"dns": dns, "dns_port": dns_port, "report_port": report_port,
                                  "metrics_port": metrics_port, "dns_log": dns_log,
+                                 "dns_log_handle": dns_log_handle, "dns_config": dns_config,
                                  "processes": [], "agent_logs": []}
+
+        def restart_authority(authority):
+            old = authority["dns"]
+            if old.poll() is None:
+                old.terminate()
+                old.wait(timeout=5)
+            process = subprocess.Popen(["dotnet", dns_dll, authority["dns_config"]],
+                                       stdout=authority["dns_log_handle"],
+                                       stderr=subprocess.STDOUT)
+            stack.callback(lambda current=process: current.wait())
+            stack.callback(lambda current=process: current.kill() if current.poll() is None else None)
+            authority["dns"] = process
+            return process
 
         configs = []
 
@@ -192,6 +206,18 @@ def main():
             stack.callback(process.wait)
             stack.callback(process.kill)
             return process
+
+        def restart_agents(authority, node):
+            for process in authority["processes"]:
+                if process.poll() is None:
+                    process.terminate()
+                    try:
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait(timeout=5)
+            for agent in agents:
+                start_agent(agent, node)
 
         for node in ("a", "b"):
             for agent in agents:
@@ -269,6 +295,30 @@ def main():
         expect_dns(authority_b["dns"], authority_b["dns_port"], 0, "192.0.2.17",
                    log_paths=[authority_b["dns_log"], *authority_b["agent_logs"]])
         print("PASS: authority recovery waits for a fresh multi-vantage quorum")
+
+        # Emergency leaf revocation is enforced at the TLS handshake on one
+        # authority, preserves quorum fail-closed behavior, and can be rolled
+        # back safely after removing the two denylisted pins.
+        b_config = json.loads(authority_b["dns_config"].read_text())
+        b_config["AgentReports"]["RevokedCertificateSha256"] = [
+            agents[0]["pin"], agents[1]["pin"]]
+        authority_b["dns_config"].write_text(json.dumps(b_config))
+        restart_agents(authority_b, "b")
+        revoked_dns = restart_authority(authority_b)
+        restart_agents(authority_b, "b")
+        expect_dns(revoked_dns, authority_b["dns_port"], 2, timeout=12,
+                   log_paths=[authority_b["dns_log"], *authority_b["agent_logs"]])
+        expect_dns(authority_a["dns"], authority_a["dns_port"], 0, "192.0.2.17",
+                   log_paths=[authority_a["dns_log"], *authority_a["agent_logs"]])
+        print("PASS: revoked observer client leaves cannot re-establish the isolated authority's quorum")
+        b_config["AgentReports"]["RevokedCertificateSha256"] = []
+        authority_b["dns_config"].write_text(json.dumps(b_config))
+        restart_agents(authority_b, "b")
+        recovered_dns = restart_authority(authority_b)
+        restart_agents(authority_b, "b")
+        expect_dns(recovered_dns, authority_b["dns_port"], 0, "192.0.2.17", timeout=12,
+                   log_paths=[authority_b["dns_log"], *authority_b["agent_logs"]])
+        print("PASS: authority recovers only after revocation is removed and fresh quorum returns")
 
 
 if __name__ == "__main__":
