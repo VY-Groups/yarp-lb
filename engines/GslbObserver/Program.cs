@@ -54,6 +54,7 @@ if (reportEnabled)
         !Path.IsPathFullyQualified(config.ReportClientCertificatePem ?? "") ||
         !Path.IsPathFullyQualified(config.ReportClientKeyPem ?? "") ||
         !Path.IsPathFullyQualified(config.ReportSequenceStatePath ?? "") ||
+        config.ReportServerRevocationMode is not ("Online" or "NoCheck") ||
         config.ReportIntervalSeconds is < 1 or > 60 ||
         config.ReportTtlSeconds < config.ReportIntervalSeconds || config.ReportTtlSeconds > 300 ||
         (config.ReportServerCaPem is not null && !Path.IsPathFullyQualified(config.ReportServerCaPem)))
@@ -91,7 +92,8 @@ if (reportEnabled)
         using var chain = new X509Chain();
         chain.ChainPolicy.TrustMode = X509ChainTrustMode.CustomRootTrust;
         chain.ChainPolicy.CustomTrustStore.Add(reportServerCa);
-        chain.ChainPolicy.RevocationMode = X509RevocationMode.Online;
+        chain.ChainPolicy.RevocationMode = config.ReportServerRevocationMode == "NoCheck"
+            ? X509RevocationMode.NoCheck : X509RevocationMode.Online;
         chain.ChainPolicy.RevocationFlag = X509RevocationFlag.ExcludeRoot;
         chain.ChainPolicy.UrlRetrievalTimeout = TimeSpan.FromSeconds(1);
         using var serverLeaf = new X509Certificate2(certificate);
@@ -224,6 +226,7 @@ sealed record ObserverConfig(string ListenAddress, int Port, Uri PublicUrl, Uri 
     public string? ReportClientCertificatePem { get; init; }
     public string? ReportClientKeyPem { get; init; }
     public string? ReportServerCaPem { get; init; }
+    public string ReportServerRevocationMode { get; init; } = "Online";
     public string? ReportSequenceStatePath { get; init; }
     public int ReportIntervalSeconds { get; init; } = 2;
     public int ReportTtlSeconds { get; init; } = 10;

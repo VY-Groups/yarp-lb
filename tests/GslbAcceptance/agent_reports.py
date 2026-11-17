@@ -160,6 +160,7 @@ def main():
                 "AgentId": agent["id"], "Zone": "lab.example.test", "SiteId": "mumbai",
                 "ReportClientCertificatePem": str(agent["cert"]),
                 "ReportClientKeyPem": str(agent["key"]), "ReportServerCaPem": str(root / "ca.pem"),
+                "ReportServerRevocationMode": "NoCheck",
                 "ReportSequenceStatePath": str(root / (agent["id"] + "-sequence.json")),
                 "ReportIntervalSeconds": 1, "ReportTtlSeconds": 8
             }))

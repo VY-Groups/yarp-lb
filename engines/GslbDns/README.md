@@ -301,6 +301,8 @@ The receiver requires a client certificate pinned by SHA-256, a matching ECDSA P
 
 Every `RequiredAgentIds` entry is mandatory (a strict unanimous policy, not an N-of-M majority quorum). A site's DNS eligibility is the conjunction of its local active health probe, any existing synchronous external validators, and a fresh positive report from **every configured required agent**. Missing, stale, negative, unknown, unsigned, replayed or misidentified reports keep it ineligible; the strict all-down policy then returns SERVFAIL when no other eligible site exists. Reports never promote a failed local probe. Predicted-health scores are not accepted by this protocol and cannot affect DNS selection. Each DNS node keeps its own replay state; configure agents to send to each authoritative node independently.
 
+When an observer uses a custom server CA, `ReportServerRevocationMode` defaults to `Online` and fails closed if revocation status cannot be established. `NoCheck` is only appropriate for isolated disposable test PKI without CRL/OCSP; it disables server-certificate revocation checks and must not be copied into production configuration. Agent client leaves are pinned directly and can be revoked through the receiver's explicit denylist.
+
 Example shape (paths, certificate pins, keys, limits and addresses below are placeholders that must be provisioned and reviewed for a disposable environment):
 
     {
