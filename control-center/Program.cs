@@ -1261,17 +1261,37 @@ app.MapGet("/admin/api/fleet/status", async () =>
             { responses.Add(new { row.Id, state = "client-certificate-missing" }); continue; }
             using var handler = new HttpClientHandler { AllowAutoRedirect = false, UseProxy = false };
             handler.ClientCertificates.Add(matches[0]);
-            using var client = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(4) };
+            using var client = new HttpClient(handler)
+            {
+                Timeout = TimeSpan.FromSeconds(4),
+                MaxResponseContentBufferSize = 64 * 1024
+            };
             using var response = await client.GetAsync(new Uri(new Uri(row.Url), "agent/v1/status"));
             if (!response.IsSuccessStatusCode)
             { responses.Add(new { row.Id, state = "http-error", httpStatus = (int)response.StatusCode }); continue; }
-            var result = await response.Content.ReadAsStringAsync();
-            responses.Add(new { row.Id, state = "connected", report = JsonNode.Parse(result) });
+            var report = JsonNode.Parse(await response.Content.ReadAsStringAsync());
+            var engineConfigState = "disabled";
+            JsonNode? engines = null;
+            if (report?["engineConfigStagingEnabled"] is JsonValue enabled &&
+                enabled.TryGetValue<bool>(out var isEnabled) && isEnabled)
+            {
+                using var engineResponse = await client.GetAsync(
+                    new Uri(new Uri(row.Url), "agent/v1/engines"));
+                if (engineResponse.IsSuccessStatusCode)
+                {
+                    engines = JsonNode.Parse(await engineResponse.Content.ReadAsStringAsync());
+                    engineConfigState = engines is JsonArray ? "available" : "invalid-response";
+                }
+                else engineConfigState = "http-error";
+            }
+            responses.Add(new { row.Id, state = "connected", report, engineConfigState, engines });
         }
         catch (Exception ex)
         { responses.Add(new { row.Id, state = "unavailable", errorType = ex.GetType().Name }); }
     }
-    return Results.Ok(new { checkedUtc = DateTimeOffset.UtcNow, type = "mTLS authenticated agent reports; not authoritative YARP destination health", gateways = responses });
+    return Results.Ok(new { checkedUtc = DateTimeOffset.UtcNow,
+        type = "mTLS agent and signed engine-configuration status; not live DNS or YARP destination health",
+        gateways = responses });
 }).RequireAuthorization();
 
 // Per-destination request observations are recorded after YARP chooses its target.

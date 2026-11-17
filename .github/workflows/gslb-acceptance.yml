@@ -26,6 +26,9 @@ jobs:
       - name: Two DNS nodes and two TLS-authenticated external health validators
         if: runner.os == 'Linux'
         run: python tests/GslbAcceptance/external_validation.py
+      - name: mTLS signed asynchronous agent reports and replay-safe DNS quorum
+        if: runner.os == 'Linux'
+        run: python tests/GslbAcceptance/agent_reports.py
       - run: python tests/GslbAcceptance/ipv6_transport.py
       - name: Install independent DNS clients
         if: runner.os == 'Linux'

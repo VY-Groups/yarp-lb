@@ -3,6 +3,7 @@ using System.Net;
 using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
+using GatewayCore.Gslb.Contracts;
 
 // Standalone, non-recursive authoritative DNS/GSLB lab engine (UDP and TCP).
 // NS/SOA responses require explicit per-zone name server metadata.
@@ -27,6 +28,7 @@ if (!IPAddress.TryParse(config.ListenHost, out var listen) ||
     throw new InvalidDataException("Invalid DNS listener or zones. Non-loopback binding requires explicit opt-in.");
 var names=new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 var groups=new Dictionary<string, SiteGroup>(StringComparer.OrdinalIgnoreCase);
+var reportTargets = new List<AgentReportTarget>();
 foreach(var zone in config.Zones)
 {
     if (string.IsNullOrWhiteSpace(zone.Name) || zone.Name.Length > 253 ||
@@ -59,6 +61,15 @@ foreach(var zone in config.Zones)
             site.Priority is < 0 or > 1000 ||
             (site.Region is not null && !DnsCidrRegionTable.ValidRegion(site.Region)) ||
             (cidrTable is not null && !DnsCidrRegionTable.ValidRegion(site.Region)) ||
+            (site.RequiredAgentIds is not null &&
+                (!zone.FailClosedWhenAllSitesDown ||
+                 !AgentHealthReportContract.IsValidIdentifier(site.AgentSiteId) ||
+                 site.RequiredAgentIds.Length is < 2 or > 16 ||
+                 (site.MinimumHealthyAgentReports is int minimumReports &&
+                    (minimumReports < 2 || minimumReports > site.RequiredAgentIds.Length)) ||
+                 site.RequiredAgentIds.Distinct(StringComparer.Ordinal).Count() != site.RequiredAgentIds.Length)) ||
+            (site.RequiredAgentIds is null &&
+                (site.AgentSiteId is not null || site.MinimumHealthyAgentReports is not null)) ||
             site.HealthCheckType is not ("Http" or "Tcp") ||
             (site.HealthCheckType == "Http" && (!validHttpUrl || site.TcpPort != 0)) ||
             (site.HealthCheckType == "Tcp" &&
@@ -67,10 +78,18 @@ foreach(var zone in config.Zones)
         var observers = ExternalValidation.Parse(site.ValidatorUrls);
         if (observers.Length != 0 && !zone.FailClosedWhenAllSitesDown)
             throw new InvalidDataException("External validation requires strict all-down behavior");
-        sites.Add(new Site(address,site.HealthCheckType == "Http" ? health : null,
+        sites.Add(new Site(address!,site.HealthCheckType == "Http" ? health : null,
             site.Weight,site.Priority,zone.FailureThreshold,zone.SuccessThreshold,
-            site.HealthCheckType,site.TcpPort,site.Region) { Validators = observers });
+            site.HealthCheckType,site.TcpPort,site.Region,site.AgentSiteId,site.RequiredAgentIds ?? [])
+            { Validators = observers });
+        if (site.RequiredAgentIds is { Length: > 0 })
+            reportTargets.Add(new AgentReportTarget(zone.Name.TrimEnd('.').ToLowerInvariant(),
+                site.AgentSiteId!, site.RequiredAgentIds,
+                site.MinimumHealthyAgentReports ?? site.RequiredAgentIds.Length));
     }
+    if (sites.Any(site => site.RequiredAgentIds.Length > 0) &&
+        sites.Any(site => site.RequiredAgentIds.Length == 0))
+        throw new InvalidDataException("All sites in an agent-report zone must use an explicit report quorum");
     var origin = zone.Name.TrimEnd('.').ToLowerInvariant();
     var servers = new List<DnsNameServer>();
     var serverNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -101,6 +120,14 @@ foreach(var zone in config.Zones)
         zone.FailClosedWhenAllSitesDown, servers.ToArray(), contact, zone.SoaSerial,
         zone.RoutingPolicy,cidrTable));
 }
+if ((reportTargets.Count > 0) != (config.AgentReports is not null))
+    throw new InvalidDataException("Agent report listener and report-gated sites must be configured together");
+using var reportStore = config.AgentReports is null ? null : new AgentHealthReportStore(
+    config.AgentReports.Agents, reportTargets, config.AgentReports.ReplayStatePath,
+    config.AgentReports.MaxTtlSeconds, config.AgentReports.MaxAgeSeconds,
+    config.AgentReports.MaxClockSkewSeconds);
+await using var reportServer = config.AgentReports is null || reportStore is null
+    ? null : new AgentHealthReportServer(config.AgentReports, reportStore);
 using var validation = groups.Values.SelectMany(group => group.Sites).Any(site => site.Validators.Length > 0)
     ? new ExternalValidation(groups.Values.SelectMany(group => group.Sites).SelectMany(site => site.Validators)) : null;
 using var stop=new CancellationTokenSource();
@@ -109,6 +136,7 @@ using var sigterm=OperatingSystem.IsLinux()
     ? System.Runtime.InteropServices.PosixSignalRegistration.Create(
         System.Runtime.InteropServices.PosixSignal.SIGTERM, e=>{e.Cancel=true;stop.Cancel();})
     : null;
+if (reportServer is not null) await reportServer.StartAsync(stop.Token);
 // A 301/302/307/308 must NOT become healthy by redirecting readiness to a
 // login page, another server or a public site. Require direct HTTP 2xx.
 using var healthClient = new HttpClient(new SocketsHttpHandler {
@@ -222,7 +250,7 @@ var tcpAccept = Task.Run(async () =>
                     await stream.ReadExactlyAsync(packet, deadline.Token);
                     var resolverIp=(session.Client.RemoteEndPoint as IPEndPoint)?.Address;
                     var response = DnsWireProtocol.Build(packet, groups, tcp: true,
-                        resolverIp:resolverIp);
+                        resolverIp:resolverIp, agentReports:reportStore);
                     if (response is null) return;
                     BinaryPrimitives.WriteUInt16BigEndian(length, checked((ushort)response.Length));
                     await stream.WriteAsync(length, deadline.Token);
@@ -257,7 +285,7 @@ try
         var source=((IPEndPoint)received.RemoteEndPoint).Address;
         if(!responseLimiter.Allow(source,Environment.TickCount64))continue;
         var response=DnsWireProtocol.Build(buffer.AsSpan(0,received.ReceivedBytes),groups,
-            tcp:false,resolverIp:source);
+            tcp:false,resolverIp:source,agentReports:reportStore);
         if(response is null)continue;
         try { await dnsSocket.SendToAsync(response,SocketFlags.None,received.RemoteEndPoint,stop.Token); }
         catch(SocketException) when(stop.IsCancellationRequested){break;}
@@ -280,6 +308,7 @@ sealed record DnsConfig(bool AllowNonLoopbackListeners,string ListenHost,int Lis
 {
     public int MaxResponsesPerSecondPerClient {get;init;} = 500;
     public int MaxConcurrentHealthProbes {get;init;} = 32;
+    public AgentReportServerConfig? AgentReports { get; init; }
 }
 sealed record DnsZone(string Name,int TtlSeconds,DnsSite[] Sites,
     bool FailClosedWhenAllSitesDown=false)
@@ -303,15 +332,19 @@ sealed record DnsSite(string Address,string? HealthUrl,int Weight,int Priority=0
     public string HealthCheckType { get; init; } = "Http";
     public int TcpPort { get; init; }
     public string? Region { get; init; }
+    public string? AgentSiteId { get; init; }
+    public string[]? RequiredAgentIds { get; init; }
+    public int? MinimumHealthyAgentReports { get; init; }
 }
 sealed class Site
 {
     public Site(IPAddress address,Uri? healthUrl,int weight,int priority,
         int failureThreshold,int successThreshold,string healthCheckType,int tcpPort,
-        string? region)
+        string? region,string? agentSiteId,string[] requiredAgentIds)
     {
         Address=address;HealthUrl=healthUrl;Weight=weight;Priority=priority;
         HealthCheckType=healthCheckType;TcpPort=tcpPort;Region=region;
+        AgentSiteId=agentSiteId;RequiredAgentIds=requiredAgentIds;
         Health=new DnsHealthHysteresis(failureThreshold,successThreshold);
     }
     public IPAddress Address {get;}
@@ -319,6 +352,8 @@ sealed class Site
     public string HealthCheckType {get;}
     public int TcpPort {get;}
     public string? Region {get;}
+    public string? AgentSiteId { get; }
+    public string[] RequiredAgentIds { get; }
     public int Weight {get;}
     public int Priority {get;}
     public DnsHealthHysteresis Health {get;}

@@ -54,4 +54,34 @@ assert.match(content,/atomic Redis/);
 assert.match(content,/&lt;script&gt;/);
 assert.doesNotMatch(content,/<script>alert/);
 assert.match(content,/Best-effort status only/);
+
+// Fleet status must expose only agent-reported engine configuration metadata
+// and must label runtime DNS health and quorum as unverified.
+const fleetElements=new Map();
+function fleetNode(id){if(!fleetElements.has(id))fleetElements.set(id,{innerHTML:'',textContent:'',hidden:false,className:'',dataset:{},classList:{toggle(){}}});return fleetElements.get(id)}
+const fleetCtx=vm.createContext({
+  console,URL,TextEncoder,setTimeout:()=>0,clearTimeout(){},
+  document:{getElementById:fleetNode,querySelectorAll:()=>[]},
+  fetch:async url=>{
+    assert.equal(url,'/admin/api/fleet/status');
+    return {ok:true,status:200,json:async()=>({
+      type:'mTLS agent and signed engine-configuration status; not live DNS or YARP destination health',
+      gateways:[{id:'<img src=x>',state:'connected',report:{machine:'node-a',engineConfigStagingEnabled:true},engineConfigState:'available',engines:[{engineId:'gslb',revision:'A'.repeat(64),mode:'signed-file-staging-only',serviceRestarted:false}] }]
+    })};
+  }
+});
+const fleetStart=js.indexOf('async function fleetStatus()');
+const fleetEnd=js.indexOf('async function performFleetRollout()',fleetStart);
+assert.ok(fleetStart>0&&fleetEnd>fleetStart,'compiled fleet status view must exist');
+vm.runInContext(js.slice(0,js.indexOf("$('content').addEventListener('click'")),fleetCtx);
+vm.runInContext(js.slice(fleetStart,fleetEnd),fleetCtx);
+await vm.runInContext('fleetStatus()',fleetCtx);
+const fleetContent=fleetNode('content').innerHTML;
+assert.match(fleetContent,/GSLB DNS configuration/);
+assert.match(fleetContent,/AAAAAAAAAAAA/);
+assert.match(fleetContent,/Restart required/);
+assert.match(fleetContent,/not proof the DNS process restarted or is healthy/);
+assert.match(fleetContent,/does not query DNS answers or authoritative-node quorum/);
+assert.match(fleetContent,/&lt;img src=x&gt;/);
+assert.doesNotMatch(fleetContent,/<img src=x>/);
 console.log('PASS: grouped navigation, auth shell, responsive CSS, authenticated peer status and escaped DOM values');

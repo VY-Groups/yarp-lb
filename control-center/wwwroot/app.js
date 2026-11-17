@@ -1242,7 +1242,13 @@ catch (e) {
 async function fleetStatus() { try {
     show('Connecting to registered mTLS agents...');
     const r = await api('/admin/api/fleet/status');
-    $('content').innerHTML = `<div class="card"><h2>Authenticated gateway reports</h2><p class="subtle">${esc(r.type)}</p>${(r.gateways || []).map((g) => `<div class="rowline"><b>${esc(g.id)}</b><span class="chip">${esc(g.state)}</span></div>`).join('') || '<p>No gateways registered.</p>'}</div>`;
+    const gateways = (r.gateways || []).map((g) => { const engines = Array.isArray(g.engines) ? g.engines : []; const gslb = engines.find((engine) => engine.engineId === 'gslb'); let engineView = ''; if (g.engineConfigState === 'available') {
+        engineView = gslb ? `<div class="rowline"><div><b>GSLB DNS configuration</b><div class="subtle">Revision ${esc(String(gslb.revision || '').slice(0, 12))} · ${esc(gslb.mode || 'file staging')}</div></div><span class="chip">${gslb.serviceRestarted ? 'Restarted' : 'Restart required'}</span></div>` : '<div class="rowline"><b>GSLB DNS configuration</b><span class="chip">Not staged</span></div>';
+    }
+    else {
+        engineView = `<div class="rowline"><b>GSLB DNS configuration</b><span class="chip">${esc(g.engineConfigState || 'unavailable')}</span></div>`;
+    } return `<div class="card"><div class="rowline"><b>${esc(g.id)}</b><span class="chip">${esc(g.state)}</span></div><div class="subtle">Agent: ${esc(g.report?.machine || 'unknown')} · ${esc(g.report?.engineConfigStagingEnabled ? 'signed file staging enabled' : 'engine staging disabled')}</div>${engineView}<p class="healthbanner">Config revision is not proof the DNS process restarted or is healthy. This view does not query DNS answers or authoritative-node quorum.</p></div>`; }).join('');
+    $('content').innerHTML = `<div class="toolbar"><div><h2>GSLB and gateway status</h2><p class="subtle">Authenticated agent metadata and staged engine file revisions.</p></div>${actionBtn('Refresh agent status', 'fleet-probe', '')}</div><div class="grid2">${gateways || '<div class="card"><p>No gateways registered.</p></div>'}</div><div class="card"><p class="subtle">Runtime DNS health, report freshness/quorum, DNSSEC state, and inter-node partition state are not yet exposed by the management API.</p></div>`;
 }
 catch (e) {
     show(String(e), true);

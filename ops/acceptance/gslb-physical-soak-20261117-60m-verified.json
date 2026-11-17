@@ -1,0 +1,57 @@
+{
+  "title": "60-minute physical GSLB DNS TCP soak",
+  "testWindowUtc": {
+    "started": "2026-11-17T07:23:09.132147+00:00",
+    "finished": "2026-11-17T08:23:09.457741+00:00",
+    "elapsedSeconds": 3600.325594
+  },
+  "testSetup": {
+    "runner": "WSL Ubuntu 24.04",
+    "origins": [
+      "Mumbai EC2 (Apache HTTP origin)",
+      "Osaka EC2 (Apache HTTP origin)"
+    ],
+    "dnsListener": "GslbDns binary, bound only to 127.0.0.1:15353 on each host",
+    "clientPath": "dig over TCP through loopback SSH port forwards",
+    "zone": "physical-gslb.test",
+    "intervalSecondsPerNode": 1,
+    "requestTimeoutSeconds": 2,
+    "dnsBinarySha256": "518fe0ba96fa1399174b7c96f2b20f897d7c73a19d2f4a8d2dade2998d73fa0f"
+  },
+  "results": [
+    {
+      "node": "mumbai",
+      "count": 3601,
+      "successes": 3601,
+      "validResponses": 3601,
+      "errors": [],
+      "elapsedSeconds": 3600.084,
+      "latencyMs": {
+        "p50": 70.85,
+        "p95": 82.03,
+        "p99": 85.82,
+        "max": 152.89
+      }
+    },
+    {
+      "node": "osaka",
+      "count": 3601,
+      "successes": 3601,
+      "validResponses": 3601,
+      "errors": [],
+      "elapsedSeconds": 3600.31,
+      "latencyMs": {
+        "p50": 308.97,
+        "p95": 320.48,
+        "p99": 324.77,
+        "max": 512.21
+      }
+    }
+  ],
+  "clean": true,
+  "limits": [
+    "The measured client path includes WSL and SSH forwarding; it is not public recursive-resolver or end-user latency.",
+    "This is a synthetic DNS TCP soak of two isolated nodes; it does not validate shared public DNS delegation, DNSSEC, production routing, capacity, or 99.9% availability.",
+    "No intentional outage or failover was injected during this soak."
+  ]
+}
