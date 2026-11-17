@@ -6,12 +6,12 @@ using System.Text;
 
 // Independent DNS wire-format implementation. External GSLB references are reviewed
 // only as architectural context; no AGPL source is included. No recursion,
-// DNSSEC, EDNS Client Subnet routing by default, or zone transfer.
+// zone transfer, or EDNS Client Subnet routing by default.
 internal static class DnsWireProtocol
 {
     private const ushort A = 1, Ns = 2, Soa = 6, Aaaa = 28, Ds = 43, Opt = 41, EcsOption = 8;
+    private const ushort Rrsig = 46, Nsec = 47, Dnskey = 48;
     private const ushort ClassIn = 1;
-    private sealed record Resource(string Owner, ushort Type, uint Ttl, byte[] Rdata);
     private sealed record EcsInput(ushort Family, int SourcePrefix, IPAddress Address);
 
     public static bool ValidName(string name)
@@ -60,6 +60,7 @@ internal static class DnsWireProtocol
         var edns = false;
         var payload = 512;
         var unsupportedEdns = false;
+        var dnssecOk = false;
         EcsInput? ecsInput = null;
         var additionalCount = BinaryPrimitives.ReadUInt16BigEndian(query[10..]);
         if (additionalCount > 1) return null;
@@ -69,6 +70,7 @@ internal static class DnsWireProtocol
             if (BinaryPrimitives.ReadUInt16BigEndian(query.Slice(pos, 2)) != Opt) return null;
             var advertised = BinaryPrimitives.ReadUInt16BigEndian(query.Slice(pos + 2, 2));
             var ttl = BinaryPrimitives.ReadUInt32BigEndian(query.Slice(pos + 4, 4));
+            dnssecOk = (ttl & 0x00008000u) != 0;
             var rdlen = BinaryPrimitives.ReadUInt16BigEndian(query.Slice(pos + 8, 2));
             pos += 10;
             if (pos + rdlen != query.Length) return null;
@@ -105,11 +107,13 @@ internal static class DnsWireProtocol
             }
         }
 
-        var answers = new List<Resource>();
-        var authority = new List<Resource>();
-        var extra = new List<Resource>();
+        var answers = new List<DnsResource>();
+        var authority = new List<DnsResource>();
+        var extra = new List<DnsResource>();
         var responseEcs = new List<byte>();
         var rcode = 0;
+        string? denialName = null;
+        var denialIsNxDomain = false;
         var authoritativeAnswer = zone is not null;
         if (unsupportedEdns) rcode = 0; // extended RCODE BADVERS is carried in OPT
         else if (zone is null) rcode = 5; // REFUSED for names outside explicitly hosted zones
@@ -132,19 +136,20 @@ internal static class DnsWireProtocol
                     n.Host.EndsWith("." + domain, StringComparison.OrdinalIgnoreCase));
             if (delegation is not null && domain.Equals(delegation.Name, StringComparison.OrdinalIgnoreCase) && qtype == Ds)
             {
-                // DNSSEC is not implemented: an unsigned parent has no DS RRset
-                // at this cut, so return the parent's negative SOA, not a referral.
+                // No child DS is configured. A signed parent proves DS absence
+                // with NSEC; unsigned parents retain the historical SOA-only response.
                 AddNegativeSoa();
+                denialName = delegation.Name;
             }
             else if (delegation is not null)
             {
                 authoritativeAnswer = false;
                 foreach (var server in delegation.NameServers)
                 {
-                    authority.Add(new Resource(delegation.Name, Ns, (uint)zone.Ttl, WireName(server.Host)));
+                    authority.Add(new DnsResource(delegation.Name, Ns, (uint)zone.Ttl, WireName(server.Host)));
                     if (server.Host.Equals(delegation.Name, StringComparison.OrdinalIgnoreCase) ||
                         server.Host.EndsWith("." + delegation.Name, StringComparison.OrdinalIgnoreCase))
-                        extra.Add(new Resource(server.Host, server.RecordType, (uint)zone.Ttl,
+                        extra.Add(new DnsResource(server.Host, server.RecordType, (uint)zone.Ttl,
                             server.Address.GetAddressBytes()));
                 }
             }
@@ -152,6 +157,25 @@ internal static class DnsWireProtocol
             {
                 rcode = emptyNonTerminal ? 0 : 3; // NODATA vs true NXDOMAIN
                 AddNegativeSoa();
+                denialName = domain;
+                denialIsNxDomain = !emptyNonTerminal;
+            }
+            else if (zone.Dnssec is { } signer && qtype == Dnskey && atApex)
+            {
+                answers.Add(signer.DnsKey);
+            }
+            else if (zone.Dnssec is { } nsecSigner && qtype == Nsec && nsecSigner.NsecAt(domain) is { } nsec)
+            {
+                answers.Add(nsec);
+            }
+            else if (zone.Dnssec is { } sigSigner && qtype == Rrsig)
+            {
+                answers.AddRange(sigSigner.SignaturesAt(domain));
+                if (domain == apex)
+                    foreach (var site in zone.Sites)
+                        answers.Add(sigSigner.SignRrset(domain,
+                            site.Address.AddressFamily == AddressFamily.InterNetwork ? A : Aaaa,
+                            (uint)zone.Ttl, [site.Address.GetAddressBytes()]));
             }
             else if ((qtype == A || qtype == Aaaa) && atApex)
             {
@@ -163,6 +187,7 @@ internal static class DnsWireProtocol
                 if (configured.Length == 0)
                 {
                     AddNegativeSoa();
+                    denialName = apex;
                 }
                 else
                 {
@@ -269,24 +294,28 @@ internal static class DnsWireProtocol
                             }
                         }
                         if (chosen is not null)
-                            answers.Add(new Resource(domain, qtype, (uint)zone.Ttl, chosen.Address.GetAddressBytes()));
+                            answers.Add(new DnsResource(domain, qtype, (uint)zone.Ttl, chosen.Address.GetAddressBytes()));
                     }
                 }
             }
             else if (ns is not null && qtype == ns.RecordType)
-                answers.Add(new Resource(domain, ns.RecordType, (uint)zone.Ttl, ns.Address.GetAddressBytes()));
+                answers.Add(new DnsResource(domain, ns.RecordType, (uint)zone.Ttl, ns.Address.GetAddressBytes()));
             else if (qtype == Soa && atApex && zone.NameServers.Length != 0)
                 answers.Add(SoaRecord(apex!, zone));
             else if (qtype == Ns && atApex && zone.NameServers.Length != 0)
             {
                 foreach (var server in zone.NameServers)
                 {
-                    answers.Add(new Resource(apex!, Ns, (uint)zone.Ttl, WireName(server.Host)));
+                    answers.Add(new DnsResource(apex!, Ns, (uint)zone.Ttl, WireName(server.Host)));
                     if (server.Host.EndsWith("." + apex!, StringComparison.OrdinalIgnoreCase))
-                        extra.Add(new Resource(server.Host, server.RecordType, (uint)zone.Ttl, server.Address.GetAddressBytes()));
+                        extra.Add(new DnsResource(server.Host, server.RecordType, (uint)zone.Ttl, server.Address.GetAddressBytes()));
                 }
             }
-            else AddNegativeSoa(); // NODATA (including AAAA, ANY and unsupported QTYPE)
+            else
+            {
+                AddNegativeSoa(); // NODATA (including AAAA, ANY and unsupported QTYPE)
+                denialName = domain;
+            }
         }
 
         void AddNegativeSoa()
@@ -295,9 +324,36 @@ internal static class DnsWireProtocol
                 authority.Add(SoaRecord(apex, zone));
         }
 
-        // Do not send EDNS OPT with DO bit: this engine has no DNSSEC signatures.
+        if (!unsupportedEdns && zone?.Dnssec is { } dnssec && authoritativeAnswer)
+        {
+            if (dnssecOk)
+            {
+                AddRrsetSignatures(answers, dnssec);
+                AddRrsetSignatures(authority, dnssec);
+                if (denialName is not null)
+                    authority.AddRange(dnssec.DenialProof(denialName, denialIsNxDomain));
+            }
+            else if (qtype == Nsec && answers.Count > 0)
+            {
+                // NSEC is an explicit DNSSEC RR query and remains available without DO.
+            }
+        }
+
+        static void AddRrsetSignatures(List<DnsResource> section, DnssecZoneSigner signer)
+        {
+            var signatures = section.Where(r => r.Type != Rrsig)
+                .GroupBy(r => (r.Owner, r.Type))
+                .Select(set => signer.SignRrset(set.Key.Owner, set.Key.Type, set.First().Ttl,
+                    set.Select(r => r.Rdata).ToArray())).ToArray();
+            section.AddRange(signatures);
+        }
+
         // Constrain untrusted UDP response amplification and use TC for complete TCP retry.
-        var budget = tcp ? 65535 : Math.Min(payload, Math.Max(128, query.Length * 4));
+        // Constrain untrusted UDP response amplification and use TC for complete TCP retry.
+        var signedEdnsResponse = dnssecOk && zone?.Dnssec is not null && edns && !unsupportedEdns;
+        var budget = tcp ? 65535 : signedEdnsResponse
+            ? payload
+            : Math.Min(payload, Math.Max(128, query.Length * 4));
         var reserve = edns ? 11 + responseEcs.Count : 0;
         var bytes = new List<byte>(Math.Min(512, budget));
         bytes.AddRange(new byte[12]);
@@ -328,7 +384,8 @@ internal static class DnsWireProtocol
             bytes.Add(0); // root owner
             Write16(bytes, Opt);
             Write16(bytes, (ushort)payload);
-            Write32(bytes, unsupportedEdns ? 0x01000000u : 0u); // BADVERS or no ext rcode
+            var optFlags = dnssecOk && zone?.Dnssec is not null ? 0x00008000u : 0u;
+            Write32(bytes, unsupportedEdns ? 0x01000000u : optFlags); // BADVERS or DNSSEC OK
             Write16(bytes, checked((ushort)responseEcs.Count));
             bytes.AddRange(responseEcs); // unknown options and disabled/ambiguous ECS are never echoed
             ar++;
@@ -403,7 +460,7 @@ internal static class DnsWireProtocol
         Array.Clear(address, full, address.Length - full);
     }
 
-    private static Resource SoaRecord(string apex, SiteGroup zone)
+    private static DnsResource SoaRecord(string apex, SiteGroup zone)
     {
         var bytes = new List<byte>();
         bytes.AddRange(WireName(zone.NameServers[0].Host));
@@ -413,10 +470,10 @@ internal static class DnsWireProtocol
         Write32(bytes, 30); // retry
         Write32(bytes, 3600); // expire
         Write32(bytes, (uint)zone.Ttl); // negative-cache minimum
-        return new Resource(apex, Soa, (uint)zone.Ttl, bytes.ToArray());
+        return new DnsResource(apex, Soa, (uint)zone.Ttl, bytes.ToArray());
     }
 
-    private static byte[] WireRecord(Resource value, string originalQuestion)
+    private static byte[] WireRecord(DnsResource value, string originalQuestion)
     {
         var bytes = new List<byte>();
         if (value.Owner == originalQuestion) { bytes.Add(0xC0); bytes.Add(0x0C); }

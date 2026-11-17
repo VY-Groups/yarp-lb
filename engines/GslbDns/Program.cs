@@ -110,6 +110,9 @@ foreach(var zone in config.Zones)
     if (sites.Any(site => site.RequiredAgentIds.Length > 0) &&
         sites.Any(site => site.RequiredAgentIds.Length == 0))
         throw new InvalidDataException("All sites in an agent-report zone must use an explicit report quorum");
+    if (!string.IsNullOrWhiteSpace(zone.DnssecPrivateKeyPath) &&
+        (zone.NameServers is not { Length: > 0 } || zone.SoaSerial == 0))
+        throw new InvalidDataException("DNSSEC requires authoritative NS records and a nonzero SOA serial");
     var origin = zone.Name.TrimEnd('.').ToLowerInvariant();
     var servers = new List<DnsNameServer>();
     var serverNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -159,6 +162,11 @@ foreach(var zone in config.Zones)
         }
         delegations.Add(new DnsDelegation(cut, childServers.ToArray()));
     }
+    if (delegations.Any(cut => delegations.Any(other =>
+            !ReferenceEquals(cut, other) && cut.Name.EndsWith("." + other.Name, StringComparison.OrdinalIgnoreCase))) ||
+        servers.Any(server => delegations.Any(cut => server.Host.Equals(cut.Name, StringComparison.OrdinalIgnoreCase) ||
+            server.Host.EndsWith("." + cut.Name, StringComparison.OrdinalIgnoreCase))))
+        throw new InvalidDataException("Nested cuts and parent name servers below a child delegation are unsupported");
     var contact = (zone.SoaContact ?? ("hostmaster." + origin)).TrimEnd('.').ToLowerInvariant();
     if (!DnsWireProtocol.ValidName(contact))
         throw new InvalidDataException("Invalid SOA contact name");
@@ -172,8 +180,11 @@ foreach(var zone in config.Zones)
     groups.Add(origin, new SiteGroup(sites.ToArray(), zone.TtlSeconds,
         zone.FailClosedWhenAllSitesDown, servers.ToArray(), contact, zone.SoaSerial,
         zone.RoutingPolicy,cidrTable,zone.EnableEcsGeoRouting,trustedEcsResolvers,
-        delegations.ToArray()));
+        delegations.ToArray(), zone.DnssecPrivateKeyPath, origin));
+    if (groups[origin].Dnssec is { } dnssec)
+        Console.WriteLine($"GSLB_DNSSEC zone={origin} algorithm=13 keyTag={dnssec.KeyTag} DS=\"{dnssec.KeyTag} 13 2 {Convert.ToHexString(dnssec.Ds.Rdata[4..])}\"");
 }
+using var dnssecLifetime = new DnssecSignerLifetime(groups.Values);
 if ((reportTargets.Count > 0) != (config.AgentReports is not null))
     throw new InvalidDataException("Agent report listener and report-gated sites must be configured together");
 using var reportStore = config.AgentReports is null ? null : new AgentHealthReportStore(
@@ -408,6 +419,7 @@ sealed record DnsZone(string Name,int TtlSeconds,DnsSite[] Sites,
     public int SuccessThreshold { get; init; } = 1;
     public DnsCidrRegionRule[]? CidrRoutes { get; init; }
     public DnsDelegationConfig[]? Delegations { get; init; }
+    public string? DnssecPrivateKeyPath { get; init; }
 }
 sealed record DnsNameServerConfig(string Host,string Address);
 sealed record DnsNameServer(string Host,IPAddress Address)
@@ -459,13 +471,19 @@ sealed class SiteGroup
     public SiteGroup(Site[] sites,int ttl,bool failClosedWhenAllSitesDown,
         DnsNameServer[] nameServers,string soaContact,uint soaSerial,string routingPolicy,
         DnsCidrRegionTable? cidrTable,bool enableEcsGeoRouting,
-        DnsCidrRegionTable? trustedEcsResolvers,DnsDelegation[]? delegations = null)
+        DnsCidrRegionTable? trustedEcsResolvers,DnsDelegation[]? delegations = null,
+        string? dnssecPrivateKeyPath = null, string? zoneName = null)
     {
         (Sites,Ttl,FailClosedWhenAllSitesDown,NameServers,SoaContact,SoaSerial,RoutingPolicy,CidrTable)
             =(sites,ttl,failClosedWhenAllSitesDown,nameServers,soaContact,soaSerial,routingPolicy,cidrTable);
         EnableEcsGeoRouting=enableEcsGeoRouting;
         TrustedEcsResolvers=trustedEcsResolvers;
         Delegations=delegations ?? [];
+        if (!string.IsNullOrWhiteSpace(dnssecPrivateKeyPath))
+            Dnssec = new DnssecZoneSigner(zoneName ?? throw new InvalidDataException("DNSSEC zone name is required"),
+                (uint)ttl, dnssecPrivateKeyPath, soaContact, soaSerial, nameServers,
+                Delegations, sites.Any(s => s.Address.AddressFamily == AddressFamily.InterNetwork),
+                sites.Any(s => s.Address.AddressFamily == AddressFamily.InterNetworkV6));
     }
     public string RoutingPolicy { get; }
     // 3 local successful measurements; at most 3 probe periods, clamped 6..60s.
@@ -476,10 +494,19 @@ sealed class SiteGroup
     public DnsCidrRegionTable? TrustedEcsResolvers { get; }
     public DnsNameServer[] NameServers { get; }
     public DnsDelegation[] Delegations { get; }
+    public DnssecZoneSigner? Dnssec { get; }
     public string SoaContact { get; }
     public uint SoaSerial { get; }
     public bool FailClosedWhenAllSitesDown {get;}
     public Site[] Sites {get;}
     public int Ttl {get;}
     public long Counter=-1;
+}
+sealed class DnssecSignerLifetime(IEnumerable<SiteGroup> groups) : IDisposable
+{
+    public void Dispose()
+    {
+        foreach (var signer in groups.Select(group => group.Dnssec).OfType<DnssecZoneSigner>())
+            signer.Dispose();
+    }
 }

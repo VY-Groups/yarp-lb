@@ -729,7 +729,7 @@ try
              Dns16(dnssecReply,10)==1 && dnssecReply[^1]==0,
              $"DNSSEC type {dnssecType} with DO=1 receives unsigned NODATA, no AD claim and no DO advertisement");
     }
-    Console.WriteLine("PASS: DNSSEC is explicitly unsupported; DO queries receive unsigned NODATA without AD or fabricated signatures");
+    Console.WriteLine("PASS: unsigned zones do not claim DNSSEC; DO queries receive no fabricated signatures or AD bit");
     var (_, badVers) = await QueryWire("app.integration.test",1,ednsVersion:1);
     Must(Dns16(badVers,6)==0 && Dns16(badVers,10)==1 &&
          badVers[^6]==1,"EDNS version mismatch signals BADVERS, without A answer");

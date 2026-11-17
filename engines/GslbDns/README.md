@@ -62,7 +62,9 @@ Example IPv6 site: `{"Address":"2001:db8::99","HealthUrl":"http://127.0.0.1:1971
 The address and the readiness probe target are deliberately separate.
 **A successful IPv4 HTTP probe is not proof of IPv6 reachability.** Production
 acceptance must probe over the network/address family actually advertised.
-IPv6 DNS UDP/TCP listeners and IPv6 NS glue are supported. DNSSEC remains open.
+IPv6 DNS UDP/TCP listeners and IPv6 NS glue are supported. DNSSEC signing is
+available as an explicit per-zone lab feature; independent public delegation,
+rollover and multi-authority acceptance remain open.
 
 ## Newly supported in lab
 
@@ -86,9 +88,12 @@ IPv6 DNS UDP/TCP listeners and IPv6 NS glue are supported. DNSSEC remains open.
   the configured zones are REFUSED.
 - EDNS0 OPT input is syntax checked with a 512–1232-byte UDP buffer limit;
   unknown options are ignored, not logged or echoed. Unsupported EDNS versions
-  return BADVERS via the OPT extended response code. DNSSEC is unsupported:
-  DO=1 requests for DS, RRSIG or DNSKEY return unsigned NODATA, never set AD,
-  and the response OPT does not advertise DO or fabricate signatures.
+  return BADVERS via the OPT extended response code. Unsigned zones keep the
+  previous safe behavior: DO requests never set AD, claim DO support, or
+  fabricate signatures. A zone with `DnssecPrivateKeyPath` enabled returns
+  signed DNSKEY, RRSIG, NSEC, SOA/NS, dynamic A/AAAA and negative answers.
+  EDNS DO queries use the advertised (at most 1232-byte) UDP budget; larger
+  responses set TC for TCP retry.
 - EDNS Client Subnet is ignored by default. A zone using `CidrRegion` can opt in
   with `EnableEcsGeoRouting: true` and an explicit `TrustedEcsResolverCidrs`
   allowlist; untrusted resolver sources cannot steer answers with forged ECS.
@@ -108,6 +113,28 @@ IPv6 DNS UDP/TCP listeners and IPv6 NS glue are supported. DNSSEC remains open.
   not fuzzing or a complete denial-of-service assessment.
 
 ## Example test configuration
+
+### Optional signed zone
+
+DNSSEC is disabled unless a zone sets `DnssecPrivateKeyPath` to an absolute
+path containing a P-256 PEM private key. For a disposable lab key:
+
+    openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out /etc/gatewaycore/dnssec/app.example.test.pem
+    chmod 600 /etc/gatewaycore/dnssec/app.example.test.pem
+
+Add this to the zone JSON (the zone must also configure NS records):
+
+    "DnssecPrivateKeyPath": "/etc/gatewaycore/dnssec/app.example.test.pem"
+
+At startup the DNS process logs a public `DS` record in presentation format.
+Copy that exact DS to the parent zone/registrar only after checking it against
+the independently generated DNSKEY. For a child delegation, publish the DS at
+the parent. All authorities serving the same signed zone must use the same
+key and serial. Windows deployments must grant read access only to the
+GatewayCore service identity using a restrictive NTFS ACL. Private key contents
+are never logged. Do not use this lab workflow as a substitute for a managed
+key store, rollover procedure, public delegation validation, or a security
+review.
 
     {
       "AllowNonLoopbackListeners": false,
@@ -271,7 +298,7 @@ sample freshness/replay fencing, privacy and failover acceptance before GO.
 
 ## Remaining NO-GO areas
 
-DNSSEC signatures/keys, TLS/DoT/DoH, TSIG, DNS NOTIFY, zone transfer, true
+TLS/DoT/DoH, TSIG, DNS NOTIFY, zone transfer, true
 zone-cut/delegation conformance, CNAME/MX, geographic/ASN policy with licensed data and privacy, verified multi-site
 health quorum and authenticated state propagation, split-brain protection,
 ECMP/multi-NS physical hosting, public resolver interoperability and
@@ -443,7 +470,24 @@ Example fragment:
     }]
 
 The parent returns an authoritative negative SOA for a DS query at an unsigned
-delegation. This is not DNSSEC denial-of-existence proof: DNSSEC signing,
-DS/DNSKEY/RRSIG generation and key rollover are unsupported. Zone serials are
-operator-configured and do not automatically increment. AXFR/IXFR, NOTIFY,
-TSIG and recursive service are also unsupported.
+delegation. When DNSSEC signing is enabled, it includes signed NSEC proof that
+the parent has no DS for that child.
+
+DNSSEC uses NSEC denial proofs, ECDSA P-256/SHA-256 (algorithm 13), and a
+pre-provisioned PEM private key per zone. The server logs the public DS value
+in presentation format; publish that DS at the parent registrar/zone before
+delegating a signed child. For multi-authority service, provision the same key
+securely to every authority and use the same zone/serial configuration. Keep
+the key outside the repository and deployment artifacts, restrict access to
+the service identity (`chmod 600` on Linux and an equivalent Windows ACL),
+and back it up using the organization's approved secret-management process.
+The signer refreshes signatures as they approach expiry.
+
+This signer is limited: NSEC only; no automated KSK/ZSK or algorithm rollover,
+HSM/KMS integration, DS publication workflow, child-zone signing, key revocation,
+TSIG, AXFR/IXFR, or external authority synchronization. The configured DS is
+not automatically published to the parent, and differing keys/serials across
+authorities will break validation. Do not enable signing for a public zone until
+independent resolver/parent-delegation and multi-authority acceptance is complete.
+Zone serials are operator-configured and do not automatically increment.
+AXFR/IXFR, NOTIFY, TSIG and recursive service are also unsupported.
