@@ -547,3 +547,39 @@ not complete in this branch. Rolling annual 99.9% availability remains an
 8h45m36s error budget objective whose production SLI is unmeasured; production
 remains NO-GO pending DNSSEC, trust/quorum/fencing, real network/fault/capacity
 acceptance, and an externally monitored annual period.
+
+## Continuation — fleet metrics UI and access-log/report increment (2026-11-17)
+
+PR #130 merged at `c43c9bfe29d7ae66ace24fcb2d9ac015b4375d44`. It adds a
+bounded loopback GSLB metric scrape in GatewayAgent, relays a fixed quorum and
+observer-freshness summary over pinned mTLS, and displays it in the Control
+Center fleet page. The exact PR head passed all Actions, including full
+Windows/Linux builds, UI/API, mTLS, HTTP, HA and load workflows. GitHub recorded
+no independent review; this was a self-reviewed merge under the user's prior
+authorization. It remains a per-node metric snapshot, not DNS validation,
+cross-authority agreement or durable fleet telemetry. Issue #109 remains OPEN.
+
+Branch `codex/issue50-access-logs-reports` is preparing a separate partial P1
+observability PR from main `c43c9bf`. It adds structured per-request UTC access
+events, uses the socket IP by default, accepts a single forwarded client IP
+only when the immediate peer exactly matches `GATEWAY_TRUSTED_PROXY_IPS`, and
+omits query strings, headers and bodies. It adds an authenticated metrics-page
+latency histogram and Operator/Administrator JSON/CSV process-lifetime traffic
+exports that intentionally contain no client IPs. Local Release build passed
+with four pre-existing warnings; address-policy tests, UI compilation and 14
+UI tests passed. HTTP/HTTPS destinations are already allowed by route
+validation. This does not implement durable multi-node report retention or the
+complete OpenTelemetry/Collector/Grafana acceptance for issue #50, which stays
+OPEN. Exact-head Actions are pending.
+
+The one-hour 75-VU HTTP run is tracked as Actions run ID `44074344501`; its
+latest observed status was still in progress. Do not treat it as a completed
+soak until its actual final result and artifacts are available. It is not
+annual 99.9% availability or physical multi-gateway capacity evidence.
+
+Current high-priority gaps remain: #36 physical independent gateway
+VRRP/ECMP and capacity/fault acceptance; #52 DNSSEC signing/key lifecycle,
+licensed GeoIP and complete authoritative acceptance; #109 distributed trust
+quorum/fencing and independent partition acceptance; #50 central durable
+OpenTelemetry, reports and monitoring. Rolling annual 99.9% has an
+8h45m36s error budget but is still unmeasured; production remains NO-GO.

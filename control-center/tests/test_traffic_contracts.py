@@ -22,6 +22,16 @@ assert 'JsonNode weightValue' in code
 assert 'SourceIpHash' in code and 'WeightedRandom' in code
 assert 'LoadBalancingCore.TryWeight' in code
 assert 'DangerousAcceptAnyServerCertificate' in code
+assert 'GATEWAY_TRUSTED_PROXY_IPS' in code
+assert 'GATEWAY_ACCESS timestampUtc={TimestampUtc:o}' in code
+assert 'clientAddress.Address?.ToString()' in code
+assert 'Request.Path' not in code[code.index('GATEWAY_ACCESS timestampUtc='):code.index('var destinationTelemetry')]
+assert '/admin/api/reports/traffic.json' in code
+assert '/admin/api/reports/traffic.csv' in code
+assert 'RequireRole("Administrator", "Operator")' in code
+assert 'durationBuckets = requestHistogram.Snapshot()' in code
+assert 'Download JSON report' in front and 'Download CSV report' in front
+assert 'Request duration distribution' in front
 assert 'DestinationConfig.Metadata' not in core
 assert 'RandomNumberGenerator.GetInt32' in engine
 assert 'RemoteIpAddress' in engine

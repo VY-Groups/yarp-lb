@@ -10,6 +10,12 @@ public sealed class GatewayRequestHistogram
     private long _inflight;
     public void Started() => Interlocked.Increment(ref _inflight);
     public long InFlight => Interlocked.Read(ref _inflight);
+    public IReadOnlyList<GatewayRequestDurationBucket> Snapshot() =>
+        _exclusiveBucketCounts.Select((_, index) => new GatewayRequestDurationBucket(
+            index < UpperBoundsSeconds.Length
+                ? UpperBoundsSeconds[index].ToString("R", CultureInfo.InvariantCulture)
+                : "+Inf",
+            Interlocked.Read(ref _exclusiveBucketCounts[index]))).ToArray();
     public void Finished(long elapsedTicks)
     {
         Interlocked.Decrement(ref _inflight);
@@ -39,3 +45,5 @@ public sealed class GatewayRequestHistogram
         output.Append("yarp_control_http_duration_seconds_count ").Append(cumulative).Append('\n');
     }
 }
+
+public sealed record GatewayRequestDurationBucket(string UpperBoundSeconds, long Requests);
