@@ -6,7 +6,7 @@ IPv6 AAAA GSLB backends, with HTTP(S) and opt-in TCP health probes,
 weighted/Failover selection, response rate limits and per-zone all-down policy.
 The DNS listener remains IPv4-only even when answering AAAA queries.
 
-## Private CIDR-to-region routing (opt-in, **not GeoIP**)
+## Private CIDR-to-region routing (opt-in)
 
 A zone may explicitly opt into `RoutingPolicy: "CidrRegion"` with a bounded
 `CidrRoutes` table of 1–256 canonical IPv4/IPv6 CIDR prefixes. Each
@@ -42,13 +42,8 @@ Example **lab-only** zone (complete operational NS/SOA settings omitted):
       ]
     }
 
-**Not equivalent to geographical user routing.** ECS remains ignored (and
-must not be trusted without explicit source resolver policy and privacy
-approval). No GeoIP/ASN dataset or inferred country/continent is used.
-External recursive resolvers may serve cached answers to many geographically
-diverse users. Use this mode only for controlled resolver networks with
-explicitly owned CIDR mappings. Multi-region failure safety, DNSSEC,
-signed configuration, physical DR and cache-aware rollover remain NO-GO.
+This mode uses the resolver socket address. For end-user subnet routing, use
+the separate opt-in `GeoIpEcs` policy below.
 
 ## Family-correct IPv4/IPv6 backend answers (lab)
 
@@ -104,6 +99,46 @@ rollover and multi-authority acceptance remain open.
   decision returns the normalized source and matching route scope for cache use.
   No ECS addresses are logged or retained. This is not GeoIP/ASN lookup and
   requires trusted recursive resolvers to apply their own ECS privacy policy.
+- `GeoIpEcs` is a separate opt-in policy that performs local MaxMind MMDB
+  country and/or ASN lookups on trusted ECS only. The operator supplies
+  absolute `GeoIpCountryDatabasePath` and/or `GeoIpAsnDatabasePath` paths in
+  the top-level DNS config and explicit `GeoCountryRoutes` and/or
+  `GeoAsnRoutes` mapping data values to configured site regions. No database
+  download, license key or raw address is sent to a service. The default
+  maximum database age is 45 days; update authorized databases before that
+  window expires. A value of zero disables the freshness guard and is intended
+  for synthetic CI fixtures only.
+  ECS is masked to at most IPv4 `/24` or IPv6 `/56` before lookup. If a country
+  or ASN record is more specific than that subnet, configured country and ASN
+  routes conflict, the result is unknown/unmapped, the resolver is not
+  allowlisted, or no healthy site exists in the mapped region, routing falls
+  back to the existing weighted policy and the ECS value is not echoed. A
+  successful match returns only the normalized subnet and selected scope for
+  DNS cache behavior. Country/ASN data is inherently approximate and is not a
+  source of identity or precise location. Operators remain responsible for
+  database licensing, updates, resolver privacy and cache behavior.
+
+Example **lab-only** top-level configuration and zone (database files are not
+included):
+
+    {
+      "GeoIpCountryDatabasePath": "/etc/gatewaycore/geo/GeoLite2-Country.mmdb",
+      "GeoIpAsnDatabasePath": "/etc/gatewaycore/geo/GeoLite2-ASN.mmdb",
+      "GeoIpMaxDatabaseAgeDays": 45,
+      "Zones": [{
+        "Name": "app.example.test",
+        "TtlSeconds": 20,
+        "RoutingPolicy": "GeoIpEcs",
+        "EnableEcsGeoRouting": true,
+        "TrustedEcsResolverCidrs": ["192.0.2.53/32"],
+        "GeoCountryRoutes": [{"CountryCode":"IN","Region":"mumbai"}],
+        "GeoAsnRoutes": [{"Asn":64500,"Region":"mumbai"}],
+        "Sites": [
+          {"Address":"198.51.100.10","HealthUrl":"https://in.example.test/ready","Weight":1,"Region":"mumbai"},
+          {"Address":"203.0.113.20","HealthUrl":"https://jp.example.test/ready","Weight":1,"Region":"osaka"}
+        ]
+      }]
+    }
 - UDP replies use complete-RR truncation (TC) when they exceed the advertised
   buffer or a conservative per-query amplification budget. Clients should retry
   over TCP. Source-IP response budgets are only a limited defense in depth.

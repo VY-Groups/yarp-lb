@@ -112,7 +112,7 @@ internal sealed class DnsCidrRegionTable
         return true;
     }
 
-    private static bool PrefixMatches(byte[] addr,byte[] network,int bits)
+    internal static bool PrefixMatches(byte[] addr,byte[] network,int bits)
     {
         var full = bits / 8;
         for (var i=0;i<full;i++) if (addr[i] != network[i]) return false;

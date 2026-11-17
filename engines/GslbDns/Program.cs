@@ -16,6 +16,8 @@ if(args.Length != 1 || !File.Exists(args[0]))
 var options = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
 var config = JsonSerializer.Deserialize<DnsConfig>(File.ReadAllText(args[0]), options)
     ?? throw new InvalidDataException("Missing DNS config");
+using var geoIpDatabase = new GeoIpEcsDatabase(config.GeoIpCountryDatabasePath,
+    config.GeoIpAsnDatabasePath, config.GeoIpMaxDatabaseAgeDays);
 if (!IPAddress.TryParse(config.ListenHost, out var listen) ||
     listen.IsIPv4MappedToIPv6 ||
     listen.AddressFamily is not (AddressFamily.InterNetwork or AddressFamily.InterNetworkV6) ||
@@ -50,23 +52,30 @@ foreach(var zone in config.Zones)
         zone.NameServers is {Length: >4} || zone.SoaSerial == 0 ||
         zone.FailureThreshold is < 1 or > 10 ||
         zone.SuccessThreshold is < 1 or > 10 ||
-        zone.RoutingPolicy is not ("Weighted" or "Failover" or "CidrRegion" or "ObservedLatency" or "WeightedFailover") ||
+        zone.RoutingPolicy is not ("Weighted" or "Failover" or "CidrRegion" or "GeoIpEcs" or "ObservedLatency" or "WeightedFailover") ||
         (zone.RoutingPolicy == "CidrRegion" &&
              zone.CidrRoutes is not { Length: >= 1 and <= 256 }) ||
         (zone.EnableEcsGeoRouting &&
-            (zone.RoutingPolicy != "CidrRegion" ||
+            (zone.RoutingPolicy is not ("CidrRegion" or "GeoIpEcs") ||
              zone.TrustedEcsResolverCidrs is not { Length: >= 1 and <= 256 })) ||
         (!zone.EnableEcsGeoRouting && zone.TrustedEcsResolverCidrs is { Length: > 0 }) ||
-        (zone.RoutingPolicy != "CidrRegion" && zone.CidrRoutes is { Length: > 0 }))
+        (zone.RoutingPolicy != "CidrRegion" && zone.CidrRoutes is { Length: > 0 }) ||
+        (zone.RoutingPolicy == "GeoIpEcs" &&
+            (!zone.EnableEcsGeoRouting ||
+             (zone.GeoCountryRoutes is not { Length: > 0 } && zone.GeoAsnRoutes is not { Length: > 0 }))) ||
+        (zone.RoutingPolicy != "GeoIpEcs" &&
+            (zone.GeoCountryRoutes is { Length: > 0 } || zone.GeoAsnRoutes is { Length: > 0 })))
         throw new InvalidDataException("Invalid GSLB zone, policy, CIDR or TTL");
-    // Only explicit operator-supplied routes. ECS remains disabled unless the
-    // zone explicitly opts in and uses this CIDR table.
+    // GeoIP and ECS are opt-in. The DNS resolver source must match the trusted
+    // resolver allowlist before a privacy-masked client subnet reaches MMDB.
     var cidrTable = zone.RoutingPolicy == "CidrRegion"
         ? new DnsCidrRegionTable(zone.CidrRoutes!) : null;
     var trustedEcsResolvers = zone.EnableEcsGeoRouting
         ? new DnsCidrRegionTable(zone.TrustedEcsResolverCidrs!
             .Select(cidr => new DnsCidrRegionRule(cidr, "trusted")))
         : null;
+    var geoIpTable = zone.RoutingPolicy == "GeoIpEcs"
+        ? geoIpDatabase.CreateTable(zone.GeoCountryRoutes, zone.GeoAsnRoutes) : null;
     var sites=new List<Site>();
     foreach(var site in zone.Sites)
     {
@@ -80,7 +89,7 @@ foreach(var zone in config.Zones)
             site.Weight is < 1 or > 100 ||
             site.Priority is < 0 or > 1000 ||
             (site.Region is not null && !DnsCidrRegionTable.ValidRegion(site.Region)) ||
-            (cidrTable is not null && !DnsCidrRegionTable.ValidRegion(site.Region)) ||
+            ((cidrTable is not null || geoIpTable is not null) && !DnsCidrRegionTable.ValidRegion(site.Region)) ||
             (site.RequiredAgentIds is not null &&
                 (!zone.FailClosedWhenAllSitesDown ||
                  !AgentHealthReportContract.IsValidIdentifier(site.AgentSiteId) ||
@@ -177,9 +186,16 @@ foreach(var zone in config.Zones)
         if(cidrTable.Regions.Any(region => !siteRegions.Contains(region)))
             throw new InvalidDataException("CIDR route references undefined backend region");
     }
+    if (geoIpTable is not null)
+    {
+        var siteRegions = sites.Select(site => site.Region!)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        if (geoIpTable.Regions.Any(region => !siteRegions.Contains(region)))
+            throw new InvalidDataException("GeoIP route references undefined backend region");
+    }
     groups.Add(origin, new SiteGroup(sites.ToArray(), zone.TtlSeconds,
         zone.FailClosedWhenAllSitesDown, servers.ToArray(), contact, zone.SoaSerial,
-        zone.RoutingPolicy,cidrTable,zone.EnableEcsGeoRouting,trustedEcsResolvers,
+        zone.RoutingPolicy,cidrTable,zone.EnableEcsGeoRouting,trustedEcsResolvers,geoIpTable,
         delegations.ToArray(), zone.DnssecPrivateKeyPath, origin));
     if (groups[origin].Dnssec is { } dnssec)
         Console.WriteLine($"GSLB_DNSSEC zone={origin} algorithm=13 keyTag={dnssec.KeyTag} DS=\"{dnssec.KeyTag} 13 2 {Convert.ToHexString(dnssec.Ds.Rdata[4..])}\"");
@@ -404,6 +420,9 @@ sealed record DnsConfig(bool AllowNonLoopbackListeners,string ListenHost,int Lis
     public int MaxConcurrentHealthProbes {get;init;} = 32;
     public string MetricsListenHost { get; init; } = "127.0.0.1";
     public int MetricsListenPort { get; init; }
+    public string? GeoIpCountryDatabasePath { get; init; }
+    public string? GeoIpAsnDatabasePath { get; init; }
+    public int GeoIpMaxDatabaseAgeDays { get; init; } = 45;
     public AgentReportServerConfig? AgentReports { get; init; }
 }
 sealed record DnsZone(string Name,int TtlSeconds,DnsSite[] Sites,
@@ -418,6 +437,8 @@ sealed record DnsZone(string Name,int TtlSeconds,DnsSite[] Sites,
     public int FailureThreshold { get; init; } = 1;
     public int SuccessThreshold { get; init; } = 1;
     public DnsCidrRegionRule[]? CidrRoutes { get; init; }
+    public GeoCountryRoute[]? GeoCountryRoutes { get; init; }
+    public GeoAsnRoute[]? GeoAsnRoutes { get; init; }
     public DnsDelegationConfig[]? Delegations { get; init; }
     public string? DnssecPrivateKeyPath { get; init; }
 }
@@ -471,13 +492,15 @@ sealed class SiteGroup
     public SiteGroup(Site[] sites,int ttl,bool failClosedWhenAllSitesDown,
         DnsNameServer[] nameServers,string soaContact,uint soaSerial,string routingPolicy,
         DnsCidrRegionTable? cidrTable,bool enableEcsGeoRouting,
-        DnsCidrRegionTable? trustedEcsResolvers,DnsDelegation[]? delegations = null,
+        DnsCidrRegionTable? trustedEcsResolvers,GeoIpEcsRegionTable? geoIpTable = null,
+        DnsDelegation[]? delegations = null,
         string? dnssecPrivateKeyPath = null, string? zoneName = null)
     {
         (Sites,Ttl,FailClosedWhenAllSitesDown,NameServers,SoaContact,SoaSerial,RoutingPolicy,CidrTable)
             =(sites,ttl,failClosedWhenAllSitesDown,nameServers,soaContact,soaSerial,routingPolicy,cidrTable);
         EnableEcsGeoRouting=enableEcsGeoRouting;
         TrustedEcsResolvers=trustedEcsResolvers;
+        GeoIpTable=geoIpTable;
         Delegations=delegations ?? [];
         if (!string.IsNullOrWhiteSpace(dnssecPrivateKeyPath))
             Dnssec = new DnssecZoneSigner(zoneName ?? throw new InvalidDataException("DNSSEC zone name is required"),
@@ -492,6 +515,7 @@ sealed class SiteGroup
     public DnsCidrRegionTable? CidrTable { get; }
     public bool EnableEcsGeoRouting { get; }
     public DnsCidrRegionTable? TrustedEcsResolvers { get; }
+    public GeoIpEcsRegionTable? GeoIpTable { get; }
     public DnsNameServer[] NameServers { get; }
     public DnsDelegation[] Delegations { get; }
     public DnssecZoneSigner? Dnssec { get; }

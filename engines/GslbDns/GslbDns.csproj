@@ -5,4 +5,7 @@
 <ItemGroup>
  <ProjectReference Include="../GslbHealthContracts/GslbHealthContracts.csproj" />
  <FrameworkReference Include="Microsoft.AspNetCore.App" />
+</ItemGroup>
+<ItemGroup>
+  <PackageReference Include="MaxMind.Db" Version="5.2.0" />
 </ItemGroup></Project>
