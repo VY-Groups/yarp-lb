@@ -7,6 +7,8 @@
     <Compile Include="../../ProxyConcurrencySettings.cs" Link="ProxyConcurrencySettings.cs" />
     <Compile Include="ProxyConcurrencyTests.cs" />
     <Compile Include="../../BoundedPeerRateTable.cs" Link="BoundedPeerRateTable.cs" />
+    <Compile Include="../../GatewayClientAddress.cs" Link="GatewayClientAddress.cs" />
+    <Compile Include="../../GatewayRequestHistogram.cs" Link="GatewayRequestHistogram.cs" />
     <Compile Include="PeerRateTableTests.cs" />
     <Compile Include="../../LoadBalancingCore.cs" Link="LoadBalancingCore.cs" />
     <Compile Include="../../../src/TrafficPolicies/EjectionBudget.cs" Link="EjectionBudget.cs" />
@@ -21,6 +23,8 @@
     <Compile Include="../../PeerStateProtocol.cs" Link="PeerStateProtocol.cs" />
     <Compile Include="../../PeerSyncTransport.cs" Link="PeerSyncTransport.cs" />
     <Compile Include="PeerSyncTests.cs" />
+    <Compile Include="GatewayClientAddressTests.cs" />
+    <Compile Include="GatewayMetricsTests.cs" />
     <Compile Include="Program.cs" />
   </ItemGroup>
 </Project>

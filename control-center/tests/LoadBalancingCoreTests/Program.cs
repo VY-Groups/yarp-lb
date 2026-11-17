@@ -133,3 +133,7 @@ PrimaryBackupTests.Run();
 RecoveryHealthGateTests.Run();
 
 PeerSyncTests.Run();
+
+GatewayClientAddressTests.Run();
+
+GatewayMetricsTests.Run();

@@ -173,6 +173,8 @@ if (peerSyncSettings is not null)
     builder.Services.AddHostedService<PeerSyncPublisher>();
 }
 var app = builder.Build();
+var trustedAccessLogProxies = GatewayClientAddress.ParseTrustedProxyAddresses(
+    Environment.GetEnvironmentVariable("GATEWAY_TRUSTED_PROXY_IPS"));
 var peerStateJournal = app.Services.GetService<PeerStateJournal>();
 var peerSigner = app.Services.GetService<PeerSignedMessages>();
 if (sharedPeerLimiter is not null)
@@ -331,11 +333,14 @@ app.UseAuthorization();
 // YARP telemetry and is reset on each process restart.
 long requestsTotal = 0, requests2xx = 0, requests4xx = 0, requests5xx = 0, durationTicks = 0;
 var requestHistogram = new GatewayRequestHistogram();
+var processStartedUtc = DateTimeOffset.UtcNow;
 app.Use(async (ctx, next) =>
 {
     if (ctx.Request.Path.StartsWithSegments("/admin") || ctx.Request.Path.StartsWithSegments("/dashboard") ||
         ctx.Request.Path.StartsWithSegments("/gateway")) { await next(); return; }
     var started = System.Diagnostics.Stopwatch.GetTimestamp();
+    var clientAddress = GatewayClientAddress.ForAccessLog(ctx.Connection.RemoteIpAddress,
+        ctx.Request.Headers["X-Forwarded-For"].ToString(), trustedAccessLogProxies);
     requestHistogram.Started();
     try { await next(); }
     finally
@@ -348,6 +353,14 @@ app.Use(async (ctx, next) =>
         var elapsed = System.Diagnostics.Stopwatch.GetTimestamp() - started;
         Interlocked.Add(ref durationTicks, elapsed);
         requestHistogram.Finished(elapsed);
+        var routeCandidate = ctx.Features.Get<IReverseProxyFeature>()?.Route?.Config.RouteId;
+        var routeId = routeCandidate is not null && ValidId(routeCandidate) ? routeCandidate : "unmatched";
+        var timestampUtc = DateTimeOffset.UtcNow;
+        app.Logger.LogInformation(
+            "GATEWAY_ACCESS timestampUtc={TimestampUtc:o} clientIp={ClientIp} clientIpSource={ClientIpSource} method={Method} routeId={RouteId} statusCode={StatusCode} durationMs={DurationMs}",
+            timestampUtc, clientAddress.Address?.ToString() ?? "unknown", clientAddress.Source,
+            ctx.Request.Method, routeId, ctx.Response.StatusCode,
+            Math.Round(elapsed * 1000.0 / System.Diagnostics.Stopwatch.Frequency, 3));
     }
 });
 var destinationTelemetry = new ConcurrentDictionary<string, DestinationCounters>();
@@ -395,8 +408,68 @@ app.MapGet("/admin/api/metrics", () =>
        totalRequests = total, success2xx = Interlocked.Read(ref requests2xx),
        clientErrors4xx = Interlocked.Read(ref requests4xx), serverErrors5xx = Interlocked.Read(ref requests5xx),
        meanDurationMs = total == 0 ? 0 : Math.Round(elapsed * 1000.0 / System.Diagnostics.Stopwatch.Frequency / total, 2),
+       durationBuckets = requestHistogram.Snapshot(),
        scope = "local process; all non-administrative HTTP requests; includes YARP and unmatched paths; resets on restart" });
 }).RequireAuthorization();
+object TrafficReportSnapshot()
+{
+    var total = Interlocked.Read(ref requestsTotal);
+    var ticks = Interlocked.Read(ref durationTicks);
+    return new
+    {
+        generatedUtc = DateTimeOffset.UtcNow,
+        gateway = Environment.MachineName,
+        startedUtc = processStartedUtc,
+        totalRequests = total,
+        success2xx = Interlocked.Read(ref requests2xx),
+        clientErrors4xx = Interlocked.Read(ref requests4xx),
+        serverErrors5xx = Interlocked.Read(ref requests5xx),
+        meanDurationMs = total == 0 ? 0 : Math.Round(ticks * 1000.0 /
+            System.Diagnostics.Stopwatch.Frequency / total, 2),
+        durationBuckets = requestHistogram.Snapshot(),
+        destinations = destinationTelemetry.OrderBy(x => x.Key, StringComparer.Ordinal).Select(x => new
+        {
+            id = x.Key,
+            requests = Interlocked.Read(ref x.Value.Requests),
+            clientErrors4xx = Interlocked.Read(ref x.Value.ClientErrors),
+            serverErrors5xx = Interlocked.Read(ref x.Value.ServerErrors),
+            meanLatencyMs = x.Value.MeanLatencyMs
+        }).ToArray(),
+        scope = "single gateway process since startup; counters reset after restart; no client IPs or request paths"
+    };
+}
+app.MapGet("/admin/api/reports/traffic.json", () => Results.Json(TrafficReportSnapshot()))
+    .RequireAuthorization(p => p.RequireRole("Administrator", "Operator"));
+app.MapGet("/admin/api/reports/traffic.csv", () =>
+{
+    var generated = DateTimeOffset.UtcNow;
+    var rows = new List<string>
+    {
+        "record_type,generated_utc,process_started_utc,gateway,record_id,requests,http_2xx,http_4xx,http_5xx,mean_duration_ms"
+    };
+    var total = Interlocked.Read(ref requestsTotal);
+    rows.Add(string.Join(',', new[]
+    {
+        "gateway", Csv(generated.ToString("O")), Csv(processStartedUtc.ToString("O")), Csv(Environment.MachineName), "",
+        total.ToString(System.Globalization.CultureInfo.InvariantCulture),
+        Interlocked.Read(ref requests2xx).ToString(System.Globalization.CultureInfo.InvariantCulture),
+        Interlocked.Read(ref requests4xx).ToString(System.Globalization.CultureInfo.InvariantCulture),
+        Interlocked.Read(ref requests5xx).ToString(System.Globalization.CultureInfo.InvariantCulture),
+        (total == 0 ? 0 : Math.Round(Interlocked.Read(ref durationTicks) * 1000.0 /
+            System.Diagnostics.Stopwatch.Frequency / total, 2)).ToString(System.Globalization.CultureInfo.InvariantCulture)
+    }));
+    foreach (var entry in destinationTelemetry.OrderBy(x => x.Key, StringComparer.Ordinal))
+        rows.Add(string.Join(',', new[]
+        {
+            "destination", Csv(generated.ToString("O")), Csv(processStartedUtc.ToString("O")), Csv(Environment.MachineName), Csv(entry.Key),
+            Interlocked.Read(ref entry.Value.Requests).ToString(System.Globalization.CultureInfo.InvariantCulture),
+            "", Interlocked.Read(ref entry.Value.ClientErrors).ToString(System.Globalization.CultureInfo.InvariantCulture),
+            Interlocked.Read(ref entry.Value.ServerErrors).ToString(System.Globalization.CultureInfo.InvariantCulture),
+            entry.Value.MeanLatencyMs.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture)
+        }));
+    return Results.File(Encoding.UTF8.GetBytes(string.Join("\r\n", rows) + "\r\n"),
+        "text/csv; charset=utf-8", $"gateway-traffic-{generated:yyyyMMdd-HHmmss}Z.csv");
+}).RequireAuthorization(p => p.RequireRole("Administrator", "Operator"));
 // Prometheus 0.0.4 text exposition, LOOPBACK SCRAPE ONLY. No public endpoint or credentials.
 // A local collector can scrape and forward to a separately secured metrics backend.
 app.MapGet("/gateway/metrics", (HttpContext ctx) =>
@@ -1585,6 +1658,13 @@ app.MapReverseProxy(proxyPipeline =>
 app.Run();
 
 static bool ValidId(string s) => s.Length is > 0 and <= 80 && Regex.IsMatch(s, "^[a-zA-Z0-9_-]+$");
+static string Csv(string value)
+{
+    var firstNonWhitespace = value.TrimStart();
+    if (firstNonWhitespace.Length > 0 && firstNonWhitespace[0] is '=' or '+' or '-' or '@')
+        value = "'" + value;
+    return "\"" + value.Replace("\"", "\"\"", StringComparison.Ordinal) + "\"";
+}
 static bool ValidAddress(string? s) => Uri.TryCreate(s, UriKind.Absolute, out var u) && (u.Scheme == "http" || u.Scheme == "https") && !string.IsNullOrWhiteSpace(u.Host) && u.UserInfo.Length == 0;
 static bool ValidPath(string? s) => !string.IsNullOrEmpty(s) && s.StartsWith('/') && s.Length <= 300 && !s.Contains('\\');
 
