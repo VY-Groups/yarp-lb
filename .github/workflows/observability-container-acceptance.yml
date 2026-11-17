@@ -46,7 +46,13 @@ jobs:
           GATEWAY_OTLP_CONTAINER_ENDPOINT: http://127.0.0.1:4318
         run: |
           set -euo pipefail
-          cleanup() { docker compose -f control-center/ops/observability/compose.yml down --volumes --remove-orphans; }
+          collector_log="$RUNNER_TEMP/otel-collector.log"
+          compose_state="$RUNNER_TEMP/observability-compose-state.txt"
+          cleanup() {
+            docker compose -f control-center/ops/observability/compose.yml ps -a > "$compose_state" 2>&1 || true
+            docker compose -f control-center/ops/observability/compose.yml logs --no-color > "$collector_log" 2>&1 || true
+            docker compose -f control-center/ops/observability/compose.yml down --volumes --remove-orphans
+          }
           trap cleanup EXIT
 
           for attempt in $(seq 1 60); do
@@ -75,10 +81,10 @@ jobs:
           curl -fsS 'http://127.0.0.1:9090/api/v1/rules' | jq -e 'any(.data.groups[]; .name == "yarp-onprem-ops")' >/dev/null
           curl -fsS 'http://127.0.0.1:3000/api/search?query=GatewayCore' | jq -e 'any(.[]; .uid == "gatewaycore-http-availability")' >/dev/null
 
-          docker compose -f control-center/ops/observability/compose.yml logs otel-collector > "$RUNNER_TEMP/otel-collector.log"
-          grep -q 'container_acceptance_route' "$RUNNER_TEMP/otel-collector.log"
-          grep -q 'gateway.proxy.requests' "$RUNNER_TEMP/otel-collector.log"
-          if grep -Eq '203\.0\.113\.99|otlp-container-secret-canary|/private' "$RUNNER_TEMP/otel-collector.log"; then
+          docker compose -f control-center/ops/observability/compose.yml logs --no-color otel-collector > "$RUNNER_TEMP/otel-collector-live.log"
+          grep -q 'container_acceptance_route' "$RUNNER_TEMP/otel-collector-live.log"
+          grep -q 'gateway.proxy.requests' "$RUNNER_TEMP/otel-collector-live.log"
+          if grep -Eq '203\.0\.113\.99|otlp-container-secret-canary|/private' "$RUNNER_TEMP/otel-collector-live.log"; then
             echo "Sensitive client or URL value leaked to Collector output" >&2
             exit 1
           fi
