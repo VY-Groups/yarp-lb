@@ -491,8 +491,10 @@ operator trust-management API or node-to-node consensus.
 Current branch `codex/issue52-dnssec-unsupported-wire-contract` adds
 cross-platform DNS acceptance for DO=1 queries of DS, RRSIG and DNSKEY, proving
 that the explicitly unsupported DNSSEC policy returns unsigned NODATA without
-AD or fabricated signatures and does not advertise DO in the response OPT.
-Exact-head tests are pending.
+AD or fabricated signatures and does not advertise DO in the response OPT. It
+also sends 256 fixed-seed random UDP parser inputs and verifies the listener
+survives and any replies remain ID-correlated and amplification-bounded. Full
+local Windows GSLB acceptance passed; exact-head tests are pending.
 
 A manually dispatched one-hour, 75-VU, 1-KiB HTTP soak on disposable GitHub
 runners is running at

@@ -760,9 +760,35 @@ try
         await ExpectUdpDrop(malformed.Packet,malformed.Case);
     foreach (var malformed in malformedPackets)
         await ExpectTcpDrop(malformed.Packet,malformed.Case);
+    var fuzzRandom = new Random(0x47534C42);
+    var fuzzIds = new Dictionary<ushort,int>();
+    var fuzzReplies = 0;
+    using (var fuzzSocket = new UdpClient(AddressFamily.InterNetwork))
+    {
+        fuzzSocket.Connect(IPAddress.Loopback,15353);
+        for (var i=0;i<256;i++)
+        {
+            var packet = new byte[fuzzRandom.Next(0,257)];
+            fuzzRandom.NextBytes(packet);
+            if (packet.Length >= 2)
+                fuzzIds[BinaryPrimitives.ReadUInt16BigEndian(packet)] = packet.Length;
+            await fuzzSocket.SendAsync(packet,CancellationToken.None);
+            using var replyTimeout = new CancellationTokenSource(TimeSpan.FromMilliseconds(10));
+            try
+            {
+                var fuzzReply = await fuzzSocket.ReceiveAsync(replyTimeout.Token);
+                Must(fuzzReply.Buffer.Length >= 12 &&
+                     fuzzIds.TryGetValue(Dns16(fuzzReply.Buffer,0),out var originalLength) &&
+                     fuzzReply.Buffer.Length <= Math.Min(1232,Math.Max(128,originalLength*4)),
+                     "deterministic DNS parser fuzz reply is correlated and amplification-bounded");
+                fuzzReplies++;
+            }
+            catch (OperationCanceledException) { }
+        }
+    }
     Must(!dns.HasExited && (await Query("app.integration.test")).Address is not null,
-        "DNS listener remains healthy after malformed packet corpus");
-    Console.WriteLine("PASS: malformed DNS/EDNS UDP/TCP corpus gets no response; listener stays healthy");
+        "DNS listener remains healthy after malformed and randomized packet corpus");
+    Console.WriteLine($"PASS: malformed DNS/EDNS UDP/TCP corpus and 256 seeded UDP parser inputs; listener healthy, bounded replies={fuzzReplies}");
     var glue = await TcpQuery(DnsRequest("ns1.app.integration.test",1));
     Must(Dns16(glue,6)==1 && glue.AsSpan(glue.Length-4).SequenceEqual(new byte[]{127,0,0,31}),
         "bailiwick NS hostname resolves to configured glue A");
