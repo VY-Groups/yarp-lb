@@ -668,3 +668,42 @@ observer-feed partition. This remains GitHub-hosted simulation, not physical
 network partition evidence or cross-node consensus. Exact-head Actions are
 pending. #109, #36, #52 and #50 remain open; annual 99.9% availability is
 unmeasured and production remains NO-GO.
+
+## Continuation — two-region DNS evidence and OTLP access logging (2026-11-18)
+
+PR #139 merged at `a4a2f0c189277b7ea34cee28fa2796ed4b8e46f4`. It fixes the
+Collector acceptance workflow to build GatewayAgent before the full contract
+suite; its merged-main Collector/Prometheus/Grafana run `44159280319` passed.
+
+The user confirmed public IPv4 TCP and UDP port 53 is allowed on the Mumbai
+(`15.252.99.51`) and Osaka (`15.152.85.231`) EC2 test hosts. A temporary
+signed test zone was served by two independent DNS processes on those hosts.
+Independent UDP/TCP queries verified DNSKEY and dynamic response signatures,
+including negative answers. With Apache stopped in each region in turn, both
+authorities returned only the other healthy destination, then returned both
+destinations after recovery. Temporary DNS processes, private test key, files
+and listeners were removed; both Apache services were restored and confirmed
+active. This is short physical DNS failover/DNSSEC behavior evidence only. It
+does not validate parent delegation/DS chain, key rollover, agent quorum or
+cross-node fencing, VRRP/ECMP gateway HA, or annual availability.
+
+PR #140 merged at `37aed719d3f4de3ae777cc601d562b4edb041425`. It adds opt-in
+OTLP HTTP structured access logs with bounded SDK batching, UTC timestamp,
+client IP/source, method, route, status and duration. URLs, headers, cookies
+and bodies are omitted; trace client-address and URL redaction remains. The
+loopback OTLP receiver and real Collector container acceptance verified the
+logs and privacy checks. All 15 PR Actions runs passed on head
+`b5c185fe738cf345dbe8342460fbb32337550bde`; the main-branch Collector run
+`44198419113` also passed. GitHub recorded no independent reviewer; this merge
+was self-reviewed under the user's prior authorization. The other post-merge
+main checks were still running at handoff time.
+
+Issue #52 had been marked closed while its full acceptance criteria remained
+unmet, so it was reopened on 2026-11-17 with the remaining DNSSEC key lifecycle,
+licensed GeoIP operations, zone-cut/interoperability, and multi-network/load/
+chaos acceptance explicitly recorded. #50 remains open: durable centralized
+retention, alert delivery, complete telemetry coverage, drop accounting,
+performance overhead, parity and deployment evidence remain. #36 and #109 also
+remain open for independent physical VRRP/ECMP capacity/fault testing and
+complete authenticated health quorum/fencing respectively. Annual 99.9%
+availability is still unmeasured; production remains NO-GO.
