@@ -49,6 +49,16 @@ Alertmanager notification. **Readiness**: `/gateway/health/ready` (503 until
 at least one backend is Active=Healthy), only on the configured data-plane
 listener in isolated mode. `/gateway/health` is process liveness only.
 
+For the provisional 99.9% HTTP objective, scrape one
+`probe_success{job="gatewaycore-availability",service="gatewaycore-http",region="<bounded-region>"}`
+and matching `up` series every 10 seconds from each independent external probe
+region. Scrape failures are recorded as failed samples; missing series alert
+and are never filled with success. Burn alerts are
+in `gateway-alerts.yml`; their syntax and synthetic behavior are checked by
+`onprem-promtool.yml`. This does not configure a live probe, central TSDB, or
+Alertmanager receiver. See `control-center/docs/AVAILABILITY_SLO.md` for the
+assumption model and incident evidence format.
+
 ### Alert/template routing
 - `/gateway/metrics` is restricted to the management metrics listener in split mode.
 - A management IP allowlist and pinned trusted client certificate are required.

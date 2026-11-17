@@ -4,6 +4,8 @@ groups:
   - name: yarp-onprem-ops
     interval: 30s
     rules:
+      - record: gatewaycore:availability_probe_success:sample
+        expr: probe_success{job="gatewaycore-availability"} or on(instance,service,region) (up{job="gatewaycore-availability"} * 0)
       - alert: YarpMetricsDown
         expr: up{job="gatewaycore-gateway"} == 0
         for: 1m
@@ -36,6 +38,34 @@ groups:
         expr: probe_success{job="gatewaycore-tls-probe"} == 0
         for: 1m
         labels: {severity: critical}
+      - alert: GatewayAvailabilityFastBurn
+        expr: ((1 - avg_over_time(gatewaycore:availability_probe_success:sample[5m])) / 0.001 > 14.4) and ((1 - avg_over_time(gatewaycore:availability_probe_success:sample[1h])) / 0.001 > 14.4)
+        for: 2m
+        labels: {severity: critical}
+        annotations:
+          summary: "GatewayCore 99.9% availability budget is burning rapidly"
+          description: "The external HTTPS readiness probe is consuming the monthly error budget rapidly for {{ $labels.service }} in {{ $labels.region }}."
+      - alert: GatewayAvailabilityBudgetAtRisk
+        expr: ((1 - avg_over_time(gatewaycore:availability_probe_success:sample[24h])) > 0.001) and (count_over_time(gatewaycore:availability_probe_success:sample[24h]) >= 8000)
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "GatewayCore 24-hour availability is below 99.9%"
+          description: "Review failed samples and open an incident record for {{ $labels.service }} in {{ $labels.region }}."
+      - alert: GatewayAvailabilityProbeMissing
+        expr: absent_over_time(gatewaycore:availability_probe_success:sample[2m])
+        for: 1m
+        labels: {severity: critical}
+        annotations:
+          summary: "GatewayCore availability probes are missing"
+          description: "No external readiness probe samples have arrived; the SLI is unknown and cannot be considered healthy."
+      - alert: GatewayAvailabilityProbeScrapeFailed
+        expr: up{job="gatewaycore-availability"} == 0
+        for: 1m
+        labels: {severity: critical}
+        annotations:
+          summary: "An external GatewayCore availability probe is unavailable"
+          description: "Probe exporter scrape failed for {{ $labels.service }} in {{ $labels.region }}; count this monitoring gap as unavailable until recovered."
       - alert: YarpDroppedLogs
         expr: increase(yarp_logging_dropped_total{job="gatewaycore-gateway"}[5m]) > 0
         for: 1m
