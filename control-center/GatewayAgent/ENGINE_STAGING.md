@@ -19,6 +19,17 @@ This reference **does not** make L4, DNS/GSLB or WAF production-ready. It extend
 
 Every endpoint is subject to the agent's **existing HTTPS client certificate** middleware. No inbound plaintext management operation succeeds. Failed signature, version, path, port, IP or schema validation causes rejection. Config activation is a local file replacement; **the process is not reloaded/restarted**. Operators must separately validate application readiness and perform a pre-drained rollout. Neither manual service controls nor any new internet-facing binding is enabled by this feature.
 
+For a GSLB config containing an authoritative `NameServers` or `Delegations`
+zone, prepare compares the current and proposed zone objects. Any changed
+existing zone requires an explicitly increased `SoaSerial` under RFC 1982;
+serial rollback and the ambiguous half-range transition are rejected. A
+serial-only increase is allowed. The operator or config author still has to
+choose and write the new serial: it is not generated automatically. New/deleted
+zones and changes made outside this signed staging endpoint are not covered by
+the transition comparison. A staged file still requires a controlled service
+restart, and serial equality across independent DNS nodes requires coordinated
+signed rollout.
+
 ## Explicit limitations and deployment gate
 
 - No Control Center UI or fleet-wide orchestration yet invokes these engine endpoints.

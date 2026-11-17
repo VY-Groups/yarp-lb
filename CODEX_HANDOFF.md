@@ -421,7 +421,7 @@ and remaining P0/P1 operational evidence remain incomplete. Production NO-GO.
 
 ## Continuation — annual objective, GSLB observability and quarantine (2026-11-17)
 
-Current `main` is `473ffe9dcff02aee990acdc074a046576064070f`.
+Current `main` is `8d6e09289daf0ebedae18bf8f581f013ffa7af84`.
 
 On `main`, PR #121 merged
 opt-in loopback-only GSLB metrics, bounded Prometheus alerts, synthetic alert
@@ -465,10 +465,17 @@ no reply and a valid query still worked afterward; all PR-head Windows/Linux
 DNS and L7/HA/load Actions passed. Main GSLB/L7 Actions for `473ffe9...` also
 passed.
 
-Current feature branch `codex/issue52-dns-malformed-tcp-acceptance` extends
-that corpus to verify malformed UDP frames are silently dropped and malformed
-TCP frames close without a DNS response, followed by a successful valid query.
-Local Windows acceptance and exact-head GitHub Actions are pending.
+PR #126 merged the malformed DNS/EDNS corpus over UDP and TCP. Windows and
+Linux exact-head DNS tests confirmed malformed UDP frames get no response,
+malformed TCP frames close without a DNS response (including Windows RST),
+and valid queries still work. Main GSLB/L7 Actions passed on `8d6e092...`.
+
+Current feature branch `codex/issue52-soa-serial-staging-guard` enforces an
+RFC 1982 serial advance for changed existing authoritative GSLB zones during
+signed GatewayAgent file staging. Windows engine security acceptance passed,
+including unchanged data, stale serial rejection, increment, rollback,
+wraparound and half-range cases. This is an explicit bump guard, not automatic
+serial generation; exact-head GitHub Actions are pending.
 
 At this snapshot, open P0 issues #36, #52 and #109 remain open. #109 still needs
 cross-authority partition fencing/consensus, dynamic operator trust/evidence

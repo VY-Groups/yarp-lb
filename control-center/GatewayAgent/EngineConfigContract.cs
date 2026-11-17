@@ -36,6 +36,11 @@ public static class EngineConfigContract
     }
     private static bool Num(JsonNode? n, int min, int max) =>
         n is JsonValue v && v.TryGetValue<int>(out var num) && num >= min && num <= max;
+    private static bool Serial(JsonNode? n, out uint value)
+    {
+        value = 0;
+        return n is JsonValue v && v.TryGetValue<uint>(out value) && value != 0;
+    }
     private static bool Bool(JsonNode? n) =>
         n is JsonValue v && v.TryGetValue<bool>(out _);
     private static bool Ip(JsonNode? n, out IPAddress address, bool allowIpv6 = false)
@@ -69,6 +74,7 @@ public static class EngineConfigContract
             {
                 if (item is not JsonObject zone || !Str(zone["Name"],out var name) ||
                     name.Length > 253 || !Num(zone["TtlSeconds"],5,300) ||
+                    (zone["SoaSerial"] is not null && !Serial(zone["SoaSerial"],out _)) ||
                     zone["Sites"] is not JsonArray sites || sites.Count is < 1 or > 16)
                     return false;
                 foreach (var s in sites)
@@ -124,5 +130,66 @@ public static class EngineConfigContract
             }
         }
         return true;
+    }
+
+    /// <summary>
+    /// Requires an RFC 1982 serial advance when a signed GSLB update changes an
+    /// existing authoritative zone. A serial-only update is allowed, but it
+    /// cannot move backwards or repeat after changing zone data.
+    /// </summary>
+    public static bool ValidSoaSerialTransition(JsonObject current, JsonObject candidate)
+    {
+        if (!TryZones(current, out var oldZones) || !TryZones(candidate, out var newZones))
+            return false;
+        foreach (var (name, oldZone) in oldZones)
+        {
+            if (!newZones.TryGetValue(name, out var newZone)) continue;
+            if (!HasAuthority(oldZone) && !HasAuthority(newZone)) continue;
+
+            var oldSerial = ReadSerial(oldZone);
+            var newSerial = ReadSerial(newZone);
+            if (oldSerial is null || newSerial is null) return false;
+
+            var oldData = (JsonObject)oldZone.DeepClone();
+            var newData = (JsonObject)newZone.DeepClone();
+            oldData.Remove("SoaSerial");
+            newData.Remove("SoaSerial");
+            var dataChanged = !JsonNode.DeepEquals(oldData, newData);
+
+            if (newSerial.Value != oldSerial.Value && !IsSerialNewer(newSerial.Value, oldSerial.Value))
+                return false;
+            if (dataChanged && !IsSerialNewer(newSerial.Value, oldSerial.Value))
+                return false;
+        }
+        return true;
+    }
+
+    private static bool TryZones(JsonObject config, out Dictionary<string,JsonObject> zones)
+    {
+        zones = new Dictionary<string,JsonObject>(StringComparer.OrdinalIgnoreCase);
+        if (config["Zones"] is not JsonArray rows) return false;
+        foreach (var row in rows)
+        {
+            if (row is not JsonObject zone || !Str(zone["Name"], out var name)) return false;
+            var key = name.TrimEnd('.');
+            if (key.Length == 0 || !zones.TryAdd(key, zone)) return false;
+        }
+        return true;
+    }
+
+    private static uint? ReadSerial(JsonObject zone)
+    {
+        if (zone["SoaSerial"] is null) return 1;
+        return Serial(zone["SoaSerial"], out var serial) ? serial : null;
+    }
+
+    private static bool HasAuthority(JsonObject zone) =>
+        zone["NameServers"] is JsonArray { Count: > 0 } ||
+        zone["Delegations"] is JsonArray { Count: > 0 };
+
+    private static bool IsSerialNewer(uint candidate, uint current)
+    {
+        var difference = unchecked(candidate - current);
+        return difference is > 0 and < 0x80000000;
     }
 }

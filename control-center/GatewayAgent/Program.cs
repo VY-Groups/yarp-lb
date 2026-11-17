@@ -266,6 +266,16 @@ app.MapPost("/agent/v1/engines/{engineId}/config/prepare", async (string engineI
         var revision=Sha(original);
         if (!revision.Equals(input.ExpectedRevision,StringComparison.OrdinalIgnoreCase))
             return Results.Conflict(new {error="Engine config drift",currentRevision=revision});
+        if (engineId == "gslb")
+        {
+            JsonNode? currentNode;
+            try { currentNode = JsonNode.Parse(original); }
+            catch (JsonException) { return Results.Conflict(new {error="Current GSLB config is not valid JSON object"}); }
+            if (currentNode is not JsonObject current)
+                return Results.Conflict(new {error="Current GSLB config is not valid JSON object"});
+            if (!EngineConfigContract.ValidSoaSerialTransition(current,candidate))
+                return Results.BadRequest(new {error="Changed authoritative GSLB zones require an RFC 1982 SOA serial advance"});
+        }
         var staging=Path.Combine(stageRoot,"engines",engineId);
         Directory.CreateDirectory(staging);
         var tx=Path.Combine(staging,input.TransactionId);
