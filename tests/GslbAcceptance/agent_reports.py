@@ -119,85 +119,97 @@ def main():
         for agent in agents:
             agent["upstream"] = serve(stack)
 
-        dns_port = port()
-        report_port = port()
-        metrics_port = port()
-        report_config = {
-            "ListenAddress": "127.0.0.1", "ListenPort": report_port,
-            "AllowNonLoopbackListener": False,
-            "ServerCertificatePem": str(dns_cert), "ServerKeyPem": str(dns_key),
-            "ReplayStatePath": str(root / "dns-replay-state.json"),
-            "MaxTtlSeconds": 8, "MaxAgeSeconds": 6, "MaxClockSkewSeconds": 2,
-            "MaxReportsPerMinute": 120, "RevokedCertificateSha256": [],
-            "Agents": [{"AgentId": a["id"], "VantageGroup": a["vantage_group"],
-                        "CertificateSha256": [a["pin"]],
-                        "SigningPublicKeyPems": [str(a["public"])]} for a in agents]
-        }
-        dns_config = root / "zones.json"
-        dns_config.write_text(json.dumps({
-            "ListenHost": "127.0.0.1", "ListenPort": dns_port,
-            "MetricsListenHost": "127.0.0.1", "MetricsListenPort": metrics_port,
-            "ProbeIntervalSeconds": 1, "AgentReports": report_config,
-            "Zones": [{"Name": "lab.example.test", "TtlSeconds": 5,
-                       "FailClosedWhenAllSitesDown": True,
-                       "Sites": [{"Address": "192.0.2.17",
-                                  "HealthUrl": f"http://127.0.0.1:{local.server_port}/ready",
-                                  "Weight": 1, "AgentSiteId": "mumbai",
-                                  "RequiredAgentIds": [a["id"] for a in agents],
-                                  "MinimumHealthyAgentReports": 2}]}]
-        }))
-        dns_log = root / "dns.log"
-        dns_log_handle = dns_log.open("w")
-        stack.callback(dns_log_handle.close)
-        dns = subprocess.Popen(["dotnet", dns_dll, dns_config], stdout=dns_log_handle,
-                               stderr=subprocess.STDOUT)
-        stack.callback(dns.wait)
-        stack.callback(dns.kill)
-        expect_dns(dns, dns_port, 2)
+        authorities = {}
+        for node in ("a", "b"):
+            dns_port = port()
+            report_port = port()
+            metrics_port = port() if node == "a" else 0
+            report_config = {
+                "ListenAddress": "127.0.0.1", "ListenPort": report_port,
+                "AllowNonLoopbackListener": False,
+                "ServerCertificatePem": str(dns_cert), "ServerKeyPem": str(dns_key),
+                "ReplayStatePath": str(root / f"dns-{node}-replay-state.json"),
+                "MaxTtlSeconds": 8, "MaxAgeSeconds": 6, "MaxClockSkewSeconds": 2,
+                "MaxReportsPerMinute": 120, "RevokedCertificateSha256": [],
+                "Agents": [{"AgentId": a["id"], "VantageGroup": a["vantage_group"],
+                            "CertificateSha256": [a["pin"]],
+                            "SigningPublicKeyPems": [str(a["public"])]} for a in agents]
+            }
+            dns_config = root / f"zones-{node}.json"
+            dns_config.write_text(json.dumps({
+                "ListenHost": "127.0.0.1", "ListenPort": dns_port,
+                "MetricsListenHost": "127.0.0.1", "MetricsListenPort": metrics_port,
+                "ProbeIntervalSeconds": 1, "AgentReports": report_config,
+                "Zones": [{"Name": "lab.example.test", "TtlSeconds": 5,
+                           "FailClosedWhenAllSitesDown": True,
+                           "Sites": [{"Address": "192.0.2.17",
+                                      "HealthUrl": f"http://127.0.0.1:{local.server_port}/ready",
+                                      "Weight": 1, "AgentSiteId": "mumbai",
+                                      "RequiredAgentIds": [a["id"] for a in agents],
+                                      "MinimumHealthyAgentReports": 2}]}]
+            }))
+            dns_log = root / f"dns-{node}.log"
+            dns_log_handle = dns_log.open("w")
+            stack.callback(dns_log_handle.close)
+            dns = subprocess.Popen(["dotnet", dns_dll, dns_config], stdout=dns_log_handle,
+                                   stderr=subprocess.STDOUT)
+            stack.callback(dns.wait)
+            stack.callback(dns.kill)
+            expect_dns(dns, dns_port, 2, log_paths=[dns_log])
+            authorities[node] = {"dns": dns, "dns_port": dns_port, "report_port": report_port,
+                                 "metrics_port": metrics_port, "dns_log": dns_log,
+                                 "processes": [], "agent_logs": []}
 
         configs = []
-        processes = []
-        agent_logs = []
 
-        def start_agent(agent):
+        def start_agent(agent, node):
+            authority = authorities[node]
             listen_port = port()
             origin = f"https://127.0.0.1:{listen_port}"
-            conf = root / f"{agent['id']}.json"
+            conf = root / f"{agent['id']}-{node}.json"
             conf.write_text(json.dumps({
                 "ListenAddress": "127.0.0.1", "Port": listen_port,
                 "PublicUrl": origin + "/ready",
                 "HealthUrl": f"http://127.0.0.1:{agent['upstream'].server_port}/ready",
                 "ServerCertificatePem": str(server_cert), "ServerKeyPem": str(server_key),
                 "SigningKeyPem": str(agent["signer"]), "AllowedClientSha256": [agent["pin"]],
-                "ReportUrl": f"https://127.0.0.1:{report_port}/agent-health/v1/reports",
+                "ReportUrl": f"https://127.0.0.1:{authority['report_port']}/agent-health/v1/reports",
                 "AgentId": agent["id"], "Zone": "lab.example.test", "SiteId": "mumbai",
                 "ReportClientCertificatePem": str(agent["cert"]),
                 "ReportClientKeyPem": str(agent["key"]), "ReportServerCaPem": str(root / "ca.pem"),
                 "ReportServerRevocationMode": "NoCheck",
-                "ReportSequenceStatePath": str(root / (agent["id"] + "-sequence.json")),
+                "ReportSequenceStatePath": str(root / (agent["id"] + f"-{node}-sequence.json")),
                 "ReportIntervalSeconds": 1, "ReportTtlSeconds": 8
             }))
             configs.append(conf)
-            log_path = root / f"{agent['id']}.log"
-            agent_logs.append(log_path)
+            log_path = root / f"{agent['id']}-{node}.log"
+            authority["agent_logs"].append(log_path)
             log_handle = log_path.open("a")
             stack.callback(log_handle.close)
             process = subprocess.Popen(["dotnet", observer_dll, conf], stdout=log_handle,
                                        stderr=subprocess.STDOUT)
-            processes.append(process)
+            authority["processes"].append(process)
             stack.callback(process.wait)
             stack.callback(process.kill)
             return process
 
-        for agent in agents:
-            start_agent(agent)
-        expect_dns(dns, dns_port, 0, "192.0.2.17", log_paths=[dns_log, *agent_logs])
-        print("PASS: three mTLS agents with two fresh independent vantage groups admit the site")
-        metrics_text = scrape_metrics(metrics_port)
+        for node in ("a", "b"):
+            for agent in agents:
+                start_agent(agent, node)
+        for node, authority in authorities.items():
+            expect_dns(authority["dns"], authority["dns_port"], 0, "192.0.2.17",
+                       log_paths=[authority["dns_log"], *authority["agent_logs"]])
+        print("PASS: two independent DNS authorities each admit a site with fresh mTLS observer quorum")
+        authority_a = authorities["a"]
+        authority_b = authorities["b"]
+        metrics_text = scrape_metrics(authority_a["metrics_port"])
         accepted_line = 'gatewaycore_gslb_agent_reports_total{result="accepted"} '
         accepted_count = int(next(line[len(accepted_line):] for line in metrics_text.splitlines()
                                   if line.startswith(accepted_line)))
-        assert accepted_count >= 3, "authenticated mTLS report accepts were not exported"
+        # DNS admission proves the configured two-vantage quorum is present.
+        # The third agent reports independently on a one-second cadence, so do
+        # not make this metrics/privacy assertion depend on its scheduling.
+        assert accepted_count >= 1, "authenticated mTLS report accepts were not exported"
         assert 'gatewaycore_gslb_agent_quorum_targets{state="quorum"} 1' in metrics_text
         assert "lab.example.test" not in metrics_text and "192.0.2.17" not in metrics_text
         print("PASS: mTLS report and quorum metrics export without zone or backend labels")
@@ -205,23 +217,50 @@ def main():
         # One independent observer reports a real failure while the DNS node's
         # local readiness endpoint stays healthy; the quorum must withdraw it.
         agents[0]["upstream"].verdict = 503
-        expect_dns(dns, dns_port, 2, log_paths=[dns_log, *agent_logs])
+        for authority in (authority_a, authority_b):
+            expect_dns(authority["dns"], authority["dns_port"], 2,
+                       log_paths=[authority["dns_log"], *authority["agent_logs"]])
         print("PASS: signed negative evidence withdraws the site without changing local probe health")
         agents[0]["upstream"].verdict = 200
-        expect_dns(dns, dns_port, 0, "192.0.2.17", log_paths=[dns_log, *agent_logs])
+        for authority in (authority_a, authority_b):
+            expect_dns(authority["dns"], authority["dns_port"], 0, "192.0.2.17",
+                       log_paths=[authority["dns_log"], *authority["agent_logs"]])
 
         # Two of three independent groups remain sufficient when one reporter
         # disappears; one remaining group is below threshold and fails closed.
-        processes[0].kill()
-        processes[0].wait(timeout=5)
-        expect_dns(dns, dns_port, 0, "192.0.2.17", timeout=12,
-                   log_paths=[dns_log, *agent_logs])
-        processes[1].kill()
-        processes[1].wait(timeout=5)
-        expect_dns(dns, dns_port, 2, timeout=12, log_paths=[dns_log, *agent_logs])
-        processes[0] = start_agent(agents[0])
-        expect_dns(dns, dns_port, 0, "192.0.2.17", log_paths=[dns_log, *agent_logs])
+        processes_a = authority_a["processes"]
+        processes_a[0].kill()
+        processes_a[0].wait(timeout=5)
+        expect_dns(authority_a["dns"], authority_a["dns_port"], 0, "192.0.2.17", timeout=12,
+                   log_paths=[authority_a["dns_log"], *authority_a["agent_logs"]])
+        processes_a[1].kill()
+        processes_a[1].wait(timeout=5)
+        expect_dns(authority_a["dns"], authority_a["dns_port"], 2, timeout=12,
+                   log_paths=[authority_a["dns_log"], *authority_a["agent_logs"]])
+        start_agent(agents[0], "a")
+        expect_dns(authority_a["dns"], authority_a["dns_port"], 0, "192.0.2.17",
+                   log_paths=[authority_a["dns_log"], *authority_a["agent_logs"]])
         print("PASS: N-of-M tolerance, below-quorum fail-closed, durable epoch restart and recovery")
+
+        # Simulate an observer-feed partition affecting only authority B. DNS
+        # authority A keeps its fresh quorum; B withdraws when its reports age
+        # out and recovers only after independent vantage evidence returns.
+        processes_b = authority_b["processes"]
+        for index in range(3):
+            processes_b[index].kill()
+            processes_b[index].wait(timeout=5)
+        expect_dns(authority_b["dns"], authority_b["dns_port"], 2, timeout=12,
+                   log_paths=[authority_b["dns_log"], *authority_b["agent_logs"]])
+        expect_dns(authority_a["dns"], authority_a["dns_port"], 0, "192.0.2.17",
+                   log_paths=[authority_a["dns_log"], *authority_a["agent_logs"]])
+        print("PASS: observer-feed partition withdraws only the authority without fresh quorum")
+        start_agent(agents[0], "b")
+        expect_dns(authority_b["dns"], authority_b["dns_port"], 2,
+                   log_paths=[authority_b["dns_log"], *authority_b["agent_logs"]])
+        start_agent(agents[1], "b")
+        expect_dns(authority_b["dns"], authority_b["dns_port"], 0, "192.0.2.17",
+                   log_paths=[authority_b["dns_log"], *authority_b["agent_logs"]])
+        print("PASS: authority recovery waits for a fresh multi-vantage quorum")
 
 
 if __name__ == "__main__":

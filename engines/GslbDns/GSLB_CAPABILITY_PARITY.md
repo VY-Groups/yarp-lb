@@ -3,8 +3,8 @@
 Source of comparison: user-supplied OpenGSLB feature matrix and the *reference*
 `gslb` branch at `48f020c3f0d7d3d353485c9a0d701061a3014c08`
 (OpenGSLB Go v1.1.10). GatewayCore base `main`:
-`e1e88e9c905e74ad3c52664b74bad6b0f4d91857`. This branch proposes child-zone
-referrals and glue; it is not merged until its PR is reviewed.
+`abbe1751d169260e936b304ee1ad3ce8ab646894`. This branch adds a two-authority
+observer-feed partition acceptance case; it is not merged until its PR review.
 
 The matrix compares desired **features**, NOT commercial/product certifications,
 vendor prices, security guarantees or claims that other providers lack a feature.
@@ -15,7 +15,7 @@ performance. No AGPL OpenGSLB source is incorporated.
 | --- | --- | --- |
 | Self-hosted data sovereignty | On-prem .NET DNS prototype | Two independent gateway hosts, network/privacy audit |
 | No vendor lock-in | Independent source/runtime design goal | Dependency/license inventory, reproducible image builds |
-| Authoritative DNS A/NS/SOA/EDNS/TCP | Limited lab implementation; this branch adds child-cut referrals, authority flags and in-bailiwick glue | Full delegation conformance, automatic serial lifecycle, fuzz/load, DNSSEC and independent resolver acceptance |
+| Authoritative DNS A/NS/SOA/EDNS/TCP | Limited lab implementation; merged child-cut referrals, authority flags and in-bailiwick glue | Full delegation conformance, automatic serial lifecycle, fuzz/load, DNSSEC and independent resolver acceptance |
 | DNS AAAA / IPv6 | Merged lab implementation; Windows/Linux acceptance exists | IPv6 listener and NS glue, real dual-stack probes and public resolvers |
 | Weighted traffic selection | Existing opt-in per-zone selection | Predictable fairness under health churn, matched load |
 | Ordered primary/standby failover | Existing opt-in `RoutingPolicy=Failover` | DNS caching, DR state, physical failover behavior |
@@ -25,7 +25,7 @@ performance. No AGPL OpenGSLB source is incorporated.
 | EDNS Client Subnet (ECS) | Optional zone opt-in over allowlisted recursive resolver CIDRs and explicit region routes; source capped at IPv4 `/24` and IPv6 `/56`; ambiguous prefixes ignored | Production privacy review, RFC vectors, independent resolver and cache tests |
 | Predictive health | Not implemented | Evidence-based confidence, false predictions, strict safety policy |
 | Agent-side failure prediction | Not implemented; signed async health reports are evidence, not prediction | Calibrated advisory model with false-positive/negative, drift and rollback evaluation |
-| External health validation | Local HTTP(S)/TCP probes plus optional signed async observer reports and synchronous external validators; each DNS process evaluates its own quorum | Authority precedence, application-specific readiness, cross-node partition fencing and independent deployment acceptance |
+| External health validation | Local HTTP(S)/TCP probes plus optional signed async observer reports and synchronous external validators; each DNS process evaluates its own quorum; this branch tests independent nodes under an observer-feed partition | Authority precedence, application-specific readiness, node-to-node fencing/consensus and independent deployment acceptance |
 | DNSSEC | Not implemented | Signed zones, DS workflow, RFC conformance, key rotation and recovery |
 | GSLB server-management API | Static startup JSON only; this branch adds a static operator quarantine veto | RBAC, strong schema, signed revisions, live staged rollout and rollback |
 | Agent gossip / health-state sync | Signed report fan-in is per DNS node; there is no DNS-node gossip or shared consensus | Versioned cross-node state, fencing and partition fault tests |
