@@ -1,0 +1,10 @@
+apiVersion: 1
+providers:
+  - name: GatewayCore
+    orgId: 1
+    folder: GatewayCore
+    type: file
+    disableDeletion: true
+    editable: false
+    options:
+      path: /var/lib/grafana/dashboards

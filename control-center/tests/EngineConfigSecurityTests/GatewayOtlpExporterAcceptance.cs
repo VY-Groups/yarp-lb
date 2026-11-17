@@ -11,6 +11,87 @@ using OpenTelemetry.Trace;
 /// <summary>Exercises the real OTLP HTTP exporters against a loopback collector fixture.</summary>
 public static class GatewayOtlpExporterAcceptance
 {
+    public static Task RunWithoutCollectorAsync()
+    {
+        var oldEndpoint = Environment.GetEnvironmentVariable("YARP_OTEL_ENDPOINT");
+        var oldRatio = Environment.GetEnvironmentVariable("YARP_OTEL_TRACE_SAMPLE_RATIO");
+        using var closedPort = new TcpListener(IPAddress.Loopback, 0);
+        closedPort.Start();
+        var endpoint = $"http://127.0.0.1:{((IPEndPoint)closedPort.LocalEndpoint).Port}";
+        closedPort.Stop();
+        try
+        {
+            Environment.SetEnvironmentVariable("YARP_OTEL_ENDPOINT", endpoint);
+            Environment.SetEnvironmentVariable("YARP_OTEL_TRACE_SAMPLE_RATIO", "1");
+            var services = new ServiceCollection();
+            services.AddLogging();
+            if (!GatewayOpenTelemetry.Configure(services, "otlp-outage-acceptance"))
+                throw new Exception("Unavailable-collector configuration was unexpectedly disabled");
+            using var provider = services.BuildServiceProvider();
+            var started = Stopwatch.GetTimestamp();
+            using (var activity = GatewayOpenTelemetry.ActivitySource.StartActivity(
+                       "gateway.proxy.request", ActivityKind.Internal))
+                activity?.SetTag("gateway.route.id", "collector_outage_route");
+            GatewayOpenTelemetry.RecordProxyResult(new DefaultHttpContext(), 1.0);
+            var elapsedMs = Stopwatch.GetElapsedTime(started).TotalMilliseconds;
+            if (elapsedMs > 250)
+                throw new Exception($"Proxy telemetry recording blocked for {elapsedMs:F1}ms while the collector was absent");
+            var tracerProvider = provider.GetRequiredService<TracerProvider>();
+            var meterProvider = provider.GetRequiredService<MeterProvider>();
+            _ = tracerProvider.ForceFlush(6000);
+            _ = meterProvider.ForceFlush(6000);
+            Console.WriteLine("PASS: request telemetry recording stayed below 250ms with an unreachable collector");
+            return Task.CompletedTask;
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("YARP_OTEL_ENDPOINT", oldEndpoint);
+            Environment.SetEnvironmentVariable("YARP_OTEL_TRACE_SAMPLE_RATIO", oldRatio);
+        }
+    }
+
+    public static async Task RunAgainstCollectorAsync(string endpoint)
+    {
+        var oldEndpoint = Environment.GetEnvironmentVariable("YARP_OTEL_ENDPOINT");
+        var oldRatio = Environment.GetEnvironmentVariable("YARP_OTEL_TRACE_SAMPLE_RATIO");
+        try
+        {
+            Environment.SetEnvironmentVariable("YARP_OTEL_ENDPOINT", endpoint);
+            Environment.SetEnvironmentVariable("YARP_OTEL_TRACE_SAMPLE_RATIO", "1");
+            var services = new ServiceCollection();
+            services.AddLogging();
+            if (!GatewayOpenTelemetry.Configure(services, "otlp-container-acceptance"))
+                throw new Exception("Container OTLP configuration was unexpectedly disabled");
+            using var provider = services.BuildServiceProvider();
+            var tracerProvider = provider.GetRequiredService<TracerProvider>();
+            var meterProvider = provider.GetRequiredService<MeterProvider>();
+            var parent = new ActivityContext(ActivityTraceId.CreateRandom(), ActivitySpanId.CreateRandom(),
+                ActivityTraceFlags.Recorded);
+            using (var activity = GatewayOpenTelemetry.ActivitySource.StartActivity(
+                       "gateway.proxy.request", ActivityKind.Internal, parent))
+            {
+                if (activity is null) throw new Exception("Container acceptance span was not sampled");
+                activity.SetTag("client.address", "203.0.113.99");
+                activity.SetTag("url.full", "https://gateway.example/private?token=otlp-container-secret-canary");
+                activity.SetTag("url.query", "token=otlp-container-secret-canary");
+                activity.SetTag("gateway.route.id", "container_acceptance_route");
+                activity.SetTag("gateway.cluster.id", "container_acceptance_cluster");
+                activity.SetTag("gateway.destination.id", "container_target_a");
+            }
+            var response = new DefaultHttpContext();
+            response.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+            GatewayOpenTelemetry.RecordProxyResult(response, 17.5);
+            if (!tracerProvider.ForceFlush(10000) || !meterProvider.ForceFlush(10000))
+                throw new Exception("Container OTLP exporters failed to flush before acceptance deadline");
+            Console.WriteLine("PASS: real OpenTelemetry Collector accepted traces and metrics via OTLP/HTTP");
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("YARP_OTEL_ENDPOINT", oldEndpoint);
+            Environment.SetEnvironmentVariable("YARP_OTEL_TRACE_SAMPLE_RATIO", oldRatio);
+        }
+    }
+
     public static async Task RunAsync()
     {
         var oldEndpoint = Environment.GetEnvironmentVariable("YARP_OTEL_ENDPOINT");

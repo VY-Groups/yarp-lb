@@ -5,7 +5,7 @@
   "links": [],
   "panels": [
     {
-      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "datasource": {"type": "prometheus", "uid": "gatewaycore-prometheus"},
       "description": "Gateway process request rate. Select a bounded job and region in the dashboard variables.",
       "fieldConfig": {"defaults": {"unit": "reqps"}, "overrides": []},
       "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
@@ -16,7 +16,7 @@
       "type": "timeseries"
     },
     {
-      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "datasource": {"type": "prometheus", "uid": "gatewaycore-prometheus"},
       "description": "5xx response rate from the gateway's own request counters.",
       "fieldConfig": {"defaults": {"unit": "reqps"}, "overrides": []},
       "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
@@ -27,7 +27,7 @@
       "type": "timeseries"
     },
     {
-      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "datasource": {"type": "prometheus", "uid": "gatewaycore-prometheus"},
       "description": "Gateway-observed histogram. For customer availability SLI, use independent external HTTPS probes below.",
       "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
       "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
@@ -42,7 +42,7 @@
       "type": "timeseries"
     },
     {
-      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "datasource": {"type": "prometheus", "uid": "gatewaycore-prometheus"},
       "description": "Independent external HTTP readiness probes are required. Missing samples are not counted as healthy. Annual result is shown only after sufficient coverage.",
       "fieldConfig": {"defaults": {"min": 0, "max": 1, "unit": "percentunit"}, "overrides": []},
       "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
@@ -56,7 +56,7 @@
       "type": "timeseries"
     },
     {
-      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "datasource": {"type": "prometheus", "uid": "gatewaycore-prometheus"},
       "description": "Active health is 1 healthy, 0 unknown and -1 unhealthy. Destination labels come only from configured clusters.",
       "fieldConfig": {"defaults": {"min": -1, "max": 1, "unit": "short"}, "overrides": []},
       "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16},
@@ -67,7 +67,7 @@
       "type": "timeseries"
     },
     {
-      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "datasource": {"type": "prometheus", "uid": "gatewaycore-prometheus"},
       "description": "Live in-flight request gauges for configured destinations.",
       "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
       "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16},
@@ -78,7 +78,7 @@
       "type": "timeseries"
     },
     {
-      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "datasource": {"type": "prometheus", "uid": "gatewaycore-prometheus"},
       "description": "Any increase indicates log messages were lost or the log writer failed.",
       "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
       "gridPos": {"h": 8, "w": 12, "x": 0, "y": 24},
@@ -93,7 +93,7 @@
       "type": "timeseries"
     },
     {
-      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "datasource": {"type": "prometheus", "uid": "gatewaycore-prometheus"},
       "description": "Process resource indicators; investigate sustained growth alongside request volume and errors.",
       "fieldConfig": {"defaults": {"unit": "bytes"}, "overrides": []},
       "gridPos": {"h": 8, "w": 12, "x": 12, "y": 24},
@@ -105,16 +105,42 @@
       ],
       "title": "Gateway process memory",
       "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "gatewaycore-prometheus"},
+      "description": "OTLP-exported proxy throughput and fixed response classes. Series appear when OTLP is configured and a Collector is accepting metrics.",
+      "fieldConfig": {"defaults": {"unit": "reqps"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 32},
+      "id": 9,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi"}},
+      "targets": [
+        {"expr": "sum by (http_response_status_class) (rate(gateway_proxy_requests_total[5m]))", "legendFormat": "{{http_response_status_class}}", "refId": "A"}
+      ],
+      "title": "OTLP proxy request rate by status class",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "gatewaycore-prometheus"},
+      "description": "OTLP proxy duration histogram, derived from the bounded latency metric.",
+      "fieldConfig": {"defaults": {"unit": "ms"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 32},
+      "id": 10,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi"}},
+      "targets": [
+        {"expr": "histogram_quantile(0.95, sum by (le) (rate(gateway_proxy_request_duration_milliseconds_bucket[5m])))", "legendFormat": "OTLP p95", "refId": "A"}
+      ],
+      "title": "OTLP proxy p95 latency",
+      "type": "timeseries"
     }
   ],
   "refresh": "30s",
   "schemaVersion": 39,
   "tags": ["gatewaycore", "load-balancer", "operations"],
-  "templating": {"list": [{"current": {}, "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"}, "definition": "label_values(up, job)", "includeAll": true, "multi": true, "name": "job", "options": [], "query": {"query": "label_values(up, job)", "refId": "PrometheusVariableQueryEditor-VariableQuery"}, "refresh": 2, "type": "query"}]},
+  "templating": {"list": [{"current": {}, "datasource": {"type": "prometheus", "uid": "gatewaycore-prometheus"}, "definition": "label_values(up, job)", "includeAll": true, "multi": true, "name": "job", "options": [], "query": {"query": "label_values(up, job)", "refId": "PrometheusVariableQueryEditor-VariableQuery"}, "refresh": 2, "type": "query"}]},
   "time": {"from": "now-6h", "to": "now"},
   "timepicker": {},
   "timezone": "browser",
   "title": "GatewayCore HTTP and Availability",
   "uid": "gatewaycore-http-availability",
-  "version": 1
+  "version": 2
 }
