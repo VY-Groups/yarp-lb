@@ -30,16 +30,19 @@ internal sealed record AgentReportServerConfig(
 internal sealed class AgentHealthReportServer : IAsyncDisposable
 {
     private readonly AgentHealthReportStore store;
+    private readonly DnsRuntimeMetrics metrics;
     private readonly AgentReportServerConfig config;
     private readonly HashSet<string> revoked;
     private WebApplication? app;
     private SemaphoreSlim? slots;
     private X509Certificate2? serverCertificate;
 
-    public AgentHealthReportServer(AgentReportServerConfig config, AgentHealthReportStore store)
+    public AgentHealthReportServer(AgentReportServerConfig config, AgentHealthReportStore store,
+        DnsRuntimeMetrics metrics)
     {
         this.config = config;
         this.store = store;
+        this.metrics = metrics;
         if (!IPAddress.TryParse(config.ListenAddress, out var address) ||
             address.IsIPv4MappedToIPv6 ||
             address.AddressFamily is not (System.Net.Sockets.AddressFamily.InterNetwork or System.Net.Sockets.AddressFamily.InterNetworkV6) ||
@@ -102,16 +105,44 @@ internal sealed class AgentHealthReportServer : IAsyncDisposable
                     report = await context.Request.ReadFromJsonAsync<AgentHealthReport>(
                         cancellationToken: context.RequestAborted);
                 }
-                catch (JsonException) { return Results.BadRequest(); }
-                if (report is null) return Results.BadRequest();
+                catch (JsonException)
+                {
+                    metrics.AgentReportRejected();
+                    return Results.BadRequest();
+                }
+                if (report is null)
+                {
+                    metrics.AgentReportRejected();
+                    return Results.BadRequest();
+                }
                 var agentId = store.AgentIdForCertificate(context.Connection.ClientCertificate, revoked);
                 if (agentId is null || !string.Equals(agentId, report.AgentId, StringComparison.Ordinal))
+                {
+                    metrics.AgentReportRejected();
                     return Results.StatusCode(StatusCodes.Status403Forbidden);
+                }
                 if (!store.TryReserveRequest(agentId, Environment.TickCount64, config.MaxReportsPerMinute))
+                {
+                    metrics.AgentReportRejected();
                     return Results.StatusCode(StatusCodes.Status429TooManyRequests);
-                if (!store.TryAccept(report, context.Connection.ClientCertificate!, DateTimeOffset.UtcNow,
-                        Environment.TickCount64))
+                }
+                bool accepted;
+                try
+                {
+                    accepted = store.TryAccept(report, context.Connection.ClientCertificate!, DateTimeOffset.UtcNow,
+                        Environment.TickCount64);
+                }
+                catch
+                {
+                    metrics.AgentReportStorageError();
+                    throw;
+                }
+                if (!accepted)
+                {
+                    metrics.AgentReportRejected();
                     return Results.BadRequest(new { error = "Invalid, stale, replayed or unauthorized report" });
+                }
+                metrics.AgentReportAccepted();
                 context.Response.Headers.CacheControl = "no-store";
                 return Results.Accepted();
             }

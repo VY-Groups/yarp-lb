@@ -10,6 +10,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import urllib.request
 
 
 class Ready(http.server.BaseHTTPRequestHandler):
@@ -35,6 +36,11 @@ def port():
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         return sock.getsockname()[1]
+
+
+def scrape_metrics(metrics_port):
+    with urllib.request.urlopen(f"http://127.0.0.1:{metrics_port}/metrics", timeout=2) as response:
+        return response.read().decode("utf-8")
 
 
 def dns_query(dns_port):
@@ -115,6 +121,7 @@ def main():
 
         dns_port = port()
         report_port = port()
+        metrics_port = port()
         report_config = {
             "ListenAddress": "127.0.0.1", "ListenPort": report_port,
             "AllowNonLoopbackListener": False,
@@ -129,6 +136,7 @@ def main():
         dns_config = root / "zones.json"
         dns_config.write_text(json.dumps({
             "ListenHost": "127.0.0.1", "ListenPort": dns_port,
+            "MetricsListenHost": "127.0.0.1", "MetricsListenPort": metrics_port,
             "ProbeIntervalSeconds": 1, "AgentReports": report_config,
             "Zones": [{"Name": "lab.example.test", "TtlSeconds": 5,
                        "FailClosedWhenAllSitesDown": True,
@@ -185,6 +193,14 @@ def main():
             start_agent(agent)
         expect_dns(dns, dns_port, 0, "192.0.2.17", log_paths=[dns_log, *agent_logs])
         print("PASS: three mTLS agents with two fresh independent vantage groups admit the site")
+        metrics_text = scrape_metrics(metrics_port)
+        accepted_line = 'gatewaycore_gslb_agent_reports_total{result="accepted"} '
+        accepted_count = int(next(line[len(accepted_line):] for line in metrics_text.splitlines()
+                                  if line.startswith(accepted_line)))
+        assert accepted_count >= 3, "authenticated mTLS report accepts were not exported"
+        assert 'gatewaycore_gslb_agent_quorum_targets{state="quorum"} 1' in metrics_text
+        assert "lab.example.test" not in metrics_text and "192.0.2.17" not in metrics_text
+        print("PASS: mTLS report and quorum metrics export without zone or backend labels")
 
         # One independent observer reports a real failure while the DNS node's
         # local readiness endpoint stays healthy; the quorum must withdraw it.

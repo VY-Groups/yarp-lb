@@ -66,3 +66,33 @@ assumption model and incident evidence format.
 - A management IP allowlist and pinned trusted client certificate are required.
 - Traffic interface must not expose admin UI or metrics.
 - Prometheus histogram p99 is bucket-derived; capacity gate uses client-observed p99.
+
+### GSLB DNS process metrics
+
+The optional GSLB exporter is disabled by default (`MetricsListenPort: 0`).
+When enabled, it binds only to a dedicated loopback address and port. Scrape it
+from a same-host Prometheus agent and remote-write or forward the samples to the
+central Prometheus server. Never expose this unauthenticated endpoint directly
+to an untrusted network.
+
+| Series | Type | Labels | Meaning |
+| --- | --- | --- | --- |
+| `gatewaycore_gslb_dns_queries_total` | counter | `transport=udp\|tcp` | DNS messages received |
+| `gatewaycore_gslb_dns_dropped_total` | counter | `transport=udp\|tcp` | Received messages that produced no DNS response |
+| `gatewaycore_gslb_dns_responses_total` | counter | `transport=udp\|tcp`, `rcode` fixed enum | DNS responses successfully sent |
+| `gatewaycore_gslb_agent_reports_total` | counter | `result=accepted\|rejected\|storage_error` | Signed report processing outcomes |
+| `gatewaycore_gslb_configured_zones` | gauge | none | Configured zones |
+| `gatewaycore_gslb_configured_sites` | gauge | none | Configured backend sites |
+| `gatewaycore_gslb_locally_healthy_sites` | gauge | none | Sites passing their local probe hysteresis |
+| `gatewaycore_gslb_report_gated_sites` | gauge | none | Sites requiring signed-agent quorum (present only when configured) |
+| `gatewaycore_gslb_agent_quorum_targets` | gauge | `state=quorum\|below_quorum` | Report-gated sites by current local quorum state |
+
+No zone, hostname, backend address, agent ID, certificate or client-address
+labels are exported. The local health and quorum gauges are separate inputs;
+neither alone represents final DNS eligibility, which also depends on address
+family and validators. Import `gateway-alerts.yml` for the opt-in runtime
+alerts. These signals do not measure end-user service availability; the
+independent HTTPS probe and rolling 365-day SLI above do. The importable
+Grafana dashboard is `gslb-dashboard.json`; its JSON syntax was checked locally.
+The existing CI workflow parses Prometheus rules and exercises synthetic alert
+behavior.

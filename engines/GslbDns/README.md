@@ -382,3 +382,23 @@ load ratios: cached answers and long-lived connections affect traffic.
 This feature adds no agent trust, gossip mesh, GeoIP, ECS routing or DNSSEC.
 Those remain separate release gates under #52/#109.
 `ListenHost` accepts native IPv4 and IPv6 addresses for both UDP and TCP. Use `::1` for IPv6 loopback. Non-loopback addresses still require explicit opt-in. Each process listens on one address family.
+
+## GSLB runtime metrics (opt-in)
+
+The DNS process can expose a Prometheus 0.0.4 scrape endpoint on a separate
+loopback-only HTTP listener. `MetricsListenPort` defaults to `0` (disabled).
+Set `MetricsListenPort` to an unused port from 1025–65535 and keep
+`MetricsListenHost` at `127.0.0.1` (or `::1`) to enable it. The listener refuses
+non-loopback addresses even when the DNS and agent-report listeners are exposed
+on a private network. Scrape it locally or use a same-host metrics agent; do not
+publish it directly to an untrusted network.
+
+Exported counters cover DNS queries, no-response drops, DNS response codes and
+authenticated agent-report outcomes. Gauges cover configured zones/sites,
+sites passing local probe hysteresis, and (when agent reports are configured)
+report-gated sites meeting quorum. Labels are fixed enums only; zone names,
+backend addresses, agent IDs and client addresses are never emitted. These
+runtime metrics support diagnostics and do not claim cross-authority consensus,
+DNSSEC, GeoIP, or service availability by themselves. See
+`control-center/ops/prometheus/METRIC_CONTRACT.md` for the series and scrape
+guidance.
