@@ -52,6 +52,10 @@ using (var privacyActivity = new System.Diagnostics.Activity("privacy-contract")
         "OTLP privacy processor preserves bounded route attribution");
 }
 await GatewayOtlpExporterAcceptance.RunAsync();
+await GatewayOtlpExporterAcceptance.RunWithoutCollectorAsync();
+var containerCollectorEndpoint = Environment.GetEnvironmentVariable("GATEWAY_OTLP_CONTAINER_ENDPOINT");
+if (!string.IsNullOrWhiteSpace(containerCollectorEndpoint))
+    await GatewayOtlpExporterAcceptance.RunAgainstCollectorAsync(containerCollectorEndpoint);
 using var key=ECDsa.Create(ECCurve.NamedCurves.nistP256);
 using var wrong=ECDsa.Create(ECCurve.NamedCurves.nistP256);
 var privatePem=key.ExportPkcs8PrivateKeyPem();
