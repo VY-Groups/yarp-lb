@@ -41,12 +41,20 @@ foreach(var zone in config.Zones)
         zone.RoutingPolicy is not ("Weighted" or "Failover" or "CidrRegion" or "ObservedLatency" or "WeightedFailover") ||
         (zone.RoutingPolicy == "CidrRegion" &&
              zone.CidrRoutes is not { Length: >= 1 and <= 256 }) ||
+        (zone.EnableEcsGeoRouting &&
+            (zone.RoutingPolicy != "CidrRegion" ||
+             zone.TrustedEcsResolverCidrs is not { Length: >= 1 and <= 256 })) ||
+        (!zone.EnableEcsGeoRouting && zone.TrustedEcsResolverCidrs is { Length: > 0 }) ||
         (zone.RoutingPolicy != "CidrRegion" && zone.CidrRoutes is { Length: > 0 }))
         throw new InvalidDataException("Invalid GSLB zone, policy, CIDR or TTL");
-    // Only explicit operator-supplied resolver-network routes; never infer a
-    // client location or parse untrusted ECS options.
+    // Only explicit operator-supplied routes. ECS remains disabled unless the
+    // zone explicitly opts in and uses this CIDR table.
     var cidrTable = zone.RoutingPolicy == "CidrRegion"
         ? new DnsCidrRegionTable(zone.CidrRoutes!) : null;
+    var trustedEcsResolvers = zone.EnableEcsGeoRouting
+        ? new DnsCidrRegionTable(zone.TrustedEcsResolverCidrs!
+            .Select(cidr => new DnsCidrRegionRule(cidr, "trusted")))
+        : null;
     var sites=new List<Site>();
     foreach(var site in zone.Sites)
     {
@@ -118,7 +126,7 @@ foreach(var zone in config.Zones)
     }
     groups.Add(origin, new SiteGroup(sites.ToArray(), zone.TtlSeconds,
         zone.FailClosedWhenAllSitesDown, servers.ToArray(), contact, zone.SoaSerial,
-        zone.RoutingPolicy,cidrTable));
+        zone.RoutingPolicy,cidrTable,zone.EnableEcsGeoRouting,trustedEcsResolvers));
 }
 if ((reportTargets.Count > 0) != (config.AgentReports is not null))
     throw new InvalidDataException("Agent report listener and report-gated sites must be configured together");
@@ -317,6 +325,8 @@ sealed record DnsZone(string Name,int TtlSeconds,DnsSite[] Sites,
     public string? SoaContact { get; init; }
     public uint SoaSerial { get; init; } = 1;
     public string RoutingPolicy { get; init; } = "Weighted";
+    public bool EnableEcsGeoRouting { get; init; }
+    public string[]? TrustedEcsResolverCidrs { get; init; }
     public int FailureThreshold { get; init; } = 1;
     public int SuccessThreshold { get; init; } = 1;
     public DnsCidrRegionRule[]? CidrRoutes { get; init; }
@@ -366,14 +376,21 @@ sealed class SiteGroup
 {
     public SiteGroup(Site[] sites,int ttl,bool failClosedWhenAllSitesDown,
         DnsNameServer[] nameServers,string soaContact,uint soaSerial,string routingPolicy,
-        DnsCidrRegionTable? cidrTable)
-        =>(Sites,Ttl,FailClosedWhenAllSitesDown,NameServers,SoaContact,SoaSerial,RoutingPolicy,CidrTable)
-        =(sites,ttl,failClosedWhenAllSitesDown,nameServers,soaContact,soaSerial,routingPolicy,cidrTable);
+        DnsCidrRegionTable? cidrTable,bool enableEcsGeoRouting,
+        DnsCidrRegionTable? trustedEcsResolvers)
+    {
+        (Sites,Ttl,FailClosedWhenAllSitesDown,NameServers,SoaContact,SoaSerial,RoutingPolicy,CidrTable)
+            =(sites,ttl,failClosedWhenAllSitesDown,nameServers,soaContact,soaSerial,routingPolicy,cidrTable);
+        EnableEcsGeoRouting=enableEcsGeoRouting;
+        TrustedEcsResolvers=trustedEcsResolvers;
+    }
     public string RoutingPolicy { get; }
     // 3 local successful measurements; at most 3 probe periods, clamped 6..60s.
     public const int LatencyMinimumSamples = 3;
     public const int LatencyMaximumAgeMs = 15_000;
     public DnsCidrRegionTable? CidrTable { get; }
+    public bool EnableEcsGeoRouting { get; }
+    public DnsCidrRegionTable? TrustedEcsResolvers { get; }
     public DnsNameServer[] NameServers { get; }
     public string SoaContact { get; }
     public uint SoaSerial { get; }

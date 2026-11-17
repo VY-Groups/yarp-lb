@@ -6,12 +6,13 @@ using System.Text;
 
 // Independent DNS wire-format implementation. External GSLB references are reviewed
 // only as architectural context; no AGPL source is included. No recursion,
-// DNSSEC, EDNS Client Subnet routing, or zone transfer.
+// DNSSEC, EDNS Client Subnet routing by default, or zone transfer.
 internal static class DnsWireProtocol
 {
-    private const ushort A = 1, Ns = 2, Soa = 6, Aaaa = 28, Opt = 41;
+    private const ushort A = 1, Ns = 2, Soa = 6, Aaaa = 28, Opt = 41, EcsOption = 8;
     private const ushort ClassIn = 1;
     private sealed record Resource(string Owner, ushort Type, uint Ttl, byte[] Rdata);
+    private sealed record EcsInput(ushort Family, int SourcePrefix, IPAddress Address);
 
     public static bool ValidName(string name)
     {
@@ -55,10 +56,11 @@ internal static class DnsWireProtocol
         var domain = string.Join('.', labels).ToLowerInvariant();
 
         // A single well-formed EDNS(0) OPT is allowed. Unknown options are deliberately ignored;
-        // ECS does not influence selection and its client IP data is never retained or echoed.
+        // ECS influences selection only for explicitly enabled zones and trusted resolvers.
         var edns = false;
         var payload = 512;
         var unsupportedEdns = false;
+        EcsInput? ecsInput = null;
         var additionalCount = BinaryPrimitives.ReadUInt16BigEndian(query[10..]);
         if (additionalCount > 1) return null;
         if (additionalCount == 1)
@@ -74,9 +76,16 @@ internal static class DnsWireProtocol
             while (pos < optionEnd)
             {
                 if (pos + 4 > optionEnd) return null;
+                var optionCode = BinaryPrimitives.ReadUInt16BigEndian(query.Slice(pos, 2));
                 var optionLength = BinaryPrimitives.ReadUInt16BigEndian(query.Slice(pos + 2, 2));
-                pos += 4 + optionLength;
-                if (pos > optionEnd) return null;
+                pos += 4;
+                if (pos + optionLength > optionEnd) return null;
+                if (optionCode == EcsOption)
+                {
+                    if (ecsInput is not null || !TryReadEcs(query.Slice(pos, optionLength), out ecsInput))
+                        return null;
+                }
+                pos += optionLength;
             }
             edns = true;
             payload = Math.Clamp((int)advertised, 512, 1232);
@@ -99,6 +108,7 @@ internal static class DnsWireProtocol
         var answers = new List<Resource>();
         var authority = new List<Resource>();
         var extra = new List<Resource>();
+        var responseEcs = new List<byte>();
         var rcode = 0;
         if (unsupportedEdns) rcode = 0; // extended RCODE BADVERS is carried in OPT
         else if (zone is null) rcode = 5; // REFUSED for names outside explicitly hosted zones
@@ -151,6 +161,18 @@ internal static class DnsWireProtocol
                         if (zone.RoutingPolicy == "CidrRegion")
                         {
                             var region = zone.CidrTable?.RegionFor(resolverIp);
+                            if (zone.EnableEcsGeoRouting && ecsInput is not null &&
+                                zone.TrustedEcsResolvers?.RegionFor(resolverIp) == "trusted")
+                            {
+                                var scopedInput = ApplyEcsPrivacyLimit(ecsInput);
+                                var ecsRegion = zone.CidrTable?.RegionForEcs(
+                                    scopedInput.Address, scopedInput.SourcePrefix);
+                                if (ecsRegion is { } match)
+                                {
+                                    region = match.Region;
+                                    AddEcsResponse(scopedInput, match.PrefixLength, responseEcs);
+                                }
+                            }
                             if (region is not null)
                             {
                                 var regional = eligible.Where(s =>
@@ -245,7 +267,7 @@ internal static class DnsWireProtocol
         // Do not send EDNS OPT with DO bit: this engine has no DNSSEC signatures.
         // Constrain untrusted UDP response amplification and use TC for complete TCP retry.
         var budget = tcp ? 65535 : Math.Min(payload, Math.Max(128, query.Length * 4));
-        var reserve = edns ? 11 : 0;
+        var reserve = edns ? 11 + responseEcs.Count : 0;
         var bytes = new List<byte>(Math.Min(512, budget));
         bytes.AddRange(new byte[12]);
         bytes.AddRange(query.Slice(12, questionEnd - 12).ToArray());
@@ -276,7 +298,8 @@ internal static class DnsWireProtocol
             Write16(bytes, Opt);
             Write16(bytes, (ushort)payload);
             Write32(bytes, unsupportedEdns ? 0x01000000u : 0u); // BADVERS or no ext rcode
-            Write16(bytes, 0); // do not copy ECS/unknown EDNS options
+            Write16(bytes, checked((ushort)responseEcs.Count));
+            bytes.AddRange(responseEcs); // unknown options and disabled/ambiguous ECS are never echoed
             ar++;
         }
         var reply = bytes.ToArray();
@@ -289,6 +312,64 @@ internal static class DnsWireProtocol
         BinaryPrimitives.WriteUInt16BigEndian(reply.AsSpan(8, 2), (ushort)nsCount);
         BinaryPrimitives.WriteUInt16BigEndian(reply.AsSpan(10, 2), (ushort)ar);
         return reply;
+    }
+
+    private static bool TryReadEcs(ReadOnlySpan<byte> data, out EcsInput? ecs)
+    {
+        ecs = null;
+        if (data.Length < 4) return false;
+        var family = BinaryPrimitives.ReadUInt16BigEndian(data);
+        var sourcePrefix = data[2];
+        var scopePrefix = data[3];
+        var addressLength = family switch
+        {
+            1 when sourcePrefix <= 32 => 4,
+            2 when sourcePrefix <= 128 => 16,
+            _ => 0,
+        };
+        if (addressLength == 0 || scopePrefix != 0 ||
+            data.Length != 4 + (sourcePrefix + 7) / 8)
+            return false;
+
+        var addressBytes = new byte[addressLength];
+        data[4..].CopyTo(addressBytes);
+        MaskNetwork(addressBytes, sourcePrefix);
+        ecs = new EcsInput(family, sourcePrefix, new IPAddress(addressBytes));
+        return true;
+    }
+
+    private static EcsInput ApplyEcsPrivacyLimit(EcsInput input)
+    {
+        // Do not use client subnets more precise than /24 IPv4 or /56 IPv6.
+        var maxPrefix = input.Family == 1 ? 24 : 56;
+        var prefix = Math.Min(input.SourcePrefix, maxPrefix);
+        var bytes = input.Address.GetAddressBytes();
+        MaskNetwork(bytes, prefix);
+        return new EcsInput(input.Family, prefix, new IPAddress(bytes));
+    }
+
+    private static void AddEcsResponse(EcsInput input, int scopePrefix, List<byte> response)
+    {
+        var sourcePrefix = input.SourcePrefix;
+        var addressLength = (sourcePrefix + 7) / 8;
+        Write16(response, EcsOption);
+        Write16(response, checked((ushort)(4 + addressLength)));
+        Write16(response, input.Family);
+        response.Add(checked((byte)sourcePrefix));
+        response.Add(checked((byte)Math.Min(scopePrefix, sourcePrefix)));
+        response.AddRange(input.Address.GetAddressBytes().Take(addressLength));
+    }
+
+    private static void MaskNetwork(byte[] address, int bits)
+    {
+        var full = bits / 8;
+        var partial = bits % 8;
+        if (partial != 0)
+        {
+            address[full] &= (byte)(0xFF << (8 - partial));
+            full++;
+        }
+        Array.Clear(address, full, address.Length - full);
     }
 
     private static Resource SoaRecord(string apex, SiteGroup zone)

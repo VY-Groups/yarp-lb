@@ -82,9 +82,19 @@ IPv6 DNS UDP/TCP listeners and IPv6 NS glue are supported. DNSSEC remains open.
   existing names with unsupported types return NODATA with SOA; names outside
   the configured zones are REFUSED.
 - EDNS0 OPT input is syntax checked with a 512–1232-byte UDP buffer limit;
-  unknown options and ECS are ignored, not logged or echoed. Unsupported EDNS
-  versions return BADVERS via the OPT extended response code. DNSSEC DO is NOT
-  advertised, and DNSSEC is not supported.
+  unknown options are ignored, not logged or echoed. Unsupported EDNS versions
+  return BADVERS via the OPT extended response code. DNSSEC DO is NOT advertised,
+  and DNSSEC is not supported.
+- EDNS Client Subnet is ignored by default. A zone using `CidrRegion` can opt in
+  with `EnableEcsGeoRouting: true` and an explicit `TrustedEcsResolverCidrs`
+  allowlist; untrusted resolver sources cannot steer answers with forged ECS.
+  Input is normalized and limited to at most
+  IPv4 `/24` and IPv6 `/56`, and only explicit operator CIDR routes are used.
+  Ambiguous source subnets that cross differently mapped more-specific routes
+  fall back to the direct resolver source and are not echoed. A successful ECS
+  decision returns the normalized source and matching route scope for cache use.
+  No ECS addresses are logged or retained. This is not GeoIP/ASN lookup and
+  requires trusted recursive resolvers to apply their own ECS privacy policy.
 - UDP replies use complete-RR truncation (TC) when they exceed the advertised
   buffer or a conservative per-query amplification budget. Clients should retry
   over TCP. Source-IP response budgets are only a limited defense in depth.

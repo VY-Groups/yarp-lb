@@ -241,6 +241,20 @@ if(cidrTable.RegionFor(IPAddress.Parse("127.0.0.1"))!="local" ||
    cidrTable.RegionFor(IPAddress.Parse("203.0.113.2")) is not null ||
    cidrTable.RegionFor(IPAddress.Parse("127.0.0.1").MapToIPv6())!="local")
     throw new Exception("FAIL: canonical longest-prefix region selection");
+var ecsTable = new DnsCidrRegionTable(new[] {
+    new DnsCidrRegionRule("198.51.100.0/24", "dr"),
+    new DnsCidrRegionRule("198.51.100.128/25", "local")
+});
+if (ecsTable.RegionForEcs(IPAddress.Parse("198.51.100.42"), 24) is not null ||
+    ecsTable.RegionForEcs(IPAddress.Parse("198.51.100.200"), 25) is not
+        { Region: "local", PrefixLength: 25 })
+    throw new Exception("FAIL: ECS crossed a more-specific region boundary");
+var simpleEcsTable = new DnsCidrRegionTable(new[] {
+    new DnsCidrRegionRule("198.51.100.0/24", "dr")
+});
+if (simpleEcsTable.RegionForEcs(IPAddress.Parse("198.51.100.42"), 24) is not
+    { Region: "dr", PrefixLength: 24 })
+    throw new Exception("FAIL: ECS network was not normalized before region matching");
 foreach(var bad in new[]{"127.0.0.9/24","127.0.0.0/33","not-an-address",
                         "2001:db8::1/32"})
 {
@@ -255,7 +269,7 @@ try { _=new DnsCidrRegionTable(new[]{
     new DnsCidrRegionRule("127.0.0.0/8","other")}); }
 catch(ArgumentException){duplicateRejected=true;}
 if(!duplicateRejected)throw new Exception("FAIL: conflicting duplicate CIDR accepted");
-Console.WriteLine("PASS: IPv4/IPv6 longest prefix, resolver-IP mapping and CIDR validation");
+Console.WriteLine("PASS: IPv4/IPv6 resolver CIDR mapping, ECS prefix boundaries and validation");
 // Verify response limiting with deterministic monotonic timestamps: no flaky UDP flood.
 var rate=new DnsResponseRateLimiter(2,2);
 var ip1=IPAddress.Parse("127.0.0.31");
@@ -347,9 +361,14 @@ File.WriteAllText(configuration,JsonSerializer.Serialize(new {
  },SoaContact="hostmaster.geo.integration.test",SoaSerial=2026111601u,
    RoutingPolicy="CidrRegion",FailureThreshold=1,SuccessThreshold=1,
    FailClosedWhenAllSitesDown=true,
+   EnableEcsGeoRouting=true,
+   TrustedEcsResolverCidrs=new[]{"127.0.0.1/32"},
    CidrRoutes=new[]{
        new {Cidr="127.0.0.0/8",Region="dr"},
-       new {Cidr="127.0.0.1/32",Region="local"}
+       new {Cidr="127.0.0.1/32",Region="local"},
+       new {Cidr="198.51.100.0/24",Region="dr"},
+       new {Cidr="198.51.101.0/24",Region="local"},
+       new {Cidr="2001:db8:abcd::/56",Region="dr"}
    }},
  new{ Name="latency.integration.test",TtlSeconds=10,Sites=new []{
     new { Address="127.0.0.21",HealthUrl="http://127.0.0.1:19711/ready",
@@ -451,6 +470,44 @@ try
     Must(Dns16(geoTcp,6)==1 &&
          geoTcp.AsSpan(geoTcp.Length-4,4).SequenceEqual(new byte[]{127,0,0,21}),
          "TCP queries use actual resolver source IP for CIDR region");
+    var (ecsRequest, ecsReply) = await QueryEcsWire("geo.integration.test", 1,
+        IPAddress.Parse("198.51.100.42"), 32);
+    Must((Dns16(ecsReply,2)&0x0F)==0 && Dns16(ecsReply,6)==1 &&
+         Dns16(ecsReply,ecsReply.Length-11)==8 &&
+         Dns16(ecsReply,ecsReply.Length-9)==7 &&
+         Dns16(ecsReply,ecsReply.Length-7)==1 &&
+         ecsReply[ecsReply.Length-5]==24 && ecsReply[ecsReply.Length-4]==24 &&
+         ecsReply.AsSpan(ecsReply.Length-3,3).SequenceEqual(new byte[]{198,51,100}) &&
+         ecsReply.AsSpan(ecsReply.Length-26,4).SequenceEqual(new byte[]{127,0,0,22}),
+         "opt-in ECS caps /32 to /24, selects its configured region and returns matching cache scope");
+    Must(Dns16(ecsRequest,10)==1,"ECS request contains one EDNS OPT record");
+    var (_, ecsV6Reply) = await QueryEcsWire("geo.integration.test", 1,
+        IPAddress.Parse("2001:db8:abcd::1234"), 128);
+    var v6Prefix = IPAddress.Parse("2001:db8:abcd::").GetAddressBytes().Take(7).ToArray();
+    Must(Dns16(ecsV6Reply,ecsV6Reply.Length-15)==8 &&
+         Dns16(ecsV6Reply,ecsV6Reply.Length-11)==2 &&
+         ecsV6Reply[ecsV6Reply.Length-9]==56 && ecsV6Reply[ecsV6Reply.Length-8]==56 &&
+         ecsV6Reply.AsSpan(ecsV6Reply.Length-7,7).SequenceEqual(v6Prefix),
+         "IPv6 ECS caps /128 to /56 and returns the normalized cache scope");
+    var (_, ambiguousEcsReply) = await QueryEcsWire("geo.integration.test", 1,
+        IPAddress.Parse("198.51.100.42"), 16);
+    Must(ambiguousEcsReply.AsSpan(ambiguousEcsReply.Length-11,11).SequenceEqual(
+             new byte[]{0,0,41,4,208,0,0,0,0,0,0}) &&
+         ambiguousEcsReply.AsSpan(ambiguousEcsReply.Length-15,4)
+             .SequenceEqual(new byte[]{127,0,0,21}),
+         "ambiguous coarse ECS subnet is ignored and not reflected");
+    var (_, disabledEcsReply) = await QueryEcsWire("app.integration.test", 1,
+        IPAddress.Parse("198.51.100.42"), 24);
+    Must(disabledEcsReply.AsSpan(disabledEcsReply.Length-11,11).SequenceEqual(
+             new byte[]{0,0,41,4,208,0,0,0,0,0,0}),
+         "ECS is not reflected by zones without explicit opt-in");
+    var (_, untrustedEcsReply) = await QueryEcsWire("geo.integration.test", 1,
+        IPAddress.Parse("198.51.101.42"), 24, IPAddress.Parse("127.0.0.2"));
+    Must(untrustedEcsReply.AsSpan(untrustedEcsReply.Length-11,11).SequenceEqual(
+             new byte[]{0,0,41,4,208,0,0,0,0,0,0}) &&
+         untrustedEcsReply.AsSpan(untrustedEcsReply.Length-15,4)
+             .SequenceEqual(new byte[]{127,0,0,22}),
+         "untrusted DNS resolver cannot steer or receive ECS-based answers");
     for(var i=0;i<12;i++)
         Must((await Query("geo.integration.test")).Address=="127.0.0.21",
             "IPv4 resolver /32 specific region beats broader /8 mapping");
@@ -689,6 +746,32 @@ async Task<(byte[] Request,byte[] Reply)> QueryWire(string domain,ushort type,by
     Must(reply.Buffer.Length>=12 && Dns16(reply.Buffer,0)==0x4613,
         "DNS UDP transaction matching");
     return(packet,reply.Buffer);
+}
+async Task<(byte[] Request,byte[] Reply)> QueryEcsWire(
+    string domain, ushort type, IPAddress clientAddress, int sourcePrefix, IPAddress? resolverSource = null)
+{
+    var request = new List<byte>(DnsRequest(domain, type));
+    request[10] = 0;
+    request[11] = 1;
+    var addressBytes = clientAddress.GetAddressBytes();
+    var family = clientAddress.AddressFamily == AddressFamily.InterNetwork ? (ushort)1 : (ushort)2;
+    var optionLength = 4 + (sourcePrefix + 7) / 8;
+    var optionAndHeaderLength = 4 + optionLength;
+    request.AddRange(new byte[] { 0, 0, 41, 4, 208, 0, 0, 0, 0,
+        (byte)(optionAndHeaderLength >> 8), (byte)optionAndHeaderLength,
+        0, 8, (byte)(optionLength >> 8), (byte)optionLength,
+        (byte)(family >> 8), (byte)family, (byte)sourcePrefix, 0 });
+    request.AddRange(addressBytes.Take((sourcePrefix + 7) / 8));
+    using var alternateClient = resolverSource is null
+        ? null : new UdpClient(new IPEndPoint(resolverSource, 0));
+    var sender = alternateClient ?? client;
+    if (alternateClient is not null) sender.Connect(IPAddress.Loopback, 15353);
+    await sender.SendAsync(request.ToArray());
+    using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+    var reply = await sender.ReceiveAsync(timeout.Token);
+    Must(reply.Buffer.Length >= 12 && Dns16(reply.Buffer, 0) == 0x4613,
+        "ECS DNS UDP transaction matching");
+    return (request.ToArray(), reply.Buffer);
 }
 async Task<byte[]> TcpQuery(byte[] query)
 {

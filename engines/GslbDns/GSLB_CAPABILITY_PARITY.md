@@ -22,7 +22,7 @@ performance. No AGPL OpenGSLB source is incorporated.
 | Weighted failover *chains* | Proposed opt-in `WeightedFailover` with weighted healthy priority groups | Exact-head Windows/Linux CI, review, DNS cache behavior and physical DR evidence; no explicit maintenance/drain API |
 | GeoIP and CIDR routing | Merged explicit resolver CIDR longest-prefix with lab acceptance; **licensed GeoIP still missing** | Resolver/source semantics, GeoIP dataset licensing/version, stale-data policy and real geo tests |
 | Latency / RTT selection | Draft PR #108 proposes local probe elapsed-time EMA, not merged or client RTT | Per-vantage measured RTT, min sample, timeout, bounded EMA and rollback |
-| EDNS Client Subnet (ECS) | EDNS parsed; ECS **ignored** | Explicit opt-in/allowlist, privacy minimization, valid prefix/data and cache scope |
+| EDNS Client Subnet (ECS) | Optional zone opt-in over allowlisted recursive resolver CIDRs and explicit region routes; source capped at IPv4 `/24` and IPv6 `/56`; ambiguous prefixes ignored | Production privacy review, RFC vectors, independent resolver and cache tests |
 | Predictive health | Not implemented | Evidence-based confidence, false predictions, strict safety policy |
 | Agent-side failure prediction | Not implemented | Signed agent identity, replay/freshness, bounded metric flow, external validation |
 | External health validation | Local HTTP(S)/TCP probing only | Independent geographic quorum and application-specific readiness |

@@ -2,8 +2,8 @@ using System.Globalization;
 using System.Net;
 using System.Net.Sockets;
 
-// Deliberate, administrator-supplied private CIDR routing only.
-// No MaxMind / inferred geography, ECS or arbitrary forwarded client headers.
+// Deliberate, administrator-supplied CIDR routing only.
+// No MaxMind / inferred geography or arbitrary forwarded client headers.
 internal sealed record DnsCidrRegionRule(string Cidr, string Region);
 
 internal sealed class DnsCidrRegionTable
@@ -62,6 +62,38 @@ internal sealed class DnsCidrRegionTable
         return null; // unknown resolver origin uses original weighted policy
     }
 
+    public (string Region, int PrefixLength)? RegionForEcs(IPAddress address, int sourcePrefixLength)
+    {
+        ArgumentNullException.ThrowIfNull(address);
+        var addressBytes = address.GetAddressBytes();
+        var maxPrefix = addressBytes.Length * 8;
+        if (sourcePrefixLength < 0 || sourcePrefixLength > maxPrefix ||
+            address.IsIPv4MappedToIPv6 ||
+            (address.AddressFamily == AddressFamily.InterNetworkV6 && address.ScopeId != 0))
+            return null;
+
+        MaskNetwork(addressBytes, sourcePrefixLength);
+        var family = address.AddressFamily;
+        var candidate = routes.FirstOrDefault(route =>
+            route.Network.AddressFamily == family && route.PrefixLength <= sourcePrefixLength &&
+            PrefixMatches(addressBytes, route.Network.GetAddressBytes(), route.PrefixLength));
+        if (candidate is null) return null;
+
+        // A broad ECS prefix may cross a more-specific mapping boundary. Do not
+        // choose a region from just the masked network address in that case.
+        foreach (var narrower in routes)
+        {
+            if (narrower.Network.AddressFamily != family ||
+                narrower.PrefixLength <= sourcePrefixLength ||
+                !PrefixMatches(narrower.Network.GetAddressBytes(), addressBytes, sourcePrefixLength))
+                continue;
+            if (!narrower.Region.Equals(candidate.Region, StringComparison.OrdinalIgnoreCase))
+                return null;
+        }
+
+        return (candidate.Region, Math.Min(candidate.PrefixLength, sourcePrefixLength));
+    }
+
     public IReadOnlyCollection<string> Regions =>
         routes.Select(x => x.Region).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
 
@@ -88,5 +120,17 @@ internal sealed class DnsCidrRegionTable
         if (partial == 0) return true;
         var mask = (byte)(0xFF << (8 - partial));
         return (addr[full] & mask) == (network[full] & mask);
+    }
+
+    private static void MaskNetwork(byte[] address, int bits)
+    {
+        var full = bits / 8;
+        var partial = bits % 8;
+        if (partial != 0)
+        {
+            address[full] &= (byte)(0xFF << (8 - partial));
+            full++;
+        }
+        Array.Clear(address, full, address.Length - full);
     }
 }
