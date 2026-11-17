@@ -421,7 +421,7 @@ and remaining P0/P1 operational evidence remain incomplete. Production NO-GO.
 
 ## Continuation — annual objective, GSLB observability and quarantine (2026-11-17)
 
-Current `main` is `8c0986705d176a42c1c42a84c098bb5d3b2cace8`.
+Current `main` is `473ffe9dcff02aee990acdc074a046576064070f`.
 
 On `main`, PR #121 merged
 opt-in loopback-only GSLB metrics, bounded Prometheus alerts, synthetic alert
@@ -459,10 +459,16 @@ merged-main GSLB and L7 Actions also passed on `8c09867...`. This tests
 observer-to-authority partition behavior only, not node-to-node consensus or
 fencing. GitHub had no independent reviewer recorded.
 
-Current feature branch `codex/issue52-dns-malformed-packet-acceptance` adds an
-eight-case malformed DNS/EDNS UDP corpus. Local Windows GSLB acceptance passed:
-malformed packets received no replies and a valid DNS query still succeeded
-afterward. Exact-head GitHub Actions have not run yet.
+PR #125 merged an eight-case malformed DNS/EDNS UDP corpus. Local Windows and
+exact-head Windows/Linux GSLB acceptance confirmed malformed packets received
+no reply and a valid query still worked afterward; all PR-head Windows/Linux
+DNS and L7/HA/load Actions passed. Main GSLB/L7 Actions for `473ffe9...` also
+passed.
+
+Current feature branch `codex/issue52-dns-malformed-tcp-acceptance` extends
+that corpus to verify malformed UDP frames are silently dropped and malformed
+TCP frames close without a DNS response, followed by a successful valid query.
+Local Windows acceptance and exact-head GitHub Actions are pending.
 
 At this snapshot, open P0 issues #36, #52 and #109 remain open. #109 still needs
 cross-authority partition fencing/consensus, dynamic operator trust/evidence

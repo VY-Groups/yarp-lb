@@ -99,9 +99,9 @@ IPv6 DNS UDP/TCP listeners and IPv6 NS glue are supported. DNSSEC remains open.
   buffer or a conservative per-query amplification budget. Clients should retry
   over TCP. Source-IP response budgets are only a limited defense in depth.
   Cross-platform acceptance sends a finite corpus of malformed DNS/EDNS frames
-  and verifies that they receive no UDP response and do not stop subsequent
-  valid queries. This is a parser regression check, not fuzzing or a complete
-  denial-of-service assessment.
+  and verifies that UDP receives no response, TCP closes without a response,
+  and subsequent valid queries still work. This is a parser regression check,
+  not fuzzing or a complete denial-of-service assessment.
 
 ## Example test configuration
 
