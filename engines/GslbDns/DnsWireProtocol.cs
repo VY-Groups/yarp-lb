@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using GatewayCore.Gslb.Contracts;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
@@ -23,7 +24,7 @@ internal static class DnsWireProtocol
     }
 
     public static byte[]? Build(ReadOnlySpan<byte> query, IReadOnlyDictionary<string, SiteGroup> zones,
-        bool tcp, IPAddress? resolverIp = null)
+        bool tcp, IPAddress? resolverIp = null, AgentHealthReportStore? agentReports = null)
     {
         if (query.Length is < 17 or > 4096) return null;
         var id = BinaryPrimitives.ReadUInt16BigEndian(query);
@@ -131,8 +132,11 @@ internal static class DnsWireProtocol
                 }
                 else
                 {
+                    var now = Environment.TickCount64;
                     var eligible = configured.Where(s => Volatile.Read(ref s.Healthy) == 1 &&
-                        (s.Validators.Length == 0 || Environment.TickCount64 < Volatile.Read(ref s.ValidatorDeadline))).ToArray();
+                        (s.Validators.Length == 0 || now < Volatile.Read(ref s.ValidatorDeadline)) &&
+                        (s.RequiredAgentIds.Length == 0 ||
+                         (agentReports?.IsHealthy(apex!, s.AgentSiteId!, now) ?? false))).ToArray();
                     if (eligible.Length == 0)
                     {
                         if (zone.FailClosedWhenAllSitesDown) rcode = 2; // SERVFAIL
@@ -176,11 +180,11 @@ internal static class DnsWireProtocol
                                 // This is local DNS-node -> probe-endpoint latency,
                                 // NOT client-perceived latency or cross-region RTT.
                                 // A single missing/stale sample causes weighted fallback.
-                                var now = Environment.TickCount64;
+                                var latencyNow = Environment.TickCount64;
                                 var measured = new List<(Site Site, double Ms)>();
                                 foreach (var site in eligible)
                                 {
-                                    if (!site.Latency.TryRead(now,
+                                    if (!site.Latency.TryRead(latencyNow,
                                             SiteGroup.LatencyMinimumSamples,
                                             SiteGroup.LatencyMaximumAgeMs, out var ms))
                                     {

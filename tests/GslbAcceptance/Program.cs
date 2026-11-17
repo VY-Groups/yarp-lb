@@ -4,6 +4,131 @@ using System.Net;
 using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
+using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
+using GatewayCore.Gslb.Contracts;
+
+// A malformed, altered or overlong report must never verify as signed agent evidence.
+using (var agentKey = ECDsa.Create(ECCurve.NamedCurves.nistP256))
+using (var verifierKey = ECDsa.Create(agentKey.ExportParameters(false)))
+{
+    var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+    var unsigned = new AgentHealthReport(1, "region-agent-1", AgentHealthReportContract.KeyId(agentKey), "lab.example.test.",
+        "mumbai", 4, 19, now, now + 10, "http", "healthy", 1000, 41, "pending");
+    var signed = unsigned with { Signature = AgentHealthReportContract.Sign(unsigned, agentKey) };
+    if (!AgentHealthReportContract.Verify(signed, verifierKey, 10))
+        throw new Exception("FAIL: valid signed agent health report rejected");
+    if (AgentHealthReportContract.Verify(signed with { Verdict = "unhealthy", LatencyMilliseconds = null }, verifierKey, 10) ||
+        AgentHealthReportContract.Verify(signed with { KeyId = new string('0', 64) }, verifierKey, 10) ||
+        AgentHealthReportContract.Verify(signed with { SiteId = "osaka" }, verifierKey, 10) ||
+        AgentHealthReportContract.Verify(signed with { Sequence = 20 }, verifierKey, 10) ||
+        AgentHealthReportContract.Verify(signed with { ExpiresAtUnixSeconds = now + 11 }, verifierKey, 10) ||
+        AgentHealthReportContract.Verify(signed with { AgentId = "../agent" }, verifierKey, 10) ||
+        AgentHealthReportContract.Verify(signed with { Version = 2 }, verifierKey, 10))
+        throw new Exception("FAIL: altered, stale-contract or overlong agent report accepted");
+    var unsignedFailure = unsigned with { Verdict = "unhealthy", LatencyMilliseconds = null };
+    var failure = unsignedFailure with { Signature = AgentHealthReportContract.Sign(unsignedFailure, agentKey) };
+    if (!AgentHealthReportContract.Verify(failure, verifierKey, 10))
+        throw new Exception("FAIL: signed negative health evidence rejected");
+    var unknown = unsigned with { Verdict = "unknown", ConfidencePermille = 0, LatencyMilliseconds = null };
+    unknown = unknown with { Signature = AgentHealthReportContract.Sign(unknown, agentKey) };
+    if (!AgentHealthReportContract.Verify(unknown, verifierKey, 10) ||
+        AgentHealthReportContract.IsValid(unknown with { ConfidencePermille = 1 }, 10))
+        throw new Exception("FAIL: explicit unknown health evidence or confidence bounds invalid");
+}
+Console.WriteLine("PASS: signed agent health report schema, canonical signature and tamper rejection");
+var reportRoot = Path.Combine(Path.GetTempPath(), "gslb-agent-contract-" + Guid.NewGuid().ToString("N"));
+Directory.CreateDirectory(reportRoot);
+if (!OperatingSystem.IsWindows())
+    File.SetUnixFileMode(reportRoot, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+try
+{
+    using var signing1 = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+    using var signing1Rotated = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+    using var signing2 = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+    using var client1Key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+    using var client1RotatedKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+    using var client2Key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+    var client1Request = new CertificateRequest("CN=agent-1", client1Key, HashAlgorithmName.SHA256);
+    var client1RotatedRequest = new CertificateRequest("CN=agent-1-rotated", client1RotatedKey, HashAlgorithmName.SHA256);
+    var client2Request = new CertificateRequest("CN=agent-2", client2Key, HashAlgorithmName.SHA256);
+    foreach (var request in new[] { client1Request, client1RotatedRequest, client2Request })
+    {
+        request.CertificateExtensions.Add(new X509BasicConstraintsExtension(false, false, 0, true));
+        var eku = new OidCollection { new Oid("1.3.6.1.5.5.7.3.2") };
+        request.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension(eku, true));
+    }
+    using var client1 = client1Request.CreateSelfSigned(DateTimeOffset.UtcNow.AddMinutes(-1), DateTimeOffset.UtcNow.AddHours(1));
+    using var client1Rotated = client1RotatedRequest.CreateSelfSigned(DateTimeOffset.UtcNow.AddMinutes(-1), DateTimeOffset.UtcNow.AddHours(1));
+    using var client2 = client2Request.CreateSelfSigned(DateTimeOffset.UtcNow.AddMinutes(-1), DateTimeOffset.UtcNow.AddHours(1));
+    var key1Path = Path.Combine(reportRoot, "agent-1.pem");
+    var key1RotatedPath = Path.Combine(reportRoot, "agent-1-rotated.pem");
+    var key2Path = Path.Combine(reportRoot, "agent-2.pem");
+    File.WriteAllText(key1Path, signing1.ExportSubjectPublicKeyInfoPem());
+    File.WriteAllText(key1RotatedPath, signing1Rotated.ExportSubjectPublicKeyInfoPem());
+    File.WriteAllText(key2Path, signing2.ExportSubjectPublicKeyInfoPem());
+    var agents = new[] {
+        new AgentTrust("agent-1", [Convert.ToHexString(client1.GetCertHash(HashAlgorithmName.SHA256)),
+            Convert.ToHexString(client1Rotated.GetCertHash(HashAlgorithmName.SHA256))], [key1Path, key1RotatedPath]),
+        new AgentTrust("agent-2", [Convert.ToHexString(client2.GetCertHash(HashAlgorithmName.SHA256))], [key2Path])
+    };
+    var targets = new[] { new AgentReportTarget("lab.example.test", "mumbai", ["agent-1", "agent-2"]) };
+    var statePath = Path.Combine(reportRoot, "replay-state.json");
+    var observed = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+    AgentHealthReport Report(string agent, long sequence, string verdict, int confidence, int? latency, ECDsa signer) {
+        var unsigned = new AgentHealthReport(1, agent, AgentHealthReportContract.KeyId(signer),
+            "lab.example.test", "mumbai", 3,
+            sequence, observed, observed + 10, "http", verdict, confidence, latency, "pending");
+        return unsigned with { Signature = AgentHealthReportContract.Sign(unsigned, signer) };
+    }
+    using (var reports = new AgentHealthReportStore(agents, targets, statePath, 10, 5, 2))
+    {
+        if (!reports.TryReserveRequest("agent-1", 100, 1) ||
+            reports.TryReserveRequest("agent-1", 101, 1) ||
+            !reports.TryReserveRequest("agent-1", 60_100, 1))
+            throw new Exception("FAIL: authenticated per-agent request budget is not bounded");
+        if (reports.IsHealthy("lab.example.test", "mumbai", 100))
+            throw new Exception("FAIL: missing multi-vantage evidence admitted a target");
+        if (!reports.TryAccept(Report("agent-1", 1, "healthy", 1000, 12, signing1), client1,
+                DateTimeOffset.FromUnixTimeSeconds(observed), 100) ||
+            reports.IsHealthy("lab.example.test", "mumbai", 101))
+            throw new Exception("FAIL: one observer satisfied the configured two-agent unanimous policy");
+        if (!reports.TryAccept(Report("agent-2", 1, "healthy", 1000, 20, signing2), client2,
+                DateTimeOffset.FromUnixTimeSeconds(observed), 100) ||
+            !reports.IsHealthy("lab.example.test", "mumbai", 101))
+            throw new Exception("FAIL: fresh independent reports did not satisfy target policy");
+        if (reports.TryAccept(Report("agent-1", 1, "healthy", 1000, 12, signing1), client1,
+                DateTimeOffset.FromUnixTimeSeconds(observed), 100) ||
+            reports.TryAccept(Report("agent-1", 2, "healthy", 1000, 12, signing1), client2,
+                DateTimeOffset.FromUnixTimeSeconds(observed), 100))
+            throw new Exception("FAIL: replay or certificate/report identity mismatch accepted");
+        if (!reports.TryAccept(Report("agent-1", 2, "unhealthy", 1000, null, signing1), client1,
+                DateTimeOffset.FromUnixTimeSeconds(observed), 100) ||
+            reports.IsHealthy("lab.example.test", "mumbai", 101))
+            throw new Exception("FAIL: fresh negative agent evidence did not fail closed");
+    }
+    using (var recovered = new AgentHealthReportStore(agents, targets, statePath, 10, 5, 2))
+    {
+        if (recovered.IsHealthy("lab.example.test", "mumbai", 101) ||
+            recovered.TryAccept(Report("agent-1", 2, "healthy", 1000, 12, signing1), client1,
+                DateTimeOffset.FromUnixTimeSeconds(observed), 101) ||
+            !recovered.TryAccept(Report("agent-1", 3, "healthy", 1000, 12, signing1), client1,
+                DateTimeOffset.FromUnixTimeSeconds(observed), 101) ||
+            !recovered.TryAccept(Report("agent-2", 2, "healthy", 1000, 20, signing2), client2,
+                DateTimeOffset.FromUnixTimeSeconds(observed), 101) ||
+            !recovered.IsHealthy("lab.example.test", "mumbai", 102) ||
+            recovered.IsHealthy("lab.example.test", "mumbai", 10_101))
+            throw new Exception("FAIL: replay protection or monotonic expiry failed across restart");
+        if (recovered.TryAccept(Report("agent-2", 3, "healthy", 1000, 20, signing2), client2,
+                DateTimeOffset.FromUnixTimeSeconds(observed + 6), 103))
+            throw new Exception("FAIL: stale observer report accepted");
+        if (!recovered.TryAccept(Report("agent-1", 4, "healthy", 1000, 14, signing1Rotated), client1Rotated,
+                DateTimeOffset.FromUnixTimeSeconds(observed), 104))
+            throw new Exception("FAIL: overlapping client certificate and signing-key rotation rejected");
+    }
+}
+finally { Directory.Delete(reportRoot, recursive: true); }
+Console.WriteLine("PASS: agent identity, unanimous-vantage reports, replay persistence, expiry and fail-closed recovery");
 LatencyRoutingTests.Run();
 // Exercise opt-in probe-latency state with deterministic monotonic timestamps.
 var latency = new DnsProbeLatency();
@@ -381,7 +506,7 @@ try
     {
         var reply=await Query("app.integration.test");
         Must(reply.Status==0 && reply.Address is not null,"all-down fallback answers rather than SERVFAIL");
-        allDown.Add(reply.Address);
+        allDown.Add(reply.Address!);
     }
     Must(allDown.SetEquals(new[]{"127.0.0.21","127.0.0.22"}),
         "all-down fallback includes all configured sites");

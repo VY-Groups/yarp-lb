@@ -290,6 +290,50 @@ Both validators and the local probe must succeed. Set `FailClosedWhenAllSitesDow
 Each configured validator origin requires its own P-256 signing key. Set `GSLB_VALIDATOR_SIGNING_KEYS` on each DNS node to a JSON object mapping canonical HTTPS origins to absolute PEM public-key paths. Keep private signing keys at the observers. Configure a distinct readiness URL for each monitored service and site. Observers should derive that URL from their own configured public origin and endpoint.
 
 DNS sends a fresh `Gslb-Challenge` per probe (32 random bytes as uppercase hex). The validator measures readiness and signs the UTF-8 encoding of four lines with LF separators and no trailing newline: `GatewayCore.Health.v1`, the canonical absolute validator URL, the received challenge, and the decimal HTTP status. Return the base64 DER-encoded ECDSA/SHA-256 signature in `Gslb-Signature`. Only signed 2xx responses are eligible. Unsigned failures also withdraw the site. A response is valid only for its originating request. Asynchronous reports require a separate sequence and expiry protocol.
+
+### Opt-in authenticated asynchronous agent reports (development/staging)
+
+An independently deployed `GslbObserver` can additionally publish signed health snapshots to a DNS node over a separate HTTPS listener. This is disabled unless `AgentReports` is present and at least one site explicitly sets both `AgentSiteId` and `RequiredAgentIds`. Existing routing behavior is unchanged when omitted.
+
+The versioned signed report includes agent and key IDs, scoped zone/site, probe type, UTC observation/expiry, monotonic epoch/sequence, an explicit `healthy`, `unhealthy` or `unknown` verdict, confidence in permille, optional measured latency and signature. `unknown` requires zero confidence and no latency; it is accepted as evidence but never promotes a site. Healthy and unhealthy verdicts require a nonzero confidence value from 1 to 1000. An observer reports confidence 1000 only for a direct HTTP result and zero for a probe exception/timeout; this is evidence strength, not a calibrated statistical probability.
+
+The receiver requires a client certificate pinned by SHA-256, a matching ECDSA P-256 report-signing key, a bounded HTTP body, a bounded per-agent request rate, a valid timestamp/expiry, and an increasing `(epoch, sequence)` for each agent/site. Certificate pins support up to four overlapping leaves per identity for rotation; an emergency SHA-256 denylist rejects revoked leaves. Agent IDs are limited to 64 ASCII identifier characters. Replay high-water marks are written atomically before a report is accepted; the state file is mode `0600` on Linux. Protect its parent directory and Windows ACLs, include it in secure backups, and do not delete it during restart/restore. The actual live report is memory-only, so a restarted DNS node begins unknown and requires new reports.
+
+Every `RequiredAgentIds` entry is mandatory (a strict unanimous policy, not an N-of-M majority quorum). A site's DNS eligibility is the conjunction of its local active health probe, any existing synchronous external validators, and a fresh positive report from **every configured required agent**. Missing, stale, negative, unknown, unsigned, replayed or misidentified reports keep it ineligible; the strict all-down policy then returns SERVFAIL when no other eligible site exists. Reports never promote a failed local probe. Predicted-health scores are not accepted by this protocol and cannot affect DNS selection. Each DNS node keeps its own replay state; configure agents to send to each authoritative node independently.
+
+Example shape (paths, certificate pins, keys, limits and addresses below are placeholders that must be provisioned and reviewed for a disposable environment):
+
+    {
+      "AgentReports": {
+        "ListenAddress": "127.0.0.1",
+        "ListenPort": 15443,
+        "AllowNonLoopbackListener": false,
+        "ServerCertificatePem": "/secure/report-server.pem",
+        "ServerKeyPem": "/secure/report-server.key",
+        "ReplayStatePath": "/var/lib/gatewaycore/gslb-agent-replay.json",
+        "MaxTtlSeconds": 8,
+        "MaxAgeSeconds": 6,
+        "MaxClockSkewSeconds": 2,
+        "MaxReportsPerMinute": 120,
+        "RevokedCertificateSha256": [],
+        "Agents": [
+          {"AgentId":"region-a","CertificateSha256":["<64-hex-SHA256-leaf-pin>"],
+           "SigningPublicKeyPems":["/secure/region-a-report.pub.pem"]},
+          {"AgentId":"region-b","CertificateSha256":["<64-hex-SHA256-leaf-pin>"],
+           "SigningPublicKeyPems":["/secure/region-b-report.pub.pem"]}
+        ]
+      },
+      "Zones": [{
+        "Name":"app.example.test", "TtlSeconds":5,
+        "FailClosedWhenAllSitesDown":true,
+        "Sites":[{"Address":"192.0.2.10", "HealthUrl":"https://app.example.test/ready",
+          "Weight":1, "AgentSiteId":"primary", "RequiredAgentIds":["region-a","region-b"]}]
+      }]
+    }
+
+Each observer's optional report configuration includes `ReportUrl` ending in `/agent-health/v1/reports`, its `AgentId`, `Zone`, `SiteId`, a P-256 `SigningKeyPem`, a client certificate/key with clientAuth EKU, an optional `ReportServerCaPem` custom CA, a protected absolute `ReportSequenceStatePath`, `ReportIntervalSeconds` and `ReportTtlSeconds`. The report carries the SHA-256 key ID of its signer; the receiver can trust up to four public signing keys per agent during rotation. Without `ReportServerCaPem`, normal system TLS trust and hostname checks apply. The observer increments and persists a sender epoch at each restart and persists each sequence before sending. A lost sender sequence file causes old epochs to be rejected; restore it or explicitly re-enroll with a new identity.
+
+The receiver binds only to the configured address; non-loopback binding requires explicit opt-in and a private firewall rule. Its default concurrency, body, identity and rate bounds do not replace network ACLs, certificate rotation/revocation operations, protected state backups or production key custody. GitHub/Linux integration tests cover disposable two-agent mTLS, signed positive/negative reports, expiry, restart and recovery. This is a new protocol foundation, **not** complete partition fencing, multi-node quorum consensus, predictive health, fleet UI/metrics, CA-sensitive authority validation, 60-minute physical acceptance or production GO.
 ## Opt-in weighted priority groups
 
 Set `RoutingPolicy: "WeightedFailover"` to select the lowest numeric

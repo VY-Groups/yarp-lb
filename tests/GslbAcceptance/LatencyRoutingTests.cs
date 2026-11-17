@@ -72,7 +72,7 @@ internal static class LatencyRoutingTests
 
     private static Site Make(string address, int weight) =>
         new(IPAddress.Parse(address), new Uri("http://127.0.0.1/unused"), weight,
-            0, 1, 1, "Http", 0, null) { Healthy = 1 };
+            0, 1, 1, "Http", 0, null, null, []) { Healthy = 1 };
     private static SiteGroup Group(params Site[] sites) =>
         new(sites, 10, true, Array.Empty<DnsNameServer>(),
             "hostmaster.latency.unit.test", 1, "ObservedLatency", null);
