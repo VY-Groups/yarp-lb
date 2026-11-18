@@ -250,6 +250,7 @@ public static class GatewayOtlpExporterAcceptance
             if (expected <= 0) throw new Exception($"Container counter fixture did not produce {name}");
             var deadline = DateTimeOffset.UtcNow.AddSeconds(30);
             var observed = false;
+            string lastQueryResult = "<Prometheus query not completed>";
             while (!observed && DateTimeOffset.UtcNow < deadline)
             {
                 var requestBuilder = new UriBuilder(prometheusBase.Uri)
@@ -261,6 +262,7 @@ public static class GatewayOtlpExporterAcceptance
                     response.EnsureSuccessStatusCode();
                     using var payload = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync());
                     var root = payload.RootElement;
+                    lastQueryResult = payload.RootElement.GetRawText();
                     observed = root.TryGetProperty("status", out var status) && status.GetString() == "success" &&
                         root.GetProperty("data").GetProperty("result").EnumerateArray().Any(series =>
                         {
@@ -274,8 +276,30 @@ public static class GatewayOtlpExporterAcceptance
                 if (!observed) await Task.Delay(1000);
             }
             if (!observed)
-                throw new Exception($"Collector-to-Prometheus pipeline did not expose {name}={expected}");
+            {
+                var observedSeries = await ReadPrometheusLoggingSeriesAsync(client, prometheusBase.Uri);
+                throw new Exception($"Collector-to-Prometheus pipeline did not expose {name}={expected}. " +
+                    $"Last exact query response: {lastQueryResult}. " +
+                    $"Observed yarp_logging series: {observedSeries}");
+            }
             Console.WriteLine($"PASS: Prometheus received Collector-exported {name}={expected}");
+        }
+    }
+
+    private static async Task<string> ReadPrometheusLoggingSeriesAsync(HttpClient client, Uri prometheusBase)
+    {
+        var request = new UriBuilder(prometheusBase)
+        { Query = "query=" + Uri.EscapeDataString("{__name__=~\"yarp_logging_.*\"}") };
+        try
+        {
+            using var response = await client.GetAsync(request.Uri);
+            response.EnsureSuccessStatusCode();
+            using var payload = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync());
+            return payload.RootElement.GetProperty("data").GetProperty("result").GetRawText();
+        }
+        catch (Exception exception) when (exception is HttpRequestException or TaskCanceledException or JsonException)
+        {
+            return $"<diagnostic query failed: {exception.GetType().Name}: {exception.Message}>";
         }
     }
 
