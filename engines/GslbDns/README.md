@@ -88,7 +88,10 @@ rollover and multi-authority acceptance remain open.
   fabricate signatures. A zone with `DnssecPrivateKeyPath` enabled returns
   signed DNSKEY, RRSIG, NSEC, SOA/NS, dynamic A/AAAA and negative answers.
   EDNS DO queries use the advertised (at most 1232-byte) UDP budget; larger
-  responses set TC for TCP retry.
+  responses set TC for TCP retry. Real-socket acceptance sends a large NS RRset
+  with 512- and 1232-byte EDNS advertisements: the 512-byte UDP response is
+  truncated and completes when that same query is retried over TCP, while the
+  1232-byte UDP response includes the full RRset.
 - EDNS Client Subnet is ignored by default. A zone using `CidrRegion` can opt in
   with `EnableEcsGeoRouting: true` and an explicit `TrustedEcsResolverCidrs`
   allowlist; untrusted resolver sources cannot steer answers with forged ECS.

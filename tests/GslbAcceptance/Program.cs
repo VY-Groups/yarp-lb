@@ -333,6 +333,9 @@ var tasks=new []{ProbeServer(healthA,s1,cancel.Token),ProbeServer(healthB,s2,can
 var temp=Path.Combine(Path.GetTempPath(),"yarp-dns-"+Guid.NewGuid().ToString("N"));
 Directory.CreateDirectory(temp);
 var configuration=Path.Combine(temp,"zones.json");
+var ednsBufferZoneName = string.Join('.', new string('z', 63), new string('y', 63), new string('x', 63));
+var ednsBufferNs1 = string.Join('.', "ns1", new string('n', 63), new string('m', 63), new string('l', 63), "net");
+var ednsBufferNs2 = string.Join('.', "ns2", new string('o', 63), new string('p', 63), new string('q', 63), "org");
 using var metricsReservation = new TcpListener(IPAddress.Loopback, 0);
 metricsReservation.Start();
 var metricsPort = ((IPEndPoint)metricsReservation.LocalEndpoint).Port;
@@ -353,6 +356,11 @@ File.WriteAllText(configuration,JsonSerializer.Serialize(new {
  GeoIpCountryDatabasePath=countryFixture,GeoIpAsnDatabasePath=asnFixture,
  GeoIpMaxDatabaseAgeDays=0,
  Zones=new object[]{
+ new {Name=ednsBufferZoneName,TtlSeconds=10,Sites=new[]{
+   new {Address="192.0.2.80",HealthUrl="http://127.0.0.1:19711/ready",Weight=1,Priority=0,HealthCheckType="Http",TcpPort=0}},
+   NameServers=new[]{
+   new {Host=ednsBufferNs1,Address="192.0.2.53"},
+   new {Host=ednsBufferNs2,Address="198.51.100.53"}}},
  new {Name="chain.integration.test",TtlSeconds=10,Sites=chainSites,
       NameServers=new[]{new {Host="ns.chain.integration.test",Address="127.0.0.31"}},
       RoutingPolicy="WeightedFailover",FailureThreshold=1,SuccessThreshold=1,
@@ -479,7 +487,7 @@ try
     Must(metricsText.Contains("# TYPE gatewaycore_gslb_dns_queries_total counter", StringComparison.Ordinal) &&
          metricsText.Contains("gatewaycore_gslb_dns_queries_total{transport=\"udp\"} ", StringComparison.Ordinal) &&
          metricsText.Contains("gatewaycore_gslb_dns_responses_total{transport=\"udp\",rcode=\"NOERROR\"} ", StringComparison.Ordinal) &&
-         metricsText.Contains("gatewaycore_gslb_configured_zones 11", StringComparison.Ordinal) &&
+         metricsText.Contains("gatewaycore_gslb_configured_zones 12", StringComparison.Ordinal) &&
          metricsText.Contains("gatewaycore_gslb_administratively_quarantined_sites 2", StringComparison.Ordinal) &&
          !metricsText.Contains("app.integration.test", StringComparison.Ordinal) &&
          !metricsText.Contains("127.0.0.21", StringComparison.Ordinal),
@@ -769,6 +777,24 @@ try
     Must((Dns16(nsTcp,2)&0x0200)==0 && Dns16(nsTcp,6)==2 &&
         Dns16(nsTcp,10)==2 && Dns16(nsTcp,8)==0,
         "TCP fallback returns complete two NS answers and two in-bailiwick glue records");
+    var (edns512Request, edns512Reply) = await QueryWire(ednsBufferZoneName, 2,
+        ednsVersion: 0, udpPayloadSize: 512);
+    Must((Dns16(edns512Reply,2)&0x0400)!=0 && (Dns16(edns512Reply,2)&0x0200)!=0 &&
+         (Dns16(edns512Reply,2)&0xF)==0 && edns512Reply.Length<=512 &&
+         Dns16(edns512Reply,edns512Reply.Length-10)==41 &&
+         Dns16(edns512Reply,edns512Reply.Length-8)==512,
+         "EDNS 512-byte advertisement returns a truncated UDP response within its negotiated budget");
+    var edns512Retry = await TcpQuery(edns512Request);
+    Must((Dns16(edns512Retry,2)&0x0200)==0 && Dns16(edns512Retry,6)==2 &&
+         edns512Retry.Length>512 && Dns16(edns512Retry,edns512Retry.Length-8)==512,
+         "TCP retry after EDNS UDP TC returns both authoritative NS records in full");
+    var (edns1232Request, edns1232Reply) = await QueryWire(ednsBufferZoneName, 2,
+        ednsVersion: 0, udpPayloadSize: 1232);
+    Must((Dns16(edns1232Reply,2)&0x0400)!=0 && (Dns16(edns1232Reply,2)&0x0200)==0 &&
+         Dns16(edns1232Reply,6)==2 && edns1232Reply.Length>512 &&
+         edns1232Reply.Length<=1232 && Dns16(edns1232Reply,edns1232Reply.Length-8)==1232,
+         "EDNS 1232-byte advertisement returns the complete NS RRset without UDP truncation");
+    Console.WriteLine("PASS: EDNS buffer negotiation truncates at 512, retries the same query over TCP, and completes at 1232");
     var soa = await TcpQuery(DnsRequest("app.integration.test",6));
     Must(Dns16(soa,6)==1 && Dns16(soa,8)==0 && (Dns16(soa,2)&0xF)==0,
         "SOA query has one authoritative answer and a valid serial");
@@ -957,7 +983,7 @@ void SkipDnsName(byte[] packet, ref int offset)
     throw new InvalidDataException("Unterminated DNS name in response");
 }
 
-byte[] DnsRequest(string domain, ushort type, byte? ednsVersion=null)
+byte[] DnsRequest(string domain, ushort type, byte? ednsVersion=null, ushort udpPayloadSize=1232)
 {
     var request=new List<byte>();
     request.Add(0x46);request.Add(0x13);
@@ -972,15 +998,17 @@ byte[] DnsRequest(string domain, ushort type, byte? ednsVersion=null)
     request.Add(0);request.Add(1);
     if(ednsVersion is not null)
     {
-        // OPT: root, type 41, UDP payload 1232, ext rcode 0, version as configured,
+        // OPT: root, type 41, caller-selected UDP payload size, ext rcode 0, version as configured,
         // DO bit supplied (must not be reflected without DNSSEC support).
-        request.AddRange(new byte[]{0,0,41,4,208,0,ednsVersion.Value,0x80,0,0,7,253,233,0,3,1,2,3});
+        request.AddRange(new byte[]{0,0,41,(byte)(udpPayloadSize>>8),(byte)udpPayloadSize,
+            0,ednsVersion.Value,0x80,0,0,7,253,233,0,3,1,2,3});
     }
     return request.ToArray();
 }
-async Task<(byte[] Request,byte[] Reply)> QueryWire(string domain,ushort type,byte? ednsVersion=null)
+async Task<(byte[] Request,byte[] Reply)> QueryWire(string domain,ushort type,
+    byte? ednsVersion=null,ushort udpPayloadSize=1232)
 {
-    var packet=DnsRequest(domain,type,ednsVersion);
+    var packet=DnsRequest(domain,type,ednsVersion,udpPayloadSize);
     await client.SendAsync(packet);
     using var timeout=new CancellationTokenSource(TimeSpan.FromSeconds(3));
     var reply=await client.ReceiveAsync(timeout.Token);
