@@ -454,7 +454,7 @@ app.MapGet("/admin/api/reports/traffic.csv", () =>
     var generated = DateTimeOffset.UtcNow;
     var rows = new List<string>
     {
-        "record_type,generated_utc,process_started_utc,gateway,record_id,requests,http_2xx,http_4xx,http_5xx,mean_duration_ms,untracked_destination_requests"
+        "record_type,generated_utc,process_started_utc,gateway,record_id,requests,http_2xx,http_4xx,http_5xx,mean_duration_ms,untracked_destination_requests,duration_bucket_upper_seconds"
     };
     var total = Interlocked.Read(ref requestsTotal);
     rows.Add(string.Join(',', new[]
@@ -466,7 +466,8 @@ app.MapGet("/admin/api/reports/traffic.csv", () =>
         Interlocked.Read(ref requests5xx).ToString(System.Globalization.CultureInfo.InvariantCulture),
         (total == 0 ? 0 : Math.Round(Interlocked.Read(ref durationTicks) * 1000.0 /
             System.Diagnostics.Stopwatch.Frequency / total, 2)).ToString(System.Globalization.CultureInfo.InvariantCulture),
-        destinationTelemetry.UntrackedRequests.ToString(System.Globalization.CultureInfo.InvariantCulture)
+        destinationTelemetry.UntrackedRequests.ToString(System.Globalization.CultureInfo.InvariantCulture),
+        ""
     }));
     foreach (var entry in destinationTelemetry.Entries.OrderBy(x => x.Key, StringComparer.Ordinal))
         rows.Add(string.Join(',', new[]
@@ -476,8 +477,10 @@ app.MapGet("/admin/api/reports/traffic.csv", () =>
             "", Interlocked.Read(ref entry.Value.ClientErrors).ToString(System.Globalization.CultureInfo.InvariantCulture),
             Interlocked.Read(ref entry.Value.ServerErrors).ToString(System.Globalization.CultureInfo.InvariantCulture),
             entry.Value.MeanLatencyMs.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture),
-            ""
+            "", ""
         }));
+    rows.AddRange(GatewayTrafficReportCsv.DurationBucketRows(
+        generated, processStartedUtc, Environment.MachineName, requestHistogram.Snapshot()));
     return Results.File(Encoding.UTF8.GetBytes(string.Join("\r\n", rows) + "\r\n"),
         "text/csv; charset=utf-8", $"gateway-traffic-{generated:yyyyMMdd-HHmmss}Z.csv");
 }).RequireAuthorization(p => p.RequireRole("Administrator", "Operator"));

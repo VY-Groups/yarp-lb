@@ -28,6 +28,8 @@ assert 'clientAddress.Address?.ToString()' in code
 assert 'Request.Path' not in code[code.index('GATEWAY_ACCESS timestampUtc='):code.index('var destinationTelemetry')]
 assert '/admin/api/reports/traffic.json' in code
 assert '/admin/api/reports/traffic.csv' in code
+assert 'duration_bucket_upper_seconds' in code
+assert 'GatewayTrafficReportCsv.DurationBucketRows' in code
 assert 'RequireRole("Administrator", "Operator")' in code
 assert 'durationBuckets = requestHistogram.Snapshot()' in code
 assert 'untrackedDestinationRequests = destinationTelemetry.UntrackedRequests' in code
