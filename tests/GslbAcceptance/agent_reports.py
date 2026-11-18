@@ -38,6 +38,19 @@ def port():
         return sock.getsockname()[1]
 
 
+def secure_windows_test_directory(path: Path) -> None:
+    """Give replay-state fixtures a private inherited ACL on Windows runners."""
+    if os.name != "nt":
+        return
+    username = os.environ.get("USERNAME")
+    if not username:
+        raise AssertionError("Windows runner identity is unavailable for replay-state ACL fixture")
+    subprocess.run([
+        "icacls", str(path), "/inheritance:r", "/grant:r",
+        f"{username}:(OI)(CI)F", "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F"
+    ], check=True, capture_output=True, text=True)
+
+
 def scrape_metrics(metrics_port):
     with urllib.request.urlopen(f"http://127.0.0.1:{metrics_port}/metrics", timeout=2) as response:
         return response.read().decode("utf-8")
@@ -78,6 +91,7 @@ def main():
     observer_dll = Path("engines/GslbObserver/bin/Release/net10.0/GslbObserver.dll").resolve()
     with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as stack:
         root = Path(tmp)
+        secure_windows_test_directory(root)
 
         def openssl(*args):
             subprocess.run(["openssl", *args], cwd=root, check=True, capture_output=True)
