@@ -470,11 +470,14 @@ def main():
         for authority in (authority_a, authority_b):
             expect_dns(authority["dns"], authority["dns_port"], 2,
                        log_paths=[authority["dns_log"], *authority["agent_logs"]])
-        local_metrics = scrape_metrics(authority_a["metrics_port"])
-        local_healthy_count = int(next(line[len(healthy_line):] for line in local_metrics.splitlines()
-                                       if line.startswith(healthy_line)))
-        assert local_healthy_count >= 2, \
-            "local readiness withdrawal was not tested with fresh healthy observer quorum"
+        for authority_name, authority in (("authority A", authority_a), ("authority B", authority_b)):
+            local_metrics = scrape_metrics(authority["metrics_port"])
+            local_healthy_count = int(next(line[len(healthy_line):] for line in local_metrics.splitlines()
+                                           if line.startswith(healthy_line)))
+            assert local_healthy_count >= 2, \
+                f"{authority_name} local readiness withdrawal was not tested with fresh healthy observer quorum"
+            assert 'gatewaycore_gslb_agent_quorum_targets{state="quorum"} 1' in local_metrics, \
+                f"{authority_name} did not retain an authenticated quorum during local readiness withdrawal"
         local.verdict = 200
         for authority in (authority_a, authority_b):
             expect_dns(authority["dns"], authority["dns_port"], 0, "192.0.2.17",
