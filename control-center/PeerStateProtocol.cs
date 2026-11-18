@@ -110,6 +110,10 @@ public sealed class PeerStateJournal
             // Older boot epochs never override state after such a reset.
             if (frame.SourceEpoch < receivedSourceEpoch) return false;
             var sameEpoch = frame.SourceEpoch == receivedSourceEpoch;
+            // If this receiver's wall clock moved backward, an authenticated
+            // delayed frame from an older source minute must not replace newer
+            // telemetry that this same source epoch already delivered.
+            if (sameEpoch && frame.Minute < receivedMinute) return false;
             if (sameEpoch && frame.Minute == receivedMinute && frame.Sequence <= receivedSequence)
                 return false;
             // Within an epoch a higher sequence cannot remove counters.
