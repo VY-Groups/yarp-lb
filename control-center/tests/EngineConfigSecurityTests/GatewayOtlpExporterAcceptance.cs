@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Buffers.Binary;
 using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
@@ -170,6 +171,20 @@ public static class GatewayOtlpExporterAcceptance
             foreach (var expected in new[] { "gateway.proxy.requests", "gateway.proxy.request.duration", "5xx" })
                 if (!metricPayload.Contains(expected, StringComparison.Ordinal))
                     throw new Exception($"Expected bounded proxy metric was absent: {expected}");
+            var metricValues = ReadOtlpMetricValues(metrics.SelectMany(x => x.Body).ToArray());
+            foreach (var expected in new[]
+                     {
+                         ("yarp_logging_dropped_total", loggingDropScenario.TotalDropped),
+                         ("yarp_logging_dropped_low_priority_total", loggingDropScenario.LowPriorityDropped),
+                         ("yarp_logging_dropped_high_priority_total", loggingDropScenario.HighPriorityDropped),
+                         ("yarp_logging_write_errors_total", loggingDropScenario.WriteErrors)
+                     })
+            {
+                metricValues.TryGetValue(expected.Item1, out var values);
+                if (expected.Item2 <= 0 || values is null || !values.Contains(expected.Item2))
+                    throw new Exception($"OTLP collector did not receive {expected.Item1}={expected.Item2}; " +
+                                        $"observed [{string.Join(",", values ?? Array.Empty<long>())}]");
+            }
             var logPayload = Encoding.Latin1.GetString(logs.SelectMany(x => x.Body).ToArray());
             foreach (var expected in new[] { "GATEWAY_ACCESS", "timestampUtc", "clientIp", "203.0.113.17", "route_acceptance", "statusCode" })
                 if (!logPayload.Contains(expected, StringComparison.Ordinal))
@@ -180,10 +195,7 @@ public static class GatewayOtlpExporterAcceptance
             foreach (var excluded in new[] { "otlp-audit-secret-canary", "otlp-application-secret-canary", "GatewayCore.SecurityAudit" })
                 if (logPayload.Contains(excluded, StringComparison.Ordinal))
                     throw new Exception($"Non-access log data was present in OTLP export: {excluded}");
-            if (!metricPayload.Contains("yarp_logging_dropped_total", StringComparison.Ordinal) ||
-                !metricPayload.Contains("yarp_logging_dropped_high_priority_total", StringComparison.Ordinal) ||
-                !metricPayload.Contains("yarp_logging_write_errors_total", StringComparison.Ordinal))
-                throw new Exception("OTLP metrics omitted bounded console queue drop/write-error counters");
+            Console.WriteLine("PASS: real OTLP/HTTP collector received bounded console total/low/high drops and write-error counter values");
             Console.WriteLine("PASS: real OTLP/HTTP collector received traces, metrics and structured access logs; traces redact client IP and logs omit request content");
         }
         finally
@@ -228,24 +240,45 @@ public static class GatewayOtlpExporterAcceptance
         private readonly BlockingTextWriter writer;
         private readonly NonBlockingConsoleLoggerProvider sink;
 
+        public long TotalDropped => sink.DroppedMessages;
+        public long LowPriorityDropped => sink.DroppedLowPriorityMessages;
+        public long HighPriorityDropped => sink.DroppedHighPriorityMessages;
+        public long WriteErrors => sink.WriteErrors;
+
         public LoggingDropScenario()
         {
             writer = new BlockingTextWriter(release, entered, drained);
             sink = new NonBlockingConsoleLoggerProvider(writer, capacity: 16, maxLineChars: 256);
-            var logger = sink.CreateLogger("otlp-counter-acceptance");
-            logger.LogWarning("fill background-writer handoff slot");
-            if (!entered.Wait(TimeSpan.FromSeconds(3)))
-                throw new Exception("OTLP counter acceptance writer did not enter its blocked state");
-            for (var i = 0; i < 256; i++) logger.LogWarning("drop counter sample {Index}", i);
-            if (sink.DroppedHighPriorityMessages == 0)
-                throw new Exception("OTLP counter acceptance failed to produce a high-priority drop sample");
-            release.Set();
-            if (!drained.Wait(TimeSpan.FromSeconds(3)))
-                throw new Exception("OTLP counter acceptance writer did not drain after release");
+            try
+            {
+                var logger = sink.CreateLogger("otlp-counter-acceptance");
+                logger.LogInformation("fill background-writer handoff slot");
+                if (!entered.Wait(TimeSpan.FromSeconds(3)))
+                    throw new Exception("OTLP counter acceptance writer did not enter its blocked state");
+                for (var i = 0; i < 64; i++) logger.LogInformation("low priority saturation {Index}", i);
+                if (sink.DroppedLowPriorityMessages == 0 || sink.QueuedMessages != 14)
+                    throw new Exception("OTLP counter acceptance did not prove bounded low-priority queue saturation");
+                for (var i = 0; i < 64; i++) logger.LogWarning("high priority saturation {Index}", i);
+                if (sink.DroppedHighPriorityMessages == 0 || sink.QueuedMessages != sink.Capacity)
+                    throw new Exception("OTLP counter acceptance did not prove bounded high-priority queue saturation");
+                if (sink.DroppedMessages != sink.DroppedLowPriorityMessages + sink.DroppedHighPriorityMessages)
+                    throw new Exception("OTLP console drop totals did not reconcile by priority");
+                release.Set();
+                if (!drained.Wait(TimeSpan.FromSeconds(3)))
+                    throw new Exception("OTLP counter acceptance writer did not drain after release");
+                if (sink.WriteErrors != 1)
+                    throw new Exception($"OTLP counter acceptance expected one simulated writer failure, got {sink.WriteErrors}");
+            }
+            catch
+            {
+                Dispose();
+                throw;
+            }
         }
 
         public void Dispose()
         {
+            release.Set();
             sink.Dispose();
             drained.Dispose();
             entered.Dispose();
@@ -263,10 +296,90 @@ public static class GatewayOtlpExporterAcceptance
         {
             entered.Set();
             release.Wait();
+            if (Interlocked.Increment(ref written) == 1) throw new IOException("simulated writer failure");
             base.WriteLine(value);
-            if (Interlocked.Increment(ref written) >= 17)
+            if (Volatile.Read(ref written) >= 17)
                 drained.Set();
         }
+    }
+
+    private static Dictionary<string, long[]> ReadOtlpMetricValues(byte[] payload)
+    {
+        var result = new Dictionary<string, List<long>>(StringComparer.Ordinal);
+        foreach (var resource in ReadFields(payload).Where(field => field.Number == 1 && field.Wire == 2))
+        foreach (var scope in ReadFields(resource.Bytes!).Where(field => field.Number == 2 && field.Wire == 2))
+        foreach (var metric in ReadFields(scope.Bytes!).Where(field => field.Number == 2 && field.Wire == 2))
+        {
+            var metricFields = ReadFields(metric.Bytes!);
+            var name = metricFields.FirstOrDefault(field => field.Number == 1 && field.Wire == 2).Text;
+            if (string.IsNullOrEmpty(name)) continue;
+            var sum = metricFields.FirstOrDefault(field => field.Number == 7 && field.Wire == 2);
+            if (sum.Bytes is null) continue;
+            foreach (var point in ReadFields(sum.Bytes!).Where(field => field.Number == 1 && field.Wire == 2))
+            {
+                var value = ReadFields(point.Bytes!).FirstOrDefault(field => field.Number == 6 && field.Wire == 1);
+                if (value.Bytes is null) continue;
+                if (!result.TryGetValue(name, out var values)) result[name] = values = new List<long>();
+                values.Add(BinaryPrimitives.ReadInt64LittleEndian(value.Bytes));
+            }
+        }
+        return result.ToDictionary(pair => pair.Key, pair => pair.Value.ToArray(), StringComparer.Ordinal);
+    }
+
+    private readonly record struct ProtoField(int Number, int Wire, ulong Varint, byte[]? Bytes, string? Text);
+
+    private static List<ProtoField> ReadFields(byte[] payload)
+    {
+        var fields = new List<ProtoField>();
+        var offset = 0;
+        while (offset < payload.Length)
+        {
+            var tag = ReadVarint(payload, ref offset);
+            var number = (int)(tag >> 3);
+            var wire = (int)(tag & 7);
+            if (number == 0) throw new InvalidDataException("Invalid protobuf field number");
+            switch (wire)
+            {
+                case 0:
+                    fields.Add(new ProtoField(number, wire, ReadVarint(payload, ref offset), null, null));
+                    break;
+                case 1:
+                    if (payload.Length - offset < 8) throw new InvalidDataException("Truncated protobuf fixed64 field");
+                    fields.Add(new ProtoField(number, wire, 0, payload.AsSpan(offset, 8).ToArray(), null));
+                    offset += 8;
+                    break;
+                case 2:
+                    var length = checked((int)ReadVarint(payload, ref offset));
+                    if (length < 0 || payload.Length - offset < length)
+                        throw new InvalidDataException("Truncated protobuf length-delimited field");
+                    var bytes = payload.AsSpan(offset, length).ToArray();
+                    fields.Add(new ProtoField(number, wire, 0, bytes,
+                        Encoding.UTF8.GetString(bytes)));
+                    offset += length;
+                    break;
+                case 5:
+                    if (payload.Length - offset < 4) throw new InvalidDataException("Truncated protobuf fixed32 field");
+                    fields.Add(new ProtoField(number, wire, 0, payload.AsSpan(offset, 4).ToArray(), null));
+                    offset += 4;
+                    break;
+                default:
+                    throw new InvalidDataException($"Unsupported protobuf wire type {wire}");
+            }
+        }
+        return fields;
+    }
+
+    private static ulong ReadVarint(byte[] payload, ref int offset)
+    {
+        ulong value = 0;
+        for (var shift = 0; shift < 64; shift += 7)
+        {
+            if (offset >= payload.Length) throw new InvalidDataException("Truncated protobuf varint");
+            var current = payload[offset++];
+            value |= (ulong)(current & 0x7f) << shift;
+            if ((current & 0x80) == 0) return value;
+        }
+        throw new InvalidDataException("Protobuf varint exceeds 64 bits");
     }
 
     private static async Task ReceiveAsync(TcpListener listener,
