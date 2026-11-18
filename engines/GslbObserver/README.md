@@ -17,7 +17,7 @@ Start one instance per service and observer vantage with `dotnet GslbObserver.dl
 
 The server certificate must match the public URL. The signing key is separate from TLS credentials. Configure the matching public key on each DNS node. Restart the processes after changing key material or trust configuration. A DNS node accepts readiness only when both configured observers and its own local probe succeed.
 
-All observer TLS and report-signing private-key paths must be absolute, existing regular files and cannot be symlinks/reparse points. On Unix the observer rejects files with group/other permissions; owner-read access is required (`0600` is recommended). On Windows the application rejects reparse points but does not inspect ACLs, so restrict each key to the observer service identity with deployment ACLs.
+All observer TLS, report-signing, and report-client TLS private keys must be absolute regular files. Linux opens each key path component-by-component without following symlinks, checks the opened file's mode, and imports the PEM bytes read from that same handle; group/other access is rejected and owner-read access is required (`0600` is recommended). Windows opens each file without following a final reparse point and imports the bytes read from that same handle, but application-level ACL validation is not implemented, so restrict each key to the observer service identity with deployment ACLs. Other operating systems are not supported by this key loader.
 
 For an agent that reports to multiple independent DNS authorities, use `ReportUrls` instead of `ReportUrl`:
 

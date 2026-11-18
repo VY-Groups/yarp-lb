@@ -22,12 +22,12 @@ if (bind.Equals(IPAddress.Any) || bind.Equals(IPAddress.IPv6Any) ||
 var pins = config.AllowedClientSha256.Select(Convert.FromHexString).ToArray();
 if (pins.Length is < 1 or > 16 || pins.Any(pin => pin.Length != 32))
     throw new InvalidDataException("Expected 1-16 SHA-256 client certificate fingerprints");
-PrivateKeyFileSecurity.Validate(config.ServerKeyPem, "Observer TLS private key");
-PrivateKeyFileSecurity.Validate(config.SigningKeyPem, "Observer report-signing private key");
-using var pem = X509Certificate2.CreateFromPemFile(config.ServerCertificatePem, config.ServerKeyPem);
+var serverKeyPem = PrivateKeyFileSecurity.ReadPrivateKeyPem(config.ServerKeyPem, "Observer TLS private key");
+var signingKeyPem = PrivateKeyFileSecurity.ReadPrivateKeyPem(config.SigningKeyPem, "Observer report-signing private key");
+using var pem = X509Certificate2.CreateFromPem(File.ReadAllText(config.ServerCertificatePem), serverKeyPem);
 using var serverCert = X509CertificateLoader.LoadPkcs12(pem.Export(X509ContentType.Pkcs12), null);
 using var signer = ECDsa.Create();
-signer.ImportFromPem(File.ReadAllText(config.SigningKeyPem));
+signer.ImportFromPem(signingKeyPem);
 if (signer.ExportParameters(false).Curve.Oid.Value != "1.2.840.10045.3.1.7")
     throw new InvalidDataException("A P-256 signing key is required");
 // Verify signing capability before advertising readiness.
@@ -69,14 +69,15 @@ if (reportEnabled)
         config.ReportTtlSeconds < config.ReportIntervalSeconds || config.ReportTtlSeconds > 300 ||
         (config.ReportServerCaPem is not null && !Path.IsPathFullyQualified(config.ReportServerCaPem)))
         throw new InvalidDataException("Invalid asynchronous agent report configuration");
-    PrivateKeyFileSecurity.Validate(config.ReportClientKeyPem, "Observer report-client TLS private key");
+    var reportClientKeyPem = PrivateKeyFileSecurity.ReadPrivateKeyPem(
+        config.ReportClientKeyPem, "Observer report-client TLS private key");
     reportEndpoints = reportUrlValues.Select(value => new Uri(value, UriKind.Absolute)).ToArray();
     var zoneName = config.Zone.TrimEnd('.');
     if (!AgentHealthReportContract.IsValidZone(zoneName))
         throw new InvalidDataException("Invalid asynchronous agent zone name");
     reportSequence = new AgentReportSequenceState(config.ReportSequenceStatePath!);
-    using var clientPem = X509Certificate2.CreateFromPemFile(
-        config.ReportClientCertificatePem!, config.ReportClientKeyPem!);
+    using var clientPem = X509Certificate2.CreateFromPem(
+        File.ReadAllText(config.ReportClientCertificatePem!), reportClientKeyPem);
     reportClientCertificate = X509CertificateLoader.LoadPkcs12(
         clientPem.Export(X509ContentType.Pkcs12), null);
     if (!reportClientCertificate.Extensions.OfType<X509EnhancedKeyUsageExtension>()

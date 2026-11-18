@@ -131,23 +131,68 @@ def main():
                         "upstream": serve(stack)}
 
         if os.name != "nt":
+            def reject_observer_config(name, document, reason, expected_error):
+                invalid_config = root / f"{name}.json"
+                invalid_config.write_text(json.dumps(document))
+                denied = subprocess.run(["dotnet", observer_dll, invalid_config],
+                                         capture_output=True, text=True, timeout=10)
+                assert denied.returncode != 0 and expected_error in denied.stderr, \
+                    f"observer did not reject {reason} through private-key file security"
+                print(f"PASS: observer refuses {reason}")
+
             insecure_observer_key = root / "insecure-observer-signing.key"
             shutil.copyfile(agents[0]["signer"], insecure_observer_key)
             insecure_observer_key.chmod(0o644)
-            invalid_observer_config = root / "insecure-observer.json"
-            invalid_observer_config.write_text(json.dumps({
+            observer_config = {
                 "ListenAddress": "127.0.0.1", "Port": port(),
                 "PublicUrl": "https://127.0.0.1:18443/ready",
                 "HealthUrl": "http://127.0.0.1:1/ready",
                 "ServerCertificatePem": str(server_cert), "ServerKeyPem": str(server_key),
                 "SigningKeyPem": str(insecure_observer_key),
                 "AllowedClientSha256": [agents[0]["pin"]]
-            }))
-            denied = subprocess.run(["dotnet", observer_dll, invalid_observer_config],
+            }
+            invalid_config = root / "insecure-observer.json"
+            invalid_config.write_text(json.dumps(observer_config))
+            denied = subprocess.run(["dotnet", observer_dll, invalid_config],
                                      capture_output=True, text=True, timeout=10)
-            assert denied.returncode != 0 and "owner-only" in denied.stderr, \
+            assert denied.returncode != 0 and "group/other access" in denied.stderr, \
                 "observer accepted a group-readable report-signing key"
             print("PASS: observer refuses group-readable report-signing private keys")
+
+            observer_key_link = root / "observer-server-link.key"
+            observer_key_link.symlink_to(server_key)
+            linked_server_config = dict(observer_config, ServerKeyPem=str(observer_key_link))
+            reject_observer_config("linked-observer-server", linked_server_config,
+                                   "a symlinked TLS private key", "without following links")
+
+            signing_key_link = root / "observer-signing-link.key"
+            signing_key_link.symlink_to(agents[0]["signer"])
+            linked_signing_config = dict(observer_config, SigningKeyPem=str(signing_key_link))
+            reject_observer_config("linked-observer-signing", linked_signing_config,
+                                   "a symlinked report-signing private key", "without following links")
+
+            linked_key_directory = root / "observer-key-directory-link"
+            linked_key_directory.symlink_to(root, target_is_directory=True)
+            linked_parent_config = dict(observer_config,
+                                        SigningKeyPem=str(linked_key_directory / agents[0]["signer"].name))
+            reject_observer_config("linked-observer-key-parent", linked_parent_config,
+                                   "a key path with a symlinked parent directory", "without following links")
+
+            report_client_key_link = root / "observer-report-client-link.key"
+            report_client_key_link.symlink_to(agents[0]["key"])
+            linked_client_config = dict(observer_config)
+            linked_client_config.update({
+                "ReportUrl": "https://127.0.0.1:18443/agent-health/v1/reports",
+                "AgentId": "agent-1", "Zone": "lab.example.test", "SiteId": "mumbai",
+                "ReportClientCertificatePem": str(agents[0]["cert"]),
+                "ReportClientKeyPem": str(report_client_key_link),
+                "ReportServerCaPem": str(root / "ca.pem"),
+                "ReportServerRevocationMode": "NoCheck",
+                "ReportSequenceStatePath": str(root / "observer-sequence.json"),
+                "ReportIntervalSeconds": 1, "ReportTtlSeconds": 8
+            })
+            reject_observer_config("linked-observer-report-client", linked_client_config,
+                                   "a symlinked report-client TLS private key", "without following links")
 
         local = serve(stack)
         for agent in agents:
@@ -195,9 +240,22 @@ def main():
                 invalid_path.write_text(json.dumps(invalid_config))
                 denied = subprocess.run(["dotnet", dns_dll, invalid_path],
                                          capture_output=True, text=True, timeout=10)
-                assert denied.returncode != 0 and "owner-only" in denied.stderr, \
+                assert denied.returncode != 0 and "group/other access" in denied.stderr, \
                     "DNS authority accepted a group-readable report TLS private key"
                 print("PASS: DNS authority refuses group-readable report TLS private keys")
+
+                linked_dns_key = root / "dns-report-server-link.key"
+                linked_dns_key.symlink_to(dns_key)
+                linked_config = json.loads(json.dumps(config_document))
+                linked_config["AgentReports"]["ServerKeyPem"] = str(linked_dns_key)
+                linked_config["AgentReports"]["ListenPort"] = port()
+                linked_path = root / "linked-dns-report-server.json"
+                linked_path.write_text(json.dumps(linked_config))
+                denied = subprocess.run(["dotnet", dns_dll, linked_path],
+                                         capture_output=True, text=True, timeout=10)
+                assert denied.returncode != 0 and "links" in denied.stderr, \
+                    "DNS authority accepted a symlinked report TLS private key"
+                print("PASS: DNS authority refuses symlinked report TLS private keys")
             dns_log = root / f"dns-{node}.log"
             dns_log_handle = dns_log.open("w")
             stack.callback(dns_log_handle.close)
