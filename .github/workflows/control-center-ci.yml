@@ -46,6 +46,8 @@ jobs:
         run: dotnet build GatewayCoreYarp.csproj --configuration Release
       - name: Build separate gateway agent
         run: dotnet build GatewayAgent/GatewayCoreGatewayAgent.csproj --configuration Release
+      - name: Test read-only GitOps route and cluster plan
+        run: dotnet run --project tests/GatewayConfigPlanTests/GatewayConfigPlanTests.csproj --configuration Release
       - name: Run load balancing core tests
         run: dotnet run --project tests/LoadBalancingCoreTests/LoadBalancingCoreTests.csproj --configuration Release
       - name: Verify actual Control Center console cannot block gateway request threads
