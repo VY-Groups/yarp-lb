@@ -783,7 +783,8 @@ try
     {
         var edns = transport == "UDP" ? (await QueryWire("app.integration.test",1,ednsVersion:0)).Reply
             : await TcpQuery(ednsRequest);
-        Must((Dns16(edns,2)&0xF)==0 && (Dns16(edns,2)&0x0020)==0 && Dns16(edns,6)==1 &&
+        Must((Dns16(edns,2)&0xF)==0 && (Dns16(edns,2)&0x0400)!=0 &&
+             (Dns16(edns,2)&0x0020)==0 && Dns16(edns,6)==1 &&
              Dns16(edns,10)==1 && Dns16(edns,edns.Length-10)==41 &&
              Dns16(edns,edns.Length-2)==0 && (edns[^4]&0x80)==0,
              $"{transport} EDNS0 accepts and ignores an unknown option without echoing its bytes or claiming DNSSEC");
@@ -980,7 +981,8 @@ byte[] DnsRequest(string domain, ushort type, byte? ednsVersion=null)
     {
         // OPT: root, type 41, UDP payload 1232, ext rcode 0, version as configured,
         // DO bit supplied (must not be reflected without DNSSEC support).
-        request.AddRange(new byte[]{0,0,41,4,208,0,ednsVersion.Value,0x80,0,0,7,253,233,0,3,1,2,3});
+        // Include an unknown EDNS option in the private-use range (65001/0xFDE9).
+        request.AddRange(new byte[]{0,0,41,4,208,0,ednsVersion.Value,0x80,0,0,7,0xFD,0xE9,0,3,1,2,3});
     }
     return request.ToArray();
 }
