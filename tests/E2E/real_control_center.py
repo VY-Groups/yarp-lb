@@ -44,7 +44,9 @@ class Origin(BaseHTTPRequestHandler):
         self.end_headers()
         # Headers arrive immediately but the full response stream remains open.
         # This makes the admission E2E prove that a permit covers response-body copy.
-        if self.path.startswith("/hold"):
+        if self.path.startswith("/hold-short"):
+            time.sleep(.8)
+        elif self.path.startswith("/hold"):
             time.sleep(3.5)
         self.wfile.write(body)
     def log_message(self, *_): pass
@@ -233,7 +235,9 @@ def verify_destination_admission(base:str,admin:Client,reviewer:Client,initial:d
         "decision":"approve","reason":"Approve isolated admission integration fixture"})
     eventually(admin,"/admit/normal","e2e-origin:/normal")
     with ThreadPoolExecutor(max_workers=4) as pool:
-        first=pool.submit(response,base,"/admit/hold")
+        # Keep the first response open long enough to observe its active lease,
+        # but below the configured queue timeout so the FIFO waiter can be granted.
+        first=pool.submit(response,base,"/admit/hold-short")
         try:
             wait_metric(admin,"yarp_control_destination_admission_inflight_requests",1,timeout=5)
         except AssertionError as error:
@@ -351,13 +355,14 @@ def acceptance(base:str,origin_port:int):
     check("e2e" in approved["routes"] and approved["revision"]!=initial["revision"],
         "second admin applied approved route with revision bump")
     eventually(anonymous,"/e2e/real-proxy","e2e-origin:/real-proxy")
+    rollback_backup=admin.request("GET","/admin/api/backups")[0]
     verify_destination_admission(base,admin,reviewer,approved)
     check(admin.request("GET","/admin/api/change-requests/"+pending["id"])["status"]=="Approved",
         "approved change recorded and auditable")
     admin.request("POST","/admin/api/change-requests",change,expect=200)  # stale drafts may be submitted but not applied
     backups=admin.request("GET","/admin/api/backups")
     check(bool(backups),"rollback backup exists after approval")
-    admin.request("POST","/admin/api/restore/"+backups[0],{})
+    admin.request("POST","/admin/api/restore/"+rollback_backup,{})
     check("e2e" not in admin.request("GET","/admin/api/state")["routes"],
         "authorized restore rolls routing config back")
     check(admin.request("GET","/admin/api/mail")["enabled"] is False,"SMTP starts disabled")

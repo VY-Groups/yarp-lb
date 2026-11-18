@@ -1763,11 +1763,34 @@ app.MapReverseProxy(proxyPipeline =>
     proxyPipeline.Use(async (context, next) =>
     {
         var feature = context.GetReverseProxyFeature();
-        var selected = feature.ProxiedDestination;
-        if (selected is null || !DestinationAdmissionPolicy.TryParse(
+        // YARP sets ProxiedDestination in its final forwarding middleware, after
+        // this policy stage. Load balancing has already reduced AvailableDestinations
+        // to the exact destination that the final forwarder will use.
+        var candidates = feature.AvailableDestinations;
+        if (candidates.Count == 0)
+        {
+            await next();
+            return;
+        }
+        if (candidates.Count > 1)
+        {
+            var admissionEnabled = candidates.Any(candidate =>
+                DestinationAdmissionPolicy.TryParse(candidate.Model.Config.Metadata,
+                    out var candidatePolicy, out _) && candidatePolicy.Enabled);
+            if (admissionEnabled)
+            {
+                context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+                context.Response.Headers["X-GatewayCore-Rejection"] = "admission_destination_unresolved";
+                return;
+            }
+            await next();
+            return;
+        }
+
+        var selected = candidates[0];
+        if (!DestinationAdmissionPolicy.TryParse(
                 selected.Model.Config.Metadata, out var policy, out var policyError))
         {
-            if (selected is null) { await next(); return; }
             context.Response.StatusCode = StatusCodes.Status500InternalServerError;
             context.Response.Headers["X-GatewayCore-Rejection"] = "invalid_admission_config";
             await context.Response.WriteAsync("Invalid destination admission configuration.");
