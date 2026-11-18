@@ -172,10 +172,12 @@ try
     if (!duplicateVantageRejected)
         throw new Exception("FAIL: two agent identities from the same declared vantage group were counted as independent votes");
     var observed = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-    AgentHealthReport Report(string agent, long sequence, string verdict, int confidence, int? latency, ECDsa signer) {
+    AgentHealthReport Report(string agent, long sequence, string verdict, int confidence, int? latency,
+        ECDsa signer, long? observedAt = null) {
+        var observedTime = observedAt ?? observed;
         var unsigned = new AgentHealthReport(1, agent, AgentHealthReportContract.KeyId(signer),
             "lab.example.test", "mumbai", 3,
-            sequence, observed, observed + 10, "http", verdict, confidence, latency, "pending");
+            sequence, observedTime, observedTime + 10, "http", verdict, confidence, latency, "pending");
         return unsigned with { Signature = AgentHealthReportContract.Sign(unsigned, signer) };
     }
     using (var reports = new AgentHealthReportStore(agents, targets, statePath, 10, 5, 2))
@@ -186,6 +188,11 @@ try
             throw new Exception("FAIL: authenticated per-agent request budget is not bounded");
         if (reports.IsHealthy("lab.example.test", "mumbai", 100))
             throw new Exception("FAIL: missing multi-vantage evidence admitted a target");
+        if (reports.TryAccept(Report("agent-1", 1, "healthy", 1000, 12, signing1,
+                    observedAt: observed + 3), client1,
+                DateTimeOffset.FromUnixTimeSeconds(observed), 100))
+            throw new Exception("FAIL: signed report beyond allowed future clock skew was accepted");
+        Console.WriteLine("PASS: signed report outside future clock-skew bound is rejected before replay state advances");
         if (!reports.TryAccept(Report("agent-1", 1, "healthy", 1000, 12, signing1), client1,
                 DateTimeOffset.FromUnixTimeSeconds(observed), 100) ||
             reports.IsHealthy("lab.example.test", "mumbai", 101))
