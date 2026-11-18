@@ -39,10 +39,15 @@ remains available to the operator to diagnose outages, but expired request
 counts are withheld.
 
 A higher-sequence, properly authenticated fresh snapshot restores reporting.
+Receipt-age expiry uses the process monotonic clock (`TimeProvider`), so NTP
+correction or wall-clock rollback cannot lengthen or prematurely expire this
+TTL. The current-minute protocol check still uses UTC wall time; if that minute
+is incorrect or regresses, snapshots fail closed until the minute agrees again.
 Expiry NEVER resets the remote boot epoch or previously accepted sequence:
 replaying an old signed frame cannot revive stale counts. A local clock moved
-backward also fails closed for freshness. Tests use a controllable clock for
-deterministic expiry, recovery and replay checks.
+backward does not change elapsed receipt age. Tests use separate controllable
+wall and monotonic clocks for deterministic rollback, expiry, recovery and
+replay checks.
 
 **Strict enforcement is not provided**: this expiry is about best-effort
 telemetry only. No synchronized HAProxy stick tables, request admission,
