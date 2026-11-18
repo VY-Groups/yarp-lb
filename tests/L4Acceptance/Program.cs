@@ -13,12 +13,14 @@ var tcpB = new TcpListener(IPAddress.Loopback, 19112);
 tcpA.Start(); tcpB.Start();
 var proxyBackend = new TcpListener(IPAddress.Loopback,19113);
 var idleBackend = new TcpListener(IPAddress.Loopback,19114);
-proxyBackend.Start(); idleBackend.Start();
+var halfCloseBackend = new TcpListener(IPAddress.Loopback,19115);
+proxyBackend.Start(); idleBackend.Start(); halfCloseBackend.Start();
 using var udpA = new UdpClient(new IPEndPoint(IPAddress.Loopback, 19121));
 using var udpB = new UdpClient(new IPEndPoint(IPAddress.Loopback, 19122));
 var workers = new [] {
     TcpEcho(tcpA, "A", stop.Token), TcpEcho(tcpB, "B", stop.Token),
     ProxyProtocolBackend(proxyBackend, stop.Token), IdleBackend(idleBackend, stop.Token),
+    HalfCloseBackend(halfCloseBackend, stop.Token),
     UdpEcho(udpA, "A", stop.Token), UdpEcho(udpB, "B", stop.Token)
 };
 var scratch = Path.Combine(Path.GetTempPath(), "yarp-l4-" + Guid.NewGuid().ToString("N"));
@@ -34,6 +36,9 @@ File.WriteAllText(configFile, JsonSerializer.Serialize(new {
       new { Name = "tcp-idle", ListenHost="127.0.0.1", ListenPort=19013,
         TcpIdleTimeoutSeconds=1,
         Backends = new [] { new { Host="127.0.0.1", Port=19114 } } },
+      new { Name = "tcp-half-close", ListenHost="127.0.0.1", ListenPort=19015,
+        TcpIdleTimeoutSeconds=5,
+        Backends = new [] { new { Host="127.0.0.1", Port=19115 } } },
       new { Name = "tcp-drain", ListenHost="127.0.0.1", ListenPort=19014,
         Backends = new [] { new { Host="127.0.0.1", Port=19111, DrainNewConnections=true },
           new { Host="127.0.0.1", Port=19112, DrainNewConnections=false } } } },
@@ -78,6 +83,7 @@ try
         Assert((await TcpRoundTrip("drain-"+i,19014)).StartsWith("B|"),
             "backend flagged draining does not receive new TCP streams");
     Assert(await ValidateProxyHeader(), "PROXY v1 reports source and destination before application bytes");
+    Assert(await ValidateTcpHalfClose(), "client half-close reaches backend while backend response still drains");
     Assert(await ValidateTcpIdle(), "idle TCP stream closed by configured timeout");
     // Verify active health rejects down nodes rather than repeatedly relying on connect exceptions.
     tcpA.Stop();
@@ -91,7 +97,7 @@ try
 finally
 {
     stop.Cancel();
-    tcpA.Stop();tcpB.Stop();proxyBackend.Stop();idleBackend.Stop();
+    tcpA.Stop();tcpB.Stop();proxyBackend.Stop();idleBackend.Stop();halfCloseBackend.Stop();
     if(!proxy.HasExited)proxy.Kill(entireProcessTree:true);
     await proxy.WaitForExitAsync();
     try { await Task.WhenAll(workers); } catch {}
@@ -146,6 +152,24 @@ async Task<bool> ValidateTcpIdle()
         return await client.GetStream().ReadAsync(new byte[1],timeout.Token)==0;
     }
     catch(OperationCanceledException) { return false; }
+}
+async Task<bool> ValidateTcpHalfClose()
+{
+    using var client = new TcpClient(AddressFamily.InterNetwork);
+    await client.ConnectAsync(IPAddress.Loopback,19015);
+    var stream = client.GetStream();
+    await stream.WriteAsync(Encoding.UTF8.GetBytes("request-body"));
+    client.Client.Shutdown(SocketShutdown.Send);
+    using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+    using var response = new MemoryStream();
+    var buffer = new byte[128];
+    while (true)
+    {
+        var count = await stream.ReadAsync(buffer,timeout.Token);
+        if (count == 0) break;
+        response.Write(buffer,0,count);
+    }
+    return Encoding.UTF8.GetString(response.ToArray()) == "complete|request-body";
 }
 async Task<bool> ValidatePublicBindDenied()
 {
@@ -255,6 +279,37 @@ static async Task IdleBackend(TcpListener listener, CancellationToken token)
                 {
                     try { await Task.Delay(TimeSpan.FromSeconds(10),token); }
                     catch(OperationCanceledException) { }
+                }
+            },token);
+        }
+    }
+    catch(OperationCanceledException) { }
+    catch(SocketException) when(token.IsCancellationRequested) { }
+}
+static async Task HalfCloseBackend(TcpListener listener, CancellationToken token)
+{
+    try
+    {
+        while (!token.IsCancellationRequested)
+        {
+            var client=await listener.AcceptTcpClientAsync(token);
+            _=Task.Run(async() =>
+            {
+                using(client)
+                using(var payload = new MemoryStream())
+                {
+                    var stream=client.GetStream();
+                    var buffer=new byte[128];
+                    try
+                    {
+                        int count;
+                        while((count=await stream.ReadAsync(buffer,token))>0)
+                            payload.Write(buffer,0,count);
+                        var result=Encoding.UTF8.GetBytes("complete|"+
+                            Encoding.UTF8.GetString(payload.ToArray()));
+                        await stream.WriteAsync(result,token);
+                    }
+                    catch(Exception ex) when(ex is IOException or SocketException or OperationCanceledException) { }
                 }
             },token);
         }
