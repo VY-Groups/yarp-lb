@@ -935,12 +935,31 @@ try
     var soa = await TcpQuery(DnsRequest("app.integration.test",6));
     Must(Dns16(soa,6)==1 && Dns16(soa,8)==0 && (Dns16(soa,2)&0xF)==0,
         "SOA query has one authoritative answer and a valid serial");
+    var soaFields = ReadSoa(soa, 6);
+    Must(soaFields.Owner=="app.integration.test" &&
+         soaFields.MName=="ns1.app.integration.test" &&
+         soaFields.RName=="hostmaster.app.integration.test" &&
+         soaFields.Serial==2026111601u && soaFields.Refresh==60 &&
+         soaFields.Retry==30 && soaFields.Expire==3600 &&
+         soaFields.RecordTtl==10 && soaFields.Minimum==10,
+        "SOA wire data preserves configured authority, serial, timers and cache TTL");
     var nx = await TcpQuery(DnsRequest("missing.app.integration.test",1));
     Must((Dns16(nx,2)&0xF)==3 && Dns16(nx,6)==0 && Dns16(nx,8)==1,
         "in-zone unknown name uses NXDOMAIN with SOA negative cache");
+    var nxSoa = ReadSoa(nx, 8);
+    Must(nxSoa.Owner=="app.integration.test" && nxSoa.Serial==2026111601u &&
+         nxSoa.RecordTtl==10 && nxSoa.Minimum==10,
+        "NXDOMAIN authority carries apex SOA with RFC 2308 negative-cache lifetime");
     var nodata = await TcpQuery(DnsRequest("ha.integration.test",28));
     Must((Dns16(nodata,2)&0xF)==0 && Dns16(nodata,6)==0 && Dns16(nodata,8)==1,
         "unsupported AAAA is NODATA, not a fabricated IPv6 address");
+    var nodataSoa = ReadSoa(nodata, 8);
+    Must(nodataSoa.Owner=="ha.integration.test" &&
+         nodataSoa.MName=="ns1.ha.integration.test" &&
+         nodataSoa.RName=="hostmaster.ha.integration.test" &&
+         nodataSoa.RecordTtl==10 &&
+         nodataSoa.Minimum==10,
+        "NODATA authority carries apex SOA and bounded negative-cache lifetime");
     var ednsRequest = DnsRequest("app.integration.test",1,ednsVersion:0);
     foreach (var transport in new[] { "UDP", "TCP" })
     {
@@ -1082,6 +1101,82 @@ async Task<(int Status,string? Address,int Ttl)> Query(string domain)
 }
 
 ushort Dns16(byte[] packet, int index) => BinaryPrimitives.ReadUInt16BigEndian(packet.AsSpan(index,2));
+
+(string Owner,string MName,string RName,uint Serial,uint Refresh,uint Retry,uint Expire,uint RecordTtl,uint Minimum)
+    ReadSoa(byte[] packet,int sectionOffset)
+{
+    var position=12;
+    ReadWireName(packet,ref position);
+    position+=4; // question type and class
+    var answers=Dns16(packet,6);
+    var authorities=Dns16(packet,8);
+    if(sectionOffset==8)
+        for(var i=0;i<answers;i++) SkipDnsRecord(packet,ref position);
+    var records=sectionOffset==6?answers:sectionOffset==8?authorities:0;
+    for(var i=0;i<records;i++)
+    {
+        var owner=ReadWireName(packet,ref position);
+        if(position+10>packet.Length) throw new InvalidDataException("Truncated DNS RR header");
+        var type=Dns16(packet,position);
+        var ttl=BinaryPrimitives.ReadUInt32BigEndian(packet.AsSpan(position+4,4));
+        var size=Dns16(packet,position+8);
+        position+=10;
+        var end=position+size;
+        if(end>packet.Length) throw new InvalidDataException("Truncated DNS RR data");
+        if(type==6)
+        {
+            var mname=ReadWireName(packet,ref position);
+            var rname=ReadWireName(packet,ref position);
+            if(position+20!=end) throw new InvalidDataException("Invalid SOA RDATA length");
+            var values=new uint[5];
+            for(var j=0;j<values.Length;j++,position+=4)
+                values[j]=BinaryPrimitives.ReadUInt32BigEndian(packet.AsSpan(position,4));
+            return(owner,mname,rname,values[0],values[1],values[2],values[3],ttl,values[4]);
+        }
+        position=end;
+    }
+    throw new InvalidDataException("Expected SOA resource record was absent");
+}
+
+void SkipDnsRecord(byte[] packet,ref int position)
+{
+    ReadWireName(packet,ref position);
+    if(position+10>packet.Length) throw new InvalidDataException("Truncated DNS RR header");
+    var size=Dns16(packet,position+8);
+    position+=10+size;
+    if(position>packet.Length) throw new InvalidDataException("Truncated DNS RR data");
+}
+
+string ReadWireName(byte[] packet,ref int position)
+{
+    var labels=new List<string>();
+    var cursor=position;
+    var next=-1;
+    var jumps=0;
+    while(true)
+    {
+        if(cursor>=packet.Length) throw new InvalidDataException("Truncated DNS name");
+        var length=packet[cursor++];
+        if(length==0)
+        {
+            position=next<0?cursor:next;
+            return string.Join('.',labels);
+        }
+        if((length&0xC0)==0xC0)
+        {
+            if(cursor>=packet.Length || ++jumps>16) throw new InvalidDataException("Invalid DNS compression pointer");
+            var target=((length&0x3F)<<8)|packet[cursor++];
+            if(target>=packet.Length) throw new InvalidDataException("DNS compression pointer out of bounds");
+            if(next<0) next=cursor;
+            cursor=target;
+            continue;
+        }
+        if((length&0xC0)!=0 || length>63 || cursor+length>packet.Length)
+            throw new InvalidDataException("Invalid DNS label");
+        labels.Add(Encoding.ASCII.GetString(packet,cursor,length));
+        cursor+=length;
+    }
+}
 
 ushort[] DnsRecordTypes(byte[] packet, int section)
 {
