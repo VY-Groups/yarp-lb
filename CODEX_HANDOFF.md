@@ -707,3 +707,27 @@ performance overhead, parity and deployment evidence remain. #36 and #109 also
 remain open for independent physical VRRP/ECMP capacity/fault testing and
 complete authenticated health quorum/fencing respectively. Annual 99.9%
 availability is still unmeasured; production remains NO-GO.
+
+
+## Continuation — verified Alertmanager webhook delivery (2026-11-18)
+
+PR #143 merged at `56c0f3d4dc0da2543138df16a7810654d6aa7e77`. It adds a
+loopback-only Alertmanager service and bounded in-memory webhook receiver to
+the disposable observability lab, plus an always-firing test-only Prometheus
+rule. The exact-head CI confirmed Prometheus observed the firing alert and
+Alertmanager delivered it to the receiver. Receiver contract tests, Compose
+configuration, and the real Collector/Prometheus/Grafana/Alertmanager container
+acceptance all passed at PR head `dfeb1f78a115b83c99aeab6eea71d17b2f597a2e`.
+All reported PR checks passed, including Windows/Linux application, HA,
+browser, and load acceptance. Post-merge main Actions were still running when
+this entry was prepared.
+
+This verifies test-stack alert delivery wiring only. The receiver is
+non-durable and not a customer alert destination. Issue #50 remains OPEN for
+the full metric inventory, drop/write-error accounting, absent-collector and
+exporter-shutdown behavior, overhead measurement, production retention and
+alert routes, and Windows/Linux parity. This does not prove production
+monitoring or availability. Issues #36, #52 and #109 remain open for their
+separate physical HA, public DNS/DNSSEC operations, and distributed trust/
+fencing criteria. Production remains NO-GO; annual 99.9% availability remains
+unmeasured.
