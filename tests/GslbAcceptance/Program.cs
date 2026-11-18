@@ -710,6 +710,48 @@ try
          untrustedEcsReply.AsSpan(untrustedEcsReply.Length-15,4)
              .SequenceEqual(new byte[]{127,0,0,22}),
          "untrusted DNS resolver cannot steer or receive ECS-based answers");
+    var (_, canonicalPartialEcsReply) = await QueryEcsWire("geo.integration.test", 1,
+        IPAddress.Parse("198.51.100.0"), 25);
+    Must(Dns16(canonicalPartialEcsReply, 6) == 1 &&
+         canonicalPartialEcsReply.AsSpan(canonicalPartialEcsReply.Length - 26, 4)
+             .SequenceEqual(new byte[] {127,0,0,22}) &&
+         canonicalPartialEcsReply[canonicalPartialEcsReply.Length - 5] == 24 &&
+         canonicalPartialEcsReply[canonicalPartialEcsReply.Length - 4] == 24 &&
+         canonicalPartialEcsReply.AsSpan(canonicalPartialEcsReply.Length - 3, 3)
+             .SequenceEqual(new byte[] {198,51,100}),
+         "canonical IPv4 /25 ECS uses the normalized /24 route and cache scope");
+
+    var (malformedV4EcsRequest, malformedV4EcsReply) = await QueryEcsWire(
+        "geo.integration.test", 1, IPAddress.Parse("198.51.100.42"), 25);
+    Must(Dns16(malformedV4EcsReply, 6) == 1 &&
+         malformedV4EcsReply.AsSpan(malformedV4EcsReply.Length - 15, 4)
+             .SequenceEqual(new byte[] {127,0,0,21}) &&
+         malformedV4EcsReply.AsSpan(malformedV4EcsReply.Length - 11, 11)
+             .SequenceEqual(new byte[] {0,0,41,4,208,0,0,0,0,0,0}),
+         "IPv4 ECS with nonzero unused /25 host bits falls back and is not echoed over UDP");
+    var malformedV4EcsTcpReply = await TcpQuery(malformedV4EcsRequest);
+    Must(Dns16(malformedV4EcsTcpReply, 6) == 1 &&
+         malformedV4EcsTcpReply.AsSpan(malformedV4EcsTcpReply.Length - 15, 4)
+             .SequenceEqual(new byte[] {127,0,0,21}) &&
+         malformedV4EcsTcpReply.AsSpan(malformedV4EcsTcpReply.Length - 11, 11)
+             .SequenceEqual(new byte[] {0,0,41,4,208,0,0,0,0,0,0}),
+         "IPv4 ECS with nonzero unused /25 host bits falls back and is not echoed over TCP");
+
+    var (malformedV6EcsRequest, malformedV6EcsReply) = await QueryEcsWire(
+        "geo.integration.test", 1, IPAddress.Parse("2001:db8:abcd:ff::1"), 57);
+    Must(Dns16(malformedV6EcsReply, 6) == 1 &&
+         malformedV6EcsReply.AsSpan(malformedV6EcsReply.Length - 15, 4)
+             .SequenceEqual(new byte[] {127,0,0,21}) &&
+         malformedV6EcsReply.AsSpan(malformedV6EcsReply.Length - 11, 11)
+             .SequenceEqual(new byte[] {0,0,41,4,208,0,0,0,0,0,0}),
+         "IPv6 ECS with nonzero unused /57 host bits falls back and is not echoed over UDP");
+    var malformedV6EcsTcpReply = await TcpQuery(malformedV6EcsRequest);
+    Must(Dns16(malformedV6EcsTcpReply, 6) == 1 &&
+         malformedV6EcsTcpReply.AsSpan(malformedV6EcsTcpReply.Length - 15, 4)
+             .SequenceEqual(new byte[] {127,0,0,21}) &&
+         malformedV6EcsTcpReply.AsSpan(malformedV6EcsTcpReply.Length - 11, 11)
+             .SequenceEqual(new byte[] {0,0,41,4,208,0,0,0,0,0,0}),
+         "IPv6 ECS with nonzero unused /57 host bits falls back and is not echoed over TCP");
     for(var i=0;i<12;i++)
         Must((await Query("geo.integration.test")).Address=="127.0.0.21",
             "IPv4 resolver /32 specific region beats broader /8 mapping");
