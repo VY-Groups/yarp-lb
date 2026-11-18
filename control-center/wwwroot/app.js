@@ -609,16 +609,57 @@ function updateCluster(id = '') { const old = data.clusters[id] || { Destination
             data.routes[rid].ClusterId = v.id;
     }
 } data.clusters[v.id] = c; edit(); }); }
-function updateDest(id = '') { const [cid, did] = id ? id.split('::') : ['', '']; const old = cid ? (data.clusters[cid]?.Destinations?.[did] ?? data.disabled[id]) : null; modal(did ? 'Edit backend' : 'Add backend', 'Provide a reachable absolute HTTP(S) URL ending in /. HTTPS certificate validation remains enabled.', [{ name: 'cluster', label: 'Cluster', value: cid || keys(data.clusters)[0] || '', options: keys(data.clusters) }, { name: 'id', label: 'Destination ID', value: did }, { name: 'address', label: 'Backend URL', value: old?.Address || 'https://api01.internal.example.com:5001/' }, { name: 'weight', label: 'Traffic weight (1–100)', value: String(old?.Metadata?.Weight ?? '1') }, { name: 'role', label: 'Traffic role (PrimaryBackup policy only)', value: old?.Metadata?.TrafficRole || 'primary', options: ['primary', 'backup'] }], v => { if (!validId(v.id) || !data.clusters[v.cluster] || !/^https?:\/\/[^\s]+\/$/.test(v.address))
-    throw Error('Invalid ID, cluster or URL; URL must end in /'); if (!/^(?:[1-9]|[1-9][0-9]|100)$/.test(v.weight))
-    throw Error('Weight must be an integer from 1 to 100'); if (!['primary', 'backup'].includes(v.role))
-    throw Error('Traffic role must be primary or backup'); const newKey = v.cluster + '::' + v.id; const isDisabled = !!data.disabled[id]; if (id) {
-    delete data.clusters[cid].Destinations[did];
-    delete data.disabled[id];
-} const configured = { ...old, Address: v.address, Metadata: { ...(old?.Metadata || {}), Weight: String(v.weight), TrafficRole: v.role } }; if (isDisabled)
-    data.disabled[newKey] = configured;
-else
-    data.clusters[v.cluster].Destinations[v.id] = configured; edit(); }); }
+function updateDest(id = '') {
+    const [cid, did] = id ? id.split('::') : ['', ''];
+    const old = cid ? (data.clusters[cid]?.Destinations?.[did] ?? data.disabled[id]) : null;
+    const meta = old?.Metadata || {};
+    modal(did ? 'Edit backend' : 'Add backend', 'Admission limits are optional and apply to requests selected for this destination. The slot is held until the full response or stream ends.', [
+        { name: 'cluster', label: 'Cluster', value: cid || keys(data.clusters)[0] || '', options: keys(data.clusters) },
+        { name: 'id', label: 'Destination ID', value: did },
+        { name: 'address', label: 'Backend URL', value: old?.Address || 'https://api01.internal.example.com:5001/' },
+        { name: 'weight', label: 'Traffic weight (1–100)', value: String(meta.Weight ?? '1') },
+        { name: 'role', label: 'Traffic role (PrimaryBackup policy only)', value: meta.TrafficRole || 'primary', options: ['primary', 'backup'] },
+        { name: 'admissionMax', label: 'Maximum requests in flight (optional)', value: String(meta['GatewayCore.Admission.MaxInFlight'] ?? ''), kind: 'number', optional: true },
+        { name: 'admissionPending', label: 'Maximum queued requests (0–4096; default 0)', value: String(meta['GatewayCore.Admission.MaxPending'] ?? ''), kind: 'number', optional: true },
+        { name: 'admissionTimeout', label: 'Queue wait timeout in milliseconds (1–60000; default 5000)', value: String(meta['GatewayCore.Admission.QueueTimeoutMs'] ?? ''), kind: 'number', optional: true }
+    ], v => {
+        if (!validId(v.id) || !data.clusters[v.cluster] || !/^https?:\/\/[^\s]+\/$/.test(v.address))
+            throw Error('Invalid ID, cluster or URL; URL must end in /');
+        if (!/^(?:[1-9]|[1-9][0-9]|100)$/.test(v.weight))
+            throw Error('Weight must be an integer from 1 to 100');
+        if (!['primary', 'backup'].includes(v.role))
+            throw Error('Traffic role must be primary or backup');
+        const max = v.admissionMax.trim(), pending = v.admissionPending.trim(), timeout = v.admissionTimeout.trim();
+        if (max && (!/^[1-9][0-9]*$/.test(max) || Number(max) > 50000))
+            throw Error('Maximum in-flight must be an integer from 1 to 50000');
+        if ((pending !== '' || timeout !== '') && !max)
+            throw Error('Set a maximum in-flight value to enable destination admission');
+        if (max && pending && (!/^(0|[1-9][0-9]*)$/.test(pending) || Number(pending) > 4096))
+            throw Error('Maximum queued requests must be an integer from 0 to 4096');
+        if (max && timeout && (!/^[1-9][0-9]*$/.test(timeout) || Number(timeout) > 60000))
+            throw Error('Queue timeout must be an integer from 1 to 60000 milliseconds');
+        const newKey = v.cluster + '::' + v.id, isDisabled = !!data.disabled[id];
+        if (id) {
+            delete data.clusters[cid].Destinations[did];
+            delete data.disabled[id];
+        }
+        const metadata = { ...(old?.Metadata || {}), Weight: String(v.weight), TrafficRole: v.role };
+        delete metadata['GatewayCore.Admission.MaxInFlight'];
+        delete metadata['GatewayCore.Admission.MaxPending'];
+        delete metadata['GatewayCore.Admission.QueueTimeoutMs'];
+        if (max) {
+            metadata['GatewayCore.Admission.MaxInFlight'] = max;
+            metadata['GatewayCore.Admission.MaxPending'] = pending || '0';
+            metadata['GatewayCore.Admission.QueueTimeoutMs'] = timeout || '5000';
+        }
+        const configured = { ...old, Address: v.address, Metadata: metadata };
+        if (isDisabled)
+            data.disabled[newKey] = configured;
+        else
+            data.clusters[v.cluster].Destinations[v.id] = configured;
+        edit();
+    });
+}
 function act(type, id) {
     if (type === 'org-edit') {
         editOrganization();
@@ -1302,7 +1343,7 @@ async function performFleetRollout() {
 async function destinationMetrics() {
     try {
         const x = await api('/admin/api/destination-metrics');
-        $('content').innerHTML = `<div class="card"><h2>Destination-level request observations</h2><p class="subtle">${esc(x.scope)} · ${esc(x.timestampUtc)}</p><div class="tablewrap"><table><thead><tr><th>Cluster / destination</th><th>Requests</th><th>HTTP 4xx</th><th>HTTP 5xx</th><th>Mean latency (ms)</th></tr></thead><tbody>${(x.destinations || []).map((d) => `<tr><td>${esc(d.id)}</td><td>${esc(d.requests)}</td><td>${esc(d.clientErrors4xx)}</td><td>${esc(d.failures5xx)}</td><td>${esc(d.meanLatencyMs)}</td></tr>`).join('') || '<tr><td colspan="5">No routed requests observed yet.</td></tr>'}</tbody></table></div></div>`;
+        $('content').innerHTML = `<div class="card"><h2>Destination-level request observations</h2><p class="subtle">${esc(x.scope)} · ${esc(x.timestampUtc)}</p><p>Tracked destination limit: ${esc(x.trackedDestinationLimit)} · Requests without per-destination counters after the limit: <strong>${esc(x.untrackedDestinationRequests)}</strong></p><div class="tablewrap"><table><thead><tr><th>Cluster / destination</th><th>Requests</th><th>HTTP 4xx</th><th>HTTP 5xx</th><th>Mean latency (ms)</th></tr></thead><tbody>${(x.destinations || []).map((d) => `<tr><td>${esc(d.id)}</td><td>${esc(d.requests)}</td><td>${esc(d.clientErrors4xx)}</td><td>${esc(d.failures5xx)}</td><td>${esc(d.meanLatencyMs)}</td></tr>`).join('') || '<tr><td colspan="5">No routed requests observed yet.</td></tr>'}</tbody></table></div></div>`;
     }
     catch (e) {
         show(String(e), true);

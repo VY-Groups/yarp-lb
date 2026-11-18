@@ -30,6 +30,8 @@ assert '/admin/api/reports/traffic.json' in code
 assert '/admin/api/reports/traffic.csv' in code
 assert 'RequireRole("Administrator", "Operator")' in code
 assert 'durationBuckets = requestHistogram.Snapshot()' in code
+assert 'untrackedDestinationRequests = destinationTelemetry.UntrackedRequests' in code
+assert 'Tracked destination limit:' in front and 'untrackedDestinationRequests' in front
 assert 'Traffic JSON' in front and 'Traffic CSV' in front
 assert 'Backend health JSON' in front and 'Backend health CSV' in front
 assert '/admin/api/reports/health.json' in code and '/admin/api/reports/health.csv' in code

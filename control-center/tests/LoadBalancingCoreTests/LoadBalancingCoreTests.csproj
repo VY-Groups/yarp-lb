@@ -6,6 +6,10 @@
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
     <Compile Include="../../ProxyConcurrencySettings.cs" Link="ProxyConcurrencySettings.cs" />
     <Compile Include="ProxyConcurrencyTests.cs" />
+    <Compile Include="../../DestinationAdmission.cs" Link="DestinationAdmission.cs" />
+    <Compile Include="../../DestinationTelemetry.cs" Link="DestinationTelemetry.cs" />
+    <Compile Include="DestinationAdmissionTests.cs" />
+    <Compile Include="DestinationTelemetryTests.cs" />
     <Compile Include="../../BoundedPeerRateTable.cs" Link="BoundedPeerRateTable.cs" />
     <Compile Include="../../GatewayClientAddress.cs" Link="GatewayClientAddress.cs" />
     <Compile Include="../../GatewayRequestHistogram.cs" Link="GatewayRequestHistogram.cs" />

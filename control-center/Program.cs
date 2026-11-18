@@ -76,7 +76,10 @@ if (OperatingSystem.IsLinux() && !ec2Lab)
 builder.Configuration.AddJsonFile(applicationConfigPath, optional: false, reloadOnChange: true);
 builder.Services.AddReverseProxy()
     .LoadFromConfig(builder.Configuration.GetSection("ReverseProxy"))
-    .ConfigureHttpClient(BackendMutualTls.Configure);
+    .ConfigureHttpClient(BackendMutualTls.Configure)
+    .AddConfigFilter<DestinationAdmissionConfigFilter>();
+builder.Services.AddSingleton<DestinationAdmissionManager>();
+builder.Services.AddHostedService<DestinationAdmissionRegistryReconciler>();
 // Custom policies are registered on every serving YARP instance, never on the UI alone.
 builder.Services.AddSingleton<ILoadBalancingPolicy, WeightedRandomPolicy>();
 builder.Services.AddSingleton<ILoadBalancingPolicy, SourceIpHashPolicy>();
@@ -365,11 +368,13 @@ app.Use(async (ctx, next) =>
             Math.Round(elapsed * 1000.0 / System.Diagnostics.Stopwatch.Frequency, 3));
     }
 });
-var destinationTelemetry = new ConcurrentDictionary<string, DestinationCounters>();
+var destinationTelemetry = new DestinationTelemetry();
 app.MapGet("/admin/api/destination-metrics", () => Results.Ok(new {
     scope = "This gateway instance; routed requests only; counters reset after restart",
     timestampUtc = DateTimeOffset.UtcNow,
-    destinations = destinationTelemetry.OrderBy(x => x.Key).Select(x => new {
+    trackedDestinationLimit = DestinationTelemetry.MaximumTrackedDestinations,
+    untrackedDestinationRequests = destinationTelemetry.UntrackedRequests,
+    destinations = destinationTelemetry.Entries.OrderBy(x => x.Key).Select(x => new {
         id = x.Key, requests = Interlocked.Read(ref x.Value.Requests),
         failures5xx = Interlocked.Read(ref x.Value.ServerErrors),
         clientErrors4xx = Interlocked.Read(ref x.Value.ClientErrors),
@@ -429,7 +434,9 @@ object TrafficReportSnapshot()
         meanDurationMs = total == 0 ? 0 : Math.Round(ticks * 1000.0 /
             System.Diagnostics.Stopwatch.Frequency / total, 2),
         durationBuckets = requestHistogram.Snapshot(),
-        destinations = destinationTelemetry.OrderBy(x => x.Key, StringComparer.Ordinal).Select(x => new
+        trackedDestinationLimit = DestinationTelemetry.MaximumTrackedDestinations,
+        untrackedDestinationRequests = destinationTelemetry.UntrackedRequests,
+        destinations = destinationTelemetry.Entries.OrderBy(x => x.Key, StringComparer.Ordinal).Select(x => new
         {
             id = x.Key,
             requests = Interlocked.Read(ref x.Value.Requests),
@@ -447,7 +454,7 @@ app.MapGet("/admin/api/reports/traffic.csv", () =>
     var generated = DateTimeOffset.UtcNow;
     var rows = new List<string>
     {
-        "record_type,generated_utc,process_started_utc,gateway,record_id,requests,http_2xx,http_4xx,http_5xx,mean_duration_ms"
+        "record_type,generated_utc,process_started_utc,gateway,record_id,requests,http_2xx,http_4xx,http_5xx,mean_duration_ms,untracked_destination_requests"
     };
     var total = Interlocked.Read(ref requestsTotal);
     rows.Add(string.Join(',', new[]
@@ -458,16 +465,18 @@ app.MapGet("/admin/api/reports/traffic.csv", () =>
         Interlocked.Read(ref requests4xx).ToString(System.Globalization.CultureInfo.InvariantCulture),
         Interlocked.Read(ref requests5xx).ToString(System.Globalization.CultureInfo.InvariantCulture),
         (total == 0 ? 0 : Math.Round(Interlocked.Read(ref durationTicks) * 1000.0 /
-            System.Diagnostics.Stopwatch.Frequency / total, 2)).ToString(System.Globalization.CultureInfo.InvariantCulture)
+            System.Diagnostics.Stopwatch.Frequency / total, 2)).ToString(System.Globalization.CultureInfo.InvariantCulture),
+        destinationTelemetry.UntrackedRequests.ToString(System.Globalization.CultureInfo.InvariantCulture)
     }));
-    foreach (var entry in destinationTelemetry.OrderBy(x => x.Key, StringComparer.Ordinal))
+    foreach (var entry in destinationTelemetry.Entries.OrderBy(x => x.Key, StringComparer.Ordinal))
         rows.Add(string.Join(',', new[]
         {
             "destination", Csv(generated.ToString("O")), Csv(processStartedUtc.ToString("O")), Csv(Environment.MachineName), Csv(entry.Key),
             Interlocked.Read(ref entry.Value.Requests).ToString(System.Globalization.CultureInfo.InvariantCulture),
             "", Interlocked.Read(ref entry.Value.ClientErrors).ToString(System.Globalization.CultureInfo.InvariantCulture),
             Interlocked.Read(ref entry.Value.ServerErrors).ToString(System.Globalization.CultureInfo.InvariantCulture),
-            entry.Value.MeanLatencyMs.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture)
+            entry.Value.MeanLatencyMs.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture),
+            ""
         }));
     return Results.File(Encoding.UTF8.GetBytes(string.Join("\r\n", rows) + "\r\n"),
         "text/csv; charset=utf-8", $"gateway-traffic-{generated:yyyyMMdd-HHmmss}Z.csv");
@@ -589,11 +598,41 @@ app.MapGet("/gateway/metrics", (HttpContext ctx) =>
     }
     output.AppendLine("# HELP yarp_control_destination_requests_total HTTP requests by configured YARP destination");
     output.AppendLine("# TYPE yarp_control_destination_requests_total counter");
-    foreach (var pair in destinationTelemetry)
+    foreach (var pair in destinationTelemetry.Entries)
     {
         var escaped = pair.Key.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\n", "\\n");
         output.Append("yarp_control_destination_requests_total{destination=\"").Append(escaped)
             .Append("\"} ").Append(Interlocked.Read(ref pair.Value.Requests)).Append('\n');
+    }
+    output.AppendLine("# HELP yarp_control_destination_telemetry_untracked_requests_total Requests whose destination counters were not tracked because the process cardinality cap was reached");
+    output.AppendLine("# TYPE yarp_control_destination_telemetry_untracked_requests_total counter");
+    output.Append("yarp_control_destination_telemetry_untracked_requests_total ").Append(destinationTelemetry.UntrackedRequests).Append('\n');
+    output.AppendLine("# HELP yarp_control_destination_admission_inflight_requests Requests currently holding an opt-in per-destination admission slot");
+    output.AppendLine("# TYPE yarp_control_destination_admission_inflight_requests gauge");
+    output.AppendLine("# HELP yarp_control_destination_admission_queued_requests Requests waiting in an opt-in per-destination FIFO queue");
+    output.AppendLine("# TYPE yarp_control_destination_admission_queued_requests gauge");
+    output.AppendLine("# HELP yarp_control_destination_admission_rejected_total Requests rejected because the per-destination queue was full");
+    output.AppendLine("# TYPE yarp_control_destination_admission_rejected_total counter");
+    output.AppendLine("# HELP yarp_control_destination_admission_queue_timeouts_total Waiters removed after the configured queue timeout");
+    output.AppendLine("# TYPE yarp_control_destination_admission_queue_timeouts_total counter");
+    output.AppendLine("# HELP yarp_control_destination_admission_waiter_canceled_total Waiters removed after their cancellation token is signaled (includes request abort, shutdown, and queue timeout)");
+    output.AppendLine("# TYPE yarp_control_destination_admission_waiter_canceled_total counter");
+    output.AppendLine("# HELP yarp_control_destination_admission_queue_wait_seconds Time spent by requests waiting for a per-destination slot");
+    output.AppendLine("# TYPE yarp_control_destination_admission_queue_wait_seconds summary");
+    var admission = ctx.RequestServices.GetRequiredService<DestinationAdmissionManager>();
+    foreach (var cluster in runtime.GetClusters())
+    foreach (var destination in cluster.Destinations.Values)
+    {
+        if (!admission.TryGetSnapshot(cluster.ClusterId, destination.DestinationId, out var snapshot)) continue;
+        var label = (cluster.ClusterId + "/" + destination.DestinationId)
+            .Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\n", "\\n");
+        output.Append("yarp_control_destination_admission_inflight_requests{destination=\"").Append(label).Append("\"} ").Append(snapshot.InFlight).Append('\n');
+        output.Append("yarp_control_destination_admission_queued_requests{destination=\"").Append(label).Append("\"} ").Append(snapshot.Queued).Append('\n');
+        output.Append("yarp_control_destination_admission_rejected_total{destination=\"").Append(label).Append("\"} ").Append(snapshot.Rejected).Append('\n');
+        output.Append("yarp_control_destination_admission_queue_timeouts_total{destination=\"").Append(label).Append("\"} ").Append(snapshot.TimedOut).Append('\n');
+        output.Append("yarp_control_destination_admission_waiter_canceled_total{destination=\"").Append(label).Append("\"} ").Append(snapshot.Canceled).Append('\n');
+        output.Append("yarp_control_destination_admission_queue_wait_seconds_sum{destination=\"").Append(label).Append("\"} ").Append(snapshot.WaitDurationSecondsSum.ToString("R", System.Globalization.CultureInfo.InvariantCulture)).Append('\n');
+        output.Append("yarp_control_destination_admission_queue_wait_seconds_count{destination=\"").Append(label).Append("\"} ").Append(snapshot.WaitDurationCount).Append('\n');
     }
     return Results.Text(output.ToString(), "text/plain; version=0.0.4; charset=utf-8");
 });
@@ -1157,6 +1196,9 @@ async Task<IResult> CommitReviewedChange(HttpContext ctx, JsonObject submitted)
             if (node?["Metadata"]?["SlowStartSeconds"] is JsonNode secondsNode &&
                 !LoadBalancingCore.TrySlowStartSeconds(secondsNode.ToString(), out _))
                 return Results.BadRequest(new { error = $"Destination {destId} SlowStartSeconds must be 0..600" });
+            if (!DestinationAdmissionPolicy.TryParse(node?["Metadata"] as JsonObject,
+                    out _, out var admissionError))
+                return Results.BadRequest(new { error = $"Destination {destId}: {admissionError}" });
         }
         if (c["Metadata"]?[BackendMutualTls.MetadataKey] is JsonNode clientCertificate)
         {
@@ -1719,13 +1761,127 @@ app.MapReverseProxy(proxyPipeline =>
             if (destination != null)
             {
                 var id = feature.Cluster.Config.ClusterId + "/" + destination.DestinationId;
-                var stats = destinationTelemetry.GetOrAdd(id, _ => new DestinationCounters());
-                stats.Record(context.Response.StatusCode, elapsedMs);
+                destinationTelemetry.Record(id, context.Response.StatusCode, elapsedMs);
             }
         }
     });
     proxyPipeline.UseSessionAffinity();
     proxyPipeline.UseLoadBalancing();
+    // The selected destination is already fixed. Holding this lease around the
+    // entire downstream pipeline covers body streaming, WebSockets and exceptions.
+    proxyPipeline.Use(async (context, next) =>
+    {
+        var feature = context.GetReverseProxyFeature();
+        // YARP sets ProxiedDestination in its final forwarding middleware, after
+        // this policy stage. Load balancing has already reduced AvailableDestinations
+        // to the exact destination that the final forwarder will use.
+        var candidates = feature.AvailableDestinations;
+        if (candidates.Count == 0)
+        {
+            await next();
+            return;
+        }
+        if (candidates.Count > 1)
+        {
+            var admissionEnabled = candidates.Any(candidate =>
+                DestinationAdmissionPolicy.TryParse(candidate.Model.Config.Metadata,
+                    out var candidatePolicy, out _) && candidatePolicy.Enabled);
+            if (admissionEnabled)
+            {
+                context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+                context.Response.Headers["X-GatewayCore-Rejection"] = "admission_destination_unresolved";
+                return;
+            }
+            await next();
+            return;
+        }
+
+        var selected = candidates[0];
+        var clusterId = feature.Cluster.Config.ClusterId;
+        var manager = context.RequestServices.GetRequiredService<DestinationAdmissionManager>();
+        if (!manager.TryAcquireHandle(clusterId, selected.DestinationId, out var registryHandle, out var policyConflict) || registryHandle is null)
+        {
+            if (policyConflict)
+            {
+                context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+                context.Response.Headers["X-GatewayCore-Rejection"] = "admission_policy_conflict";
+                return;
+            }
+            if (!DestinationAdmissionPolicy.TryParse(
+                    selected.Model.Config.Metadata, out var selectedPolicy, out var policyError))
+            {
+                context.Response.StatusCode = StatusCodes.Status500InternalServerError;
+                context.Response.Headers["X-GatewayCore-Rejection"] = "invalid_admission_config";
+                await context.Response.WriteAsync("Invalid destination admission configuration.");
+                return;
+            }
+            // A disabled snapshot can bypass only when there is no currently
+            // reconciled enabled policy. If a newer applied config enabled it,
+            // the manager returns its current gate before consulting this snapshot.
+            if (!selectedPolicy.Enabled) { await next(); return; }
+            context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+            context.Response.Headers["X-GatewayCore-Rejection"] = "admission_configuration_unavailable";
+            return;
+        }
+        using (registryHandle)
+        {
+        var state = registryHandle.State;
+        var policy = state.Policy;
+
+        using var waitCancellation = CancellationTokenSource.CreateLinkedTokenSource(
+            context.RequestAborted,
+            context.RequestServices.GetRequiredService<IHostApplicationLifetime>().ApplicationStopping);
+        waitCancellation.CancelAfter(policy.QueueTimeoutMs);
+        DestinationAdmissionState.DestinationAdmissionLease? lease;
+        try
+        {
+            lease = await state.AcquireAsync(waitCancellation.Token);
+        }
+        catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested)
+        {
+            return;
+        }
+        catch (OperationCanceledException)
+        {
+            if (context.RequestServices.GetRequiredService<IHostApplicationLifetime>().ApplicationStopping.IsCancellationRequested)
+            {
+                context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+                context.Response.Headers["X-GatewayCore-Rejection"] = "gateway_shutdown";
+            }
+            else
+            {
+                state.RecordTimeout();
+                context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+                context.Response.Headers["X-GatewayCore-Rejection"] = "destination_queue_timeout";
+            }
+            return;
+        }
+        if (lease is null)
+        {
+            context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+            context.Response.Headers["X-GatewayCore-Rejection"] = "destination_queue_full";
+            return;
+        }
+
+        using (lease)
+        {
+            // Do not transfer the request to a different backend. If a queued
+            // destination was removed, drained or made unhealthy, fail locally.
+            var lookup = context.RequestServices.GetRequiredService<IProxyStateLookup>();
+            if (context.RequestAborted.IsCancellationRequested) return;
+            if (!lookup.TryGetCluster(clusterId, out var currentCluster) ||
+                !currentCluster.DestinationsState.AvailableDestinations.Any(d =>
+                    string.Equals(d.DestinationId, selected.DestinationId, StringComparison.Ordinal) &&
+                    !TrafficLifecycle.IsDraining(d)))
+            {
+                context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+                context.Response.Headers["X-GatewayCore-Rejection"] = "destination_unavailable_after_queue";
+                return;
+            }
+            await next();
+        }
+        }
+    });
     proxyPipeline.UsePassiveHealthChecks();
 }).RequireRateLimiting("proxy-concurrency");
 app.Run();
@@ -1776,21 +1932,6 @@ record InventoryInput(string Id, string Name, string Type, string Address, strin
 record AdminUser(string Username, string Role, string Salt, string Hash, string? Email = null, bool Enabled = true, string SecurityStamp = "", string Provider = "Local", string DistinguishedName = "");
 
 record FleetGateway(string Id, string Url, string ClientCertificateThumbprint);
-
-// Managed destination metrics: no request paths, tokens, subjects or other high-cardinality labels.
-sealed class DestinationCounters
-{
-    public long Requests, ServerErrors, ClientErrors, TotalMicros;
-    public double MeanLatencyMs => Interlocked.Read(ref Requests) is var r && r > 0
-        ? Interlocked.Read(ref TotalMicros) / 1000.0 / r : 0;
-    public void Record(int status, double elapsedMs)
-    {
-        Interlocked.Increment(ref Requests);
-        if (status >= 500) Interlocked.Increment(ref ServerErrors);
-        else if (status >= 400) Interlocked.Increment(ref ClientErrors);
-        Interlocked.Add(ref TotalMicros, (long)(elapsedMs * 1000));
-    }
-}
 
 sealed record GatewayDestinationHealthRow(string ClusterId, string DestinationId, string ActiveHealth,
     string PassiveHealth, int InflightRequests, long Requests, long Http4xx, long Http5xx);
