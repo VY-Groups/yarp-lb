@@ -23,3 +23,24 @@ GitHub Actions test real HTTP draining, recovery, warmup distribution, active he
 
 ## Backend mTLS transport profile
 YARP clusters may set `Metadata.BackendClientCertificateThumbprint` to a 40-hex-character LocalMachine/My certificate thumbprint. The management API rejects invalid thumbprints and requires HTTPS destinations. YARP `ConfigureHttpClient` loads a trusted, valid client-auth EKU certificate with its private key in the local Windows certificate store; it does **not** alter or disable backend server-certificate trust. New cluster metadata triggers creation of a fresh outbound handler. **Production backend mTLS and managed certificate rotation remain unverified until two-sided CA trust and failure tests pass.**
+
+## Per-destination request admission
+
+Per-destination concurrency control is **opt-in**. In **Backends → Add/Edit backend**, configure maximum in-flight requests, maximum queued requests, and queue timeout. The same metadata can be set in reviewed configuration:
+
+```json
+{
+  "Address": "https://app1.example.net/",
+  "Metadata": {
+    "GatewayCore.Admission.MaxInFlight": "64",
+    "GatewayCore.Admission.MaxPending": "128",
+    "GatewayCore.Admission.QueueTimeoutMs": "5000"
+  }
+}
+```
+
+`MaxInFlight` accepts 1–50,000; `MaxPending` accepts 0–4,096 (default 0); queue timeout accepts 1–60,000 milliseconds (default 5,000). A partial or invalid policy is rejected on reviewed configuration apply and by the YARP configuration filter. Existing destinations without these metadata keys retain their prior behavior.
+
+The gateway chooses the destination first, then admits or queues the request for that destination. The queue is FIFO, bounded both per destination and to 16,384 waiters per gateway process. Queue-full and queue-timeout failures return local HTTP 503 with `X-GatewayCore-Rejection`; these responses do not replay a request or select a different backend. Before releasing a queued request, the gateway rechecks current destination health and drain state. If the selected destination became unavailable, the request gets a local 503 and is not transferred elsewhere. Client disconnect and shutdown cancel queued waiters. An acquired slot remains held around the complete YARP forwarding lifecycle, including response body streaming, WebSocket lifetime, and exceptions.
+
+This limit is **process-local**, not a shared fleet quota: with multiple gateway nodes, each node can admit up to the configured number. Use backend-side limits or a separately designed atomic shared quota if a fleet-wide ceiling is required. A queue wait seconds summary and in-flight, queued, rejected, timeout and cancellation metrics are exported at `/gateway/metrics`; destination labels have the same configured cluster/destination cardinality bound as the YARP config. Dashboards must scrape this loopback-only endpoint through an approved local collector.

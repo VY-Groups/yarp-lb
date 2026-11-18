@@ -21,6 +21,12 @@ assert.match(html,/GatewayCore Control Center/);
 assert.match(js,/Sign in to GatewayCore/);
 assert.match(ts,/Sign in to GatewayCore/);
 assert.doesNotMatch(js,/YARP Control Center/,'customer-facing product naming must be consistent');
+for (const key of ['GatewayCore.Admission.MaxInFlight','GatewayCore.Admission.MaxPending','GatewayCore.Admission.QueueTimeoutMs']) {
+  assert.ok(js.includes(key), 'backend editor must expose per-destination admission setting '+key);
+  assert.ok(ts.includes(key), 'TypeScript source must preserve per-destination admission setting '+key);
+}
+assert.ok(js.includes('Maximum in-flight must be an integer from 1 to 50000'));
+assert.ok(ts.includes('Maximum queued requests must be an integer from 0 to 4096'));
 
 assert.match(html,/aria-label="Primary navigation"/);
 assert.doesNotMatch(html,/style="/,'styles must remain in reviewed stylesheet');

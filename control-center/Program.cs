@@ -76,7 +76,9 @@ if (OperatingSystem.IsLinux() && !ec2Lab)
 builder.Configuration.AddJsonFile(applicationConfigPath, optional: false, reloadOnChange: true);
 builder.Services.AddReverseProxy()
     .LoadFromConfig(builder.Configuration.GetSection("ReverseProxy"))
-    .ConfigureHttpClient(BackendMutualTls.Configure);
+    .ConfigureHttpClient(BackendMutualTls.Configure)
+    .AddConfigFilter<DestinationAdmissionConfigFilter>();
+builder.Services.AddSingleton<DestinationAdmissionManager>();
 // Custom policies are registered on every serving YARP instance, never on the UI alone.
 builder.Services.AddSingleton<ILoadBalancingPolicy, WeightedRandomPolicy>();
 builder.Services.AddSingleton<ILoadBalancingPolicy, SourceIpHashPolicy>();
@@ -594,6 +596,33 @@ app.MapGet("/gateway/metrics", (HttpContext ctx) =>
         var escaped = pair.Key.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\n", "\\n");
         output.Append("yarp_control_destination_requests_total{destination=\"").Append(escaped)
             .Append("\"} ").Append(Interlocked.Read(ref pair.Value.Requests)).Append('\n');
+    }
+    output.AppendLine("# HELP yarp_control_destination_admission_inflight_requests Requests currently holding an opt-in per-destination admission slot");
+    output.AppendLine("# TYPE yarp_control_destination_admission_inflight_requests gauge");
+    output.AppendLine("# HELP yarp_control_destination_admission_queued_requests Requests waiting in an opt-in per-destination FIFO queue");
+    output.AppendLine("# TYPE yarp_control_destination_admission_queued_requests gauge");
+    output.AppendLine("# HELP yarp_control_destination_admission_rejected_total Requests rejected because the per-destination queue was full");
+    output.AppendLine("# TYPE yarp_control_destination_admission_rejected_total counter");
+    output.AppendLine("# HELP yarp_control_destination_admission_queue_timeouts_total Waiters removed after the configured queue timeout");
+    output.AppendLine("# TYPE yarp_control_destination_admission_queue_timeouts_total counter");
+    output.AppendLine("# HELP yarp_control_destination_admission_waiter_canceled_total Waiters removed after their cancellation token is signaled (includes request abort, shutdown, and queue timeout)");
+    output.AppendLine("# TYPE yarp_control_destination_admission_waiter_canceled_total counter");
+    output.AppendLine("# HELP yarp_control_destination_admission_queue_wait_seconds Time spent by requests waiting for a per-destination slot");
+    output.AppendLine("# TYPE yarp_control_destination_admission_queue_wait_seconds summary");
+    var admission = ctx.RequestServices.GetRequiredService<DestinationAdmissionManager>();
+    foreach (var cluster in runtime.GetClusters())
+    foreach (var destination in cluster.Destinations.Values)
+    {
+        if (!admission.TryGetSnapshot(cluster.ClusterId, destination.DestinationId, out var snapshot)) continue;
+        var label = (cluster.ClusterId + "/" + destination.DestinationId)
+            .Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\n", "\\n");
+        output.Append("yarp_control_destination_admission_inflight_requests{destination=\"").Append(label).Append("\"} ").Append(snapshot.InFlight).Append('\n');
+        output.Append("yarp_control_destination_admission_queued_requests{destination=\"").Append(label).Append("\"} ").Append(snapshot.Queued).Append('\n');
+        output.Append("yarp_control_destination_admission_rejected_total{destination=\"").Append(label).Append("\"} ").Append(snapshot.Rejected).Append('\n');
+        output.Append("yarp_control_destination_admission_queue_timeouts_total{destination=\"").Append(label).Append("\"} ").Append(snapshot.TimedOut).Append('\n');
+        output.Append("yarp_control_destination_admission_waiter_canceled_total{destination=\"").Append(label).Append("\"} ").Append(snapshot.Canceled).Append('\n');
+        output.Append("yarp_control_destination_admission_queue_wait_seconds_sum{destination=\"").Append(label).Append("\"} ").Append(snapshot.WaitDurationSecondsSum.ToString("R", System.Globalization.CultureInfo.InvariantCulture)).Append('\n');
+        output.Append("yarp_control_destination_admission_queue_wait_seconds_count{destination=\"").Append(label).Append("\"} ").Append(snapshot.WaitDurationCount).Append('\n');
     }
     return Results.Text(output.ToString(), "text/plain; version=0.0.4; charset=utf-8");
 });
@@ -1157,6 +1186,9 @@ async Task<IResult> CommitReviewedChange(HttpContext ctx, JsonObject submitted)
             if (node?["Metadata"]?["SlowStartSeconds"] is JsonNode secondsNode &&
                 !LoadBalancingCore.TrySlowStartSeconds(secondsNode.ToString(), out _))
                 return Results.BadRequest(new { error = $"Destination {destId} SlowStartSeconds must be 0..600" });
+            if (!DestinationAdmissionPolicy.TryParse(node?["Metadata"] as JsonObject,
+                    out _, out var admissionError))
+                return Results.BadRequest(new { error = $"Destination {destId}: {admissionError}" });
         }
         if (c["Metadata"]?[BackendMutualTls.MetadataKey] is JsonNode clientCertificate)
         {
@@ -1726,6 +1758,86 @@ app.MapReverseProxy(proxyPipeline =>
     });
     proxyPipeline.UseSessionAffinity();
     proxyPipeline.UseLoadBalancing();
+    // The selected destination is already fixed. Holding this lease around the
+    // entire downstream pipeline covers body streaming, WebSockets and exceptions.
+    proxyPipeline.Use(async (context, next) =>
+    {
+        var feature = context.GetReverseProxyFeature();
+        var selected = feature.ProxiedDestination;
+        if (selected is null || !DestinationAdmissionPolicy.TryParse(
+                selected.Model.Config.Metadata, out var policy, out var policyError))
+        {
+            if (selected is null) { await next(); return; }
+            context.Response.StatusCode = StatusCodes.Status500InternalServerError;
+            context.Response.Headers["X-GatewayCore-Rejection"] = "invalid_admission_config";
+            await context.Response.WriteAsync("Invalid destination admission configuration.");
+            return;
+        }
+        if (!policy.Enabled) { await next(); return; }
+
+        var clusterId = feature.Cluster.Config.ClusterId;
+        var manager = context.RequestServices.GetRequiredService<DestinationAdmissionManager>();
+        if (!manager.TryGetOrCreate(clusterId, selected.DestinationId, policy, out var state) || state is null)
+        {
+            context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+            context.Response.Headers["X-GatewayCore-Rejection"] = state is null
+                ? "admission_registry_full" : "admission_policy_conflict";
+            return;
+        }
+
+        using var waitCancellation = CancellationTokenSource.CreateLinkedTokenSource(
+            context.RequestAborted,
+            context.RequestServices.GetRequiredService<IHostApplicationLifetime>().ApplicationStopping);
+        waitCancellation.CancelAfter(policy.QueueTimeoutMs);
+        DestinationAdmissionState.DestinationAdmissionLease? lease;
+        try
+        {
+            lease = await state.AcquireAsync(waitCancellation.Token);
+        }
+        catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested)
+        {
+            return;
+        }
+        catch (OperationCanceledException)
+        {
+            if (context.RequestServices.GetRequiredService<IHostApplicationLifetime>().ApplicationStopping.IsCancellationRequested)
+            {
+                context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+                context.Response.Headers["X-GatewayCore-Rejection"] = "gateway_shutdown";
+            }
+            else
+            {
+                state.RecordTimeout();
+                context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+                context.Response.Headers["X-GatewayCore-Rejection"] = "destination_queue_timeout";
+            }
+            return;
+        }
+        if (lease is null)
+        {
+            context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+            context.Response.Headers["X-GatewayCore-Rejection"] = "destination_queue_full";
+            return;
+        }
+
+        using (lease)
+        {
+            // Do not transfer the request to a different backend. If a queued
+            // destination was removed, drained or made unhealthy, fail locally.
+            var lookup = context.RequestServices.GetRequiredService<IProxyStateLookup>();
+            if (context.RequestAborted.IsCancellationRequested) return;
+            if (!lookup.TryGetCluster(clusterId, out var currentCluster) ||
+                !currentCluster.DestinationsState.AvailableDestinations.Any(d =>
+                    string.Equals(d.DestinationId, selected.DestinationId, StringComparison.Ordinal) &&
+                    !TrafficLifecycle.IsDraining(d)))
+            {
+                context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+                context.Response.Headers["X-GatewayCore-Rejection"] = "destination_unavailable_after_queue";
+                return;
+            }
+            await next();
+        }
+    });
     proxyPipeline.UsePassiveHealthChecks();
 }).RequireRateLimiting("proxy-concurrency");
 app.Run();

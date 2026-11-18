@@ -19,6 +19,7 @@ import subprocess
 import tempfile
 import time
 from threading import Thread
+from concurrent.futures import ThreadPoolExecutor
 from urllib.error import HTTPError, URLError
 from urllib.request import (
     HTTPCookieProcessor, ProxyHandler, Request, build_opener
@@ -41,6 +42,10 @@ class Origin(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/plain")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
+        # Headers arrive immediately but the full response stream remains open.
+        # This makes the admission E2E prove that a permit covers response-body copy.
+        if self.path.startswith("/hold"):
+            time.sleep(3.5)
         self.wfile.write(body)
     def log_message(self, *_): pass
 
@@ -172,6 +177,94 @@ def eventually(client:Client,path:str,expected_text:str,seconds:float=7):
         time.sleep(.2)
     raise AssertionError(f"real YARP did not forward {path} expected={expected_text}")
 
+def response(base:str,path:str):
+    req=Request(base+path,headers={"Accept":"text/plain"},method="GET")
+    opener=build_opener(ProxyHandler({}))
+    try:
+        with opener.open(req,timeout=8) as r:
+            return r.status,dict(r.headers),r.read().decode("utf8","replace")
+    except HTTPError as e:
+        return e.code,dict(e.headers),e.read().decode("utf8","replace")
+
+def wait_metric(client:Client,name:str,expected:int,timeout:float=3):
+    end=time.monotonic()+timeout
+    while time.monotonic()<end:
+        body=client.request("GET","/gateway/metrics")
+        rows=[line for line in body.splitlines() if line.startswith(name+"{") and 'destination="fixture/origin"' in line]
+        if rows and int(rows[0].rsplit(" ",1)[1])==expected:
+            return
+        time.sleep(.02)
+    raise AssertionError(f"metric {name} did not reach {expected}")
+
+def abort_queued_request(base:str,client:Client):
+    sock=socket.create_connection(("127.0.0.1",int(base.rsplit(":",1)[1])),timeout=3)
+    sock.sendall(b"GET /admit/aborted HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+    wait_metric(client,"yarp_control_destination_admission_queued_requests",1)
+    sock.close()
+    wait_metric(client,"yarp_control_destination_admission_queued_requests",0)
+
+def verify_destination_admission(base:str,admin:Client,reviewer:Client,initial:dict):
+    routes=dict(initial["routes"])
+    routes["admission-e2e"]={"ClusterId":"fixture","Match":{"Path":"/admit/{**catch-all}"},
+        "Transforms":[{"PathRemovePrefix":"/admit"}]}
+    clusters=json.loads(json.dumps(initial["clusters"]))
+    invalid=json.loads(json.dumps(clusters))
+    invalid["fixture"]["Destinations"]["origin"]["Metadata"]={
+        "GatewayCore.Admission.MaxInFlight":"1",
+        "GatewayCore.Admission.MaxPending":"4097"}
+    invalid_draft={"routes":routes,"clusters":invalid,"disabled":initial["disabled"],"revision":initial["revision"]}
+    invalid_request=admin.request("POST","/admin/api/change-requests",{
+        "reason":"E2E reject invalid per-destination admission bounds","payload":invalid_draft})
+    reviewer.request("POST",f"/admin/api/change-requests/{invalid_request['id']}/decision",{
+        "decision":"approve","reason":"Reject invalid queue size in isolated configuration"},expect=400)
+    check(admin.request("GET","/admin/api/change-requests/"+invalid_request["id"])["status"]=="Pending",
+        "invalid admission bounds fail closed without applying or approving the draft")
+    clusters["fixture"]["Destinations"]["origin"]["Metadata"]={
+        "GatewayCore.Admission.MaxInFlight":"1",
+        "GatewayCore.Admission.MaxPending":"1",
+        "GatewayCore.Admission.QueueTimeoutMs":"1500"}
+    payload={"routes":routes,"clusters":clusters,"disabled":initial["disabled"],"revision":initial["revision"]}
+    pending=admin.request("POST","/admin/api/change-requests",{
+        "reason":"E2E exercise bounded destination request admission","payload":payload})
+    reviewer.request("POST",f"/admin/api/change-requests/{pending['id']}/decision",{
+        "decision":"approve","reason":"Approve isolated admission integration fixture"})
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        first=pool.submit(response,base,"/admit/hold")
+        wait_metric(admin,"yarp_control_destination_admission_inflight_requests",1)
+        second=pool.submit(response,base,"/admit/normal")
+        wait_metric(admin,"yarp_control_destination_admission_queued_requests",1)
+        status,headers,_=response(base,"/admit/rejected")
+        check(status==503 and headers.get("X-GatewayCore-Rejection")=="destination_queue_full",
+            "real YARP rejects local overload distinctly when the bounded FIFO is full")
+        check(first.result(timeout=5)[0]==200,"first real HTTP request keeps its destination slot until body completion")
+        check(second.result(timeout=5)[0]==200,"queued real HTTP request receives the released FIFO slot")
+
+        held=pool.submit(response,base,"/admit/hold")
+        wait_metric(admin,"yarp_control_destination_admission_inflight_requests",1)
+        timed_out_status,timed_out_headers,_=response(base,"/admit/timeout")
+        check(timed_out_status==503 and timed_out_headers.get("X-GatewayCore-Rejection")=="destination_queue_timeout",
+            "real YARP removes a waiter at its configured queue timeout")
+        check(held.result(timeout=5)[0]==200,"timed-out queue waiter does not cancel the active upstream response")
+
+        held_again=pool.submit(response,base,"/admit/hold")
+        wait_metric(admin,"yarp_control_destination_admission_inflight_requests",1)
+        abort_queued_request(base,admin)
+        check(held_again.result(timeout=5)[0]==200,"client disconnect removes only its queued waiter")
+        check(response(base,"/admit/normal")[0]==200,"destination recovers after timeout and client cancellation")
+
+    wait_metric(admin,"yarp_control_destination_admission_queued_requests",0)
+    wait_metric(admin,"yarp_control_destination_admission_inflight_requests",0)
+    metrics=admin.request("GET","/gateway/metrics")
+    check('yarp_control_destination_admission_rejected_total{destination="fixture/origin"} 1' in metrics,
+        "destination admission rejection counter is exposed with bounded destination labels")
+    check('yarp_control_destination_admission_queue_timeouts_total{destination="fixture/origin"} 1' in metrics,
+        "destination admission queue timeout counter is exposed")
+    check('yarp_control_destination_admission_waiter_canceled_total{destination="fixture/origin"} 2' in metrics,
+        "queue timeout and client disconnect both release bounded waiter reservations")
+    check('yarp_control_destination_admission_queue_wait_seconds_count{destination="fixture/origin"} 3' in metrics,
+        "bounded-label queue wait summary is exported for dashboards")
+    return pending
+
 def acceptance(base:str,origin_port:int):
     anonymous=Client(base)
     check(not anonymous.session()["initialized"],"clean state requires bootstrap")
@@ -250,6 +343,7 @@ def acceptance(base:str,origin_port:int):
     check("e2e" in approved["routes"] and approved["revision"]!=initial["revision"],
         "second admin applied approved route with revision bump")
     eventually(anonymous,"/e2e/real-proxy","e2e-origin:/real-proxy")
+    verify_destination_admission(base,admin,reviewer,approved)
     check(admin.request("GET","/admin/api/change-requests/"+pending["id"])["status"]=="Approved",
         "approved change recorded and auditable")
     admin.request("POST","/admin/api/change-requests",change,expect=200)  # stale drafts may be submitted but not applied
