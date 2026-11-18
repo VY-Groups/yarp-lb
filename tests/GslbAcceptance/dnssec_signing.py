@@ -76,6 +76,9 @@ def verify_cli_interop(port):
             raise RuntimeError(f"required independent DNS client is missing: {client}")
         for transport in ("udp", "tcp"):
             transport_arg = "+notcp" if transport == "udp" else "+tcp"
+            # Prevent either client from silently retrying TCP after a truncated
+            # UDP answer; the TC assertion below must describe the UDP datagram.
+            no_fallback_arg = "+ignore" if transport == "udp" else "+noignore"
             for qname, qtype, expected_status, required_types in (
                 (str(ZONE), "A", "noerror", ("A", "RRSIG")),
                 ("missing.signed.integration.test.", "A", "nxdomain",
@@ -83,7 +86,7 @@ def verify_cli_interop(port):
             ):
                 completed = subprocess.run(
                     [client, "-p", str(port), qname, qtype,
-                     "+norecurse", "+dnssec", "+bufsize=1232", transport_arg,
+                     "+norecurse", "+dnssec", "+bufsize=1232", transport_arg, no_fallback_arg,
                      "+time=2", ("+tries=1" if client == "dig" else "+retry=1"),
                      *(["+noall", "+comments", "+answer", "+authority"] if client == "dig" else ["+all"]),
                      "@127.0.0.1"],
@@ -102,6 +105,9 @@ def verify_cli_interop(port):
                 flags = set(re.split(r"[\s;]+", flags_line.split("flags:", 1)[-1].strip()))
                 if "aa" not in flags or "ra" in flags or "ad" in flags:
                     raise AssertionError(f"{client} {transport} did not preserve authoritative, non-recursive flags:\n{output}")
+                if transport == "udp" and "tc" in flags:
+                    raise AssertionError(
+                        f"{client} UDP response was truncated instead of returning the complete signed answer/proof:\n{output}")
                 missing = [record_type for record_type in required_types
                            if not re.search(rf"\bIN\s+{record_type}\b", output, re.IGNORECASE)]
                 if missing:
