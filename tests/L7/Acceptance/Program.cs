@@ -225,9 +225,9 @@ void CheckRendezvous()
     Record("rendezvous-remapping", new { moved, total = 5000 });
 }
 
-// The existing workflow_dispatch matrix can run the optional paired OTLP
-// diagnostic at the exact PR head without changing the shared workflow file.
-if (string.Equals(Environment.GetEnvironmentVariable("GITHUB_EVENT_NAME"), "workflow_dispatch",
+// The existing L7 acceptance step opts into this diagnostic explicitly. Other
+// Acceptance invocations in the same workflow (soak/counter rigs) stay untouched.
+if (string.Equals(Environment.GetEnvironmentVariable("GATEWAYLAB_RUN_OTEL_DIAGNOSTIC"), "1",
         StringComparison.Ordinal))
 {
     var python = OperatingSystem.IsWindows() ? "python" : "python3";

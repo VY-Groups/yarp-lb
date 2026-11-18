@@ -252,6 +252,6 @@ Must(invalidPins, "invalid configured controller thumbprint rejects startup");
 await AgentTlsNegativeAcceptance.RunAsync();
 GslbAgentReportStatusParserTests.Run();
 await AgentLabCaTlsAcceptance.RunAsync();
-if (OperatingSystem.IsLinux())
+if (OperatingSystem.IsLinux() || OperatingSystem.IsWindows())
     await AgentCrlAcceptance.RunAsync();
 Console.WriteLine("ENGINE CONFIG CONTRACT ACCEPTANCE PASSED");

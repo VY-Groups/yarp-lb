@@ -15,17 +15,19 @@ collector drain happen after each timed request window and are excluded from
 the reported request timing.
 
 Manually dispatch the existing `l7-acceptance.yml` workflow at the PR branch.
-Its Windows Server 2022 and Ubuntu 24.04 runners run this diagnostic first and
-upload its full JSON report and gateway logs with the L7 artifacts. Compare
+Only its L7 acceptance step opts into this diagnostic, before the normal L7
+acceptance suite. Other load-rig and counter-collection invocations remain
+unchanged. The Windows Server 2022 and Ubuntu 24.04 runners upload the full JSON
+report and gateway logs with the L7 artifacts. Compare
 individual paired results and runner metadata, not only the median. These short loopback measurements
 help distinguish middleware-only behavior from a real YARP-to-backend path; they
 do not establish a production capacity target, a site-specific overhead figure,
 or availability/SLO evidence. Use representative backend latency, connection
 reuse, TLS, traffic shape and host capacity before making deployment decisions.
 
-To avoid altering ordinary L7 acceptance runs, the benchmark executes only for
-`workflow_dispatch`; GatewayLab adds telemetry and access-log middleware only
-when `YARP_LAB_OTEL_OVERHEAD=1` is set.
+To avoid altering ordinary L7 acceptance runs, the benchmark requires the
+explicit `GATEWAYLAB_RUN_OTEL_DIAGNOSTIC=1` opt-in. GatewayLab adds telemetry and
+access-log middleware only when `YARP_LAB_OTEL_OVERHEAD=1` is set.
 
 ## Preliminary local measurements
 

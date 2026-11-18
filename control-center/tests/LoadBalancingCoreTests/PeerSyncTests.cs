@@ -102,6 +102,21 @@ public static class PeerSyncTests
         Check(!orderingReceiver.Status(now).RemoteReportedInCurrentMinute,
             "rejected delayed frame does not refresh the peer receipt TTL");
 
+        var minuteSource = new PeerStateJournal("node-a", "node-b", secret, 2);
+        minuteSource.Observe(IPAddress.Parse("10.123.4.9"), now);
+        var previousMinuteFrame = minuteSource.Snapshot(now);
+        minuteSource.Observe(IPAddress.Parse("10.123.4.10"), now + 1);
+        var nextMinuteFrame = minuteSource.Snapshot(now + 1);
+        var minuteRollbackReceiver = new PeerStateJournal("node-b", "node-a", secret, 2,
+            TimeSpan.FromSeconds(6), timeProvider: new ManualTimeProvider(DateTimeOffset.UtcNow));
+        Check(minuteRollbackReceiver.Apply(previousMinuteFrame, now) &&
+              minuteRollbackReceiver.Apply(nextMinuteFrame, now + 1),
+            "peer accepts complete snapshots as its source advances to a new minute");
+        Check(!minuteRollbackReceiver.Apply(previousMinuteFrame, now) &&
+              minuteRollbackReceiver.Status(now + 1).RemoteReportedInCurrentMinute &&
+              minuteRollbackReceiver.Status(now + 1).RemoteRequests == 1,
+            "receiver clock rollback cannot replay an older source minute over newer peer telemetry");
+
         Check(!b.Apply(new PeerStateFrame("node-c",now,500,new()),now),"unknown peer rejected");
         Check(!b.Apply(new PeerStateFrame("node-a",now+2,999,new()),now),
             "future minute rejected");

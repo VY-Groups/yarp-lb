@@ -59,6 +59,9 @@ if (allowedServices.Any(x => !Regex.IsMatch(x, "^[A-Za-z0-9_.-]{1,64}$")))
 // Isolated self-signed test CA is allowed ONLY on loopback with ALL mutating
 // management features disabled. It is not a production PKI trust shortcut.
 var labCaPath = builder.Configuration["Agent:LabOnlyClientCaCertificatePath"];
+var labCaCheckRevocation = builder.Configuration.GetValue<bool>("Agent:LabOnlyClientCaCheckRevocation");
+if (labCaCheckRevocation && string.IsNullOrWhiteSpace(labCaPath))
+    throw new InvalidOperationException("Lab-only CRL checking requires an explicit loopback test CA");
 X509Certificate2? labRoot = null;
 ILogger? clientCertificateLogger = null;
 if (!string.IsNullOrWhiteSpace(labCaPath))
@@ -88,17 +91,37 @@ builder.WebHost.ConfigureKestrel(server =>
             https.ClientCertificateValidation = (cert, _, _) =>
             {
                 if (cert is null) return false;
-                // The CA is ephemeral and has no published CRL. Skipping
-                // revocation is permissible ONLY in this loopback test mode.
+                clientCertificateLogger?.LogInformation(
+                    "Validating lab TLS client certificate {CertificateThumbprint} with online revocation {RevocationEnabled}",
+                    cert.Thumbprint.ToUpperInvariant(), labCaCheckRevocation);
+                // Revocation stays disabled for the ordinary lab trust root;
+                // dedicated loopback CRL acceptance opts in to online checks.
                 using var custom = new X509Chain();
                 custom.ChainPolicy.TrustMode = X509ChainTrustMode.CustomRootTrust;
                 custom.ChainPolicy.CustomTrustStore.Add(labRoot);
-                custom.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;
+                custom.ChainPolicy.RevocationMode = labCaCheckRevocation
+                    ? X509RevocationMode.Online
+                    : X509RevocationMode.NoCheck;
+                if (labCaCheckRevocation)
+                {
+                    custom.ChainPolicy.RevocationFlag = X509RevocationFlag.ExcludeRoot;
+                    custom.ChainPolicy.UrlRetrievalTimeout = TimeSpan.FromSeconds(5);
+                    custom.ChainPolicy.ApplicationPolicy.Add(new Oid("1.3.6.1.5.5.7.3.2"));
+                }
                 custom.ChainPolicy.VerificationFlags = X509VerificationFlags.NoFlag;
                 var eku = cert.Extensions.OfType<X509EnhancedKeyUsageExtension>()
                     .Any(ext => ext.EnhancedKeyUsages.Cast<Oid>()
                         .Any(oid => oid.Value=="1.3.6.1.5.5.7.3.2"));
-                return eku && custom.Build(cert);
+                var built = custom.Build(cert);
+                if (!built)
+                {
+                    var statuses = string.Join(",", custom.ChainStatus
+                        .Select(status => status.Status.ToString()).Distinct().Order(StringComparer.Ordinal));
+                    clientCertificateLogger?.LogWarning(
+                        "Rejected lab TLS client certificate {CertificateThumbprint} during chain validation; chain statuses: {ChainStatuses}",
+                        cert.Thumbprint.ToUpperInvariant(), statuses);
+                }
+                return eku && built;
             };
         }
         else
@@ -134,6 +157,10 @@ builder.WebHost.ConfigureKestrel(server =>
 var app = builder.Build();
 clientCertificateLogger = app.Services.GetRequiredService<ILoggerFactory>()
     .CreateLogger("GatewayAgent.ClientCertificate");
+if (labRoot is not null)
+    clientCertificateLogger.LogInformation(
+        "Loopback lab client CA configured; online revocation checks enabled {RevocationEnabled}",
+        labCaCheckRevocation);
 
 app.Use(async (ctx, next) =>
 {

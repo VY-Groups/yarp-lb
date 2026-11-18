@@ -45,6 +45,8 @@ jobs:
         run: dotnet build tests/L7/Acceptance/Acceptance.csproj -c Release
 
       - name: Send real requests through YARP and verify failover
+        env:
+          GATEWAYLAB_RUN_OTEL_DIAGNOSTIC: ${{ github.event_name == 'workflow_dispatch' && '1' || '' }}
         run: dotnet run --project tests/L7/Acceptance/Acceptance.csproj -c Release --no-build -- "${{ github.workspace }}"
 
       - name: Upload PASS/FAIL report and process logs

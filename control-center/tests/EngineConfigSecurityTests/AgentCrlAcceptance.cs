@@ -1,6 +1,6 @@
 using System.Diagnostics;
 
-/// <summary>Runs the real production-mode Agent CRL test on disposable Linux CI.</summary>
+/// <summary>Runs the real production-mode Agent CRL test on disposable CI hosts.</summary>
 public static class AgentCrlAcceptance
 {
     public static async Task RunAsync()
@@ -9,8 +9,7 @@ public static class AgentCrlAcceptance
             "EngineConfigSecurityTests", "agent_crl_acceptance.py");
         if (!File.Exists(script))
             throw new FileNotFoundException("Build/run from the control-center root", script);
-
-        var start = new ProcessStartInfo("python3")
+        var start = new ProcessStartInfo(OperatingSystem.IsWindows() ? "python" : "python3")
         {
             UseShellExecute = false,
             RedirectStandardOutput = true,
@@ -31,9 +30,10 @@ public static class AgentCrlAcceptance
         {
             process.Kill(entireProcessTree: true);
             await process.WaitForExitAsync();
+            _ = await stdout;
+            _ = await stderr;
             throw new TimeoutException("Disposable CRL acceptance exceeded 90 seconds");
         }
-
         var output = await stdout;
         var errors = await stderr;
         Console.Write(output);
