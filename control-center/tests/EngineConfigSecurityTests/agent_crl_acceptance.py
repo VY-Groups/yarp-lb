@@ -74,11 +74,20 @@ def wait_for_listener(port: int, process: subprocess.Popen[str], name: str) -> N
     raise TimeoutError(f"{name} HTTPS listener did not start")
 
 
-def was_stopped_by_test(process: subprocess.Popen[str], terminated_by_test: bool) -> bool:
+def was_stopped_by_test(returncode: int | None, terminated_by_test: bool) -> bool:
     # Python's terminate() uses TerminateProcess on Windows, whose expected
     # process exit status is 1; POSIX reports SIGTERM as -15.
-    return process.returncode in (0, -15) or (
-        terminated_by_test and os.name == "nt" and process.returncode == 1)
+    accepted_codes = (0, 1) if os.name == "nt" else (0, -15)
+    return terminated_by_test and returncode in accepted_codes
+
+
+def verify_termination_contract() -> None:
+    if was_stopped_by_test(0, False) or was_stopped_by_test(1, False) or \
+            was_stopped_by_test(-15, False) or was_stopped_by_test(None, False):
+        raise AssertionError("an agent exit without test-initiated termination was accepted")
+    accepted = (0, 1) if os.name == "nt" else (0, -15)
+    if any(not was_stopped_by_test(code, True) for code in accepted):
+        raise AssertionError("a test-initiated process termination status was rejected")
 
 
 def request_status(port: int, cert: Path, key: Path, root: Path) -> int:
@@ -125,6 +134,7 @@ def require_no_http_response(port: int, cert: Path, key: Path, root: Path, reaso
 
 
 def main() -> None:
+    verify_termination_contract()
     if not AGENT.is_file():
         raise FileNotFoundError(f"Build GatewayAgent first: {AGENT}")
     openssl = find_openssl()
@@ -367,7 +377,7 @@ authorityKeyIdentifier = keyid,issuer
                             f"with status {statuses}; agent logs:\n{logs}")
                     status = matching_statuses[0]
                     print(f"PASS: agent chain log identifies {reason} with status {status}", flush=True)
-                if not was_stopped_by_test(process, terminated_by_test):
+                if not was_stopped_by_test(process.returncode, terminated_by_test):
                     raise RuntimeError(f"GatewayAgent exited {process.returncode}; logs:\n" + logs)
 
             # Windows caches CRLs by issuer. Use a distinct one-use CA and agent
@@ -440,7 +450,7 @@ crlDistributionPoints = URI:http://127.0.0.1:{dead_port}/crl.pem
                     except subprocess.TimeoutExpired:
                         offline_process.kill()
                         offline_process.wait(timeout=3)
-                if not was_stopped_by_test(offline_process, offline_terminated_by_test):
+                if not was_stopped_by_test(offline_process.returncode, offline_terminated_by_test):
                     raise RuntimeError(f"offline-CRL GatewayAgent exited {offline_process.returncode}; logs:\n"
                                        + offline_log.read_text(encoding="utf-8", errors="replace"))
             offline_logs = offline_log.read_text(encoding="utf-8", errors="replace")
