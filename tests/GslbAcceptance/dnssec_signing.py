@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Independent DNSSEC wire/signature acceptance using dnspython as validator."""
 import json
+import re
+import shutil
 import socket
 import subprocess
 import sys
@@ -65,6 +67,54 @@ def assert_nsec_cover(response, qname):
             if (start < end and start < owner < end) or (start >= end and (owner > start or owner < end)):
                 return
     raise AssertionError(f"NSEC records do not cover {qname}")
+
+
+def verify_cli_interop(port):
+    """Check the real wire behavior with independent BIND and Knot clients."""
+    for client in ("dig", "kdig"):
+        if shutil.which(client) is None:
+            raise RuntimeError(f"required independent DNS client is missing: {client}")
+        for transport in ("udp", "tcp"):
+            transport_arg = "+notcp" if transport == "udp" else "+tcp"
+            # Prevent either client from silently retrying TCP after a truncated
+            # UDP answer; the TC assertion below must describe the UDP datagram.
+            no_fallback_arg = "+ignore" if transport == "udp" else "+noignore"
+            for qname, qtype, expected_status, required_types in (
+                (str(ZONE), "A", "noerror", ("A", "RRSIG")),
+                ("missing.signed.integration.test.", "A", "nxdomain",
+                 ("SOA", "NSEC", "RRSIG")),
+            ):
+                completed = subprocess.run(
+                    [client, "-p", str(port), qname, qtype,
+                     "+norecurse", "+dnssec", "+bufsize=1232", transport_arg, no_fallback_arg,
+                     "+time=2", ("+tries=1" if client == "dig" else "+retry=1"),
+                     *(["+noall", "+comments", "+answer", "+authority"] if client == "dig" else ["+all"]),
+                     "@127.0.0.1"],
+                    capture_output=True, text=True, timeout=6, check=False,
+                )
+                output = completed.stdout
+                if completed.returncode != 0:
+                    raise AssertionError(
+                        f"{client} {transport} invocation failed ({completed.returncode}):\n"
+                        f"stdout:\n{output}\nstderr:\n{completed.stderr}")
+                lowered = output.lower()
+                if f"status: {expected_status}" not in lowered:
+                    raise AssertionError(f"{client} {transport} {qname} returned unexpected status:\n{output}")
+                flags_line = next((line.lower() for line in output.splitlines()
+                                   if re.search(r"\bflags:\s", line, re.IGNORECASE)), "")
+                flags = set(re.split(r"[\s;]+", flags_line.split("flags:", 1)[-1].strip()))
+                if "aa" not in flags or "ra" in flags or "ad" in flags:
+                    raise AssertionError(f"{client} {transport} did not preserve authoritative, non-recursive flags:\n{output}")
+                if transport == "udp" and "tc" in flags:
+                    raise AssertionError(
+                        f"{client} UDP response was truncated instead of returning the complete signed answer/proof:\n{output}")
+                missing = [record_type for record_type in required_types
+                           if not re.search(rf"\bIN\s+{record_type}\b", output, re.IGNORECASE)]
+                if missing:
+                    raise AssertionError(
+                        f"{client} {transport} omitted signed {qtype} data/proof {missing}:\n{output}")
+                print(f"PASS: {client} over {transport.upper()} verifies authoritative signed {expected_status} wire response",
+                      flush=True)
 
 
 def main():
@@ -168,11 +218,18 @@ def main():
             nodata = query("127.0.0.1", port, ZONE, "AAAA", "tcp")
             require(nodata.rcode() == dns.rcode.NOERROR and validate_signed_sections(nodata, keys) == 2,
                     "NODATA SOA and exact-owner NSEC denial signatures validate")
-            nx = query("127.0.0.1", port, "missing.signed.integration.test.", "A", "tcp")
-            require(nx.rcode() == dns.rcode.NXDOMAIN and validate_signed_sections(nx, keys) >= 3,
-                    "NXDOMAIN SOA and NSEC proof RRsets verify cryptographically")
-            assert_nsec_cover(nx, "missing.signed.integration.test.")
-            assert_nsec_cover(nx, "*.signed.integration.test.")
+            for transport in ("udp", "tcp"):
+                nx = query("127.0.0.1", port,
+                           "missing.signed.integration.test.", "A", transport)
+                require(nx.rcode() == dns.rcode.NXDOMAIN,
+                        f"{transport.upper()} preserves NXDOMAIN response code")
+                if transport == "udp":
+                    require(not nx.flags & dns.flags.TC,
+                            "UDP NXDOMAIN denial proof is complete without TCP fallback")
+                require(validate_signed_sections(nx, keys) >= 3,
+                        f"{transport.upper()} NXDOMAIN SOA and NSEC proof RRsets verify cryptographically")
+                assert_nsec_cover(nx, "missing.signed.integration.test.")
+                assert_nsec_cover(nx, "*.signed.integration.test.")
 
             ds = query("127.0.0.1", port, "child.signed.integration.test.", "DS", "tcp")
             require(ds.rcode() == dns.rcode.NOERROR and validate_signed_sections(ds, keys) >= 2,
@@ -184,6 +241,7 @@ def main():
             require(any(rrset.rdtype == dns.rdatatype.RRSIG for rrset in rrsig.answer),
                     "direct RRSIG query returns available zone signatures")
             require("PRIVATE KEY" not in startup, "private key material is not written to startup logs")
+            verify_cli_interop(port)
         finally:
             process.terminate()
             try:
