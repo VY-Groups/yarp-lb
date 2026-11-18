@@ -79,7 +79,10 @@ with tempfile.TemporaryDirectory(prefix='gateway-sockets-') as td:
           'Clusters':{'api':{'HealthCheck':{'AvailableDestinationsPolicy':'HealthyAndUnknown',
           'Active':{'Enabled':True,'Interval':'00:00:01','Timeout':'00:00:01',
           'Policy':'ConsecutiveFailures','Path':'/health/ready'}},
-          'Destinations':{'A':{'Address':f'http://127.0.0.1:{backend_port}/'}}}}}}))
+          'Destinations':{'A':{'Address':f'http://127.0.0.1:{backend_port}/','Metadata':{
+              'GatewayCore.Admission.MaxInFlight':'8',
+              'GatewayCore.Admission.MaxPending':'4',
+              'GatewayCore.Admission.QueueTimeoutMs':'1000'}}}}}}}))
         chmod(appconfig)
         ca_key=root/'ca.key';ca_crt=root/'ca.crt'
         run('openssl','req','-new','-x509','-nodes','-newkey','rsa:3072',
@@ -153,7 +156,9 @@ with tempfile.TemporaryDirectory(prefix='gateway-sockets-') as td:
             check(status==200,'mTLS metrics listener reachable on management IP',status)
             text=body.decode('utf-8')
             check('yarp_control_http_requests_total ' in text and
-                  'yarp_control_gc_collections_total{generation="2"}' in text,
+                  'yarp_control_gc_collections_total{generation="2"}' in text and
+                  'yarp_control_destination_admission_inflight_requests{destination="api/A"}' in text and
+                  'yarp_control_destination_admission_queue_wait_seconds_count{destination="api/A"}' in text,
                   'real HTTP and GC product metrics exported')
             (args.out/'metrics.txt').write_text(text)
         except Exception as error: failure=str(error)

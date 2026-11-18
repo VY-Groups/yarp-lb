@@ -188,13 +188,16 @@ def response(base:str,path:str):
 
 def wait_metric(client:Client,name:str,expected:int,timeout:float=3):
     end=time.monotonic()+timeout
+    last_body=""
     while time.monotonic()<end:
         body=client.request("GET","/gateway/metrics")
+        last_body=body
         rows=[line for line in body.splitlines() if line.startswith(name+"{") and 'destination="fixture/origin"' in line]
         if rows and int(rows[0].rsplit(" ",1)[1])==expected:
             return
         time.sleep(.02)
-    raise AssertionError(f"metric {name} did not reach {expected}")
+    observed=[line for line in last_body.splitlines() if "destination_admission_" in line]
+    raise AssertionError(f"metric {name} did not reach {expected}; observed={observed!r}")
 
 def abort_queued_request(base:str,client:Client):
     sock=socket.create_connection(("127.0.0.1",int(base.rsplit(":",1)[1])),timeout=3)
@@ -228,9 +231,14 @@ def verify_destination_admission(base:str,admin:Client,reviewer:Client,initial:d
         "reason":"E2E exercise bounded destination request admission","payload":payload})
     reviewer.request("POST",f"/admin/api/change-requests/{pending['id']}/decision",{
         "decision":"approve","reason":"Approve isolated admission integration fixture"})
+    eventually(admin,"/admit/normal","e2e-origin:/normal")
     with ThreadPoolExecutor(max_workers=4) as pool:
         first=pool.submit(response,base,"/admit/hold")
-        wait_metric(admin,"yarp_control_destination_admission_inflight_requests",1)
+        try:
+            wait_metric(admin,"yarp_control_destination_admission_inflight_requests",1,timeout=5)
+        except AssertionError as error:
+            result=first.result(timeout=1) if first.done() else "request still running"
+            raise AssertionError(f"first admission request did not hold an observable slot: {result!r}") from error
         second=pool.submit(response,base,"/admit/normal")
         wait_metric(admin,"yarp_control_destination_admission_queued_requests",1)
         status,headers,_=response(base,"/admit/rejected")

@@ -131,6 +131,45 @@
       ],
       "title": "OTLP proxy p95 latency",
       "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "gatewaycore-prometheus"},
+      "description": "Process-local per-destination capacity. Limits are not shared between gateway nodes.",
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 40},
+      "id": 11,
+      "options": {"legend": {"displayMode": "table", "placement": "bottom"}, "tooltip": {"mode": "multi"}},
+      "targets": [
+        {"expr": "yarp_control_destination_admission_inflight_requests{job=~\"$job\"}", "legendFormat": "{{instance}} {{destination}} in-flight", "refId": "A"},
+        {"expr": "yarp_control_destination_admission_queued_requests{job=~\"$job\"}", "legendFormat": "{{instance}} {{destination}} queued", "refId": "B"}
+      ],
+      "title": "Per-destination in-flight and queued requests",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "gatewaycore-prometheus"},
+      "description": "Local capacity rejections and queue timeouts, separate from upstream HTTP response classes.",
+      "fieldConfig": {"defaults": {"unit": "reqps"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 40},
+      "id": 12,
+      "options": {"legend": {"displayMode": "table", "placement": "bottom"}, "tooltip": {"mode": "multi"}},
+      "targets": [
+        {"expr": "sum by (instance,destination) (rate(yarp_control_destination_admission_rejected_total{job=~\"$job\"}[5m]))", "legendFormat": "{{instance}} {{destination}} rejected", "refId": "A"},
+        {"expr": "sum by (instance,destination) (rate(yarp_control_destination_admission_queue_timeouts_total{job=~\"$job\"}[5m]))", "legendFormat": "{{instance}} {{destination}} timed out", "refId": "B"}
+      ],
+      "title": "Per-destination admission failures",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "gatewaycore-prometheus"},
+      "description": "Average wait among queued requests; zero until requests have waited for a slot.",
+      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 48},
+      "id": 13,
+      "options": {"legend": {"displayMode": "table", "placement": "bottom"}, "tooltip": {"mode": "multi"}},
+      "targets": [{"expr": "sum by (instance,destination) (rate(yarp_control_destination_admission_queue_wait_seconds_sum{job=~\"$job\"}[5m])) / clamp_min(sum by (instance,destination) (rate(yarp_control_destination_admission_queue_wait_seconds_count{job=~\"$job\"}[5m])), 1e-9)", "legendFormat": "{{instance}} {{destination}} average queue wait", "refId": "A"}],
+      "title": "Per-destination queue wait",
+      "type": "timeseries"
     }
   ],
   "refresh": "30s",
