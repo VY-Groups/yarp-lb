@@ -183,6 +183,7 @@ def main():
             report_client_key_link.symlink_to(agents[0]["key"])
             linked_client_config = dict(observer_config)
             linked_client_config.update({
+                "SigningKeyPem": str(agents[0]["signer"]),
                 "ReportUrl": "https://127.0.0.1:18443/agent-health/v1/reports",
                 "AgentId": "agent-1", "Zone": "lab.example.test", "SiteId": "mumbai",
                 "ReportClientCertificatePem": str(agents[0]["cert"]),
