@@ -18,6 +18,15 @@ public static class ProductLinuxStartupSmoke
         const UnixFileMode secret=UnixFileMode.UserRead|UnixFileMode.UserWrite;
         var root=Path.Combine(Path.GetTempPath(),"onprem-product-start-"+Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(root,privateDir);
+        Process? proc=null;
+        Process? restarted=null;
+        Task<string>? stdout=null;
+        Task<string>? stderr=null;
+        Task<string>? restartStdout=null;
+        Task<string>? restartStderr=null;
+        var ready=false;
+        try
+        {
         var state=Path.Combine(root,"state");
         Directory.CreateDirectory(state,privateDir);
         var cfgDir=Path.Combine(state,"config");
@@ -62,15 +71,16 @@ public static class ProductLinuxStartupSmoke
         info.Environment["YARP_LINUX_DP_CERT_PFX_PATH"]=pfx;
         info.Environment["YARP_LINUX_DP_CERT_PASSWORD_FILE"]=passwordFile;
         info.Environment.Remove("YARP_EC2_LAB_MODE");
-        using var proc=Process.Start(info) ??
+        proc=Process.Start(info) ??
             throw new Exception("Could not start real Control Center in Linux production mode");
-        var stdout=proc.StandardOutput.ReadToEndAsync();
-        var stderr=proc.StandardError.ReadToEndAsync();
-        var ready=false;
-        try
-        {
+        stdout=proc.StandardOutput.ReadToEndAsync();
+        stderr=proc.StandardError.ReadToEndAsync();
             using var client=new HttpClient(new HttpClientHandler{UseProxy=false}) {
                 Timeout=TimeSpan.FromSeconds(2)
+            };
+            var cookies=new CookieContainer();
+            using var authClient=new HttpClient(new HttpClientHandler{UseProxy=false,CookieContainer=cookies}) {
+                Timeout=TimeSpan.FromSeconds(5)
             };
             for(var i=0;i<100;i++)
             {
@@ -109,6 +119,21 @@ public static class ProductLinuxStartupSmoke
                 throw new Exception("Production monitoring metrics missing GC Gen2 or log-drop counters");
             Console.WriteLine("PASS: real production Linux gateway exposes loopback-only Gen2 and drop counters");
 
+            var bootstrapPayload=JsonSerializer.Serialize(new {username="dp_restart_admin",
+                password="linux-dp-restart-test-password-123",email="dp-restart@example.invalid"});
+            using var bootstrap=await authClient.PostAsync("http://127.0.0.1:"+port+"/admin/api/bootstrap",
+                new StringContent(bootstrapPayload,System.Text.Encoding.UTF8,"application/json"));
+            if(!bootstrap.IsSuccessStatusCode)
+                throw new Exception("Could not create isolated local admin session before Linux process restart: HTTP "+(int)bootstrap.StatusCode);
+            using(var sessionResponse=await authClient.GetAsync("http://127.0.0.1:"+port+"/admin/api/session"))
+            {
+                sessionResponse.EnsureSuccessStatusCode();
+                using var sessionJson=JsonDocument.Parse(await sessionResponse.Content.ReadAsStringAsync());
+                if(sessionJson.RootElement.GetProperty("authenticated").GetBoolean()!=true)
+                    throw new Exception("Pre-restart admin session was not authenticated");
+            }
+            Console.WriteLine("PASS: isolated production admin cookie created before restart");
+
             // Restart the shipping process against the same protected key ring and
             // certificate. Use a fresh listener port to avoid any socket reuse assumptions.
             proc.Kill(entireProcessTree:true);
@@ -118,10 +143,10 @@ public static class ProductLinuxStartupSmoke
             var restartPort=((IPEndPoint)restartListener.LocalEndpoint).Port;
             restartListener.Stop();
             info.Environment["ASPNETCORE_URLS"]="http://127.0.0.1:"+restartPort;
-            using var restarted=Process.Start(info) ??
+            restarted=Process.Start(info) ??
                 throw new Exception("Could not restart the real Control Center against its existing Linux key ring");
-            var restartStdout=restarted.StandardOutput.ReadToEndAsync();
-            var restartStderr=restarted.StandardError.ReadToEndAsync();
+            restartStdout=restarted.StandardOutput.ReadToEndAsync();
+            restartStderr=restarted.StandardError.ReadToEndAsync();
             var restartedReady=false;
             try
             {
@@ -147,22 +172,35 @@ public static class ProductLinuxStartupSmoke
                     .Select(Path.GetFileName).Order(StringComparer.Ordinal).ToArray();
                 if(!firstKeyIds.SequenceEqual(restartedKeyIds,StringComparer.Ordinal))
                     throw new Exception("Linux process restart replaced or lost the existing Data Protection key ring");
+                using(var sessionResponse=await authClient.GetAsync("http://127.0.0.1:"+restartPort+"/admin/api/session"))
+                {
+                    sessionResponse.EnsureSuccessStatusCode();
+                    using var sessionJson=JsonDocument.Parse(await sessionResponse.Content.ReadAsStringAsync());
+                    if(sessionJson.RootElement.GetProperty("authenticated").GetBoolean()!=true ||
+                        sessionJson.RootElement.GetProperty("username").GetString()!="dp_restart_admin")
+                        throw new Exception("Pre-restart production auth cookie could not be unprotected after process restart");
+                }
+                Console.WriteLine("PASS: production admin cookie protected before restart authenticates after restart using the same persisted key ring");
                 Console.WriteLine("PASS: shipping Control Center restarted against the persistent encrypted Linux key ring");
             }
             finally
             {
                 if(!restarted.HasExited) restarted.Kill(entireProcessTree:true);
                 await restarted.WaitForExitAsync();
-                _=await restartStdout;
-                _=await restartStderr;
             }
         }
         finally
         {
-            if(!proc.HasExited)proc.Kill(entireProcessTree:true);
-            await proc.WaitForExitAsync();
-            var outText=await stdout;
-            var errText=await stderr;
+            if(restarted is not null && !restarted.HasExited) restarted.Kill(entireProcessTree:true);
+            if(restarted is not null) await restarted.WaitForExitAsync();
+            if(proc is not null && !proc.HasExited)proc.Kill(entireProcessTree:true);
+            if(proc is not null) await proc.WaitForExitAsync();
+            restarted?.Dispose();
+            proc?.Dispose();
+            if(restartStdout is not null) _=await restartStdout;
+            if(restartStderr is not null) _=await restartStderr;
+            var outText=stdout is null ? "" : await stdout;
+            var errText=stderr is null ? "" : await stderr;
             if(!ready)
                 Console.Error.WriteLine("Linux product startup stdout:"+outText[..Math.Min(outText.Length,2500)] +
                     " stderr:"+errText[..Math.Min(errText.Length,5000)]);

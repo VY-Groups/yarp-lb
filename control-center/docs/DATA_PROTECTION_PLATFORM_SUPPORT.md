@@ -36,8 +36,9 @@ automated disaster recovery. A shared directory or copied certificate is not
 proof of safe multi-node cookie/session continuity.
 
 The Linux process test now starts the real Control Center in Production mode,
-inspects the persisted key XML for certificate wrapping, terminates it, and
-restarts it against the same key ring. This is repeatable CI evidence only; it
-does not replace a service-manager restart, host reboot, tamper, or lost-key
-drill on representative Ubuntu and Windows Server machines. Issue #48 remains
-open until those requirements are accepted.
+inspects the persisted key XML for certificate wrapping, creates an authenticated
+administrative cookie, terminates the process, then restarts it against the same
+key ring and verifies that the pre-restart cookie still authenticates. This is
+repeatable CI evidence only; it does not replace a service-manager restart, host
+reboot, tamper, or lost-key drill on representative Ubuntu and Windows Server
+machines. Issue #48 remains open until those requirements are accepted.
