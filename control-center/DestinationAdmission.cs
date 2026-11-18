@@ -114,6 +114,7 @@ public sealed class DestinationAdmissionState
     private readonly object _sync = new();
     private readonly LinkedList<Waiter> _waiters = new();
     private DestinationAdmissionPolicy _policy;
+    private bool _admissionBlocked;
     private int _inFlight;
     private long _rejected;
     private long _timedOut;
@@ -162,8 +163,13 @@ public sealed class DestinationAdmissionState
         List<Waiter>? granted = null;
         lock (_sync)
         {
-            if (_waiters.Count > policy.MaxPending) return false;
+            if (_waiters.Count > policy.MaxPending)
+            {
+                _admissionBlocked = true;
+                return false;
+            }
             _policy = policy;
+            _admissionBlocked = false;
             granted = GrantWaitersLocked();
         }
         CompleteGranted(granted);
@@ -177,6 +183,15 @@ public sealed class DestinationAdmissionState
         {
             if (cancellationToken.IsCancellationRequested)
                 return ValueTask.FromCanceled<DestinationAdmissionLease?>(cancellationToken);
+
+            // A failed queue-shrink update fences handles acquired under the
+            // previous revision from adding new work. Existing waiters remain
+            // accepted and continue to drain through Release().
+            if (_admissionBlocked)
+            {
+                Interlocked.Increment(ref _rejected);
+                return ValueTask.FromResult<DestinationAdmissionLease?>(null);
+            }
 
             if (_inFlight < _policy.MaxInFlight && _waiters.Count == 0)
             {

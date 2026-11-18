@@ -207,7 +207,11 @@ public static class DestinationAdmissionTests
         if (!conflictManager.TryAcquireHandle("app", "shrink-conflict", out var conflictHandle, out _) ||
             conflictHandle is null)
             throw new Exception("FAIL: conflict fixture destination could not be acquired");
+        if (!conflictManager.TryAcquireHandle("app", "shrink-conflict", out var delayedHandle, out _) ||
+            delayedHandle is null)
+            throw new Exception("FAIL: delayed admission handle should be acquired before policy shrink");
         using (conflictHandle)
+        using (delayedHandle)
         using (var heldConflictPermit = await conflictHandle.State.AcquireAsync(CancellationToken.None) ??
                throw new Exception("FAIL: conflict fixture permit should be acquired"))
         {
@@ -219,6 +223,9 @@ public static class DestinationAdmissionTests
             Check(conflicted.Applied && conflicted.PolicyConflicts == 1 &&
                   !conflictManager.TryAcquireHandle("app", "shrink-conflict", out _, out var updateConflict) && updateConflict,
                 "unsafe applied queue shrink blocks new handles until accepted waiter drains");
+            var delayedAcquire = await delayedHandle.State.AcquireAsync(CancellationToken.None);
+            Check(delayedAcquire is null && conflictHandle.State.Snapshot is { Queued: 1, Rejected: 1 },
+                "handle acquired before a failed shrink cannot enqueue afterward while accepted waiters drain");
             heldConflictPermit.Dispose();
             using var drainedWaiter = await acceptedWaiter.WaitAsync(TimeSpan.FromSeconds(2)) ??
                 throw new Exception("FAIL: previously accepted waiter should drain under old policy");
