@@ -4,6 +4,11 @@
 TLS 1.3 clients can observe the TLS socket as established before Kestrel reports
 the client-chain result. Rejected certificates must receive no HTTP response;
 the test also matches a server-side chain rejection by that certificate's pin.
+
+On Windows, the agent uses its loopback-only test CA trust mode with online revocation
+explicitly enabled. The public test root is process-scoped; no OS certificate store
+is changed. This verifies Windows chain/CRL handling on the real Kestrel endpoint,
+but does not validate the default System trust store or enterprise deployment.
 """
 
 from __future__ import annotations
@@ -30,17 +35,67 @@ def run(*args: str) -> str:
     return result.stdout
 
 
+def find_openssl() -> str:
+    openssl = shutil.which("openssl")
+    if openssl:
+        return openssl
+    if os.name == "nt":
+        candidates = [
+            Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "Git/usr/bin/openssl.exe",
+            Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "OpenSSL-Win64/bin/openssl.exe",
+        ]
+        for candidate in candidates:
+            if candidate.is_file():
+                return str(candidate)
+    raise RuntimeError("OpenSSL is required for disposable CRL acceptance")
+
+
+def openssl_config_path(path: Path) -> str:
+    # OpenSSL config files parse backslashes as escapes on Windows.
+    return path.as_posix()
+
+
 def free_port() -> int:
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         return sock.getsockname()[1]
 
 
+def wait_for_listener(port: int, process: subprocess.Popen[str], name: str) -> None:
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            raise RuntimeError(f"{name} exited before its HTTPS listener started")
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=1):
+                return
+        except OSError:
+            time.sleep(0.1)
+    raise TimeoutError(f"{name} HTTPS listener did not start")
+
+
+def was_stopped_by_test(returncode: int | None, terminated_by_test: bool) -> bool:
+    # Python's terminate() uses TerminateProcess on Windows, whose expected
+    # process exit status is 1; POSIX reports SIGTERM as -15.
+    accepted_codes = (0, 1) if os.name == "nt" else (0, -15)
+    return terminated_by_test and returncode in accepted_codes
+
+
+def verify_termination_contract() -> None:
+    if was_stopped_by_test(0, False) or was_stopped_by_test(1, False) or \
+            was_stopped_by_test(-15, False) or was_stopped_by_test(None, False):
+        raise AssertionError("an agent exit without test-initiated termination was accepted")
+    accepted = (0, 1) if os.name == "nt" else (0, -15)
+    if any(not was_stopped_by_test(code, True) for code in accepted):
+        raise AssertionError("a test-initiated process termination status was rejected")
+
+
 def request_status(port: int, cert: Path, key: Path, root: Path) -> int:
     context = ssl.create_default_context(cafile=str(root))
     context.load_cert_chain(str(cert), str(key))
     context.check_hostname = False
-    client = http.client.HTTPSConnection("127.0.0.1", port, context=context, timeout=4)
+    # Leave room for the agent's bounded five-second online CRL retrieval.
+    client = http.client.HTTPSConnection("127.0.0.1", port, context=context, timeout=10)
     try:
         client.request("GET", "/agent/v1/status")
         return client.getresponse().status
@@ -53,7 +108,7 @@ def require_no_http_response(port: int, cert: Path, key: Path, root: Path, reaso
     context = ssl.create_default_context(cafile=str(root))
     context.load_cert_chain(str(cert), str(key))
     context.check_hostname = False
-    raw = socket.create_connection(("127.0.0.1", port), timeout=4)
+    raw = socket.create_connection(("127.0.0.1", port), timeout=10)
     try:
         try:
             tls = context.wrap_socket(raw, server_hostname="127.0.0.1")
@@ -61,7 +116,7 @@ def require_no_http_response(port: int, cert: Path, key: Path, root: Path, reaso
             pass
         else:
             try:
-                tls.settimeout(4)
+                tls.settimeout(10)
                 tls.sendall(b"GET /agent/v1/status HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
                 response = tls.recv(4096)
             except (ssl.SSLError, ConnectionError, TimeoutError):
@@ -79,11 +134,10 @@ def require_no_http_response(port: int, cert: Path, key: Path, root: Path, reaso
 
 
 def main() -> None:
+    verify_termination_contract()
     if not AGENT.is_file():
         raise FileNotFoundError(f"Build GatewayAgent first: {AGENT}")
-    openssl = shutil.which("openssl")
-    if not openssl:
-        raise RuntimeError("OpenSSL is required for disposable CRL acceptance")
+    openssl = find_openssl()
 
     with tempfile.TemporaryDirectory(prefix="gatewaycore-agent-crl-") as temp_name:
         temp = Path(temp_name)
@@ -121,12 +175,12 @@ def main() -> None:
             ca_config.write_text(f"""[ ca ]
 default_ca = CA_default
 [ CA_default ]
-database = {temp / 'index.txt'}
-new_certs_dir = {temp}
-certificate = {temp / 'root.pem'}
-private_key = {temp / 'root.key'}
-serial = {temp / 'serial'}
-crlnumber = {temp / 'crlnumber'}
+database = {openssl_config_path(temp / 'index.txt')}
+new_certs_dir = {openssl_config_path(temp)}
+certificate = {openssl_config_path(temp / 'root.pem')}
+private_key = {openssl_config_path(temp / 'root.key')}
+serial = {openssl_config_path(temp / 'serial')}
+crlnumber = {openssl_config_path(temp / 'crlnumber')}
 default_md = sha256
 default_days = 2
 default_crl_days = 1
@@ -138,27 +192,26 @@ commonName = supplied
 basicConstraints = critical,CA:FALSE
 keyUsage = critical,digitalSignature,keyEncipherment
 extendedKeyUsage = clientAuth
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid,issuer
 crlDistributionPoints = URI:http://127.0.0.1:{ca_port}/crl.pem
-[ offline_client_cert ]
-basicConstraints = critical,CA:FALSE
-keyUsage = critical,digitalSignature,keyEncipherment
-extendedKeyUsage = clientAuth
-crlDistributionPoints = URI:http://127.0.0.1:{dead_port}/crl.pem
 [ server_cert ]
 basicConstraints = critical,CA:FALSE
 keyUsage = critical,digitalSignature,keyEncipherment
 extendedKeyUsage = serverAuth
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid,issuer
 subjectAltName = DNS:localhost,IP:127.0.0.1
 """, encoding="ascii")
             unknown_ca_config = temp / "unknown-ca.cnf"
             unknown_ca_config.write_text(f"""[ ca ]
 default_ca = CA_default
 [ CA_default ]
-database = {temp / 'unknown-index.txt'}
-new_certs_dir = {temp}
-certificate = {temp / 'unknown-root.pem'}
-private_key = {temp / 'unknown-root.key'}
-serial = {temp / 'unknown-serial'}
+database = {openssl_config_path(temp / 'unknown-index.txt')}
+new_certs_dir = {openssl_config_path(temp)}
+certificate = {openssl_config_path(temp / 'unknown-root.pem')}
+private_key = {openssl_config_path(temp / 'unknown-root.key')}
+serial = {openssl_config_path(temp / 'unknown-serial')}
 default_md = sha256
 default_days = 2
 policy = policy
@@ -168,11 +221,15 @@ commonName = supplied
 basicConstraints = critical,CA:FALSE
 keyUsage = critical,digitalSignature,keyEncipherment
 extendedKeyUsage = clientAuth
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid,issuer
 """, encoding="ascii")
             run(openssl, "req", "-new", "-x509", "-nodes", "-newkey", "rsa:2048",
                 "-sha256", "-days", "2", "-subj", "/CN=GatewayCore disposable CRL root",
                 "-addext", "basicConstraints=critical,CA:TRUE,pathlen:0",
                 "-addext", "keyUsage=critical,keyCertSign,cRLSign",
+                "-addext", "subjectKeyIdentifier=hash",
+                "-addext", "authorityKeyIdentifier=keyid:always,issuer",
                 "-keyout", str(temp / "root.key"), "-out", str(temp / "root.pem"))
 
             def issue(name: str, section: str = "client_cert") -> tuple[Path, Path]:
@@ -198,12 +255,13 @@ extendedKeyUsage = clientAuth
 
             good_cert, good_key = issue("good-controller")
             revoked_cert, revoked_key = issue("revoked-controller")
-            offline_cert, offline_key = issue("offline-controller", "offline_client_cert")
             expired_cert, expired_key = issue_expired("expired-controller")
             run(openssl, "req", "-new", "-x509", "-nodes", "-newkey", "rsa:2048", "-sha256",
                 "-days", "2", "-subj", "/CN=GatewayCore unknown disposable root",
                 "-addext", "basicConstraints=critical,CA:TRUE,pathlen:0",
                 "-addext", "keyUsage=critical,keyCertSign,cRLSign",
+                "-addext", "subjectKeyIdentifier=hash",
+                "-addext", "authorityKeyIdentifier=keyid:always,issuer",
                 "-keyout", str(temp / "unknown-root.key"), "-out", str(temp / "unknown-root.pem"))
             unknown_csr = temp / "unknown-controller.csr"
             run(openssl, "req", "-new", "-nodes", "-newkey", "rsa:2048", "-sha256",
@@ -228,7 +286,7 @@ extendedKeyUsage = clientAuth
             run(openssl, "crl", "-in", str(crl_path), "-CAfile", str(temp / "root.pem"), "-verify", "-noout")
 
             port = free_port()
-            certificates = (good_cert, revoked_cert, offline_cert, expired_cert, unknown_cert)
+            certificates = (good_cert, revoked_cert, expired_cert, unknown_cert)
             pins = [run(openssl, "x509", "-in", str(cert), "-noout", "-fingerprint", "-sha1").split("=", 1)[1].replace(":", "").strip()
                     for cert in certificates]
             env = os.environ.copy()
@@ -243,6 +301,9 @@ extendedKeyUsage = clientAuth
             })
             env.update({f"Agent__TrustedClientThumbprints__{index}": pin
                         for index, pin in enumerate(pins)})
+            if os.name == "nt":
+                env["Agent__LabOnlyClientCaCertificatePath"] = str(temp / "root.pem")
+                env["Agent__LabOnlyClientCaCheckRevocation"] = "true"
             agent_log = temp / "gateway-agent.log"
             agent_log_stream = agent_log.open("w", encoding="utf-8")
             try:
@@ -252,18 +313,23 @@ extendedKeyUsage = clientAuth
                 agent_log_stream.close()
                 raise
             expected_chain_rejections: list[tuple[str, tuple[str, ...], str]] = []
+            terminated_by_test = False
             try:
-                deadline = time.monotonic() + 12
+                deadline = time.monotonic() + 30
+                last_connect_error: BaseException | None = None
                 while time.monotonic() < deadline:
                     if process.poll() is not None:
                         raise RuntimeError("GatewayAgent exited before its HTTPS listener started")
                     try:
                         if request_status(port, good_cert, good_key, temp / "root.pem") == 200:
                             break
-                    except (ssl.SSLError, http.client.HTTPException, ConnectionError, TimeoutError, OSError):
+                    except (ssl.SSLError, http.client.HTTPException, ConnectionError, TimeoutError, OSError) as error:
+                        last_connect_error = error
                         time.sleep(0.1)
                 else:
-                    raise TimeoutError("GatewayAgent production-mode CRL listener did not accept valid client")
+                    raise TimeoutError(
+                        "GatewayAgent CRL listener did not accept valid client; last request error: "
+                        + repr(last_connect_error))
                 print("PASS: production mTLS accepts a CA-trusted pinned client with a fresh signed CRL", flush=True)
                 require_no_http_response(port, revoked_cert, revoked_key, temp / "root.pem",
                                          "a CA-revoked client certificate")
@@ -271,27 +337,20 @@ extendedKeyUsage = clientAuth
                 if request_status(port, good_cert, good_key, temp / "root.pem") != 200:
                     raise AssertionError("valid client stopped working after revoked-client rejection")
                 print("PASS: valid client remains admitted after revoked-client rejection", flush=True)
-                require_no_http_response(port, offline_cert, offline_key, temp / "root.pem",
-                                         "an unavailable CRL endpoint")
-                expected_chain_rejections.append((pins[2],
-                                                  ("OfflineRevocation", "RevocationStatusUnknown"),
-                                                  "unavailable CRL endpoint"))
-                if request_status(port, good_cert, good_key, temp / "root.pem") != 200:
-                    raise AssertionError("valid client stopped working after unavailable-CRL rejection")
-                print("PASS: valid client remains admitted after unavailable-CRL rejection", flush=True)
                 require_no_http_response(port, expired_cert, expired_key, temp / "root.pem",
                                          "an expired client certificate")
-                expected_chain_rejections.append((pins[3], ("NotTimeValid",), "expired client certificate"))
+                expected_chain_rejections.append((pins[2], ("NotTimeValid",), "expired client certificate"))
                 if request_status(port, good_cert, good_key, temp / "root.pem") != 200:
                     raise AssertionError("valid client stopped working after expired-client rejection")
                 print("PASS: valid client remains admitted after expired-client rejection", flush=True)
                 require_no_http_response(port, unknown_cert, unknown_key, temp / "root.pem",
                                          "a client certificate from an untrusted CA")
-                expected_chain_rejections.append((pins[4], ("PartialChain",), "unknown client CA"))
+                expected_chain_rejections.append((pins[3], ("PartialChain",), "unknown client CA"))
                 if request_status(port, good_cert, good_key, temp / "root.pem") != 200:
                     raise AssertionError("valid client stopped working after unknown-chain rejection")
                 print("PASS: valid client remains admitted after unknown-chain rejection", flush=True)
             finally:
+                terminated_by_test = process.poll() is None
                 process.terminate()
                 try:
                     process.wait(timeout=3)
@@ -302,12 +361,14 @@ extendedKeyUsage = clientAuth
                 agent_log_stream.close()
                 logs = agent_log.read_text(encoding="utf-8", errors="replace")
                 request_prefix = f"Request starting HTTP/1.1 GET https://127.0.0.1:{port}/agent/v1/status"
-                if sum(request_prefix in line for line in logs.splitlines()) != 5:
+                if sum(request_prefix in line for line in logs.splitlines()) != 4:
                     raise AssertionError(
                         "expected only the five valid-client requests to reach the HTTP pipeline; logs:\n" + logs)
                 for thumbprint, statuses, reason in expected_chain_rejections:
+                    rejection_prefix = ("Rejected lab TLS client certificate " if os.name == "nt"
+                                        else "Rejected TLS client certificate ")
                     event_lines = [line for line in logs.splitlines()
-                                   if "Rejected TLS client certificate " + thumbprint in line]
+                                   if rejection_prefix + thumbprint in line]
                     matching_statuses = [status for status in statuses
                                          if any(status in line for line in event_lines)]
                     if not matching_statuses:
@@ -316,8 +377,94 @@ extendedKeyUsage = clientAuth
                             f"with status {statuses}; agent logs:\n{logs}")
                     status = matching_statuses[0]
                     print(f"PASS: agent chain log identifies {reason} with status {status}", flush=True)
-                if process.returncode not in (0, -15):
+                if not was_stopped_by_test(process.returncode, terminated_by_test):
                     raise RuntimeError(f"GatewayAgent exited {process.returncode}; logs:\n" + logs)
+
+            # Windows caches CRLs by issuer. Use a distinct one-use CA and agent
+            # for the outage case so the good CRL above cannot satisfy it from cache.
+            offline_dir = temp / "offline"
+            offline_dir.mkdir()
+            (offline_dir / "index.txt").write_text("", encoding="ascii")
+            (offline_dir / "serial").write_text("3000\n", encoding="ascii")
+            offline_config = offline_dir / "ca.cnf"
+            offline_config.write_text(f"""[ ca ]
+default_ca = CA_default
+[ CA_default ]
+database = {openssl_config_path(offline_dir / 'index.txt')}
+new_certs_dir = {openssl_config_path(offline_dir)}
+certificate = {openssl_config_path(offline_dir / 'root.pem')}
+private_key = {openssl_config_path(offline_dir / 'root.key')}
+serial = {openssl_config_path(offline_dir / 'serial')}
+default_md = sha256
+default_days = 2
+policy = policy
+copy_extensions = copy
+[ policy ]
+commonName = supplied
+[ offline_client_cert ]
+basicConstraints = critical,CA:FALSE
+keyUsage = critical,digitalSignature,keyEncipherment
+extendedKeyUsage = clientAuth
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid,issuer
+crlDistributionPoints = URI:http://127.0.0.1:{dead_port}/crl.pem
+""", encoding="ascii")
+            run(openssl, "req", "-new", "-x509", "-nodes", "-newkey", "rsa:2048",
+                "-sha256", "-days", "2", "-subj", "/CN=GatewayCore offline disposable root",
+                "-addext", "basicConstraints=critical,CA:TRUE,pathlen:0",
+                "-addext", "keyUsage=critical,keyCertSign,cRLSign",
+                "-addext", "subjectKeyIdentifier=hash",
+                "-addext", "authorityKeyIdentifier=keyid:always,issuer",
+                "-keyout", str(offline_dir / "root.key"), "-out", str(offline_dir / "root.pem"))
+            offline_key = offline_dir / "offline-controller.key"
+            offline_csr = offline_dir / "offline-controller.csr"
+            offline_cert = offline_dir / "offline-controller.pem"
+            run(openssl, "req", "-new", "-nodes", "-newkey", "rsa:2048", "-sha256",
+                "-subj", "/CN=offline-controller", "-keyout", str(offline_key), "-out", str(offline_csr))
+            run(openssl, "ca", "-batch", "-config", str(offline_config),
+                "-extensions", "offline_client_cert", "-in", str(offline_csr), "-out", str(offline_cert))
+            offline_pin = run(openssl, "x509", "-in", str(offline_cert), "-noout", "-fingerprint", "-sha1").split("=", 1)[1].replace(":", "").strip()
+            offline_port = free_port()
+            offline_env = env.copy()
+            offline_env["Kestrel__Endpoints__AgentHttps__Url"] = f"https://127.0.0.1:{offline_port}"
+            offline_env["Agent__TrustedClientThumbprints__0"] = offline_pin
+            # Let the isolated production-mode Linux chain trust this second CA
+            # so it must evaluate its dead CRL DP rather than stopping at
+            # PartialChain. The Python client explicitly trusts the main CA for
+            # the HTTPS server certificate, independent of this child setting.
+            offline_env["SSL_CERT_FILE"] = str(offline_dir / "root.pem")
+            for key in tuple(offline_env):
+                if key.startswith("Agent__TrustedClientThumbprints__") and key != "Agent__TrustedClientThumbprints__0":
+                    del offline_env[key]
+            if os.name == "nt":
+                offline_env["Agent__LabOnlyClientCaCertificatePath"] = str(offline_dir / "root.pem")
+            offline_log = temp / "gateway-agent-offline-crl.log"
+            with offline_log.open("w", encoding="utf-8") as stream:
+                offline_process = subprocess.Popen(["dotnet", str(AGENT)], cwd=temp, env=offline_env,
+                                                   stdout=stream, stderr=subprocess.STDOUT, text=True)
+                offline_terminated_by_test = False
+                try:
+                    wait_for_listener(offline_port, offline_process, "offline-CRL GatewayAgent")
+                    require_no_http_response(offline_port, offline_cert, offline_key, temp / "root.pem",
+                                             "an unavailable CRL endpoint from an uncached CA")
+                finally:
+                    offline_terminated_by_test = offline_process.poll() is None
+                    offline_process.terminate()
+                    try:
+                        offline_process.wait(timeout=3)
+                    except subprocess.TimeoutExpired:
+                        offline_process.kill()
+                        offline_process.wait(timeout=3)
+                if not was_stopped_by_test(offline_process.returncode, offline_terminated_by_test):
+                    raise RuntimeError(f"offline-CRL GatewayAgent exited {offline_process.returncode}; logs:\n"
+                                       + offline_log.read_text(encoding="utf-8", errors="replace"))
+            offline_logs = offline_log.read_text(encoding="utf-8", errors="replace")
+            rejection_prefix = ("Rejected lab TLS client certificate " if os.name == "nt"
+                                else "Rejected TLS client certificate ")
+            if f"{rejection_prefix}{offline_pin}" not in offline_logs or not any(
+                    status in offline_logs for status in ("OfflineRevocation", "RevocationStatusUnknown")):
+                raise AssertionError("unavailable CRL was not logged as a client-chain rejection:\n" + offline_logs)
+            print("PASS: production chain rejects an unavailable CRL from a separate uncached test CA", flush=True)
         finally:
             crl_server.shutdown()
             crl_server.server_close()
