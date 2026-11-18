@@ -43,6 +43,9 @@ Receipt-age expiry uses the process monotonic clock (`TimeProvider`), so NTP
 correction or wall-clock rollback cannot lengthen or prematurely expire this
 TTL. The current-minute protocol check still uses UTC wall time; if that minute
 is incorrect or regresses, snapshots fail closed until the minute agrees again.
+Within one source epoch, frames from a minute older than the last accepted minute
+are rejected, so a receiver clock rollback cannot replace newer telemetry with a
+delayed prior-minute snapshot.
 Expiry NEVER resets the remote boot epoch or previously accepted sequence:
 replaying an old signed frame cannot revive stale counts. A local clock moved
 backward does not change elapsed receipt age. Tests use separate controllable
