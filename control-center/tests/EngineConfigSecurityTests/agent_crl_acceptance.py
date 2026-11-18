@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Exercise production-mode GatewayAgent mTLS revocation with a disposable CA."""
+"""Exercise production GatewayAgent CRL enforcement with a disposable CA.
+
+TLS 1.3 clients can observe the TLS socket as established before Kestrel reports
+the client-chain result. Rejected certificates must receive no HTTP response;
+the test also matches a server-side chain rejection by that certificate's pin.
+"""
 
 from __future__ import annotations
 
@@ -43,14 +48,34 @@ def request_status(port: int, cert: Path, key: Path, root: Path) -> int:
         client.close()
 
 
-def require_denied(port: int, cert: Path, key: Path, root: Path, reason: str) -> None:
+def require_no_http_response(port: int, cert: Path, key: Path, root: Path, reason: str) -> None:
+    """Ensure a rejected certificate cannot obtain any HTTP response."""
+    context = ssl.create_default_context(cafile=str(root))
+    context.load_cert_chain(str(cert), str(key))
+    context.check_hostname = False
+    raw = socket.create_connection(("127.0.0.1", port), timeout=4)
     try:
-        status = request_status(port, cert, key, root)
-        if status < 400:
-            raise AssertionError(f"{reason}: unexpected HTTP {status}")
-    except (ssl.SSLError, http.client.HTTPException, ConnectionError, TimeoutError, OSError):
-        pass
-    print(f"PASS: production mTLS rejects {reason}", flush=True)
+        try:
+            tls = context.wrap_socket(raw, server_hostname="127.0.0.1")
+        except (ssl.SSLError, ConnectionError, TimeoutError):
+            pass
+        else:
+            try:
+                tls.settimeout(4)
+                tls.sendall(b"GET /agent/v1/status HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+                response = tls.recv(4096)
+            except (ssl.SSLError, ConnectionError, TimeoutError):
+                response = b""
+            finally:
+                tls.close()
+            if response:
+                raise AssertionError(
+                    f"{reason}: server returned application-layer data instead of rejecting the client chain: "
+                    f"{response.splitlines()[0]!r}")
+    finally:
+        raw.close()
+    print(f"PASS: production mTLS returned no HTTP response for {reason}; chain log is checked at teardown",
+          flush=True)
 
 
 def main() -> None:
@@ -171,8 +196,15 @@ subjectAltName = DNS:localhost,IP:127.0.0.1
                 "Agent__EnableEngineConfigChanges": "false",
                 "Agent__EnableServiceActions": "false",
             })
-            process = subprocess.Popen(["dotnet", str(AGENT)], cwd=temp, env=env,
-                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            agent_log = temp / "gateway-agent.log"
+            agent_log_stream = agent_log.open("w", encoding="utf-8")
+            try:
+                process = subprocess.Popen(["dotnet", str(AGENT)], cwd=temp, env=env,
+                                           stdout=agent_log_stream, stderr=subprocess.STDOUT, text=True)
+            except Exception:
+                agent_log_stream.close()
+                raise
+            expected_chain_rejections: list[tuple[str, tuple[str, ...], str]] = []
             try:
                 deadline = time.monotonic() + 12
                 while time.monotonic() < deadline:
@@ -186,11 +218,17 @@ subjectAltName = DNS:localhost,IP:127.0.0.1
                 else:
                     raise TimeoutError("GatewayAgent production-mode CRL listener did not accept valid client")
                 print("PASS: production mTLS accepts a CA-trusted pinned client with a fresh signed CRL", flush=True)
-                require_denied(port, revoked_cert, revoked_key, temp / "root.pem", "a CA-revoked client certificate")
+                require_no_http_response(port, revoked_cert, revoked_key, temp / "root.pem",
+                                         "a CA-revoked client certificate")
+                expected_chain_rejections.append((pins[1], ("Revoked",), "revoked certificate"))
                 if request_status(port, good_cert, good_key, temp / "root.pem") != 200:
                     raise AssertionError("valid client stopped working after revoked-client rejection")
                 print("PASS: valid client remains admitted after revoked-client rejection", flush=True)
-                require_denied(port, offline_cert, offline_key, temp / "root.pem", "an unavailable CRL endpoint")
+                require_no_http_response(port, offline_cert, offline_key, temp / "root.pem",
+                                         "an unavailable CRL endpoint")
+                expected_chain_rejections.append((pins[2],
+                                                  ("OfflineRevocation", "RevocationStatusUnknown"),
+                                                  "unavailable CRL endpoint"))
                 if request_status(port, good_cert, good_key, temp / "root.pem") != 200:
                     raise AssertionError("valid client stopped working after unavailable-CRL rejection")
                 print("PASS: valid client remains admitted after unavailable-CRL rejection", flush=True)
@@ -201,9 +239,26 @@ subjectAltName = DNS:localhost,IP:127.0.0.1
                 except subprocess.TimeoutExpired:
                     process.kill()
                     process.wait(timeout=3)
+                agent_log_stream.flush()
+                agent_log_stream.close()
+                logs = agent_log.read_text(encoding="utf-8", errors="replace")
+                request_prefix = f"Request starting HTTP/1.1 GET https://127.0.0.1:{port}/agent/v1/status"
+                if sum(request_prefix in line for line in logs.splitlines()) != 3:
+                    raise AssertionError(
+                        "expected only the three valid-client requests to reach the HTTP pipeline; logs:\n" + logs)
+                for thumbprint, statuses, reason in expected_chain_rejections:
+                    event_lines = [line for line in logs.splitlines()
+                                   if "Rejected TLS client certificate " + thumbprint in line]
+                    matching_statuses = [status for status in statuses
+                                         if any(status in line for line in event_lines)]
+                    if not matching_statuses:
+                        raise AssertionError(
+                            f"{reason}: expected production chain rejection for thumbprint {thumbprint} "
+                            f"with status {statuses}; agent logs:\n{logs}")
+                    status = matching_statuses[0]
+                    print(f"PASS: agent chain log identifies {reason} with status {status}", flush=True)
                 if process.returncode not in (0, -15):
-                    stdout, stderr = process.communicate(timeout=2)
-                    raise RuntimeError(f"GatewayAgent exited {process.returncode}:\n{stdout}\n{stderr}")
+                    raise RuntimeError(f"GatewayAgent exited {process.returncode}; logs:\n" + logs)
         finally:
             crl_server.shutdown()
             crl_server.server_close()
