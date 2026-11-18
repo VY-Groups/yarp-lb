@@ -32,7 +32,7 @@ public static class GatewayOtlpOverheadAcceptance
         await using var collector = await StartCollectorAsync();
         var collectorAddress = collector.Services.GetRequiredService<IServer>()
             .Features.Get<IServerAddressesFeature>()!.Addresses.Single();
-        var results = new List<SampleResult>();
+        var pairs = new List<PairedSample>();
         try
         {
             // Alternate order to reduce systematic warm-cache and runner-load bias.
@@ -41,12 +41,13 @@ public static class GatewayOtlpOverheadAcceptance
                 var telemetryFirst = index % 2 == 1;
                 var first = await MeasureAsync(telemetryFirst, collectorAddress);
                 var second = await MeasureAsync(!telemetryFirst, collectorAddress);
-                results.Add(telemetryFirst ? first : second);
-                results.Add(telemetryFirst ? second : first);
+                pairs.Add(telemetryFirst
+                    ? new PairedSample(second, first)
+                    : new PairedSample(first, second));
             }
 
-            var disabled = results.Where(result => !result.TelemetryEnabled).ToArray();
-            var enabled = results.Where(result => result.TelemetryEnabled).ToArray();
+            var disabled = pairs.Select(pair => pair.TelemetryDisabled).ToArray();
+            var enabled = pairs.Select(pair => pair.TelemetryEnabled).ToArray();
             var disabledP95 = Median(disabled.Select(result => result.P95Milliseconds));
             var enabledP95 = Median(enabled.Select(result => result.P95Milliseconds));
             var disabledRps = Median(disabled.Select(result => result.RequestsPerSecond));
@@ -68,16 +69,53 @@ public static class GatewayOtlpOverheadAcceptance
                     p95LatencyChangePercent = PercentChange(disabledP95, enabledP95),
                     throughputChangePercent = PercentChange(disabledRps, enabledRps)
                 },
-                samples = results.Select(result => new
+                sampleRanges = new
                 {
-                    telemetryEnabled = result.TelemetryEnabled,
-                    requestsPerSecond = Round(result.RequestsPerSecond),
-                    p50Milliseconds = Round(result.P50Milliseconds),
-                    p95Milliseconds = Round(result.P95Milliseconds),
-                    p99Milliseconds = Round(result.P99Milliseconds)
+                    telemetryDisabled = new
+                    {
+                        minRequestsPerSecond = Round(disabled.Min(result => result.RequestsPerSecond)),
+                        maxRequestsPerSecond = Round(disabled.Max(result => result.RequestsPerSecond)),
+                        minP95Milliseconds = Round(disabled.Min(result => result.P95Milliseconds)),
+                        maxP95Milliseconds = Round(disabled.Max(result => result.P95Milliseconds))
+                    },
+                    telemetryEnabled = new
+                    {
+                        minRequestsPerSecond = Round(enabled.Min(result => result.RequestsPerSecond)),
+                        maxRequestsPerSecond = Round(enabled.Max(result => result.RequestsPerSecond)),
+                        minP95Milliseconds = Round(enabled.Min(result => result.P95Milliseconds)),
+                        maxP95Milliseconds = Round(enabled.Max(result => result.P95Milliseconds))
+                    }
+                },
+                pairedDeltas = pairs.Select((pair, index) => new
+                {
+                    pair = index + 1,
+                    telemetryWasFirst = index % 2 == 1,
+                    p95LatencyChangePercent = PercentChange(pair.TelemetryDisabled.P95Milliseconds,
+                        pair.TelemetryEnabled.P95Milliseconds),
+                    throughputChangePercent = PercentChange(pair.TelemetryDisabled.RequestsPerSecond,
+                        pair.TelemetryEnabled.RequestsPerSecond),
+                    telemetryDisabled = Sample(pair.TelemetryDisabled),
+                    telemetryEnabled = Sample(pair.TelemetryEnabled)
+                }),
+                samples = pairs.SelectMany((pair, index) => new[]
+                {
+                    new { pair = index + 1, telemetryEnabled = false, sample = Sample(pair.TelemetryDisabled) },
+                    new { pair = index + 1, telemetryEnabled = true, sample = Sample(pair.TelemetryEnabled) }
                 })
             };
-            Console.WriteLine("OTEL_OVERHEAD_REPORT " + JsonSerializer.Serialize(report));
+            var reportJson = JsonSerializer.Serialize(report, new JsonSerializerOptions { WriteIndented = true });
+            var reportDirectory = Environment.GetEnvironmentVariable("RUNNER_TEMP");
+            if (string.IsNullOrWhiteSpace(reportDirectory)) reportDirectory = Path.GetTempPath();
+            var reportPath = Path.Combine(reportDirectory, "gatewaycore-otel-overhead-report.json");
+            await File.WriteAllTextAsync(reportPath, reportJson);
+            var githubSummaryPath = Environment.GetEnvironmentVariable("GITHUB_STEP_SUMMARY");
+            if (!string.IsNullOrWhiteSpace(githubSummaryPath))
+            {
+                await File.AppendAllTextAsync(githubSummaryPath,
+                    $"## Paired GatewayCore telemetry middleware measurement\n\n```json\n{reportJson}\n```\n");
+            }
+            Console.WriteLine("OTEL_OVERHEAD_REPORT " + reportJson);
+            Console.WriteLine($"OTEL_OVERHEAD_REPORT_PATH {reportPath}");
             Console.WriteLine("PASS: paired proxy telemetry overhead comparison completed; values are CI loopback measurements only");
         }
         finally
@@ -217,11 +255,21 @@ public static class GatewayOtlpOverheadAcceptance
 
     private static double Round(double value) => Math.Round(value, 3, MidpointRounding.AwayFromZero);
 
+    private static object Sample(SampleResult result) => new
+    {
+        requestsPerSecond = Round(result.RequestsPerSecond),
+        p50Milliseconds = Round(result.P50Milliseconds),
+        p95Milliseconds = Round(result.P95Milliseconds),
+        p99Milliseconds = Round(result.P99Milliseconds)
+    };
+
     private static double? PercentChange(double baseline, double measured) =>
         baseline <= 0 ? null : Round((measured - baseline) / baseline * 100);
 
     private sealed record SampleResult(bool TelemetryEnabled, double RequestsPerSecond,
         double P50Milliseconds, double P95Milliseconds, double P99Milliseconds);
+
+    private sealed record PairedSample(SampleResult TelemetryDisabled, SampleResult TelemetryEnabled);
 
     private sealed record LatencySample(TimeSpan Elapsed, double[] Milliseconds);
 
