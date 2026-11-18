@@ -61,6 +61,7 @@ public static class GatewayOtlpOverheadAcceptance
                 concurrency = Concurrency,
                 samplesPerMode = Samples,
                 samplingRatio = 0.05,
+                connectionPolicy = "HTTP/1.1 keep-alive; one shared client per mode sample; drain response body",
                 collector = "local disposable HTTP receiver",
                 median = new
                 {
@@ -193,7 +194,12 @@ public static class GatewayOtlpOverheadAcceptance
         var address = app.Services.GetRequiredService<IServer>()
             .Features.Get<IServerAddressesFeature>()!.Addresses.Single();
         using var handler = new SocketsHttpHandler { MaxConnectionsPerServer = Concurrency };
-        using var client = new HttpClient(handler, disposeHandler: false) { Timeout = TimeSpan.FromSeconds(15) };
+        using var client = new HttpClient(handler, disposeHandler: false)
+        {
+            Timeout = TimeSpan.FromSeconds(15),
+            DefaultRequestVersion = HttpVersion.Version11,
+            DefaultVersionPolicy = HttpVersionPolicy.RequestVersionExact
+        };
         var requestUri = new Uri(new Uri(address), "benchmark");
 
         await SendRequestsAsync(client, requestUri, WarmupRequests);
@@ -231,6 +237,7 @@ public static class GatewayOtlpOverheadAcceptance
                 using var response = await client.GetAsync(uri, HttpCompletionOption.ResponseHeadersRead);
                 if (response.StatusCode != HttpStatusCode.OK)
                     throw new InvalidOperationException($"Loopback benchmark returned HTTP {(int)response.StatusCode}");
+                await response.Content.CopyToAsync(Stream.Null);
                 latencies.Add(Stopwatch.GetElapsedTime(started).TotalMilliseconds);
             }
         });
