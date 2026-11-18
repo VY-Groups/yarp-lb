@@ -743,7 +743,7 @@ unmeasured.
 
 ### Recent merged increments
 
-Exact-head Actions results are recorded on the PRs and listed below where applicable. Independent source reviews were performed during the implementation work, but GitHub review records were not present on PRs #145, #147, and #155–#159 at this snapshot; do not claim GitHub approval for those merges.
+Exact-head Actions results are recorded on the PRs and listed below where applicable. Source-review work was performed during these tasks, but none of the merged PRs listed below had a GitHub review record at this snapshot; do not claim GitHub approval for those merges.
 
 | PR | Merge commit | Verified contribution | Issue remains open because |
 | --- | --- | --- | --- |
