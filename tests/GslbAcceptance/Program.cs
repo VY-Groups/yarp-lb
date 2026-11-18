@@ -132,6 +132,13 @@ try
                 new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid, null), trustedPrincipals) ||
             !AgentHealthReportStore.IsWindowsServiceSid(new SecurityIdentifier("S-1-5-80-1-2-3-4-5")))
             throw new Exception("FAIL: Windows replay-state owner/service SID trust policy is incorrect");
+        var syntheticServiceSid = new SecurityIdentifier("S-1-5-80-11-22-33-44-55");
+        var filteredGroups = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        AgentHealthReportStore.AddTrustedServiceSids(filteredGroups,
+            [syntheticServiceSid, new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid, null)]);
+        if (!filteredGroups.Contains(syntheticServiceSid.Value) ||
+            filteredGroups.Contains(new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid, null).Value))
+            throw new Exception("FAIL: only injected NT SERVICE token groups may extend the replay ACL allowlist");
         Console.WriteLine("PASS: untrusted Windows replay-state owner rejected");
 
         var serviceSid = testIdentity.Groups?.Cast<IdentityReference>().OfType<SecurityIdentifier>()

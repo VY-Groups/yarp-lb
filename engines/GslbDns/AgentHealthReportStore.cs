@@ -391,15 +391,18 @@ internal sealed class AgentHealthReportStore : IDisposable
             new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null).Value,
             new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null).Value
         };
-        if (identity.Groups is not null)
-        {
-            foreach (var group in identity.Groups)
-            {
-                if (group is SecurityIdentifier sid && IsWindowsServiceSid(sid))
-                    allowed.Add(sid.Value);
-            }
-        }
+        var groups = identity.Groups?.Cast<IdentityReference>().OfType<SecurityIdentifier>() ?? [];
+        AddTrustedServiceSids(allowed, groups);
         return allowed;
+    }
+
+    [SupportedOSPlatform("windows")]
+    internal static void AddTrustedServiceSids(ISet<string> allowed,
+        IEnumerable<SecurityIdentifier> tokenGroups)
+    {
+        foreach (var sid in tokenGroups)
+            if (IsWindowsServiceSid(sid))
+                allowed.Add(sid.Value);
     }
 
     [SupportedOSPlatform("windows")]
