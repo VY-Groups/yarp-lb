@@ -137,7 +137,8 @@ def main():
                 denied = subprocess.run(["dotnet", observer_dll, invalid_config],
                                          capture_output=True, text=True, timeout=10)
                 assert denied.returncode != 0 and expected_error in denied.stderr, \
-                    f"observer did not reject {reason} through private-key file security"
+                    f"observer did not reject {reason} through private-key file security; " \
+                    f"exit={denied.returncode}, stdout={denied.stdout[-1000:]}, stderr={denied.stderr[-2000:]}"
                 print(f"PASS: observer refuses {reason}")
 
             insecure_observer_key = root / "insecure-observer-signing.key"
