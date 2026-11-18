@@ -80,6 +80,28 @@ public static class PeerSyncTests
         var rollback=a.Snapshot(now);
         rollback.Counters.Clear();
         Check(!b.Apply(rollback,now),"state rollback rejected");
+
+        // A delayed frame from the same process epoch is distinct from an
+        // exact replay: it has a lower sequence but identical counters. It
+        // must neither replace the newest sequence nor refresh the receipt TTL.
+        var orderingSource = new PeerStateJournal("node-a", "node-b", secret, 2);
+        orderingSource.Observe(IPAddress.Parse("10.123.4.8"), now);
+        var delayedFrame = orderingSource.Snapshot(now);
+        var currentFrame = orderingSource.Snapshot(now);
+        var orderingClock = new ManualTimeProvider(DateTimeOffset.UtcNow);
+        var orderingReceiver = new PeerStateJournal("node-b", "node-a", secret, 2,
+            TimeSpan.FromSeconds(6), timeProvider: orderingClock);
+        Check(orderingReceiver.Apply(currentFrame, now),
+            "newest same-epoch sequence is accepted before delayed delivery");
+        orderingClock.Advance(TimeSpan.FromSeconds(5));
+        Check(!orderingReceiver.Apply(delayedFrame, now) &&
+              orderingReceiver.Status(now).RemoteSequence == currentFrame.Sequence &&
+              orderingReceiver.Status(now).RemoteRequests == 1,
+            "delayed lower sequence with unchanged counters cannot replace the newest frame");
+        orderingClock.Advance(TimeSpan.FromSeconds(2));
+        Check(!orderingReceiver.Status(now).RemoteReportedInCurrentMinute,
+            "rejected delayed frame does not refresh the peer receipt TTL");
+
         Check(!b.Apply(new PeerStateFrame("node-c",now,500,new()),now),"unknown peer rejected");
         Check(!b.Apply(new PeerStateFrame("node-a",now+2,999,new()),now),
             "future minute rejected");
