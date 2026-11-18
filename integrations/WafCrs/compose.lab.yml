@@ -1,10 +1,9 @@
 services:
   protected-app:
     image: python:3.12-alpine
-    command: >
-      sh -c "mkdir -p /srv/website &&
-             echo 'YARP-WAF-CI-BENIGN' > /srv/website/index.html &&
-             exec python -m http.server 8000 --bind 0.0.0.0 --directory /srv/website"
+    command: ["python", "/app/backend.py"]
+    volumes:
+      - ../../tests/WafCrs/backend.py:/app/backend.py:ro
     expose: ["8000"]
     networks: ["waf-private"]
   waf:

@@ -1,0 +1,2 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Envelope><Request id="waf-fixture-002"><Action>update</Action><Service>edge-api</Service><Comment>North &amp; South routing example</Comment></Request></Envelope>
