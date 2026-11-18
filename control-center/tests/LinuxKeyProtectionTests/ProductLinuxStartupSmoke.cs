@@ -87,6 +87,19 @@ public static class ProductLinuxStartupSmoke
             if(!ready)
                 throw new Exception("Real Control Center never became ready on Linux with non-DPAPI X509 key protection");
             Console.WriteLine("PASS: shipping Control Center starts on Ubuntu in Production mode with private RSA X509 key ring");
+            var keyDirectory=Path.Combine(state,"data-protection-keys");
+            var firstKeyFiles=Directory.GetFiles(keyDirectory,"key-*.xml");
+            if(firstKeyFiles.Length==0)
+                throw new Exception("Production Linux startup did not persist a Data Protection key");
+            var firstKeyIds=firstKeyFiles.Select(Path.GetFileName).Order(StringComparer.Ordinal).ToArray();
+            foreach(var keyFile in firstKeyFiles)
+            {
+                var xml=await File.ReadAllTextAsync(keyFile);
+                if(!xml.Contains("<encryptedSecret",StringComparison.Ordinal) ||
+                    xml.Contains("<masterKey",StringComparison.Ordinal))
+                    throw new Exception("Production Linux Data Protection key XML is not certificate-wrapped");
+            }
+            Console.WriteLine("PASS: shipping Control Center persisted only certificate-wrapped Linux Data Protection key material");
             using var metrics=await client.GetAsync("http://127.0.0.1:"+port+"/gateway/metrics");
             metrics.EnsureSuccessStatusCode();
             var body=await metrics.Content.ReadAsStringAsync();
@@ -95,6 +108,54 @@ public static class ProductLinuxStartupSmoke
                 !body.Contains("yarp_logging_dropped_high_priority_total "))
                 throw new Exception("Production monitoring metrics missing GC Gen2 or log-drop counters");
             Console.WriteLine("PASS: real production Linux gateway exposes loopback-only Gen2 and drop counters");
+
+            // Restart the shipping process against the same protected key ring and
+            // certificate. Use a fresh listener port to avoid any socket reuse assumptions.
+            proc.Kill(entireProcessTree:true);
+            await proc.WaitForExitAsync();
+            using var restartListener=new TcpListener(IPAddress.Loopback,0);
+            restartListener.Start();
+            var restartPort=((IPEndPoint)restartListener.LocalEndpoint).Port;
+            restartListener.Stop();
+            info.Environment["ASPNETCORE_URLS"]="http://127.0.0.1:"+restartPort;
+            using var restarted=Process.Start(info) ??
+                throw new Exception("Could not restart the real Control Center against its existing Linux key ring");
+            var restartStdout=restarted.StandardOutput.ReadToEndAsync();
+            var restartStderr=restarted.StandardError.ReadToEndAsync();
+            var restartedReady=false;
+            try
+            {
+                using var restartClient=new HttpClient(new HttpClientHandler{UseProxy=false})
+                {
+                    Timeout=TimeSpan.FromSeconds(2)
+                };
+                for(var i=0;i<100;i++)
+                {
+                    if(restarted.HasExited) break;
+                    try
+                    {
+                        using var health=await restartClient.GetAsync("http://127.0.0.1:"+restartPort+"/gateway/health");
+                        if(health.IsSuccessStatusCode){restartedReady=true;break;}
+                    }
+                    catch(HttpRequestException) {}
+                    catch(TaskCanceledException) {}
+                    await Task.Delay(100);
+                }
+                if(!restartedReady)
+                    throw new Exception("Production Control Center failed to restart with the existing certificate-wrapped Linux key ring");
+                var restartedKeyIds=Directory.GetFiles(keyDirectory,"key-*.xml")
+                    .Select(Path.GetFileName).Order(StringComparer.Ordinal).ToArray();
+                if(!firstKeyIds.SequenceEqual(restartedKeyIds,StringComparer.Ordinal))
+                    throw new Exception("Linux process restart replaced or lost the existing Data Protection key ring");
+                Console.WriteLine("PASS: shipping Control Center restarted against the persistent encrypted Linux key ring");
+            }
+            finally
+            {
+                if(!restarted.HasExited) restarted.Kill(entireProcessTree:true);
+                await restarted.WaitForExitAsync();
+                _=await restartStdout;
+                _=await restartStderr;
+            }
         }
         finally
         {
