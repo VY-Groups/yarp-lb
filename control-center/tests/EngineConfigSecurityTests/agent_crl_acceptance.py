@@ -355,8 +355,10 @@ authorityKeyIdentifier = keyid,issuer
                     raise AssertionError(
                         "expected only the five valid-client requests to reach the HTTP pipeline; logs:\n" + logs)
                 for thumbprint, statuses, reason in expected_chain_rejections:
+                    rejection_prefix = ("Rejected lab TLS client certificate " if os.name == "nt"
+                                        else "Rejected TLS client certificate ")
                     event_lines = [line for line in logs.splitlines()
-                                   if "Rejected lab TLS client certificate " + thumbprint in line]
+                                   if rejection_prefix + thumbprint in line]
                     matching_statuses = [status for status in statuses
                                          if any(status in line for line in event_lines)]
                     if not matching_statuses:
@@ -442,7 +444,9 @@ crlDistributionPoints = URI:http://127.0.0.1:{dead_port}/crl.pem
                     raise RuntimeError(f"offline-CRL GatewayAgent exited {offline_process.returncode}; logs:\n"
                                        + offline_log.read_text(encoding="utf-8", errors="replace"))
             offline_logs = offline_log.read_text(encoding="utf-8", errors="replace")
-            if f"Rejected lab TLS client certificate {offline_pin}" not in offline_logs or not any(
+            rejection_prefix = ("Rejected lab TLS client certificate " if os.name == "nt"
+                                else "Rejected TLS client certificate ")
+            if f"{rejection_prefix}{offline_pin}" not in offline_logs or not any(
                     status in offline_logs for status in ("OfflineRevocation", "RevocationStatusUnknown")):
                 raise AssertionError("unavailable CRL was not logged as a client-chain rejection:\n" + offline_logs)
             print("PASS: production chain rejects an unavailable CRL from a separate uncached test CA", flush=True)
