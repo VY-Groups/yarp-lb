@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Security.AccessControl;
 using System.Security.Principal;
 using System.Security.Cryptography.X509Certificates;
+using System.Runtime.Versioning;
 using System.Text.Json;
 using GatewayCore.Gslb.Contracts;
 
@@ -355,22 +356,21 @@ internal sealed class AgentHealthReportStore : IDisposable
         else if (OperatingSystem.IsWindows()) EnsurePrivateWindowsAcl(path, isDirectory: false);
     }
 
+    [SupportedOSPlatform("windows")]
     private static void EnsurePrivateWindowsAcl(string path, bool isDirectory)
     {
         if (!OperatingSystem.IsWindows()) return;
-        var currentUser = WindowsIdentity.GetCurrent().User
-            ?? throw new InvalidDataException("Cannot determine DNS service identity for replay state ACL validation");
-        var allowed = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-        {
-            currentUser.Value,
-            new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null).Value,
-            new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null).Value
-        };
-        AuthorizationRuleCollection rules = isDirectory
-            ? new DirectoryInfo(path).GetAccessControl(AccessControlSections.Access)
-                .GetAccessRules(includeExplicit: true, includeInherited: true, targetType: typeof(SecurityIdentifier))
-            : new FileInfo(path).GetAccessControl(AccessControlSections.Access)
-                .GetAccessRules(includeExplicit: true, includeInherited: true, targetType: typeof(SecurityIdentifier));
+        using var identity = WindowsIdentity.GetCurrent();
+        var allowed = AllowedWindowsPrincipals(identity);
+
+        FileSystemSecurity security = isDirectory
+            ? new DirectoryInfo(path).GetAccessControl(AccessControlSections.Access | AccessControlSections.Owner)
+            : new FileInfo(path).GetAccessControl(AccessControlSections.Access | AccessControlSections.Owner);
+        var owner = security.GetOwner(typeof(SecurityIdentifier)) as SecurityIdentifier;
+        if (!IsAllowedWindowsOwner(owner, allowed))
+            throw new InvalidDataException("Replay state owner must be the DNS service identity, SYSTEM, Administrators or its service SID");
+        var rules = security.GetAccessRules(includeExplicit: true, includeInherited: true,
+            targetType: typeof(SecurityIdentifier));
         foreach (FileSystemAccessRule rule in rules)
         {
             if (rule.AccessControlType == AccessControlType.Allow &&
@@ -379,6 +379,36 @@ internal sealed class AgentHealthReportStore : IDisposable
                 throw new InvalidDataException("Replay state ACL grants access beyond the DNS service identity, SYSTEM and Administrators");
         }
     }
+
+    [SupportedOSPlatform("windows")]
+    internal static HashSet<string> AllowedWindowsPrincipals(WindowsIdentity identity)
+    {
+        var currentUser = identity.User
+            ?? throw new InvalidDataException("Cannot determine DNS service identity for replay state ACL validation");
+        var allowed = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            currentUser.Value,
+            new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null).Value,
+            new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null).Value
+        };
+        if (identity.Groups is not null)
+        {
+            foreach (var group in identity.Groups)
+            {
+                if (group is SecurityIdentifier sid && IsWindowsServiceSid(sid))
+                    allowed.Add(sid.Value);
+            }
+        }
+        return allowed;
+    }
+
+    [SupportedOSPlatform("windows")]
+    internal static bool IsAllowedWindowsOwner(SecurityIdentifier? owner, IReadOnlySet<string> allowed) =>
+        owner is not null && allowed.Contains(owner.Value);
+
+    [SupportedOSPlatform("windows")]
+    internal static bool IsWindowsServiceSid(SecurityIdentifier sid) =>
+        sid.Value.StartsWith("S-1-5-80-", StringComparison.OrdinalIgnoreCase);
 
     private static void EnsureNotLink(string path)
     {

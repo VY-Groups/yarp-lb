@@ -124,6 +124,32 @@ try
         if (!broadAclRejected)
             throw new Exception("FAIL: Windows replay-state directory with Everyone access was accepted");
         Console.WriteLine("PASS: broadly accessible Windows replay-state ACL rejected");
+
+        using var testIdentity = WindowsIdentity.GetCurrent();
+        var trustedPrincipals = AgentHealthReportStore.AllowedWindowsPrincipals(testIdentity);
+        if (!AgentHealthReportStore.IsAllowedWindowsOwner(testIdentity.User, trustedPrincipals) ||
+            AgentHealthReportStore.IsAllowedWindowsOwner(
+                new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid, null), trustedPrincipals) ||
+            !AgentHealthReportStore.IsWindowsServiceSid(new SecurityIdentifier("S-1-5-80-1-2-3-4-5")))
+            throw new Exception("FAIL: Windows replay-state owner/service SID trust policy is incorrect");
+        Console.WriteLine("PASS: untrusted Windows replay-state owner rejected");
+
+        var serviceSid = testIdentity.Groups?.Cast<IdentityReference>().OfType<SecurityIdentifier>()
+            .FirstOrDefault(AgentHealthReportStore.IsWindowsServiceSid);
+        if (serviceSid is not null)
+        {
+            var serviceSidDirectory = Path.Combine(reportRoot, "service-sid-replay-state");
+            Directory.CreateDirectory(serviceSidDirectory);
+            var serviceSidSecurity = new DirectoryInfo(serviceSidDirectory).GetAccessControl();
+            serviceSidSecurity.AddAccessRule(new FileSystemAccessRule(serviceSid,
+                FileSystemRights.Modify | FileSystemRights.ReadAndExecute,
+                InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+                PropagationFlags.None, AccessControlType.Allow));
+            new DirectoryInfo(serviceSidDirectory).SetAccessControl(serviceSidSecurity);
+            using var serviceSidReports = new AgentHealthReportStore(agents, targets,
+                Path.Combine(serviceSidDirectory, "replay-state.json"), 10, 5, 2);
+            Console.WriteLine("PASS: current Windows service SID is allowed by replay-state ACL policy");
+        }
     }
     var duplicateVantageRejected = false;
     try
