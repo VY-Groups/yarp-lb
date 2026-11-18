@@ -46,8 +46,9 @@ is incorrect or regresses, snapshots fail closed until the minute agrees again.
 Expiry NEVER resets the remote boot epoch or previously accepted sequence:
 replaying an old signed frame cannot revive stale counts. A local clock moved
 backward does not change elapsed receipt age. Tests use separate controllable
-wall and monotonic clocks for deterministic rollback, expiry, recovery and
-replay checks.
+wall and monotonic clocks for deterministic rollback, expiry, recovery,
+replay and delayed lower-sequence checks; rejecting a delayed frame does not
+refresh the accepted receipt's TTL.
 
 **Strict enforcement is not provided**: this expiry is about best-effort
 telemetry only. No synchronized HAProxy stick tables, request admission,
