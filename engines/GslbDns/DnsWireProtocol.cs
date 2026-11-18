@@ -12,6 +12,9 @@ internal static class DnsWireProtocol
     private const ushort A = 1, Ns = 2, Soa = 6, Aaaa = 28, Ds = 43, Opt = 41, EcsOption = 8;
     private const ushort Rrsig = 46, Nsec = 47, Dnskey = 48;
     private const ushort ClassIn = 1;
+    // RFC 6891 response OPT CLASS reports this server's receive capability,
+    // while the request's advertised size separately limits UDP response data.
+    private const ushort ServerUdpPayloadSize = 1232;
     private sealed record EcsInput(ushort Family, int SourcePrefix, IPAddress Address);
 
     public static bool ValidName(string name)
@@ -90,7 +93,7 @@ internal static class DnsWireProtocol
                 pos += optionLength;
             }
             edns = true;
-            payload = Math.Clamp((int)advertised, 512, 1232);
+            payload = Math.Min(Math.Clamp((int)advertised, 512, ushort.MaxValue), ServerUdpPayloadSize);
             unsupportedEdns = ((ttl >> 16) & 0xFF) != 0;
         }
         if (pos != query.Length) return null;
@@ -402,7 +405,7 @@ internal static class DnsWireProtocol
         {
             bytes.Add(0); // root owner
             Write16(bytes, Opt);
-            Write16(bytes, (ushort)payload);
+            Write16(bytes, ServerUdpPayloadSize);
             var optFlags = dnssecOk && zone?.Dnssec is not null ? 0x00008000u : 0u;
             Write32(bytes, unsupportedEdns ? 0x01000000u : optFlags); // BADVERS or DNSSEC OK
             Write16(bytes, checked((ushort)responseEcs.Count));

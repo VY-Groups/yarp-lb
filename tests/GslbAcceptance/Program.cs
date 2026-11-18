@@ -782,12 +782,12 @@ try
     Must((Dns16(edns512Reply,2)&0x0400)!=0 && (Dns16(edns512Reply,2)&0x0200)!=0 &&
          (Dns16(edns512Reply,2)&0xF)==0 && edns512Reply.Length<=512 &&
          Dns16(edns512Reply,edns512Reply.Length-10)==41 &&
-         Dns16(edns512Reply,edns512Reply.Length-8)==512,
-         "EDNS 512-byte advertisement returns a truncated UDP response within its negotiated budget");
+         Dns16(edns512Reply,edns512Reply.Length-8)==1232,
+         "EDNS 512-byte client budget returns bounded TC while OPT advertises the server's 1232-byte receive size");
     var edns512Retry = await TcpQuery(edns512Request);
     Must((Dns16(edns512Retry,2)&0x0200)==0 && Dns16(edns512Retry,6)==2 &&
-         edns512Retry.Length>512 && Dns16(edns512Retry,edns512Retry.Length-8)==512,
-         "TCP retry after EDNS UDP TC returns both authoritative NS records in full");
+         edns512Retry.Length>512 && Dns16(edns512Retry,edns512Retry.Length-8)==1232,
+         "TCP retry after EDNS UDP TC returns both authoritative NS records and advertises the server's receive size");
     var (edns1232Request, edns1232Reply) = await QueryWire(ednsBufferZoneName, 2,
         ednsVersion: 0, udpPayloadSize: 1232);
     Must((Dns16(edns1232Reply,2)&0x0400)!=0 && (Dns16(edns1232Reply,2)&0x0200)==0 &&
