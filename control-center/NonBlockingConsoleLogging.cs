@@ -31,15 +31,15 @@ public sealed class NonBlockingConsoleLoggerProvider : ILoggerProvider, ISupport
         this.maxLineChars = maxLineChars;
         queue = new BlockingCollection<string>(new ConcurrentQueue<string>(), capacity);
         meter = new Meter("GatewayCoreYarp.Logging", "0.1");
-        meter.CreateObservableCounter<long>("yarp_logging_dropped_total",
+        meter.CreateObservableCounter<long>("yarp_logging_dropped",
             () => DroppedMessages, "messages", "Console log messages discarded when the bounded writer queue is full");
-        meter.CreateObservableCounter<long>("yarp_logging_dropped_low_priority_total",
+        meter.CreateObservableCounter<long>("yarp_logging_dropped_low_priority",
             () => DroppedLowPriorityMessages, "messages",
             "Debug/Information messages discarded under console-log queue pressure");
-        meter.CreateObservableCounter<long>("yarp_logging_dropped_high_priority_total",
+        meter.CreateObservableCounter<long>("yarp_logging_dropped_high_priority",
             () => DroppedHighPriorityMessages, "messages",
             "Warning/Error/Critical messages discarded under console-log queue pressure");
-        meter.CreateObservableCounter<long>("yarp_logging_write_errors_total",
+        meter.CreateObservableCounter<long>("yarp_logging_write_errors",
             () => WriteErrors, "messages", "Console log records lost on output writer failure");
         worker = new Thread(WriteLoop) { IsBackground = true, Name = "YarpBoundedConsoleWriter" };
         worker.Start();

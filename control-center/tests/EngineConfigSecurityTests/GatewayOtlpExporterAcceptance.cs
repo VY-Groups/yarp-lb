@@ -176,10 +176,10 @@ public static class GatewayOtlpExporterAcceptance
             var metricValues = ReadOtlpMetricValues(metrics.SelectMany(x => x.Body).ToArray());
             foreach (var expected in new[]
                      {
-                         ("yarp_logging_dropped_total", loggingDropScenario.TotalDropped),
-                         ("yarp_logging_dropped_low_priority_total", loggingDropScenario.LowPriorityDropped),
-                         ("yarp_logging_dropped_high_priority_total", loggingDropScenario.HighPriorityDropped),
-                         ("yarp_logging_write_errors_total", loggingDropScenario.WriteErrors)
+                         ("yarp_logging_dropped", loggingDropScenario.TotalDropped),
+                         ("yarp_logging_dropped_low_priority", loggingDropScenario.LowPriorityDropped),
+                         ("yarp_logging_dropped_high_priority", loggingDropScenario.HighPriorityDropped),
+                         ("yarp_logging_write_errors", loggingDropScenario.WriteErrors)
                      })
             {
                 metricValues.TryGetValue(expected.Item1, out var values);
