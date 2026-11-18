@@ -741,7 +741,9 @@ unmeasured.
 - Open GitHub issues: **16** (see live issue list). No issue was closed by the recent scoped PR merges because each canonical issue still has unmet acceptance criteria.
 - Release: controlled development/test only; **production NO-GO**. The annual 99.9% availability target is unmeasured and must not be inferred from CI or short fault tests.
 
-### Recent merged increments (all exact-head Actions and independent source review were recorded on their PRs)
+### Recent merged increments
+
+Exact-head Actions results are recorded on the PRs and listed below where applicable. Independent source reviews were performed during the implementation work, but GitHub review records were not present on PRs #145, #147, and #155–#159 at this snapshot; do not claim GitHub approval for those merges.
 
 | PR | Merge commit | Verified contribution | Issue remains open because |
 | --- | --- | --- | --- |
