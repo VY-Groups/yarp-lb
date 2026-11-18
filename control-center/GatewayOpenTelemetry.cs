@@ -166,12 +166,63 @@ internal sealed class GatewayTelemetryPrivacyProcessor : BaseProcessor<Activity>
     [
         "client.address", "client.port", "network.peer.address", "network.peer.port",
         "url.full", "url.path", "url.query", "user_agent.original",
+        "http.url", "http.target", "http.request.url",
         "http.request.header.authorization", "http.request.header.cookie"
     ];
 
     public override void OnEnd(Activity data)
     {
         foreach (var tag in SensitiveTags) data.SetTag(tag, null);
+        NormalizeAspNetCoreDisplayName(data);
         base.OnEnd(data);
+    }
+
+    private static void NormalizeAspNetCoreDisplayName(Activity activity)
+    {
+        if (!string.Equals(activity.Source.Name, "Microsoft.AspNetCore", StringComparison.Ordinal))
+            return;
+
+        var method = activity.GetTagItem("http.request.method") as string;
+        if (method is not { Length: > 0 and <= 16 } ||
+            method.Any(static character => !char.IsAsciiLetter(character)))
+            method = null;
+        else
+            method = method.ToUpperInvariant();
+
+        var route = activity.GetTagItem("http.route") as string;
+        if (IsSafeRouteTemplate(route))
+        {
+            activity.DisplayName = $"{method ?? "HTTP"} {route}";
+            return;
+        }
+
+        activity.SetTag("http.route", null);
+        activity.DisplayName = method is null ? "HTTP request" : $"HTTP {method}";
+    }
+
+    private static bool IsSafeRouteTemplate(string? route)
+    {
+        if (route is not { Length: > 0 and <= 256 } || route[0] != '/') return false;
+        var insideParameter = false;
+        foreach (var character in route)
+        {
+            if (character == '{')
+            {
+                if (insideParameter) return false;
+                insideParameter = true;
+                continue;
+            }
+            if (character == '}')
+            {
+                if (!insideParameter) return false;
+                insideParameter = false;
+                continue;
+            }
+            if (character == '?' && !insideParameter) return false;
+            if (!char.IsAsciiLetterOrDigit(character) &&
+                character is not ('/' or '_' or '-' or '.' or ':' or '*' or '?'))
+                return false;
+        }
+        return !insideParameter;
     }
 }
