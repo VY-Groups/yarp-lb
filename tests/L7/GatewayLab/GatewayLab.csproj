@@ -25,6 +25,7 @@
     <Compile Include="../../../control-center/NonBlockingConsoleLogging.cs" Link="NonBlockingConsoleLogging.cs" />
     <Compile Include="../../../control-center/GatewayLoggingConfiguration.cs" Link="GatewayLoggingConfiguration.cs" />
     <Compile Include="../../../control-center/GatewayOpenTelemetry.cs" Link="GatewayOpenTelemetry.cs" />
+    <Compile Include="../../../control-center/GatewayAccessLog.cs" Link="GatewayAccessLog.cs" />
     <Compile Include="../../../control-center/OtlpEndpointPolicy.cs" Link="OtlpEndpointPolicy.cs" />
     <Compile Include="../../../control-center/GatewayClientAddress.cs" Link="GatewayClientAddress.cs" />
     <Compile Include="../../HA/Heartbeat/HaProcessHeartbeat.cs" Link="HaProcessHeartbeat.cs" />

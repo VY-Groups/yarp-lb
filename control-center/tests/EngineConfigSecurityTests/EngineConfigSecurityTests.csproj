@@ -11,6 +11,7 @@
     <Compile Include="../../FleetSequenceState.cs" Link="FleetSequenceState.cs" />
     <Compile Include="../../OtlpEndpointPolicy.cs" Link="OtlpEndpointPolicy.cs" />
     <Compile Include="../../GatewayOpenTelemetry.cs" Link="GatewayOpenTelemetry.cs" />
+    <Compile Include="../../GatewayAccessLog.cs" Link="GatewayAccessLog.cs" />
     <Compile Include="../../NonBlockingConsoleLogging.cs" Link="NonBlockingConsoleLogging.cs" />
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
     <PackageReference Include="Yarp.ReverseProxy" Version="2.3.0" />

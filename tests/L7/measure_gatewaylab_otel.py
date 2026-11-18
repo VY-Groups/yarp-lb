@@ -13,11 +13,16 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-GATE = ROOT / "tests/L7/GatewayLab/bin/Release/net10.0/GatewayLab.dll"
-BACK = ROOT / "tests/L7/BackendLab/bin/Release/net10.0/BackendLab.dll"
+GATE = pathlib.Path(os.environ.get("GATEWAYLAB_OTEL_GATEWAY_DLL",
+    ROOT / "tests/L7/GatewayLab/bin/Release/net10.0/GatewayLab.dll"))
+BACK = pathlib.Path(os.environ.get("GATEWAYLAB_OTEL_BACKEND_DLL",
+    ROOT / "tests/L7/BackendLab/bin/Release/net10.0/BackendLab.dll"))
 OUT = pathlib.Path(os.environ.get("GATEWAYLAB_OTEL_EVIDENCE_DIR", ROOT / "gatewaylab-otel-evidence"))
 OUT.mkdir(exist_ok=True)
-WORKERS, REQUESTS, WARMUP, PAIRS = 16, 10000, 500, 3
+WORKERS, REQUESTS, WARMUP = 16, 10000, 500
+PAIRS = int(os.environ.get("GATEWAYLAB_OTEL_PAIRS", "3"))
+if not 1 <= PAIRS <= 10:
+    raise ValueError("GATEWAYLAB_OTEL_PAIRS must be from 1 to 10")
 
 class Receiver(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
@@ -58,6 +63,16 @@ def requests(count):
         values = [x for result in pool.map(worker, [each + (i < rem) for i in range(WORKERS)]) for x in result]
     return time.perf_counter() - start, sorted(values)
 
+def gateway_stats():
+    conn = http.client.HTTPConnection("127.0.0.1", 18080, timeout=3)
+    conn.request("GET", "/lab/stats")
+    response = conn.getresponse()
+    payload = response.read()
+    conn.close()
+    if response.status != 200:
+        raise RuntimeError(f"Gateway stats returned HTTP {response.status}")
+    return json.loads(payload)
+
 def pct(xs, p): return xs[max(0, min(len(xs)-1, int((len(xs)*p + .999999)-1)))]
 def measure(enabled, collector):
     env = os.environ.copy()
@@ -85,11 +100,22 @@ def measure(enabled, collector):
             except OSError: time.sleep(.1)
         else: raise RuntimeError("Gateway did not become ready")
         requests(WARMUP)
+        before_stats = gateway_stats()
         elapsed, latency = requests(REQUESTS)
+        after_stats = gateway_stats()
+        allocated_bytes = after_stats["allocatedBytesTotal"] - before_stats["allocatedBytesTotal"]
         result = {"requestsPerSecond": round(REQUESTS / elapsed, 2),
                   "p50Milliseconds": round(pct(latency, .50), 3),
                   "p95Milliseconds": round(pct(latency, .95), 3),
-                  "p99Milliseconds": round(pct(latency, .99), 3)}
+                  "p99Milliseconds": round(pct(latency, .99), 3),
+                  "gatewayAllocatedBytes": allocated_bytes,
+                  "gatewayAllocatedBytesPerRequest": round(allocated_bytes / REQUESTS, 3),
+                  "gatewayGen0Collections": after_stats["gc0Collections"] - before_stats["gc0Collections"],
+                  "gatewayGen1Collections": after_stats["gc1Collections"] - before_stats["gc1Collections"],
+                  "gatewayGen2Collections": after_stats["gc2Collections"] - before_stats["gc2Collections"],
+                  "gatewayCpuTimeMs": round(after_stats["processCpuTimeMs"] - before_stats["processCpuTimeMs"], 3),
+                  "gatewayWorkingSetDeltaBytes": after_stats["processWorkingSetBytes"] - before_stats["processWorkingSetBytes"],
+                  "gatewayManagedHeapDeltaBytes": after_stats["gcManagedHeapBytes"] - before_stats["gcManagedHeapBytes"]}
         if enabled:
             flush = http.client.HTTPConnection("127.0.0.1", 18080, timeout=15)
             flush.request("POST", "/lab/otel-flush")
@@ -153,10 +179,12 @@ try:
     report = {"workload": "GatewayLab full YARP proxy to two local BackendLab processes",
               "os": platform.platform(), "machine": platform.machine(),
               "processor": platform.processor(), "python": platform.python_version(),
+              "sourceCommit": os.environ.get("GATEWAYLAB_OTEL_SOURCE_COMMIT", "unspecified"),
               "requestsPerMode": REQUESTS, "warmup": WARMUP,
               "workers": WORKERS, "samplePairs": PAIRS, "samplingRatio": 0.05,
               "connectionPolicy": "16 HTTP/1.1 keep-alive connections, response bodies drained",
               "collector": "disposable loopback HTTP receiver; all traces/metrics/logs drain after timing",
+              "allocationMethod": "Gateway process GC.GetTotalAllocatedBytes before/after the timed request batch; one loopback stats query per boundary; exporter flush excluded",
               "median": {
                   "telemetryDisabledRps": round(statistics.median(p["telemetryDisabled"]["requestsPerSecond"] for p in pairs), 2),
                   "telemetryEnabledRps": round(statistics.median(p["telemetryEnabled"]["requestsPerSecond"] for p in pairs), 2),

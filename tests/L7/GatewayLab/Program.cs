@@ -86,8 +86,7 @@ if (otelOverheadMode)
                           routeCandidate.All(static c => char.IsAsciiLetterOrDigit(c) || c is '_' or '-')
                 ? routeCandidate : "unmatched";
             var elapsed = Stopwatch.GetElapsedTime(started).TotalMilliseconds;
-            accessLogger.LogInformation(
-                "GATEWAY_ACCESS timestampUtc={TimestampUtc:o} clientIp={ClientIp} clientIpSource={ClientIpSource} method={Method} routeId={RouteId} statusCode={StatusCode} durationMs={DurationMs}",
+            GatewayAccessLog.Write(accessLogger,
                 DateTimeOffset.UtcNow, clientAddress.Address?.ToString() ?? "unknown", clientAddress.Source,
                 ctx.Request.Method, routeId, ctx.Response.StatusCode, Math.Round(elapsed, 3));
         }
