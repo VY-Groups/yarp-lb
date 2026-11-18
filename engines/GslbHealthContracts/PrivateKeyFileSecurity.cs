@@ -16,6 +16,9 @@ public static class PrivateKeyFileSecurity
     private const int LinuxCloseOnExec = 0x80000;
     private const int LinuxNoFollow = 0x20000;
     private const int LinuxDirectory = 0x10000;
+    private const int LinuxAtEmptyPath = 0x1000;
+    private const uint LinuxStatxMode = 0x0002;
+    private const uint LinuxStatxUid = 0x0008;
     private const uint GenericRead = 0x80000000;
     private const uint ShareRead = 0x00000001;
     private const uint OpenExisting = 3;
@@ -48,9 +51,7 @@ public static class PrivateKeyFileSecurity
 
         if (OperatingSystem.IsLinux())
         {
-            var mode = File.GetUnixFileMode(handle);
-            if ((mode & UnixFileMode.UserRead) == 0 || (mode & ForbiddenUnixPermissions) != 0)
-                throw new InvalidDataException($"{purpose} permissions must grant owner read and no group/other access (chmod 600 recommended)");
+            ValidateLinuxOpenedObject(handle, purpose, isDirectory: false);
         }
 
         using var stream = new FileStream(handle, FileAccess.Read);
@@ -74,11 +75,14 @@ public static class PrivateKeyFileSecurity
             purpose, "parent directory");
         try
         {
+            ValidateLinuxOpenedObject(directory, purpose, isDirectory: true);
             for (var i = 0; i < components.Length - 1; i++)
             {
                 var next = OpenLinuxAt(directory, components[i],
                     LinuxReadOnly | LinuxDirectory | LinuxNoFollow | LinuxCloseOnExec,
                     purpose, "parent directory");
+                try { ValidateLinuxOpenedObject(next, purpose, isDirectory: true); }
+                catch { next.Dispose(); throw; }
                 directory.Dispose();
                 directory = next;
             }
@@ -91,6 +95,38 @@ public static class PrivateKeyFileSecurity
         {
             directory?.Dispose();
         }
+    }
+
+    private static void ValidateLinuxOpenedObject(SafeFileHandle handle, string purpose, bool isDirectory)
+    {
+        var requiredMask = LinuxStatxMode | LinuxStatxUid;
+        if (StatxUnix(handle.DangerousGetHandle().ToInt32(), "", LinuxAtEmptyPath,
+                requiredMask, out var metadata) != 0 || (metadata.Mask & requiredMask) != requiredMask)
+            throw new InvalidDataException($"Unable to verify {purpose} ownership and permissions",
+                new Win32Exception(Marshal.GetLastPInvokeError()));
+
+        ValidateLinuxPathObject(metadata.OwnerUid, metadata.Mode, GetEffectiveUid(), isDirectory, purpose);
+    }
+
+    internal static void ValidateLinuxPathObject(uint ownerUid, uint mode, uint effectiveUid,
+        bool isDirectory, string purpose)
+    {
+        if (ownerUid != 0 && ownerUid != effectiveUid)
+            throw new InvalidDataException($"{purpose} owner must be root or the service identity");
+
+        var unixMode = (UnixFileMode)mode;
+        if (!isDirectory)
+        {
+            if ((unixMode & UnixFileMode.UserRead) == 0 ||
+                (unixMode & ForbiddenUnixPermissions) != 0)
+                throw new InvalidDataException($"{purpose} permissions must grant owner read and no group/other access (chmod 600 recommended)");
+            return;
+        }
+
+        var groupOrOtherWrite = UnixFileMode.GroupWrite | UnixFileMode.OtherWrite;
+        var sticky = (unixMode & UnixFileMode.StickyBit) != 0;
+        if ((unixMode & groupOrOtherWrite) != 0 && !sticky)
+            throw new InvalidDataException($"{purpose} permissions must not allow group/other writes");
     }
 
     private static SafeFileHandle OpenLinux(string path, int flags, string purpose, string objectName)
@@ -133,6 +169,21 @@ public static class PrivateKeyFileSecurity
 
     [DllImport("libc", EntryPoint = "openat", SetLastError = true, CharSet = CharSet.Ansi)]
     private static extern int OpenAtUnix(int directoryDescriptor, string path, int flags);
+
+    [DllImport("libc", EntryPoint = "statx", SetLastError = true, CharSet = CharSet.Ansi)]
+    private static extern int StatxUnix(int directoryDescriptor, string path, int flags,
+        uint mask, out LinuxStatx metadata);
+
+    [DllImport("libc", EntryPoint = "geteuid", SetLastError = true)]
+    private static extern uint GetEffectiveUid();
+
+    [StructLayout(LayoutKind.Explicit, Size = 256)]
+    private struct LinuxStatx
+    {
+        [FieldOffset(0)] public uint Mask;
+        [FieldOffset(20)] public uint OwnerUid;
+        [FieldOffset(28)] public ushort Mode;
+    }
 
     [DllImport("kernel32.dll", EntryPoint = "CreateFileW", SetLastError = true, CharSet = CharSet.Unicode)]
     private static extern SafeFileHandle CreateFileW(string fileName, uint desiredAccess, uint shareMode,

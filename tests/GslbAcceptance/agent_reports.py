@@ -179,6 +179,20 @@ def main():
             reject_observer_config("linked-observer-key-parent", linked_parent_config,
                                    "a key path with a symlinked parent directory", "without following links")
 
+            unsafe_key_directory = root / "observer-unsafe-key-directory"
+            unsafe_key_directory.mkdir()
+            unsafe_key_directory.chmod(0o777)
+            unsafe_parent_key = unsafe_key_directory / "signing.key"
+            shutil.copyfile(agents[0]["signer"], unsafe_parent_key)
+            unsafe_parent_key.chmod(0o600)
+            replacement_key = unsafe_key_directory / "replacement.key"
+            shutil.copyfile(agents[1]["signer"], replacement_key)
+            replacement_key.chmod(0o600)
+            os.replace(replacement_key, unsafe_parent_key)
+            unsafe_parent_config = dict(observer_config, SigningKeyPem=str(unsafe_parent_key))
+            reject_observer_config("unsafe-observer-key-parent", unsafe_parent_config,
+                                   "a replaced key under a group/other-writable parent", "parent directory permissions")
+
             report_client_key_link = root / "observer-report-client-link.key"
             report_client_key_link.symlink_to(agents[0]["key"])
             linked_client_config = dict(observer_config)
@@ -258,6 +272,23 @@ def main():
                 assert denied.returncode != 0 and "links" in denied.stderr, \
                     "DNS authority accepted a symlinked report TLS private key"
                 print("PASS: DNS authority refuses symlinked report TLS private keys")
+
+                unsafe_dns_key_directory = root / "dns-unsafe-key-directory"
+                unsafe_dns_key_directory.mkdir()
+                unsafe_dns_key_directory.chmod(0o777)
+                unsafe_dns_key = unsafe_dns_key_directory / "server.key"
+                shutil.copyfile(dns_key, unsafe_dns_key)
+                unsafe_dns_key.chmod(0o600)
+                unsafe_dns_config = json.loads(json.dumps(config_document))
+                unsafe_dns_config["AgentReports"]["ServerKeyPem"] = str(unsafe_dns_key)
+                unsafe_dns_config["AgentReports"]["ListenPort"] = port()
+                unsafe_dns_path = root / "unsafe-dns-report-server.json"
+                unsafe_dns_path.write_text(json.dumps(unsafe_dns_config))
+                denied = subprocess.run(["dotnet", dns_dll, unsafe_dns_path],
+                                         capture_output=True, text=True, timeout=10)
+                assert denied.returncode != 0 and "parent directory permissions" in denied.stderr, \
+                    "DNS authority accepted a key under a group/other-writable parent"
+                print("PASS: DNS authority refuses keys under group/other-writable parents")
             dns_log = root / f"dns-{node}.log"
             dns_log_handle = dns_log.open("w")
             stack.callback(dns_log_handle.close)
