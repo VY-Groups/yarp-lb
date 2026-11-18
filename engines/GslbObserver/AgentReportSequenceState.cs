@@ -81,14 +81,16 @@ internal sealed class AgentReportSequenceState : IDisposable
         if (!OperatingSystem.IsWindows())
         {
             if (!existed) File.SetUnixFileMode(parent, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
-            else if ((File.GetUnixFileMode(parent) & (UnixFileMode.GroupRead | UnixFileMode.GroupWrite |
-                    UnixFileMode.GroupExecute | UnixFileMode.OtherRead | UnixFileMode.OtherWrite |
-                    UnixFileMode.OtherExecute)) != 0)
-                throw new InvalidDataException("Agent sequence directory must be private to the service account");
+            GatewayCore.Gslb.Contracts.PrivateKeyFileSecurity.ValidateLinuxPrivateStateDirectory(
+                parent, "Agent sequence state");
         }
         EnsureNotLink(path);
         var lockPath = path + ".lock";
         EnsureNotLink(lockPath);
+        GatewayCore.Gslb.Contracts.PrivateKeyFileSecurity.ValidateLinuxPrivateStateFile(
+            path, "Agent sequence state file");
+        GatewayCore.Gslb.Contracts.PrivateKeyFileSecurity.ValidateLinuxPrivateStateFile(
+            lockPath, "Agent sequence lock file");
         var stream = new FileStream(lockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
         if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(lockPath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
         return stream;
