@@ -1,0 +1,11 @@
+groups:
+  - name: gatewaycore-observability-delivery-fixture
+    interval: 5s
+    rules:
+      - alert: GatewayCoreObservabilityDeliveryTest
+        expr: vector(1)
+        labels:
+          severity: warning
+        annotations:
+          summary: Disposable acceptance alert for Alertmanager webhook delivery
+

@@ -8,6 +8,9 @@ on:
       - "control-center/ops/observability/**"
       - "control-center/ops/prometheus/gateway-dashboard.json"
       - "control-center/ops/prometheus/gateway-alerts.yml"
+      - "control-center/ops/observability/alertmanager.yml"
+      - "control-center/ops/observability/alert-delivery-test.yml"
+      - "control-center/ops/observability/alert-receiver/**"
       - ".github/workflows/observability-container-acceptance.yml"
   push:
     branches: [main]
@@ -18,6 +21,9 @@ on:
       - "control-center/ops/observability/**"
       - "control-center/ops/prometheus/gateway-dashboard.json"
       - "control-center/ops/prometheus/gateway-alerts.yml"
+      - "control-center/ops/observability/alertmanager.yml"
+      - "control-center/ops/observability/alert-delivery-test.yml"
+      - "control-center/ops/observability/alert-receiver/**"
       - ".github/workflows/observability-container-acceptance.yml"
 permissions:
   contents: read
@@ -36,10 +42,11 @@ jobs:
         run: |
           set -euo pipefail
           python3 control-center/ops/prometheus/validate_gateway_dashboard.py
+          python3 -m unittest discover -s control-center/ops/observability/alert-receiver -p 'test_*.py'
           docker compose -f control-center/ops/observability/compose.yml config --quiet
       - name: Start isolated observability stack
         shell: bash
-        run: docker compose -f control-center/ops/observability/compose.yml up -d
+        run: docker compose -f control-center/ops/observability/compose.yml up -d --build
       - name: Export real spans, metrics and access logs to Collector, then verify Prometheus and Grafana
         shell: bash
         env:
@@ -47,17 +54,21 @@ jobs:
         run: |
           set -euo pipefail
           collector_log="$RUNNER_TEMP/otel-collector.log"
+          alert_delivery_log="$RUNNER_TEMP/alert-delivery-events.json"
           compose_state="$RUNNER_TEMP/observability-compose-state.txt"
           cleanup() {
             docker compose -f control-center/ops/observability/compose.yml ps -a > "$compose_state" 2>&1 || true
             docker compose -f control-center/ops/observability/compose.yml logs --no-color > "$collector_log" 2>&1 || true
+            curl -fsS http://127.0.0.1:18080/events > "$alert_delivery_log" 2>/dev/null || true
             docker compose -f control-center/ops/observability/compose.yml down --volumes --remove-orphans
           }
           trap cleanup EXIT
 
           for attempt in $(seq 1 60); do
             if curl -fsS http://127.0.0.1:9090/-/ready >/dev/null && \
-               curl -fsS http://127.0.0.1:3000/api/health >/dev/null; then break; fi
+               curl -fsS http://127.0.0.1:3000/api/health >/dev/null && \
+               curl -fsS http://127.0.0.1:9093/-/ready >/dev/null && \
+               curl -fsS http://127.0.0.1:18080/ready >/dev/null; then break; fi
             if [ "$attempt" -eq 60 ]; then echo "Observability containers did not become ready" >&2; exit 1; fi
             sleep 2
           done
@@ -79,6 +90,22 @@ jobs:
 
           query_until_present 'gateway_proxy_requests_total{http_response_status_class="5xx"}'
           query_until_present 'gateway_proxy_request_duration_milliseconds_bucket'
+          query_until_present 'ALERTS{alertname="GatewayCoreObservabilityDeliveryTest",alertstate="firing"}'
+          delivered=false
+          for attempt in $(seq 1 30); do
+            events=$(curl -fsS http://127.0.0.1:18080/events)
+            if jq -e 'any(.events[]; .status == "firing" and any(.alerts[]; .status == "firing" and .labels.alertname == "GatewayCoreObservabilityDeliveryTest"))' <<<"$events" >/dev/null; then
+              delivered=true
+              break
+            fi
+            sleep 2
+          done
+          if [ "$delivered" != true ]; then
+            echo "Prometheus fired the fixture alert but Alertmanager did not deliver it to the webhook receiver" >&2
+            curl -fsS http://127.0.0.1:9093/api/v2/alerts || true
+            printf '%s\n' "$events" >&2
+            exit 1
+          fi
           curl -fsS 'http://127.0.0.1:9090/api/v1/rules' | jq -e 'any(.data.groups[]; .name == "yarp-onprem-ops")' >/dev/null
           curl -fsS 'http://127.0.0.1:3000/api/search?query=GatewayCore' | jq -e 'any(.[]; .uid == "gatewaycore-http-availability")' >/dev/null
 
@@ -97,6 +124,7 @@ jobs:
             exit 1
           fi
           echo "PASS: Collector ingested redacted traces, metrics and structured access logs; Prometheus queried OTLP series; Grafana loaded provisioned dashboard"
+          echo "PASS: Prometheus firing alert was delivered through Alertmanager to the isolated webhook receiver"
       - name: Upload Collector evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -105,5 +133,7 @@ jobs:
           path: |
             ${{ runner.temp }}/otel-collector.log
             ${{ runner.temp }}/otel-collector-live.log
+            ${{ runner.temp }}/alert-delivery-events.json
             ${{ runner.temp }}/observability-compose-state.txt
           if-no-files-found: ignore
+

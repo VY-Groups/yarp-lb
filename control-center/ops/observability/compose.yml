@@ -9,6 +9,34 @@ services:
       - ./otel-collector.yml:/etc/otelcol-contrib/config.yaml:ro
     networks: [observability]
 
+  alert-receiver:
+    build:
+      context: ./alert-receiver
+    ports:
+      - "127.0.0.1:18080:8080"
+    read_only: true
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    user: "65532:65532"
+    tmpfs:
+      - /tmp:mode=1777,size=16m
+    networks: [observability]
+
+  alertmanager:
+    image: prom/alertmanager:v0.35.0
+    command: ["--config.file=/etc/alertmanager/alertmanager.yml", "--storage.path=/tmp/alertmanager"]
+    ports:
+      - "127.0.0.1:9093:9093"
+    volumes:
+      - ./alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+    read_only: true
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    tmpfs:
+      - /tmp:mode=1777,size=16m
+    depends_on: [alert-receiver]
+    networks: [observability]
+
   prometheus:
     image: prom/prometheus:v3.14.0
     command: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.retention.time=24h"]
@@ -17,7 +45,8 @@ services:
     volumes:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ../prometheus/gateway-alerts.yml:/etc/prometheus/gateway-alerts.yml:ro
-    depends_on: [otel-collector]
+      - ./alert-delivery-test.yml:/etc/prometheus/alert-delivery-test.yml:ro
+    depends_on: [otel-collector, alertmanager]
     networks: [observability]
 
   grafana:
@@ -37,3 +66,4 @@ services:
 networks:
   observability:
     driver: bridge
+
