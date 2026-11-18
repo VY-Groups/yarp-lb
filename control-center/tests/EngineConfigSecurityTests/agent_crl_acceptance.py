@@ -428,6 +428,11 @@ crlDistributionPoints = URI:http://127.0.0.1:{dead_port}/crl.pem
             offline_env = env.copy()
             offline_env["Kestrel__Endpoints__AgentHttps__Url"] = f"https://127.0.0.1:{offline_port}"
             offline_env["Agent__TrustedClientThumbprints__0"] = offline_pin
+            # Let the isolated production-mode Linux chain trust this second CA
+            # so it must evaluate its dead CRL DP rather than stopping at
+            # PartialChain. The Python client explicitly trusts the main CA for
+            # the HTTPS server certificate, independent of this child setting.
+            offline_env["SSL_CERT_FILE"] = str(offline_dir / "root.pem")
             for key in tuple(offline_env):
                 if key.startswith("Agent__TrustedClientThumbprints__") and key != "Agent__TrustedClientThumbprints__0":
                     del offline_env[key]
