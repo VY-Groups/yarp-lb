@@ -179,8 +179,8 @@ def main():
             reject_observer_config("linked-observer-key-parent", linked_parent_config,
                                    "a key path with a symlinked parent directory", "without following links")
 
-            unsafe_key_directory = root / "observer-unsafe-key-directory"
-            unsafe_key_directory.mkdir()
+            unsafe_key_directory = Path(tempfile.mkdtemp(prefix="gslb-observer-unsafe-key-parent-"))
+            stack.callback(shutil.rmtree, unsafe_key_directory, ignore_errors=True)
             unsafe_key_directory.chmod(0o777)
             unsafe_parent_key = unsafe_key_directory / "signing.key"
             shutil.copyfile(agents[0]["signer"], unsafe_parent_key)
@@ -273,8 +273,8 @@ def main():
                     "DNS authority accepted a symlinked report TLS private key"
                 print("PASS: DNS authority refuses symlinked report TLS private keys")
 
-                unsafe_dns_key_directory = root / "dns-unsafe-key-directory"
-                unsafe_dns_key_directory.mkdir()
+                unsafe_dns_key_directory = Path(tempfile.mkdtemp(prefix="gslb-dns-unsafe-key-parent-"))
+                stack.callback(shutil.rmtree, unsafe_dns_key_directory, ignore_errors=True)
                 unsafe_dns_key_directory.chmod(0o777)
                 unsafe_dns_key = unsafe_dns_key_directory / "server.key"
                 shutil.copyfile(dns_key, unsafe_dns_key)
