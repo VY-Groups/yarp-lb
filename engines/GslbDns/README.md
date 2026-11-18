@@ -171,11 +171,16 @@ At startup the DNS process logs a public `DS` record in presentation format.
 Copy that exact DS to the parent zone/registrar only after checking it against
 the independently generated DNSKEY. For a child delegation, publish the DS at
 the parent. All authorities serving the same signed zone must use the same
-key and serial. Windows deployments must grant read access only to the
-GatewayCore service identity using a restrictive NTFS ACL. Private key contents
-are never logged. Do not use this lab workflow as a substitute for a managed
-key store, rollover procedure, public delegation validation, or a security
-review.
+key and serial. On Linux, every path component is opened without following
+symlinks, ownership and restrictive mode are checked on the opened key, and
+the PEM imported is read from that same handle; the key must be owned by root
+or the service identity and have no group/other permissions (`0600` is
+recommended). On Windows, the final reparse point is not followed, but key ACL
+authorization is deployment-managed: grant read access only to the GatewayCore
+service identity using a restrictive NTFS ACL. Private key contents are never
+logged. This static-key workflow does not provide automated rollover, HSM/KMS
+storage, or safe multi-authority key distribution; do not use it as a substitute
+for those controls, public delegation validation, or a security review.
 
     {
       "AllowNonLoopbackListeners": false,
