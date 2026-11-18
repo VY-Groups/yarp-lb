@@ -5,6 +5,7 @@ import http.server
 import json
 import os
 from pathlib import Path
+import shutil
 import socket
 import subprocess
 import tempfile
@@ -129,6 +130,25 @@ def main():
                         "public": public_key, "pin": hashlib.sha256(der).hexdigest().upper(),
                         "upstream": serve(stack)}
 
+        if os.name != "nt":
+            insecure_observer_key = root / "insecure-observer-signing.key"
+            shutil.copyfile(agents[0]["signer"], insecure_observer_key)
+            insecure_observer_key.chmod(0o644)
+            invalid_observer_config = root / "insecure-observer.json"
+            invalid_observer_config.write_text(json.dumps({
+                "ListenAddress": "127.0.0.1", "Port": port(),
+                "PublicUrl": "https://127.0.0.1:18443/ready",
+                "HealthUrl": "http://127.0.0.1:1/ready",
+                "ServerCertificatePem": str(server_cert), "ServerKeyPem": str(server_key),
+                "SigningKeyPem": str(insecure_observer_key),
+                "AllowedClientSha256": [agents[0]["pin"]]
+            }))
+            denied = subprocess.run(["dotnet", observer_dll, invalid_observer_config],
+                                     capture_output=True, text=True, timeout=10)
+            assert denied.returncode != 0 and "owner-only" in denied.stderr, \
+                "observer accepted a group-readable report-signing key"
+            print("PASS: observer refuses group-readable report-signing private keys")
+
         local = serve(stack)
         for agent in agents:
             agent["upstream"] = serve(stack)
@@ -150,8 +170,7 @@ def main():
                             "SigningPublicKeyPems": [str(a["public"])]}
                            for a in [*agents, fanout_agent]]
             }
-            dns_config = root / f"zones-{node}.json"
-            dns_config.write_text(json.dumps({
+            config_document = {
                 "ListenHost": "127.0.0.1", "ListenPort": dns_port,
                 "MetricsListenHost": "127.0.0.1", "MetricsListenPort": metrics_port,
                 "ProbeIntervalSeconds": 1, "AgentReports": report_config,
@@ -162,7 +181,23 @@ def main():
                                       "Weight": 1, "AgentSiteId": "mumbai",
                                       "RequiredAgentIds": [a["id"] for a in agents],
                                       "MinimumHealthyAgentReports": 2}]}]
-            }))
+            }
+            dns_config = root / f"zones-{node}.json"
+            dns_config.write_text(json.dumps(config_document))
+            if node == "a" and os.name != "nt":
+                insecure_dns_key = root / "insecure-dns-report-server.key"
+                shutil.copyfile(dns_key, insecure_dns_key)
+                insecure_dns_key.chmod(0o644)
+                invalid_config = json.loads(json.dumps(config_document))
+                invalid_config["AgentReports"]["ServerKeyPem"] = str(insecure_dns_key)
+                invalid_config["AgentReports"]["ListenPort"] = port()
+                invalid_path = root / "insecure-dns-report-server.json"
+                invalid_path.write_text(json.dumps(invalid_config))
+                denied = subprocess.run(["dotnet", dns_dll, invalid_path],
+                                         capture_output=True, text=True, timeout=10)
+                assert denied.returncode != 0 and "owner-only" in denied.stderr, \
+                    "DNS authority accepted a group-readable report TLS private key"
+                print("PASS: DNS authority refuses group-readable report TLS private keys")
             dns_log = root / f"dns-{node}.log"
             dns_log_handle = dns_log.open("w")
             stack.callback(dns_log_handle.close)
