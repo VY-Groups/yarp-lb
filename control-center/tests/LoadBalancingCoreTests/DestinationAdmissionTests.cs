@@ -80,6 +80,31 @@ public static class DestinationAdmissionTests
             throw new Exception("FAIL: next waiter should receive the released permit");
         next.Dispose();
 
+        var drainGate = new DestinationAdmissionState(new DestinationAdmissionPolicy(1, 1, 5000));
+        using var activeOnEast = await drainGate.AcquireAsync(CancellationToken.None) ??
+            throw new Exception("FAIL: selected destination permit should be acquired");
+        var queuedForEast = drainGate.AcquireAsync(CancellationToken.None).AsTask();
+        Check(drainGate.Snapshot is { InFlight: 1, Queued: 1 },
+            "request queues behind the originally selected backend");
+        activeOnEast.Dispose();
+        using var grantedForEast = await queuedForEast.WaitAsync(TimeSpan.FromSeconds(2)) ??
+            throw new Exception("FAIL: queued request should receive the released destination permit");
+        var availableAfterFailure = new[] { new AdmissionDestination("west", IsDraining: false) };
+        Check(!DestinationAdmissionForwarding.IsStillEligibleAfterWait("east", availableAfterFailure,
+                  static destination => destination.Id, static destination => destination.IsDraining),
+            "queued request is rejected rather than transferred when its backend becomes unavailable and another remains healthy");
+        var drainingSelected = new[] { new AdmissionDestination("east", IsDraining: true) };
+        Check(!DestinationAdmissionForwarding.IsStillEligibleAfterWait("east", drainingSelected,
+                  static destination => destination.Id, static destination => destination.IsDraining),
+            "queued request is rejected when its selected backend is marked draining");
+        var stillEligible = new[] { new AdmissionDestination("east", IsDraining: false) };
+        Check(DestinationAdmissionForwarding.IsStillEligibleAfterWait("east", stillEligible,
+                  static destination => destination.Id, static destination => destination.IsDraining),
+            "queued request can continue when its original backend remains available and ready");
+        grantedForEast.Dispose();
+        Check(drainGate.Snapshot is { InFlight: 0, Queued: 0 },
+            "post-queue rejection path releases the granted backend permit");
+
         var manager = new DestinationAdmissionManager();
         Apply(manager, 1, Config("app", "east", new(1, 0, 5000)), Config("app", "west", new(1, 0, 5000)));
         Check(manager.TryAcquireHandle("app", "east", out var eastHandle, out _) && eastHandle is not null,
@@ -276,4 +301,6 @@ public static class DestinationAdmissionTests
         Check(churnSucceeded && churnManager.TrackedDestinationCount == 0,
             "4097 destination replacements are reclaimed without exceeding the registry cap");
     }
+
+    private readonly record struct AdmissionDestination(string Id, bool IsDraining);
 }
