@@ -254,4 +254,6 @@ GslbAgentReportStatusParserTests.Run();
 await AgentLabCaTlsAcceptance.RunAsync();
 if (OperatingSystem.IsLinux() || OperatingSystem.IsWindows())
     await AgentCrlAcceptance.RunAsync();
+if (OperatingSystem.IsWindows())
+    WindowsDpapiAcceptance.Run();
 Console.WriteLine("ENGINE CONFIG CONTRACT ACCEPTANCE PASSED");
