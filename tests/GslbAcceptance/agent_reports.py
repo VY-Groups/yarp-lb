@@ -463,6 +463,24 @@ def main():
         assert "lab.example.test" not in metrics_text and "192.0.2.17" not in metrics_text
         print("PASS: mTLS evidence, freshness and quorum metrics export without zone or backend labels")
 
+        # Fresh positive reports cannot override a failed local application probe.
+        # Keep the agents healthy and confirm their quorum is still present while
+        # both independent authorities fail closed on the local readiness failure.
+        local.verdict = 503
+        for authority in (authority_a, authority_b):
+            expect_dns(authority["dns"], authority["dns_port"], 2,
+                       log_paths=[authority["dns_log"], *authority["agent_logs"]])
+        local_metrics = scrape_metrics(authority_a["metrics_port"])
+        local_healthy_count = int(next(line[len(healthy_line):] for line in local_metrics.splitlines()
+                                       if line.startswith(healthy_line)))
+        assert local_healthy_count >= 2, \
+            "local readiness withdrawal was not tested with fresh healthy observer quorum"
+        local.verdict = 200
+        for authority in (authority_a, authority_b):
+            expect_dns(authority["dns"], authority["dns_port"], 0, "192.0.2.17",
+                       log_paths=[authority["dns_log"], *authority["agent_logs"]])
+        print("PASS: fresh positive agent quorum cannot override local readiness failure on either authority")
+
         # A single process signs once and delivers the identical report ID to
         # two authorities. Verify each authority's own accepted counter advances.
         def accepted_reports(node):
