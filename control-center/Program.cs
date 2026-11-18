@@ -1873,9 +1873,11 @@ app.MapReverseProxy(proxyPipeline =>
             var lookup = context.RequestServices.GetRequiredService<IProxyStateLookup>();
             if (context.RequestAborted.IsCancellationRequested) return;
             if (!lookup.TryGetCluster(clusterId, out var currentCluster) ||
-                !currentCluster.DestinationsState.AvailableDestinations.Any(d =>
-                    string.Equals(d.DestinationId, selected.DestinationId, StringComparison.Ordinal) &&
-                    !TrafficLifecycle.IsDraining(d)))
+                !DestinationAdmissionForwarding.IsStillEligibleAfterWait(
+                    selected.DestinationId,
+                    currentCluster.DestinationsState.AvailableDestinations,
+                    static destination => destination.DestinationId,
+                    TrafficLifecycle.IsDraining))
             {
                 context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
                 context.Response.Headers["X-GatewayCore-Rejection"] = "destination_unavailable_after_queue";

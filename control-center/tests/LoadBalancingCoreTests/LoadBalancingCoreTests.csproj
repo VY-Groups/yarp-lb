@@ -7,6 +7,7 @@
     <Compile Include="../../ProxyConcurrencySettings.cs" Link="ProxyConcurrencySettings.cs" />
     <Compile Include="ProxyConcurrencyTests.cs" />
     <Compile Include="../../DestinationAdmission.cs" Link="DestinationAdmission.cs" />
+    <Compile Include="../../DestinationAdmissionForwarding.cs" Link="DestinationAdmissionForwarding.cs" />
     <Compile Include="../../DestinationTelemetry.cs" Link="DestinationTelemetry.cs" />
     <Compile Include="DestinationAdmissionTests.cs" />
     <Compile Include="DestinationTelemetryTests.cs" />
