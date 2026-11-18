@@ -100,6 +100,8 @@ internal sealed class AgentHealthReportServer : IAsyncDisposable
             if (!slots.Wait(0)) return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
             try
             {
+                var authenticatedAgentId = store.AgentIdForCertificate(
+                    context.Connection.ClientCertificate, revoked);
                 AgentHealthReport? report;
                 try
                 {
@@ -108,22 +110,28 @@ internal sealed class AgentHealthReportServer : IAsyncDisposable
                 }
                 catch (JsonException)
                 {
+                    if (authenticatedAgentId is not null)
+                        store.RecordRejectedReport(authenticatedAgentId);
                     metrics.AgentReportRejected();
                     return Results.BadRequest();
                 }
                 if (report is null)
                 {
+                    if (authenticatedAgentId is not null)
+                        store.RecordRejectedReport(authenticatedAgentId);
                     metrics.AgentReportRejected();
                     return Results.BadRequest();
                 }
-                var agentId = store.AgentIdForCertificate(context.Connection.ClientCertificate, revoked);
+                var agentId = authenticatedAgentId;
                 if (agentId is null || !string.Equals(agentId, report.AgentId, StringComparison.Ordinal))
                 {
+                    if (agentId is not null) store.RecordRejectedReport(agentId);
                     metrics.AgentReportRejected();
                     return Results.StatusCode(StatusCodes.Status403Forbidden);
                 }
                 if (!store.TryReserveRequest(agentId, Environment.TickCount64, config.MaxReportsPerMinute))
                 {
+                    store.RecordRejectedReport(agentId);
                     metrics.AgentReportRejected();
                     return Results.StatusCode(StatusCodes.Status429TooManyRequests);
                 }
@@ -140,6 +148,7 @@ internal sealed class AgentHealthReportServer : IAsyncDisposable
                 }
                 if (!accepted)
                 {
+                    store.RecordRejectedReport(agentId);
                     metrics.AgentReportRejected();
                     return Results.BadRequest(new { error = "Invalid, stale, replayed or unauthorized report" });
                 }

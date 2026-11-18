@@ -61,11 +61,14 @@ public static class AgentLabCaTlsAcceptance
             var metricsPortSource=new TcpListener(IPAddress.Loopback,0);
             metricsPortSource.Start();var metricsPort=((IPEndPoint)metricsPortSource.LocalEndpoint).Port;metricsPortSource.Stop();
             var metricsBody = ValidMetrics();
+            var agentStatusBody = ValidAgentStatus();
             var metricsBuilder = WebApplication.CreateSlimBuilder();
             metricsBuilder.WebHost.ConfigureKestrel(server => server.Listen(IPAddress.Loopback,metricsPort));
             await using var metricsApp = metricsBuilder.Build();
             metricsApp.MapGet("/metrics", () => Results.Text(Volatile.Read(ref metricsBody),
                 "text/plain; version=0.0.4; charset=utf-8"));
+            metricsApp.MapGet("/agent-report-status", () => Results.Text(
+                Volatile.Read(ref agentStatusBody), "application/json"));
             await metricsApp.StartAsync();
             var cfg=Path.Combine(dir,"appsettings.json");
             void SetPins(string[] pins,string[]? revoked=null) =>
@@ -118,7 +121,13 @@ public static class AgentLabCaTlsAcceptance
                 using var tooOld=Client(server,expired);
                 await RequireStatus(a,url,HttpStatusCode.OK,"valid CA-signed and pinned client succeeds");
                 var runtimeUrl="https://127.0.0.1:"+port+"/agent/v1/engines/gslb/runtime-status";
+                await RequireStatus(unpinned,runtimeUrl,HttpStatusCode.Forbidden,
+                    "untrusted client cannot read per-agent GSLB runtime status");
                 await RequireRuntimeStatus(a,runtimeUrl);
+                Volatile.Write(ref agentStatusBody, ValidAgentStatus(includeClientIp: true));
+                await RequireStatus(a,runtimeUrl,HttpStatusCode.BadGateway,
+                    "agent status relay rejects unexpected private fields");
+                Volatile.Write(ref agentStatusBody, ValidAgentStatus());
                 Volatile.Write(ref metricsBody,"# TYPE gatewaycore_gslb_report_gated_sites gauge\n");
                 await RequireStatus(a,runtimeUrl,HttpStatusCode.BadGateway,
                     "invalid local metric contract is rejected by authenticated runtime endpoint");
@@ -223,9 +232,39 @@ public static class AgentLabCaTlsAcceptance
             root.GetProperty("quorumTargets").GetProperty("quorum").GetInt32()!=1 ||
             root.GetProperty("quorumTargets").GetProperty("configured").GetInt32()!=2 ||
             root.GetProperty("observerReports").GetProperty("healthy").GetInt32()!=2 ||
-            root.GetProperty("observerReports").GetProperty("staleOrMissing").GetInt32()!=1)
+            root.GetProperty("observerReports").GetProperty("staleOrMissing").GetInt32()!=1 ||
+            root.GetProperty("observerAgents").GetArrayLength()!=2 ||
+            root.GetProperty("observerAgents")[0].GetProperty("agentId").GetString()!="agent-1" ||
+            root.GetProperty("observerAgents")[0].GetProperty("lastAcceptedAgeSeconds").GetInt64()!=60 ||
+            root.GetProperty("observerAgents")[0].GetProperty("rejectedTotal").GetInt32()!=1 ||
+            root.GetProperty("observerAgents")[1].GetProperty("staleOrMissingReports").GetInt32()!=2 ||
+            root.GetProperty("observerAgents")[1].GetProperty("lastAcceptedUtc").ValueKind!=JsonValueKind.Null ||
+            root.GetProperty("observerAgents")[0].TryGetProperty("clientIp",out _) ||
+            root.GetProperty("observerAgents")[0].TryGetProperty("certificateThumbprint",out _))
             throw new Exception("FAIL: GSLB runtime status summary mismatch");
-        Console.WriteLine("PASS: mTLS agent relays bounded loopback quorum and observer-freshness summary");
+        Console.WriteLine("PASS: mTLS agent relays bounded loopback quorum, freshness and privacy-safe per-agent status");
+    }
+
+    private static string ValidAgentStatus(bool includeClientIp=false)
+    {
+        var first = new Dictionary<string, object?>
+        {
+            ["agentId"]="agent-1", ["lastAcceptedUtc"]="2026-11-18T09:59:00+00:00",
+            ["lastAcceptedAgeSeconds"]=60, ["rejectedTotal"]=1,
+            ["freshReports"]=2, ["staleOrMissingReports"]=0
+        };
+        if (includeClientIp) first["clientIp"]="203.0.113.10";
+        return JsonSerializer.Serialize(new
+        {
+            type="loopback-gslb-agent-report-status", checkedUtc="2026-11-18T10:00:00+00:00",
+            agents=new object[]
+            {
+                first,
+                new { agentId="agent-2", lastAcceptedUtc=(DateTimeOffset?)null,
+                    lastAcceptedAgeSeconds=(long?)null, rejectedTotal=0,
+                    freshReports=0, staleOrMissingReports=2 }
+            }
+        });
     }
 
     private static string ValidMetrics() => """
