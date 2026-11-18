@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Independent DNSSEC wire/signature acceptance using dnspython as validator."""
 import json
+import re
+import shutil
 import socket
 import subprocess
 import sys
@@ -65,6 +67,48 @@ def assert_nsec_cover(response, qname):
             if (start < end and start < owner < end) or (start >= end and (owner > start or owner < end)):
                 return
     raise AssertionError(f"NSEC records do not cover {qname}")
+
+
+def verify_cli_interop(port):
+    """Check the real wire behavior with independent BIND and Knot clients."""
+    for client in ("dig", "kdig"):
+        if shutil.which(client) is None:
+            raise RuntimeError(f"required independent DNS client is missing: {client}")
+        for transport in ("udp", "tcp"):
+            transport_arg = "+notcp" if transport == "udp" else "+tcp"
+            for qname, qtype, expected_status, required_types in (
+                (str(ZONE), "A", "noerror", ("A", "RRSIG")),
+                ("missing.signed.integration.test.", "A", "nxdomain",
+                 ("SOA", "NSEC", "RRSIG")),
+            ):
+                completed = subprocess.run(
+                    [client, "-p", str(port), qname, qtype,
+                     "+norecurse", "+dnssec", "+bufsize=1232", transport_arg,
+                     "+time=2", ("+tries=1" if client == "dig" else "+retry=1"),
+                     *(["+noall", "+comments", "+answer", "+authority"] if client == "dig" else ["+all"]),
+                     "@127.0.0.1"],
+                    capture_output=True, text=True, timeout=6, check=False,
+                )
+                output = completed.stdout
+                if completed.returncode != 0:
+                    raise AssertionError(
+                        f"{client} {transport} invocation failed ({completed.returncode}):\n"
+                        f"stdout:\n{output}\nstderr:\n{completed.stderr}")
+                lowered = output.lower()
+                if f"status: {expected_status}" not in lowered:
+                    raise AssertionError(f"{client} {transport} {qname} returned unexpected status:\n{output}")
+                flags_line = next((line.lower() for line in output.splitlines()
+                                   if re.search(r"\bflags:\s", line, re.IGNORECASE)), "")
+                flags = set(re.split(r"[\s;]+", flags_line.split("flags:", 1)[-1].strip()))
+                if "aa" not in flags or "ra" in flags or "ad" in flags:
+                    raise AssertionError(f"{client} {transport} did not preserve authoritative, non-recursive flags:\n{output}")
+                missing = [record_type for record_type in required_types
+                           if not re.search(rf"\bIN\s+{record_type}\b", output, re.IGNORECASE)]
+                if missing:
+                    raise AssertionError(
+                        f"{client} {transport} omitted signed {qtype} data/proof {missing}:\n{output}")
+                print(f"PASS: {client} over {transport.upper()} verifies authoritative signed {expected_status} wire response",
+                      flush=True)
 
 
 def main():
@@ -184,6 +228,7 @@ def main():
             require(any(rrset.rdtype == dns.rdatatype.RRSIG for rrset in rrsig.answer),
                     "direct RRSIG query returns available zone signatures")
             require("PRIVATE KEY" not in startup, "private key material is not written to startup logs")
+            verify_cli_interop(port)
         finally:
             process.terminate()
             try:
