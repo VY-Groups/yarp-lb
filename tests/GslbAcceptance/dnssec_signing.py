@@ -218,11 +218,18 @@ def main():
             nodata = query("127.0.0.1", port, ZONE, "AAAA", "tcp")
             require(nodata.rcode() == dns.rcode.NOERROR and validate_signed_sections(nodata, keys) == 2,
                     "NODATA SOA and exact-owner NSEC denial signatures validate")
-            nx = query("127.0.0.1", port, "missing.signed.integration.test.", "A", "tcp")
-            require(nx.rcode() == dns.rcode.NXDOMAIN and validate_signed_sections(nx, keys) >= 3,
-                    "NXDOMAIN SOA and NSEC proof RRsets verify cryptographically")
-            assert_nsec_cover(nx, "missing.signed.integration.test.")
-            assert_nsec_cover(nx, "*.signed.integration.test.")
+            for transport in ("udp", "tcp"):
+                nx = query("127.0.0.1", port,
+                           "missing.signed.integration.test.", "A", transport)
+                require(nx.rcode() == dns.rcode.NXDOMAIN,
+                        f"{transport.upper()} preserves NXDOMAIN response code")
+                if transport == "udp":
+                    require(not nx.flags & dns.flags.TC,
+                            "UDP NXDOMAIN denial proof is complete without TCP fallback")
+                require(validate_signed_sections(nx, keys) >= 3,
+                        f"{transport.upper()} NXDOMAIN SOA and NSEC proof RRsets verify cryptographically")
+                assert_nsec_cover(nx, "missing.signed.integration.test.")
+                assert_nsec_cover(nx, "*.signed.integration.test.")
 
             ds = query("127.0.0.1", port, "child.signed.integration.test.", "DS", "tcp")
             require(ds.rcode() == dns.rcode.NOERROR and validate_signed_sections(ds, keys) >= 2,
