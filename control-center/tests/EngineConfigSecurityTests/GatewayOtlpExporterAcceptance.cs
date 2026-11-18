@@ -71,6 +71,7 @@ public static class GatewayOtlpExporterAcceptance
             var tracerProvider = provider.GetRequiredService<TracerProvider>();
             var meterProvider = provider.GetRequiredService<MeterProvider>();
             var loggerProvider = provider.GetRequiredService<LoggerProvider>();
+            using var loggingDropScenario = EmitLoggingDropCounters();
             var parent = new ActivityContext(ActivityTraceId.CreateRandom(), ActivitySpanId.CreateRandom(),
                 ActivityTraceFlags.Recorded);
             using (var activity = GatewayOpenTelemetry.ActivitySource.StartActivity(
@@ -88,6 +89,7 @@ public static class GatewayOtlpExporterAcceptance
             response.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
             GatewayOpenTelemetry.RecordProxyResult(response, 17.5);
             EmitAccessLog(provider);
+            EmitRestrictedLogs(provider);
             if (!tracerProvider.ForceFlush(10000) || !meterProvider.ForceFlush(10000) || !loggerProvider.ForceFlush(10000))
                 throw new Exception("Container OTLP exporters failed to flush before acceptance deadline");
             Console.WriteLine("PASS: real OpenTelemetry Collector accepted traces and metrics via OTLP/HTTP");
@@ -121,6 +123,7 @@ public static class GatewayOtlpExporterAcceptance
             var tracerProvider = provider.GetRequiredService<TracerProvider>();
             var meterProvider = provider.GetRequiredService<MeterProvider>();
             var loggerProvider = provider.GetRequiredService<LoggerProvider>();
+            using var loggingDropScenario = EmitLoggingDropCounters();
             var parent = new ActivityContext(ActivityTraceId.CreateRandom(), ActivitySpanId.CreateRandom(),
                 ActivityTraceFlags.Recorded);
             using (var activity = GatewayOpenTelemetry.ActivitySource.StartActivity(
@@ -141,6 +144,7 @@ public static class GatewayOtlpExporterAcceptance
             response.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
             GatewayOpenTelemetry.RecordProxyResult(response, 12.5);
             EmitAccessLog(provider);
+            EmitRestrictedLogs(provider);
             if (!tracerProvider.ForceFlush(10000) || !meterProvider.ForceFlush(10000) || !loggerProvider.ForceFlush(10000))
                 throw new Exception("OTLP provider failed to flush before acceptance deadline");
 
@@ -173,6 +177,13 @@ public static class GatewayOtlpExporterAcceptance
             foreach (var sensitive in new[] { "otlp-secret-canary", "Authorization", "Cookie", "/private" })
                 if (logPayload.Contains(sensitive, StringComparison.OrdinalIgnoreCase))
                     throw new Exception($"Sensitive request data was present in OTLP log export: {sensitive}");
+            foreach (var excluded in new[] { "otlp-audit-secret-canary", "otlp-application-secret-canary", "GatewayCore.SecurityAudit" })
+                if (logPayload.Contains(excluded, StringComparison.Ordinal))
+                    throw new Exception($"Non-access log data was present in OTLP export: {excluded}");
+            if (!metricPayload.Contains("yarp_logging_dropped_total", StringComparison.Ordinal) ||
+                !metricPayload.Contains("yarp_logging_dropped_high_priority_total", StringComparison.Ordinal) ||
+                !metricPayload.Contains("yarp_logging_write_errors_total", StringComparison.Ordinal))
+                throw new Exception("OTLP metrics omitted bounded console queue drop/write-error counters");
             Console.WriteLine("PASS: real OTLP/HTTP collector received traces, metrics and structured access logs; traces redact client IP and logs omit request content");
         }
         finally
@@ -193,6 +204,69 @@ public static class GatewayOtlpExporterAcceptance
         logger.LogInformation(
             "GATEWAY_ACCESS timestampUtc={TimestampUtc:o} clientIp={ClientIp} clientIpSource={ClientIpSource} method={Method} routeId={RouteId} statusCode={StatusCode} durationMs={DurationMs}",
             DateTimeOffset.UtcNow, "203.0.113.17", "remote", "GET", "route_acceptance", 200, 12.5);
+    }
+
+    private static void EmitRestrictedLogs(IServiceProvider provider)
+    {
+        var factory = provider.GetRequiredService<ILoggerFactory>();
+        factory.CreateLogger("GatewayCore.SecurityAudit")
+            .LogWarning("Administrative audit marker {Secret}", "otlp-audit-secret-canary");
+        factory.CreateLogger("Microsoft.Hosting.Lifetime")
+            .LogWarning("Application diagnostic marker {Secret}", "otlp-application-secret-canary");
+    }
+
+    private static LoggingDropScenario EmitLoggingDropCounters()
+    {
+        return new LoggingDropScenario();
+    }
+
+    private sealed class LoggingDropScenario : IDisposable
+    {
+        private readonly ManualResetEventSlim release = new(false);
+        private readonly ManualResetEventSlim entered = new(false);
+        private readonly ManualResetEventSlim drained = new(false);
+        private readonly BlockingTextWriter writer;
+        private readonly NonBlockingConsoleLoggerProvider sink;
+
+        public LoggingDropScenario()
+        {
+            writer = new BlockingTextWriter(release, entered, drained);
+            sink = new NonBlockingConsoleLoggerProvider(writer, capacity: 16, maxLineChars: 256);
+            var logger = sink.CreateLogger("otlp-counter-acceptance");
+            logger.LogWarning("fill background-writer handoff slot");
+            if (!entered.Wait(TimeSpan.FromSeconds(3)))
+                throw new Exception("OTLP counter acceptance writer did not enter its blocked state");
+            for (var i = 0; i < 256; i++) logger.LogWarning("drop counter sample {Index}", i);
+            if (sink.DroppedHighPriorityMessages == 0)
+                throw new Exception("OTLP counter acceptance failed to produce a high-priority drop sample");
+            release.Set();
+            if (!drained.Wait(TimeSpan.FromSeconds(3)))
+                throw new Exception("OTLP counter acceptance writer did not drain after release");
+        }
+
+        public void Dispose()
+        {
+            sink.Dispose();
+            drained.Dispose();
+            entered.Dispose();
+            release.Dispose();
+            writer.Dispose();
+        }
+    }
+
+    private sealed class BlockingTextWriter(ManualResetEventSlim release,
+        ManualResetEventSlim entered, ManualResetEventSlim drained) : StringWriter
+    {
+        private int written;
+
+        public override void WriteLine(string? value)
+        {
+            entered.Set();
+            release.Wait();
+            base.WriteLine(value);
+            if (Interlocked.Increment(ref written) >= 17)
+                drained.Set();
+        }
     }
 
     private static async Task ReceiveAsync(TcpListener listener,
