@@ -79,6 +79,7 @@ builder.Services.AddReverseProxy()
     .ConfigureHttpClient(BackendMutualTls.Configure)
     .AddConfigFilter<DestinationAdmissionConfigFilter>();
 builder.Services.AddSingleton<DestinationAdmissionManager>();
+builder.Services.AddHostedService<DestinationAdmissionRegistryReconciler>();
 // Custom policies are registered on every serving YARP instance, never on the UI alone.
 builder.Services.AddSingleton<ILoadBalancingPolicy, WeightedRandomPolicy>();
 builder.Services.AddSingleton<ILoadBalancingPolicy, SourceIpHashPolicy>();
@@ -1800,13 +1801,16 @@ app.MapReverseProxy(proxyPipeline =>
 
         var clusterId = feature.Cluster.Config.ClusterId;
         var manager = context.RequestServices.GetRequiredService<DestinationAdmissionManager>();
-        if (!manager.TryGetOrCreate(clusterId, selected.DestinationId, policy, out var state) || state is null)
+        if (!manager.TryAcquireHandle(clusterId, selected.DestinationId, policy, out var registryHandle, out var policyConflict) || registryHandle is null)
         {
             context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
-            context.Response.Headers["X-GatewayCore-Rejection"] = state is null
-                ? "admission_registry_full" : "admission_policy_conflict";
+            context.Response.Headers["X-GatewayCore-Rejection"] = policyConflict
+                ? "admission_policy_conflict" : "admission_registry_full";
             return;
         }
+        using (registryHandle)
+        {
+        var state = registryHandle.State;
 
         using var waitCancellation = CancellationTokenSource.CreateLinkedTokenSource(
             context.RequestAborted,
@@ -1859,6 +1863,7 @@ app.MapReverseProxy(proxyPipeline =>
                 return;
             }
             await next();
+        }
         }
     });
     proxyPipeline.UsePassiveHealthChecks();

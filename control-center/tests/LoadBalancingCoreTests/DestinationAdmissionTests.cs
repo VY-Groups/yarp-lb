@@ -73,9 +73,9 @@ public static class DestinationAdmissionTests
         next.Dispose();
 
         var manager = new DestinationAdmissionManager();
-        Check(manager.TryGetOrCreate("app", "east", new(1, 0, 5000), out var east) && east is not null,
+        Check(manager.TryAcquireHandle("app", "east", new(1, 0, 5000), out var eastHandle, out _) && eastHandle is not null,
             "manager creates bounded destination gate");
-        Check(manager.TryGetOrCreate("app", "west", new(1, 0, 5000), out var west) && west is not null,
+        Check(manager.TryAcquireHandle("app", "west", new(1, 0, 5000), out var westHandle, out _) && westHandle is not null,
             "manager creates independent destination gate");
         var policyUpdate = new DestinationAdmissionState(new DestinationAdmissionPolicy(1, 1, 5000));
         using var updateHeld = await policyUpdate.AcquireAsync(CancellationToken.None) ??
@@ -87,18 +87,22 @@ public static class DestinationAdmissionTests
         using var updatedPermit = await updateWaiter.WaitAsync(TimeSpan.FromSeconds(2)) ??
             throw new Exception("FAIL: policy update fixture waiter should receive the released permit");
         updatedPermit.Dispose();
-        using var eastPermit = await east!.AcquireAsync(CancellationToken.None) ??
+        using var eastPermit = await eastHandle!.State.AcquireAsync(CancellationToken.None) ??
             throw new Exception("FAIL: east permit should be acquired");
-        using var westPermit = await west!.AcquireAsync(CancellationToken.None) ??
+        using var westPermit = await westHandle!.State.AcquireAsync(CancellationToken.None) ??
             throw new Exception("FAIL: west permit should be independent");
-        var rejectedShrink = !east.TryUpdatePolicy(new(1, 0, 5000));
+        var rejectedShrink = !eastHandle.State.TryUpdatePolicy(new(1, 0, 5000));
         Check(!rejectedShrink, "policy remains applicable when no queued requests would be stranded");
-        Check(east.Snapshot.InFlight == 1 && west.Snapshot.InFlight == 1,
+        Check(eastHandle.State.Snapshot.InFlight == 1 && westHandle.State.Snapshot.InFlight == 1,
             "separate destinations hold independent simultaneous capacity");
+        eastHandle.Dispose();
+        westHandle.Dispose();
 
         var boundedManager = new DestinationAdmissionManager();
-        Check(boundedManager.TryGetOrCreate("app", "queued", new(1, 1, 5000), out var queuedState) && queuedState is not null,
+        Check(boundedManager.TryAcquireHandle("app", "queued", new(1, 1, 5000), out var queuedHandle, out _) && queuedHandle is not null,
             "manager creates a queued destination state");
+        using var queuedStateHandle = queuedHandle!;
+        var queuedState = queuedStateHandle.State;
         using var queuedHeld = await queuedState!.AcquireAsync(CancellationToken.None) ??
             throw new Exception("FAIL: manager queue fixture permit should be acquired");
         using var queuedCancel = new CancellationTokenSource();
@@ -113,5 +117,82 @@ public static class DestinationAdmissionTests
         using var managerGranted = await managerWaiter2.WaitAsync(TimeSpan.FromSeconds(2)) ??
             throw new Exception("FAIL: manager queue fixture waiter should be granted");
         Check(boundedManager.PendingCount == 0, "granted waiter releases global queue capacity");
+
+        var retirementManager = new DestinationAdmissionManager();
+        Check(retirementManager.TryAcquireHandle("app", "retiring", new(1, 0, 5000), out var firstHandle, out _) && firstHandle is not null,
+            "registry returns a reference-counted handle");
+        var firstState = firstHandle!.State;
+        using var firstLease = await firstState.AcquireAsync(CancellationToken.None) ??
+            throw new Exception("FAIL: retiring fixture permit should be acquired");
+        retirementManager.ReconcileConfiguredDestinations(Array.Empty<(string, string)>());
+        Check(retirementManager.TryAcquireHandle("app", "retiring", new(1, 0, 5000), out var concurrentHandle, out _) &&
+              ReferenceEquals(firstState, concurrentHandle!.State),
+            "retirement cannot replace a gate while a forwarding lease is live");
+        using (concurrentHandle!) { }
+        firstLease.Dispose();
+        firstHandle.Dispose();
+        Check(retirementManager.TrackedDestinationCount == 0,
+            "retired gate is reclaimed after its last handle and forwarding lease finish");
+
+        var racingManager = new DestinationAdmissionManager();
+        var overlap = 0;
+        var maximumOverlap = 0;
+        var racers = Enumerable.Range(0, 2).Select(_iteration => Task.Run(async () =>
+        {
+            for (var i = 0; i < 500; i++)
+            {
+                if (!racingManager.TryAcquireHandle("app", "race", new(1, 0, 5000), out var handle, out _) || handle is null)
+                    throw new Exception("FAIL: race registry lookup unexpectedly failed");
+                using (handle)
+                {
+                    using var lease = await handle.State.AcquireAsync(CancellationToken.None);
+                    if (lease is null) continue;
+                    var current = Interlocked.Increment(ref overlap);
+                    int observed;
+                    do { observed = Volatile.Read(ref maximumOverlap); }
+                    while (current > observed && Interlocked.CompareExchange(ref maximumOverlap, current, observed) != observed);
+                    await Task.Yield();
+                    Interlocked.Decrement(ref overlap);
+                }
+                racingManager.ReconcileConfiguredDestinations(Array.Empty<(string, string)>());
+            }
+        })).ToArray();
+        await Task.WhenAll(racers);
+        Check(maximumOverlap == 1 && racingManager.TrackedDestinationCount == 0,
+            "concurrent acquire and retirement never split one destination into independent gates");
+
+        var canceledManager = new DestinationAdmissionManager();
+        Check(canceledManager.TryAcquireHandle("app", "cancel", new(1, 1, 5000), out var ownerHandle, out _) && ownerHandle is not null,
+            "cancellation registry owner acquired");
+        using var ownerLease = await ownerHandle!.State.AcquireAsync(CancellationToken.None) ??
+            throw new Exception("FAIL: cancellation registry owner permit should be acquired");
+        Check(canceledManager.TryAcquireHandle("app", "cancel", new(1, 1, 5000), out var waiterHandle, out _) && waiterHandle is not null,
+            "cancellation waiter holds a registry reference");
+        using var waiterRegistryHandle = waiterHandle!;
+        using var timeoutToken = new CancellationTokenSource();
+        var timedWait = waiterRegistryHandle.State.AcquireAsync(timeoutToken.Token).AsTask();
+        canceledManager.ReconcileConfiguredDestinations(Array.Empty<(string, string)>());
+        timeoutToken.Cancel();
+        try { await timedWait.WaitAsync(TimeSpan.FromSeconds(2)); }
+        catch (OperationCanceledException) { waiterRegistryHandle.State.RecordTimeout(); }
+        waiterRegistryHandle.Dispose();
+        ownerLease.Dispose();
+        ownerHandle.Dispose();
+        Check(canceledManager.PendingCount == 0 && canceledManager.TrackedDestinationCount == 0,
+            "timeout cancellation releases queue reservation and retired registry entry");
+
+        var churnManager = new DestinationAdmissionManager();
+        var churnSucceeded = true;
+        for (var i = 0; i <= DestinationAdmissionManager.MaximumTrackedDestinations; i++)
+        {
+            var key = "destination-" + i;
+            if (!churnManager.TryAcquireHandle("churn", key, new(1, 0, 5000), out var churnHandle, out _) || churnHandle is null)
+            { churnSucceeded = false; break; }
+            churnHandle!.Dispose();
+            churnManager.ReconcileConfiguredDestinations(new[] { ("churn", key) });
+            churnManager.ReconcileConfiguredDestinations(Array.Empty<(string, string)>());
+        }
+        Check(churnSucceeded && churnManager.TrackedDestinationCount == 0,
+            "4097 destination replacements are reclaimed without exceeding the registry cap");
     }
 }

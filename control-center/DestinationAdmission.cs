@@ -281,38 +281,94 @@ public sealed class DestinationAdmissionState
     }
 }
 
+/// <summary>A reference to a registry entry held from admission lookup through forwarding completion.</summary>
+public sealed class DestinationAdmissionHandle : IDisposable
+{
+    private Action? _release;
+    internal DestinationAdmissionHandle(DestinationAdmissionState state, Action release)
+    { State = state; _release = release; }
+    public DestinationAdmissionState State { get; }
+    public void Dispose() => Interlocked.Exchange(ref _release, null)?.Invoke();
+}
+
 /// <summary>
-/// A bounded registry prevents destination-id churn from growing memory forever.
-/// Entries are deliberately not evicted while idle: a request may have obtained a
-/// state reference but not yet acquired its first permit. Eviction in that window
-/// could create two independent gates for one destination and exceed its limit.
+/// Bounded per-destination registry. Lookups acquire a reference while holding the
+/// registry lock; an entry can only be retired after config removal, zero references,
+/// and an idle gate, so no request can race eviction and create a second gate.
 /// </summary>
 public sealed class DestinationAdmissionManager
 {
     public const int MaximumTrackedDestinations = 4096;
     public const int MaximumGlobalPending = 16384;
     private readonly object _sync = new();
-    private readonly Dictionary<(string Cluster, string Destination), DestinationAdmissionState> _states = new();
+    private sealed class Entry(DestinationAdmissionState state)
+    {
+        public DestinationAdmissionState State { get; } = state;
+        public int References;
+        public bool Configured;
+    }
+    private readonly Dictionary<(string Cluster, string Destination), Entry> _states = new();
     private int _pending;
     public int PendingCount => Volatile.Read(ref _pending);
+    public int TrackedDestinationCount { get { lock (_sync) return _states.Count; } }
 
-    public bool TryGetOrCreate(string clusterId, string destinationId, DestinationAdmissionPolicy policy,
-        out DestinationAdmissionState? state)
+    public bool TryAcquireHandle(string clusterId, string destinationId, DestinationAdmissionPolicy policy,
+        out DestinationAdmissionHandle? handle, out bool policyConflict)
     {
         lock (_sync)
         {
             var key = (clusterId, destinationId);
-            if (_states.TryGetValue(key, out state)) return state.TryUpdatePolicy(policy);
+            if (_states.TryGetValue(key, out var existing))
+            {
+                handle = null;
+                if (!existing.State.TryUpdatePolicy(policy)) { policyConflict = true; return false; }
+                existing.References++;
+                handle = new(existing.State, () => ReleaseHandle(key, existing));
+                policyConflict = false;
+                return true;
+            }
 
             if (_states.Count >= MaximumTrackedDestinations)
             {
-                state = null;
+                handle = null;
+                policyConflict = false;
                 return false;
             }
 
-            state = new DestinationAdmissionState(policy, TryReservePending, ReleasePending);
-            _states.Add(key, state);
+            var entry = new Entry(new DestinationAdmissionState(policy, TryReservePending, ReleasePending))
+            { References = 1, Configured = true };
+            _states.Add(key, entry);
+            handle = new(entry.State, () => ReleaseHandle(key, entry));
+            policyConflict = false;
             return true;
+        }
+    }
+
+    /// <summary>Replace the active set with keys from an already accepted proxy snapshot.</summary>
+    public void ReconcileConfiguredDestinations(IEnumerable<(string Cluster, string Destination)> configured)
+    {
+        var active = configured.ToHashSet();
+        lock (_sync)
+        {
+            foreach (var pair in _states.ToArray())
+            {
+                var isConfigured = active.Contains(pair.Key);
+                pair.Value.Configured = isConfigured;
+                if (!isConfigured && pair.Value.References == 0 && pair.Value.State.IsIdle)
+                    _states.Remove(pair.Key);
+            }
+        }
+    }
+
+    private void ReleaseHandle((string Cluster, string Destination) key, Entry entry)
+    {
+        lock (_sync)
+        {
+            if (entry.References <= 0) throw new InvalidOperationException("Destination registry reference underflow");
+            entry.References--;
+            if (entry.References == 0 && !entry.Configured && entry.State.IsIdle &&
+                _states.TryGetValue(key, out var current) && ReferenceEquals(current, entry))
+                _states.Remove(key);
         }
     }
 
@@ -320,9 +376,9 @@ public sealed class DestinationAdmissionManager
     {
         lock (_sync)
         {
-            if (_states.TryGetValue((clusterId, destinationId), out var state))
+            if (_states.TryGetValue((clusterId, destinationId), out var entry))
             {
-                snapshot = state.Snapshot;
+                snapshot = entry.State.Snapshot;
                 return true;
             }
             snapshot = default;
