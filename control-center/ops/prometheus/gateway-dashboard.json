@@ -170,6 +170,17 @@
       "targets": [{"expr": "sum by (instance,destination) (rate(yarp_control_destination_admission_queue_wait_seconds_sum{job=~\"$job\"}[5m])) / clamp_min(sum by (instance,destination) (rate(yarp_control_destination_admission_queue_wait_seconds_count{job=~\"$job\"}[5m])), 1e-9)", "legendFormat": "{{instance}} {{destination}} average queue wait", "refId": "A"}],
       "title": "Per-destination queue wait",
       "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "gatewaycore-prometheus"},
+      "description": "Aggregate requests without per-destination counters after the process reaches its fixed destination telemetry limit. This series intentionally has no destination label.",
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 48},
+      "id": 14,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi"}},
+      "targets": [{"expr": "yarp_control_destination_telemetry_untracked_requests_total{job=~\"$job\"}", "legendFormat": "{{instance}} untracked destination requests", "refId": "A"}],
+      "title": "Destination telemetry cardinality overflow",
+      "type": "timeseries"
     }
   ],
   "refresh": "30s",

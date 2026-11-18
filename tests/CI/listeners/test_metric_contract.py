@@ -13,6 +13,7 @@ required=[
 'yarp_control_http_duration_seconds_sum','yarp_control_process_working_set_bytes',
 'yarp_control_gc_heap_bytes','yarp_control_gc_collections_total',
 'yarp_control_destination_inflight_requests','yarp_control_destination_active_health',
+'yarp_control_destination_telemetry_untracked_requests_total',
 'yarp_control_destination_admission_inflight_requests','yarp_control_destination_admission_queued_requests',
 'yarp_control_destination_admission_rejected_total','yarp_control_destination_admission_queue_timeouts_total',
 'yarp_control_destination_admission_waiter_canceled_total',

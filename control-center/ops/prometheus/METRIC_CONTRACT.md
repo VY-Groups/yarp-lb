@@ -16,6 +16,7 @@ yarp_control_destination_admission_rejected_total
 yarp_control_destination_admission_waiter_canceled_total
 yarp_control_destination_inflight_requests
 yarp_control_destination_requests_total
+yarp_control_destination_telemetry_untracked_requests_total
 yarp_control_gc_collections_total
 yarp_control_gc_heap_bytes
 yarp_control_http_duration_seconds
@@ -40,6 +41,7 @@ yarp_logging_write_errors_total
 - `yarp_control_gc_collections_total`
 - `yarp_control_destination_inflight_requests`
 - `yarp_control_destination_active_health`
+- `yarp_control_destination_telemetry_untracked_requests_total`
 - `yarp_control_destination_admission_inflight_requests`
 - `yarp_control_destination_admission_queued_requests`
 - `yarp_control_destination_admission_rejected_total`
@@ -50,6 +52,11 @@ yarp_logging_write_errors_total
 - `yarp_logging_dropped_total`
 - `yarp_logging_dropped_high_priority_total`
 - `yarp_logging_write_errors_total`
+
+Per-destination request counters have a process-local cap of 4,096 distinct
+IDs. Requests for additional IDs increment
+`yarp_control_destination_telemetry_untracked_requests_total`, a single
+unlabelled aggregate; no overflow destination IDs become Prometheus labels.
 
 ### Explicit external-exporter series
 - `up`

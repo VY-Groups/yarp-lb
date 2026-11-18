@@ -124,6 +124,8 @@ await ProxyConcurrencyTests.RunAsync();
 
 await DestinationAdmissionTests.RunAsync();
 
+DestinationTelemetryTests.Run();
+
 PeerRateTableTests.Run();
 
 RecoveryTransitionTests.Run();

@@ -8,7 +8,7 @@
 - Drafts remain subject to independent review; a freeze flag is local, not distributed.
 
 ## Prometheus metrics
-A process-local exporter at `GET /gateway/metrics` rejects non-loopback connections. Metrics include request totals/status classes, duration histogram, in-flight request count, destination counts and YARP current in-flight/active health, working set and managed heap size. No unbounded path or client labels. Use a **local** collector forwarding to your protected Prometheus-compatible infrastructure.
+A process-local exporter at `GET /gateway/metrics` rejects non-loopback connections. Metrics include request totals/status classes, duration histogram, in-flight request count, destination counts and YARP current in-flight/active health, working set and managed heap size. Per-destination request counters retain at most 4,096 destination IDs per process; requests beyond that fixed cap increment the unlabelled `yarp_control_destination_telemetry_untracked_requests_total` aggregate and remain visible through the authenticated destination-metrics and traffic-report APIs. No per-overflow-destination series is created. Use a **local** collector forwarding to your protected Prometheus-compatible infrastructure.
 
 ## Acceptance
 GitHub Actions test real HTTP draining, recovery, warmup distribution, active health failover, all-down 503, and hot reconfiguration. Dedicated k6/wrk soak tests and long-lived connection drain tests are **not yet covered**. All results are development evidence, not production approval.

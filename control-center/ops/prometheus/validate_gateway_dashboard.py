@@ -24,6 +24,7 @@ required_series = {
     "yarp_control_http_duration_seconds_bucket",
     "gatewaycore:availability_probe_success:sample",
     "yarp_control_destination_active_health",
+    "yarp_control_destination_telemetry_untracked_requests_total",
     "yarp_control_destination_inflight_requests",
     "yarp_control_destination_admission_inflight_requests",
     "yarp_control_destination_admission_queued_requests",
