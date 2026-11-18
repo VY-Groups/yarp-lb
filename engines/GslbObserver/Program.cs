@@ -30,8 +30,8 @@ if (signer.ExportParameters(false).Curve.Oid.Value != "1.2.840.10045.3.1.7")
     throw new InvalidDataException("A P-256 signing key is required");
 // Verify signing capability before advertising readiness.
 _ = signer.SignData(Array.Empty<byte>(), HashAlgorithmName.SHA256);
-var reportEnabled = !string.IsNullOrWhiteSpace(config.ReportUrl);
-var anyReportField = config.ReportUrl is not null || config.AgentId is not null ||
+var reportEnabled = config.ReportUrl is not null || config.ReportUrls is not null;
+var anyReportField = reportEnabled || config.AgentId is not null ||
     config.Zone is not null || config.SiteId is not null ||
     config.ReportClientCertificatePem is not null || config.ReportClientKeyPem is not null ||
     config.ReportServerCaPem is not null || config.ReportSequenceStatePath is not null;
@@ -41,12 +41,20 @@ AgentReportSequenceState? reportSequence = null;
 HttpClient? reportClient = null;
 X509Certificate2? reportClientCertificate = null;
 X509Certificate2? reportServerCa = null;
+Uri[] reportEndpoints = [];
 if (reportEnabled)
 {
-    if (!Uri.TryCreate(config.ReportUrl, UriKind.Absolute, out var reportUrl) ||
-        reportUrl.Scheme != "https" || reportUrl.UserInfo.Length != 0 ||
-        reportUrl.Query.Length != 0 || reportUrl.Fragment.Length != 0 ||
-        reportUrl.AbsolutePath != "/agent-health/v1/reports" ||
+    if ((config.ReportUrl is not null && config.ReportUrls is not null) ||
+        config.ReportUrls is { Length: 0 or > 8 })
+        throw new InvalidDataException("Configure either ReportUrl or 1-8 ReportUrls");
+    var reportUrlValues = config.ReportUrls ?? [config.ReportUrl!];
+    if (reportUrlValues.Any(value =>
+            !Uri.TryCreate(value, UriKind.Absolute, out var target) ||
+            target.Scheme != "https" || target.UserInfo.Length != 0 ||
+            target.Query.Length != 0 || target.Fragment.Length != 0 ||
+            target.AbsolutePath != "/agent-health/v1/reports") ||
+        reportUrlValues.Select(value => new Uri(value, UriKind.Absolute).AbsoluteUri)
+            .Distinct(StringComparer.OrdinalIgnoreCase).Count() != reportUrlValues.Length ||
         !AgentHealthReportContract.IsValidIdentifier(config.AgentId) ||
         string.IsNullOrWhiteSpace(config.Zone) ||
         !AgentHealthReportContract.IsValidIdentifier(config.SiteId) ||
@@ -59,6 +67,7 @@ if (reportEnabled)
         config.ReportTtlSeconds < config.ReportIntervalSeconds || config.ReportTtlSeconds > 300 ||
         (config.ReportServerCaPem is not null && !Path.IsPathFullyQualified(config.ReportServerCaPem)))
         throw new InvalidDataException("Invalid asynchronous agent report configuration");
+    reportEndpoints = reportUrlValues.Select(value => new Uri(value, UriKind.Absolute)).ToArray();
     var zoneName = config.Zone.TrimEnd('.');
     if (!AgentHealthReportContract.IsValidZone(zoneName))
         throw new InvalidDataException("Invalid asynchronous agent zone name");
@@ -165,7 +174,6 @@ finally
 
 async Task PublishReports(CancellationToken token)
 {
-    var endpoint = new Uri(config.ReportUrl!);
     while (!token.IsCancellationRequested)
     {
         var observed = DateTimeOffset.UtcNow;
@@ -196,10 +204,25 @@ async Task PublishReports(CancellationToken token)
                 "http", verdict, verdict == "unknown" ? 0 : 1000,
                 verdict == "unknown" ? null : latencyMs, "pending");
             lock (signer) report = report with { Signature = AgentHealthReportContract.Sign(report, signer) };
-            using var response = await reportClient!.PostAsJsonAsync(endpoint, report, token);
-            if (!response.IsSuccessStatusCode)
-                app.Logger.LogWarning("Health report rejected by configured receiver with HTTP {StatusCode}",
-                    (int)response.StatusCode);
+            // Every authority has an independent replay store, so it may accept
+            // the same signed, sequenced report once without sharing process state.
+            await Task.WhenAll(reportEndpoints.Select(async endpoint =>
+            {
+                try
+                {
+                    using var response = await reportClient!.PostAsJsonAsync(endpoint, report, token);
+                    if (!response.IsSuccessStatusCode)
+                        app.Logger.LogWarning("Health report rejected by configured receiver with HTTP {StatusCode}",
+                            (int)response.StatusCode);
+                }
+                catch (Exception ex) when (ex is HttpRequestException or OperationCanceledException or IOException)
+                {
+                    if (!token.IsCancellationRequested)
+                        app.Logger.LogWarning("Health report delivery failed: {ErrorType}, inner={InnerType}, detail={Detail}",
+                            ex.GetType().Name, ex.InnerException?.GetType().Name ?? "none",
+                            ex.InnerException?.Message ?? ex.Message);
+                }
+            }));
         }
         catch (Exception ex) when (ex is HttpRequestException or OperationCanceledException or IOException)
         {
@@ -220,6 +243,7 @@ sealed record ObserverConfig(string ListenAddress, int Port, Uri PublicUrl, Uri 
     string ServerCertificatePem, string ServerKeyPem, string SigningKeyPem, string[] AllowedClientSha256)
 {
     public string? ReportUrl { get; init; }
+    public string[]? ReportUrls { get; init; }
     public string? AgentId { get; init; }
     public string? Zone { get; init; }
     public string? SiteId { get; init; }

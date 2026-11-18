@@ -16,3 +16,14 @@ Start one instance per service and observer vantage with `dotnet GslbObserver.dl
 ```
 
 The server certificate must match the public URL. The signing key is separate from TLS credentials. Configure the matching public key on each DNS node. Restart the processes after changing key material or trust configuration. A DNS node accepts readiness only when both configured observers and its own local probe succeed.
+
+For an agent that reports to multiple independent DNS authorities, use `ReportUrls` instead of `ReportUrl`:
+
+```json
+"ReportUrls": [
+  "https://dns-a.example:18444/agent-health/v1/reports",
+  "https://dns-b.example:18444/agent-health/v1/reports"
+]
+```
+
+The list is limited to eight unique HTTPS report endpoints with the fixed report path. One signed report and persisted sequence number are sent concurrently to all configured authorities; each authority validates and replay-fences it using its own local state. A failed endpoint is logged independently and does not prevent delivery to other endpoints. Existing `ReportUrl` configurations remain supported.

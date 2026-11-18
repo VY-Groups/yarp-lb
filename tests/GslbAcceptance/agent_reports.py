@@ -115,6 +115,20 @@ def main():
                            "cert": cert, "key": key, "signer": signer,
                            "public": public_key, "pin": hashlib.sha256(der).hexdigest().upper()})
 
+        # A fourth, non-quorum test identity exercises one-process fan-out to
+        # both authorities without changing the existing partition assertions.
+        cert, key = issue("agent-fanout", "clientAuth")
+        public_key = root / "agent-fanout-signing.pub"
+        signer = root / "agent-fanout-signing.key"
+        openssl("ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out", str(signer))
+        openssl("pkey", "-in", str(signer), "-pubout", "-out", str(public_key))
+        der = subprocess.run(["openssl", "x509", "-in", str(cert), "-outform", "DER"],
+                             capture_output=True, check=True).stdout
+        fanout_agent = {"id": "agent-fanout", "vantage_group": "vantage-fanout",
+                        "cert": cert, "key": key, "signer": signer,
+                        "public": public_key, "pin": hashlib.sha256(der).hexdigest().upper(),
+                        "upstream": serve(stack)}
+
         local = serve(stack)
         for agent in agents:
             agent["upstream"] = serve(stack)
@@ -123,7 +137,7 @@ def main():
         for node in ("a", "b"):
             dns_port = port()
             report_port = port()
-            metrics_port = port() if node == "a" else 0
+            metrics_port = port()
             report_config = {
                 "ListenAddress": "127.0.0.1", "ListenPort": report_port,
                 "AllowNonLoopbackListener": False,
@@ -133,7 +147,8 @@ def main():
                 "MaxReportsPerMinute": 120, "RevokedCertificateSha256": [],
                 "Agents": [{"AgentId": a["id"], "VantageGroup": a["vantage_group"],
                             "CertificateSha256": [a["pin"]],
-                            "SigningPublicKeyPems": [str(a["public"])]} for a in agents]
+                            "SigningPublicKeyPems": [str(a["public"])]}
+                           for a in [*agents, fanout_agent]]
             }
             dns_config = root / f"zones-{node}.json"
             dns_config.write_text(json.dumps({
@@ -176,25 +191,32 @@ def main():
 
         configs = []
 
-        def start_agent(agent, node):
+        def start_agent(agent, node, report_nodes=None):
             authority = authorities[node]
             listen_port = port()
             origin = f"https://127.0.0.1:{listen_port}"
             conf = root / f"{agent['id']}-{node}.json"
-            conf.write_text(json.dumps({
+            report_nodes = report_nodes or [node]
+            report_targets = [
+                f"https://127.0.0.1:{authorities[target]['report_port']}/agent-health/v1/reports"
+                for target in report_nodes]
+            report_config_fields = ({"ReportUrl": report_targets[0]} if len(report_targets) == 1
+                                    else {"ReportUrls": report_targets})
+            observer_config = {
                 "ListenAddress": "127.0.0.1", "Port": listen_port,
                 "PublicUrl": origin + "/ready",
                 "HealthUrl": f"http://127.0.0.1:{agent['upstream'].server_port}/ready",
                 "ServerCertificatePem": str(server_cert), "ServerKeyPem": str(server_key),
                 "SigningKeyPem": str(agent["signer"]), "AllowedClientSha256": [agent["pin"]],
-                "ReportUrl": f"https://127.0.0.1:{authority['report_port']}/agent-health/v1/reports",
                 "AgentId": agent["id"], "Zone": "lab.example.test", "SiteId": "mumbai",
                 "ReportClientCertificatePem": str(agent["cert"]),
                 "ReportClientKeyPem": str(agent["key"]), "ReportServerCaPem": str(root / "ca.pem"),
                 "ReportServerRevocationMode": "NoCheck",
                 "ReportSequenceStatePath": str(root / (agent["id"] + f"-{node}-sequence.json")),
                 "ReportIntervalSeconds": 1, "ReportTtlSeconds": 8
-            }))
+            }
+            observer_config.update(report_config_fields)
+            conf.write_text(json.dumps(observer_config))
             configs.append(conf)
             log_path = root / f"{agent['id']}-{node}.log"
             authority["agent_logs"].append(log_path)
@@ -243,6 +265,26 @@ def main():
         assert healthy_count >= 2, "fresh healthy observer evidence was not exported"
         assert "lab.example.test" not in metrics_text and "192.0.2.17" not in metrics_text
         print("PASS: mTLS evidence, freshness and quorum metrics export without zone or backend labels")
+
+        # A single process signs once and delivers the identical report ID to
+        # two authorities. Verify each authority's own accepted counter advances.
+        def accepted_reports(node):
+            text = scrape_metrics(authorities[node]["metrics_port"])
+            prefix = 'gatewaycore_gslb_agent_reports_total{result="accepted"} '
+            return int(next(line[len(prefix):] for line in text.splitlines()
+                            if line.startswith(prefix)))
+
+        before = {node: accepted_reports(node) for node in ("a", "b")}
+        fanout_process = start_agent(fanout_agent, "a", report_nodes=["a", "b"])
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline and any(
+                accepted_reports(node) <= before[node] for node in ("a", "b")):
+            if fanout_process.poll() is not None:
+                raise AssertionError(f"fan-out observer exited {fanout_process.returncode}")
+            time.sleep(.2)
+        assert all(accepted_reports(node) > before[node] for node in ("a", "b")), \
+            "both independent authorities did not accept the single observer's report"
+        print("PASS: one observer process delivered an authenticated report accepted by both authorities")
 
         # One independent observer reports a real failure while the DNS node's
         # local readiness endpoint stays healthy; the quorum must withdraw it.
