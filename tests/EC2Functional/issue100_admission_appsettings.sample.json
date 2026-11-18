@@ -1,0 +1,38 @@
+{
+  "Logging": {
+    "LogLevel": {
+      "Default": "Warning"
+    }
+  },
+  "AllowedHosts": "localhost;127.0.0.1",
+  "ReverseProxy": {
+    "Routes": {
+      "physical-admission": {
+        "ClusterId": "fixture",
+        "Match": {
+          "Path": "/admit/{**catch-all}"
+        },
+        "Transforms": [
+          {
+            "PathRemovePrefix": "/admit"
+          }
+        ]
+      }
+    },
+    "Clusters": {
+      "fixture": {
+        "LoadBalancingPolicy": "RoundRobin",
+        "Destinations": {
+          "origin": {
+            "Address": "http://127.0.0.1:18081/",
+            "Metadata": {
+              "GatewayCore.Admission.MaxInFlight": "8",
+              "GatewayCore.Admission.MaxPending": "64",
+              "GatewayCore.Admission.QueueTimeoutMs": "5000"
+            }
+          }
+        }
+      }
+    }
+  }
+}
