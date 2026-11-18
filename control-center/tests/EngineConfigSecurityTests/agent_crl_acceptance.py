@@ -115,6 +115,8 @@ def main() -> None:
             (temp / "index.txt").write_text("", encoding="ascii")
             (temp / "serial").write_text("1000\n", encoding="ascii")
             (temp / "crlnumber").write_text("1000\n", encoding="ascii")
+            (temp / "unknown-index.txt").write_text("", encoding="ascii")
+            (temp / "unknown-serial").write_text("2000\n", encoding="ascii")
             ca_config = temp / "ca.cnf"
             ca_config.write_text(f"""[ ca ]
 default_ca = CA_default
@@ -148,6 +150,25 @@ keyUsage = critical,digitalSignature,keyEncipherment
 extendedKeyUsage = serverAuth
 subjectAltName = DNS:localhost,IP:127.0.0.1
 """, encoding="ascii")
+            unknown_ca_config = temp / "unknown-ca.cnf"
+            unknown_ca_config.write_text(f"""[ ca ]
+default_ca = CA_default
+[ CA_default ]
+database = {temp / 'unknown-index.txt'}
+new_certs_dir = {temp}
+certificate = {temp / 'unknown-root.pem'}
+private_key = {temp / 'unknown-root.key'}
+serial = {temp / 'unknown-serial'}
+default_md = sha256
+default_days = 2
+policy = policy
+[ policy ]
+commonName = supplied
+[ unknown_client_cert ]
+basicConstraints = critical,CA:FALSE
+keyUsage = critical,digitalSignature,keyEncipherment
+extendedKeyUsage = clientAuth
+""", encoding="ascii")
             run(openssl, "req", "-new", "-x509", "-nodes", "-newkey", "rsa:2048",
                 "-sha256", "-days", "2", "-subj", "/CN=GatewayCore disposable CRL root",
                 "-addext", "basicConstraints=critical,CA:TRUE,pathlen:0",
@@ -164,9 +185,35 @@ subjectAltName = DNS:localhost,IP:127.0.0.1
                     "-in", str(csr), "-out", str(cert))
                 return cert, key
 
+            def issue_expired(name: str) -> tuple[Path, Path]:
+                key = temp / f"{name}.key"
+                csr = temp / f"{name}.csr"
+                cert = temp / f"{name}.pem"
+                run(openssl, "req", "-new", "-nodes", "-newkey", "rsa:2048", "-sha256",
+                    "-subj", f"/CN={name}", "-keyout", str(key), "-out", str(csr))
+                run(openssl, "ca", "-batch", "-config", str(ca_config), "-extensions", "client_cert",
+                    "-startdate", "20200101000000Z", "-enddate", "20200102000000Z",
+                    "-in", str(csr), "-out", str(cert))
+                return cert, key
+
             good_cert, good_key = issue("good-controller")
             revoked_cert, revoked_key = issue("revoked-controller")
             offline_cert, offline_key = issue("offline-controller", "offline_client_cert")
+            expired_cert, expired_key = issue_expired("expired-controller")
+            run(openssl, "req", "-new", "-x509", "-nodes", "-newkey", "rsa:2048", "-sha256",
+                "-days", "2", "-subj", "/CN=GatewayCore unknown disposable root",
+                "-addext", "basicConstraints=critical,CA:TRUE,pathlen:0",
+                "-addext", "keyUsage=critical,keyCertSign,cRLSign",
+                "-keyout", str(temp / "unknown-root.key"), "-out", str(temp / "unknown-root.pem"))
+            unknown_csr = temp / "unknown-controller.csr"
+            run(openssl, "req", "-new", "-nodes", "-newkey", "rsa:2048", "-sha256",
+                "-subj", "/CN=unknown-controller", "-keyout", str(temp / "unknown-controller.key"),
+                "-out", str(unknown_csr))
+            run(openssl, "ca", "-batch", "-config", str(unknown_ca_config),
+                "-extensions", "unknown_client_cert", "-in", str(unknown_csr),
+                "-out", str(temp / "unknown-controller.pem"))
+            unknown_cert = temp / "unknown-controller.pem"
+            unknown_key = temp / "unknown-controller.key"
             server_csr = temp / "server.csr"
             run(openssl, "req", "-new", "-nodes", "-newkey", "rsa:2048", "-sha256",
                 "-subj", "/CN=localhost", "-keyout", str(temp / "server.key"),
@@ -181,21 +228,21 @@ subjectAltName = DNS:localhost,IP:127.0.0.1
             run(openssl, "crl", "-in", str(crl_path), "-CAfile", str(temp / "root.pem"), "-verify", "-noout")
 
             port = free_port()
+            certificates = (good_cert, revoked_cert, offline_cert, expired_cert, unknown_cert)
             pins = [run(openssl, "x509", "-in", str(cert), "-noout", "-fingerprint", "-sha1").split("=", 1)[1].replace(":", "").strip()
-                    for cert in (good_cert, revoked_cert, offline_cert)]
+                    for cert in certificates]
             env = os.environ.copy()
             env.update({
                 "SSL_CERT_FILE": str(temp / "root.pem"),
                 "Kestrel__Endpoints__AgentHttps__Url": f"https://127.0.0.1:{port}",
                 "Kestrel__Endpoints__AgentHttps__Certificate__Path": str(temp / "server.pfx"),
                 "Kestrel__Endpoints__AgentHttps__Certificate__Password": "disposable-only",
-                "Agent__TrustedClientThumbprints__0": pins[0],
-                "Agent__TrustedClientThumbprints__1": pins[1],
-                "Agent__TrustedClientThumbprints__2": pins[2],
                 "Agent__EnableConfigChanges": "false",
                 "Agent__EnableEngineConfigChanges": "false",
                 "Agent__EnableServiceActions": "false",
             })
+            env.update({f"Agent__TrustedClientThumbprints__{index}": pin
+                        for index, pin in enumerate(pins)})
             agent_log = temp / "gateway-agent.log"
             agent_log_stream = agent_log.open("w", encoding="utf-8")
             try:
@@ -232,6 +279,18 @@ subjectAltName = DNS:localhost,IP:127.0.0.1
                 if request_status(port, good_cert, good_key, temp / "root.pem") != 200:
                     raise AssertionError("valid client stopped working after unavailable-CRL rejection")
                 print("PASS: valid client remains admitted after unavailable-CRL rejection", flush=True)
+                require_no_http_response(port, expired_cert, expired_key, temp / "root.pem",
+                                         "an expired client certificate")
+                expected_chain_rejections.append((pins[3], ("NotTimeValid",), "expired client certificate"))
+                if request_status(port, good_cert, good_key, temp / "root.pem") != 200:
+                    raise AssertionError("valid client stopped working after expired-client rejection")
+                print("PASS: valid client remains admitted after expired-client rejection", flush=True)
+                require_no_http_response(port, unknown_cert, unknown_key, temp / "root.pem",
+                                         "a client certificate from an untrusted CA")
+                expected_chain_rejections.append((pins[4], ("PartialChain",), "unknown client CA"))
+                if request_status(port, good_cert, good_key, temp / "root.pem") != 200:
+                    raise AssertionError("valid client stopped working after unknown-chain rejection")
+                print("PASS: valid client remains admitted after unknown-chain rejection", flush=True)
             finally:
                 process.terminate()
                 try:
@@ -243,9 +302,9 @@ subjectAltName = DNS:localhost,IP:127.0.0.1
                 agent_log_stream.close()
                 logs = agent_log.read_text(encoding="utf-8", errors="replace")
                 request_prefix = f"Request starting HTTP/1.1 GET https://127.0.0.1:{port}/agent/v1/status"
-                if sum(request_prefix in line for line in logs.splitlines()) != 3:
+                if sum(request_prefix in line for line in logs.splitlines()) != 5:
                     raise AssertionError(
-                        "expected only the three valid-client requests to reach the HTTP pipeline; logs:\n" + logs)
+                        "expected only the five valid-client requests to reach the HTTP pipeline; logs:\n" + logs)
                 for thumbprint, statuses, reason in expected_chain_rejections:
                     event_lines = [line for line in logs.splitlines()
                                    if "Rejected TLS client certificate " + thumbprint in line]
