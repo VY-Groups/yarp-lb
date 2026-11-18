@@ -1,0 +1,56 @@
+name: GatewayLab paired OTLP overhead diagnostic
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/gatewaylab-otel-overhead.yml"
+      - "tests/L7/GatewayLab/**"
+      - "tests/L7/BackendLab/**"
+      - "tests/L7/measure_gatewaylab_otel.py"
+      - "control-center/GatewayOpenTelemetry.cs"
+      - "control-center/OtlpEndpointPolicy.cs"
+      - "control-center/GatewayClientAddress.cs"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gatewaylab-otel-overhead-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  paired-end-to-end:
+    name: Full YARP path - ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, ubuntu-24.04]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build YARP lab and two local backends
+        shell: bash
+        run: |
+          dotnet build tests/L7/GatewayLab/GatewayLab.csproj -c Release
+          dotnet build tests/L7/BackendLab/BackendLab.csproj -c Release
+      - name: Run paired telemetry off/on measurement
+        shell: bash
+        env:
+          GATEWAYLAB_OTEL_EVIDENCE_DIR: ${{ runner.temp }}/gatewaylab-otel-evidence
+        run: python tests/L7/measure_gatewaylab_otel.py
+      - name: Upload paired JSON and gateway logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gatewaylab-otel-overhead-${{ matrix.os }}
+          path: ${{ runner.temp }}/gatewaylab-otel-evidence/
+          if-no-files-found: warn
+          retention-days: 14
