@@ -136,6 +136,16 @@ def main():
             server.verdict = 200
             check(nodes, 0)
 
+        # One fresh negative validator vetoes a healthy peer validator and
+        # local probe; neither independent DNS authority may serve the site.
+        observers[0].verdict = 503
+        observers[1].verdict = 200
+        local.verdict = 200
+        check(nodes, 2)
+        observers[0].verdict = 200
+        check(nodes, 0)
+        print("PASS: conflicting validator verdicts fail closed on both authorities until both validate healthy")
+
         for mode in ("unsigned", "replay", "wrong-target"):
             observers[0].mode = mode
             check(nodes, 2)
