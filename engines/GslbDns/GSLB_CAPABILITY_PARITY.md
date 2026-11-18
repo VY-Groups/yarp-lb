@@ -16,7 +16,7 @@ performance. No AGPL OpenGSLB source is incorporated.
 | --- | --- | --- |
 | Self-hosted data sovereignty | On-prem .NET DNS prototype | Two independent gateway hosts, network/privacy audit |
 | No vendor lock-in | Independent source/runtime design goal | Dependency/license inventory, reproducible image builds |
-| Authoritative DNS A/NS/SOA/EDNS/TCP | Limited lab implementation; merged child-cut referrals, authority flags, in-bailiwick glue, two-authority observer-feed partition checks, finite malformed UDP/TCP corpus, a staged-config RFC 1982 serial-increment guard, and explicit UDP/TCP checks that unknown EDNS option payloads are ignored and not echoed | Full delegation conformance, automatic serial generation, fuzz/load, DNSSEC and independent resolver acceptance |
+| Authoritative DNS A/NS/SOA/EDNS/TCP | Limited lab implementation; merged child-cut referrals, authority flags, in-bailiwick glue, two-authority observer-feed partition checks, finite malformed UDP/TCP corpus, staged-config RFC 1982 serial-increment guard, explicit UDP/TCP checks that unknown EDNS options are ignored and not echoed, and real-socket 512/1232-byte client budget negotiation with TC-to-TCP retry acceptance | Full delegation conformance, automatic serial generation, fuzz/load, DNSSEC and independent resolver acceptance |
 | DNS AAAA / IPv6 | Merged lab implementation; Windows/Linux acceptance exists | IPv6 listener and NS glue, real dual-stack probes and public resolvers |
 | Weighted traffic selection | Existing opt-in per-zone selection | Predictable fairness under health churn, matched load |
 | Ordered primary/standby failover | Existing opt-in `RoutingPolicy=Failover` | DNS caching, DR state, physical failover behavior |
