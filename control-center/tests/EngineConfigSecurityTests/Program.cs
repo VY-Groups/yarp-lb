@@ -250,4 +250,6 @@ catch (InvalidOperationException) { invalidPins=true; }
 Must(invalidPins, "invalid configured controller thumbprint rejects startup");
 await AgentTlsNegativeAcceptance.RunAsync();
 await AgentLabCaTlsAcceptance.RunAsync();
+if (OperatingSystem.IsLinux())
+    await AgentCrlAcceptance.RunAsync();
 Console.WriteLine("ENGINE CONFIG CONTRACT ACCEPTANCE PASSED");

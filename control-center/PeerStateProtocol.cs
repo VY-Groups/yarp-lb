@@ -24,15 +24,18 @@ public sealed class PeerStateJournal
     private readonly int maxIdentities;
     private readonly TimeSpan remoteFreshness;
     private readonly Func<DateTimeOffset> clock;
+    private readonly TimeProvider timeProvider;
     private long localMinute = -1, sequence, receivedMinute = -1, receivedSequence = -1;
     private long receivedSourceEpoch;
     private readonly long sourceEpoch = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
     private DateTimeOffset? lastAcceptedUtc;
+    private long? lastAcceptedTimestamp;
     private readonly Dictionary<string,int> local = new(StringComparer.Ordinal);
     private Dictionary<string,int> remote = new(StringComparer.Ordinal);
 
     public PeerStateJournal(string localId, string remoteId, byte[] secret, int capacity,
-        TimeSpan? remoteFreshness = null, Func<DateTimeOffset>? clock = null)
+        TimeSpan? remoteFreshness = null, Func<DateTimeOffset>? clock = null,
+        TimeProvider? timeProvider = null)
     {
         if (string.IsNullOrWhiteSpace(localId) || string.IsNullOrWhiteSpace(remoteId) ||
             localId == remoteId || localId.Length > 48 || remoteId.Length > 48)
@@ -49,6 +52,7 @@ public sealed class PeerStateJournal
             throw new ArgumentOutOfRangeException(nameof(remoteFreshness),
                 "Peer telemetry freshness must be 1..60 seconds");
         this.clock = clock ?? (() => DateTimeOffset.UtcNow);
+        this.timeProvider = timeProvider ?? TimeProvider.System;
     }
 
     public static long CurrentMinute() => DateTimeOffset.UtcNow.ToUnixTimeSeconds() / 60;
@@ -117,6 +121,7 @@ public sealed class PeerStateJournal
             receivedSequence = frame.Sequence;
             receivedSourceEpoch = frame.SourceEpoch;
             lastAcceptedUtc = clock();
+            lastAcceptedTimestamp = timeProvider.GetTimestamp();
             return true;
         }
     }
@@ -125,8 +130,8 @@ public sealed class PeerStateJournal
     // preserves replay/sequence fencing so an older snapshot cannot resurrect.
     private bool RemoteFresh(long minute)
     {
-        if (receivedMinute != minute || lastAcceptedUtc is null) return false;
-        var age = clock() - lastAcceptedUtc.Value;
+        if (receivedMinute != minute || lastAcceptedTimestamp is null) return false;
+        var age = timeProvider.GetElapsedTime(lastAcceptedTimestamp.Value);
         return age >= TimeSpan.Zero && age <= remoteFreshness;
     }
 

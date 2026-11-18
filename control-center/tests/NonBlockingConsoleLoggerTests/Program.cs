@@ -38,11 +38,11 @@ using(var listener = new MeterListener())
 {
     listener.InstrumentPublished = (inst,l) =>
     {
-        if (inst.Name == "yarp_logging_dropped_total") l.EnableMeasurementEvents(inst);
+        if (inst.Name == "yarp_logging_dropped") l.EnableMeasurementEvents(inst);
     };
     listener.SetMeasurementEventCallback<long>((inst,measurement,tags,state) =>
     {
-        if (inst.Name == "yarp_logging_dropped_total" &&
+        if (inst.Name == "yarp_logging_dropped" &&
             measurement == provider.DroppedMessages) reported=true;
     });
     listener.Start();

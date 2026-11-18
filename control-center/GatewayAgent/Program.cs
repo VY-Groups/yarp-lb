@@ -60,6 +60,7 @@ if (allowedServices.Any(x => !Regex.IsMatch(x, "^[A-Za-z0-9_.-]{1,64}$")))
 // management features disabled. It is not a production PKI trust shortcut.
 var labCaPath = builder.Configuration["Agent:LabOnlyClientCaCertificatePath"];
 X509Certificate2? labRoot = null;
+ILogger? clientCertificateLogger = null;
 if (!string.IsNullOrWhiteSpace(labCaPath))
 {
     var listener = builder.Configuration["Kestrel:Endpoints:AgentHttps:Url"] ?? "";
@@ -100,9 +101,39 @@ builder.WebHost.ConfigureKestrel(server =>
                 return eku && custom.Build(cert);
             };
         }
+        else
+        {
+            // Explicitly build the production client chain with online revocation
+            // before any HTTP request reaches the application pipeline. Do not
+            // rely solely on platform-specific Kestrel revocation defaults.
+            https.ClientCertificateValidation = (cert, _, _) =>
+            {
+                if (cert is null) return false;
+                using var chain = new X509Chain();
+                chain.ChainPolicy.RevocationMode = X509RevocationMode.Online;
+                // Check the leaf and intermediate certificates; a trust anchor
+                // does not need a revocation CRL of its own.
+                chain.ChainPolicy.RevocationFlag = X509RevocationFlag.ExcludeRoot;
+                chain.ChainPolicy.VerificationFlags = X509VerificationFlags.NoFlag;
+                chain.ChainPolicy.UrlRetrievalTimeout = TimeSpan.FromSeconds(5);
+                chain.ChainPolicy.ApplicationPolicy.Add(new Oid("1.3.6.1.5.5.7.3.2"));
+                var result = chain.Build(cert);
+                if (!result)
+                {
+                    var statuses = string.Join(",", chain.ChainStatus
+                        .Select(status => status.Status.ToString()).Distinct().Order(StringComparer.Ordinal));
+                    clientCertificateLogger?.LogWarning(
+                        "Rejected TLS client certificate {CertificateThumbprint} during chain validation; chain statuses: {ChainStatuses}",
+                        cert.Thumbprint.ToUpperInvariant(), statuses);
+                }
+                return result;
+            };
+        }
     });
 });
 var app = builder.Build();
+clientCertificateLogger = app.Services.GetRequiredService<ILoggerFactory>()
+    .CreateLogger("GatewayAgent.ClientCertificate");
 
 app.Use(async (ctx, next) =>
 {

@@ -36,7 +36,9 @@ public static class GatewayOpenTelemetry
         var instance = string.IsNullOrWhiteSpace(machineName) ? Environment.MachineName : machineName;
         if (instance.Length > 128) throw new InvalidOperationException("OTel service instance ID exceeds 128 characters");
 
-        services.AddLogging(logging => logging.AddFilter("GatewayCore.AccessLog", LogLevel.Information));
+        services.AddLogging(logging => logging.AddFilter<OpenTelemetryLoggerProvider>(
+            (category, level) => string.Equals(category, "GatewayCore.AccessLog", StringComparison.Ordinal) &&
+                level >= LogLevel.Information));
         services.AddOpenTelemetry()
             .ConfigureResource(resource => resource.AddService(
                 serviceName: "gatewaycore-control-center",
@@ -85,6 +87,7 @@ public static class GatewayOpenTelemetry
                 })
             .WithMetrics(metrics => metrics
                 .AddMeter(ActivitySourceName)
+                .AddMeter("GatewayCoreYarp.Logging")
                 .AddAspNetCoreInstrumentation()
                 .AddRuntimeInstrumentation()
                 .AddOtlpExporter((exporter, reader) =>

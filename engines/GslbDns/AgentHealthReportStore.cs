@@ -1,6 +1,9 @@
 using System.Net.Security;
 using System.Security.Cryptography;
+using System.Security.AccessControl;
+using System.Security.Principal;
 using System.Security.Cryptography.X509Certificates;
+using System.Runtime.Versioning;
 using System.Text.Json;
 using GatewayCore.Gslb.Contracts;
 
@@ -291,6 +294,8 @@ internal sealed class AgentHealthReportStore : IDisposable
             {
                 if (!OperatingSystem.IsWindows())
                     File.SetUnixFileMode(temporary, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+                else
+                    EnsurePrivateWindowsAcl(temporary, isDirectory: false);
                 stream.Write(bytes);
                 stream.Flush(flushToDisk: true);
             }
@@ -321,12 +326,23 @@ internal sealed class AgentHealthReportStore : IDisposable
                     UnixFileMode.OtherExecute)) != 0)
                 throw new InvalidDataException("Replay state directory must be private to the DNS service account");
         }
+        else EnsurePrivateWindowsAcl(parent, isDirectory: true);
         var lockPath = path + ".lock";
         EnsureNotLink(lockPath);
         EnsureNotLink(path);
         var stream = new FileStream(lockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
-        if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(lockPath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
-        return stream;
+        try
+        {
+            if (!OperatingSystem.IsWindows())
+                File.SetUnixFileMode(lockPath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+            else EnsurePrivateWindowsAcl(lockPath, isDirectory: false);
+            return stream;
+        }
+        catch
+        {
+            stream.Dispose();
+            throw;
+        }
     }
 
     private static void EnsurePrivateFile(string path)
@@ -337,7 +353,65 @@ internal sealed class AgentHealthReportStore : IDisposable
              UnixFileMode.GroupExecute | UnixFileMode.OtherRead | UnixFileMode.OtherWrite |
              UnixFileMode.OtherExecute)) != 0)
             throw new InvalidDataException("Replay state file must be private to the DNS service account");
+        else if (OperatingSystem.IsWindows()) EnsurePrivateWindowsAcl(path, isDirectory: false);
     }
+
+    [SupportedOSPlatform("windows")]
+    private static void EnsurePrivateWindowsAcl(string path, bool isDirectory)
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        using var identity = WindowsIdentity.GetCurrent();
+        var allowed = AllowedWindowsPrincipals(identity);
+
+        FileSystemSecurity security = isDirectory
+            ? new DirectoryInfo(path).GetAccessControl(AccessControlSections.Access | AccessControlSections.Owner)
+            : new FileInfo(path).GetAccessControl(AccessControlSections.Access | AccessControlSections.Owner);
+        var owner = security.GetOwner(typeof(SecurityIdentifier)) as SecurityIdentifier;
+        if (!IsAllowedWindowsOwner(owner, allowed))
+            throw new InvalidDataException("Replay state owner must be the DNS service identity, SYSTEM, Administrators or its service SID");
+        var rules = security.GetAccessRules(includeExplicit: true, includeInherited: true,
+            targetType: typeof(SecurityIdentifier));
+        foreach (FileSystemAccessRule rule in rules)
+        {
+            if (rule.AccessControlType == AccessControlType.Allow &&
+                rule.FileSystemRights != 0 &&
+                rule.IdentityReference is SecurityIdentifier sid && !allowed.Contains(sid.Value))
+                throw new InvalidDataException("Replay state ACL grants access beyond the DNS service identity, SYSTEM and Administrators");
+        }
+    }
+
+    [SupportedOSPlatform("windows")]
+    internal static HashSet<string> AllowedWindowsPrincipals(WindowsIdentity identity)
+    {
+        var currentUser = identity.User
+            ?? throw new InvalidDataException("Cannot determine DNS service identity for replay state ACL validation");
+        var allowed = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            currentUser.Value,
+            new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null).Value,
+            new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null).Value
+        };
+        var groups = identity.Groups?.Cast<IdentityReference>().OfType<SecurityIdentifier>() ?? [];
+        AddTrustedServiceSids(allowed, groups);
+        return allowed;
+    }
+
+    [SupportedOSPlatform("windows")]
+    internal static void AddTrustedServiceSids(ISet<string> allowed,
+        IEnumerable<SecurityIdentifier> tokenGroups)
+    {
+        foreach (var sid in tokenGroups)
+            if (IsWindowsServiceSid(sid))
+                allowed.Add(sid.Value);
+    }
+
+    [SupportedOSPlatform("windows")]
+    internal static bool IsAllowedWindowsOwner(SecurityIdentifier? owner, IReadOnlySet<string> allowed) =>
+        owner is not null && allowed.Contains(owner.Value);
+
+    [SupportedOSPlatform("windows")]
+    internal static bool IsWindowsServiceSid(SecurityIdentifier sid) =>
+        sid.Value.StartsWith("S-1-5-80-", StringComparison.OrdinalIgnoreCase);
 
     private static void EnsureNotLink(string path)
     {

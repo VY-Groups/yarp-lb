@@ -6,6 +6,8 @@ using System.Text;
 using System.Text.Json;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
+using System.Security.AccessControl;
+using System.Security.Principal;
 using GatewayCore.Gslb.Contracts;
 
 // A malformed, altered or overlong report must never verify as signed agent evidence.
@@ -41,6 +43,25 @@ var reportRoot = Path.Combine(Path.GetTempPath(), "gslb-agent-contract-" + Guid.
 Directory.CreateDirectory(reportRoot);
 if (!OperatingSystem.IsWindows())
     File.SetUnixFileMode(reportRoot, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+else
+{
+    var identity = WindowsIdentity.GetCurrent().User
+        ?? throw new InvalidOperationException("Windows test identity has no SID");
+    var security = new DirectoryInfo(reportRoot).GetAccessControl();
+    security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
+    security.AddAccessRule(new FileSystemAccessRule(identity, FileSystemRights.FullControl,
+        InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+        PropagationFlags.None, AccessControlType.Allow));
+    security.AddAccessRule(new FileSystemAccessRule(
+        new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null), FileSystemRights.FullControl,
+        InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+        PropagationFlags.None, AccessControlType.Allow));
+    security.AddAccessRule(new FileSystemAccessRule(
+        new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null), FileSystemRights.FullControl,
+        InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+        PropagationFlags.None, AccessControlType.Allow));
+    new DirectoryInfo(reportRoot).SetAccessControl(security);
+}
 try
 {
     using var signing1 = ECDsa.Create(ECCurve.NamedCurves.nistP256);
@@ -82,6 +103,61 @@ try
     var targets = new[] { new AgentReportTarget("lab.example.test", "mumbai",
         ["agent-1", "agent-2", "agent-3"], MinimumHealthyVantageGroups: 2) };
     var statePath = Path.Combine(reportRoot, "replay-state.json");
+    if (OperatingSystem.IsWindows())
+    {
+        var broadAclDirectory = Path.Combine(reportRoot, "broad-replay-acl");
+        Directory.CreateDirectory(broadAclDirectory);
+        var security = new DirectoryInfo(broadAclDirectory).GetAccessControl();
+        var everyone = new SecurityIdentifier(WellKnownSidType.WorldSid, null);
+        security.AddAccessRule(new FileSystemAccessRule(everyone,
+            FileSystemRights.Modify | FileSystemRights.ReadAndExecute,
+            InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+            PropagationFlags.None, AccessControlType.Allow));
+        new DirectoryInfo(broadAclDirectory).SetAccessControl(security);
+        var broadAclRejected = false;
+        try
+        {
+            using var invalidReports = new AgentHealthReportStore(agents, targets,
+                Path.Combine(broadAclDirectory, "replay-state.json"), 10, 5, 2);
+        }
+        catch (InvalidDataException) { broadAclRejected = true; }
+        if (!broadAclRejected)
+            throw new Exception("FAIL: Windows replay-state directory with Everyone access was accepted");
+        Console.WriteLine("PASS: broadly accessible Windows replay-state ACL rejected");
+
+        using var testIdentity = WindowsIdentity.GetCurrent();
+        var trustedPrincipals = AgentHealthReportStore.AllowedWindowsPrincipals(testIdentity);
+        if (!AgentHealthReportStore.IsAllowedWindowsOwner(testIdentity.User, trustedPrincipals) ||
+            AgentHealthReportStore.IsAllowedWindowsOwner(
+                new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid, null), trustedPrincipals) ||
+            !AgentHealthReportStore.IsWindowsServiceSid(new SecurityIdentifier("S-1-5-80-1-2-3-4-5")))
+            throw new Exception("FAIL: Windows replay-state owner/service SID trust policy is incorrect");
+        var syntheticServiceSid = new SecurityIdentifier("S-1-5-80-11-22-33-44-55");
+        var filteredGroups = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        AgentHealthReportStore.AddTrustedServiceSids(filteredGroups,
+            [syntheticServiceSid, new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid, null)]);
+        if (!filteredGroups.Contains(syntheticServiceSid.Value) ||
+            filteredGroups.Contains(new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid, null).Value))
+            throw new Exception("FAIL: only injected NT SERVICE token groups may extend the replay ACL allowlist");
+        Console.WriteLine("PASS: untrusted Windows replay-state owner rejected");
+
+        var serviceSid = testIdentity.Groups?.Cast<IdentityReference>().OfType<SecurityIdentifier>()
+            .FirstOrDefault(AgentHealthReportStore.IsWindowsServiceSid);
+        if (serviceSid is not null)
+        {
+            var serviceSidDirectory = Path.Combine(reportRoot, "service-sid-replay-state");
+            Directory.CreateDirectory(serviceSidDirectory);
+            var serviceSidSecurity = new DirectoryInfo(serviceSidDirectory).GetAccessControl();
+            serviceSidSecurity.AddAccessRule(new FileSystemAccessRule(serviceSid,
+                FileSystemRights.Modify | FileSystemRights.ReadAndExecute,
+                InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+                PropagationFlags.None, AccessControlType.Allow));
+            new DirectoryInfo(serviceSidDirectory).SetAccessControl(serviceSidSecurity);
+            using var serviceSidReports = new AgentHealthReportStore(agents, targets,
+                Path.Combine(serviceSidDirectory, "replay-state.json"), 10, 5, 2);
+            Console.WriteLine("PASS: current Windows service SID is allowed by replay-state ACL policy");
+        }
+    }
     var duplicateVantageRejected = false;
     try
     {
@@ -804,10 +880,17 @@ try
     var nodata = await TcpQuery(DnsRequest("ha.integration.test",28));
     Must((Dns16(nodata,2)&0xF)==0 && Dns16(nodata,6)==0 && Dns16(nodata,8)==1,
         "unsupported AAAA is NODATA, not a fabricated IPv6 address");
-    var (_, edns) = await QueryWire("app.integration.test",1,ednsVersion:0);
-    Must((Dns16(edns,2)&0xF)==0 && Dns16(edns,10)==1 &&
-         edns[^11]==0 && edns[^10]==0 && edns[^9]==41 && edns[^1]==0,
-         "EDNS0 OPT answered without leaking unknown client options or DO bit");
+    var ednsRequest = DnsRequest("app.integration.test",1,ednsVersion:0);
+    foreach (var transport in new[] { "UDP", "TCP" })
+    {
+        var edns = transport == "UDP" ? (await QueryWire("app.integration.test",1,ednsVersion:0)).Reply
+            : await TcpQuery(ednsRequest);
+        Must((Dns16(edns,2)&0xF)==0 && (Dns16(edns,2)&0x0400)!=0 &&
+             (Dns16(edns,2)&0x0020)==0 && Dns16(edns,6)==1 &&
+             Dns16(edns,10)==1 && Dns16(edns,edns.Length-10)==41 &&
+             Dns16(edns,edns.Length-2)==0 && (edns[^4]&0x80)==0,
+             $"{transport} EDNS0 accepts and ignores an unknown option without echoing its bytes or claiming DNSSEC");
+    }
     foreach (var dnssecType in new ushort[] { 43, 46, 48 }) // DS, RRSIG, DNSKEY
     {
         var dnssecReply = await TcpQuery(DnsRequest("app.integration.test", dnssecType, ednsVersion: 0));
@@ -1000,8 +1083,9 @@ byte[] DnsRequest(string domain, ushort type, byte? ednsVersion=null, ushort udp
     {
         // OPT: root, type 41, caller-selected UDP payload size, ext rcode 0, version as configured,
         // DO bit supplied (must not be reflected without DNSSEC support).
+        // Include an unknown EDNS option in the private-use range (65001/0xFDE9).
         request.AddRange(new byte[]{0,0,41,(byte)(udpPayloadSize>>8),(byte)udpPayloadSize,
-            0,ednsVersion.Value,0x80,0,0,7,253,233,0,3,1,2,3});
+            0,ednsVersion.Value,0x80,0,0,7,0xFD,0xE9,0,3,1,2,3});
     }
     return request.ToArray();
 }

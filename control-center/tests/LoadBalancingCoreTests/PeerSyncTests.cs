@@ -3,6 +3,23 @@ using System.Text;
 
 public static class PeerSyncTests
 {
+    private sealed class ManualTimeProvider(DateTimeOffset utcNow) : TimeProvider
+    {
+        private DateTimeOffset currentUtc = utcNow;
+        private long timestamp;
+
+        public override long TimestampFrequency => TimeSpan.TicksPerSecond;
+        public override long GetTimestamp() => timestamp;
+        public override DateTimeOffset GetUtcNow() => currentUtc;
+
+        public void SetUtcNow(DateTimeOffset value) => currentUtc = value;
+        public void Advance(TimeSpan elapsed)
+        {
+            timestamp += elapsed.Ticks;
+            currentUtc += elapsed;
+        }
+    }
+
     public static void Run()
     {
         static void Check(bool condition,string name)
@@ -26,24 +43,34 @@ public static class PeerSyncTests
         // Accepted snapshots must have a recent receipt time, not merely
         // share the same UTC minute. Use an injected clock to avoid sleeps.
         var clock = DateTimeOffset.UtcNow;
+        var monotonicClock = new ManualTimeProvider(clock);
         var ageLimited = new PeerStateJournal("node-b", "node-a", secret, 2,
-            TimeSpan.FromSeconds(6), () => clock);
+            TimeSpan.FromSeconds(6), () => clock, monotonicClock);
         Check(ageLimited.Apply(frame,now) && ageLimited.Status(now).RemoteReportedInCurrentMinute,
             "fresh remote frame is visible to operational status");
-        clock = clock.AddSeconds(7);
+        clock = clock.AddHours(-1);
+        monotonicClock.SetUtcNow(clock);
+        Check(ageLimited.Status(now).RemoteReportedInCurrentMinute,
+            "wall-clock rollback does not prematurely expire monotonic peer freshness");
+        monotonicClock.Advance(TimeSpan.FromSeconds(7));
+        clock = monotonicClock.GetUtcNow();
         Check(!ageLimited.Status(now).RemoteReportedInCurrentMinute &&
               ageLimited.Status(now).RemoteIdentities == 0 &&
               ageLimited.PeerTelemetry(now)==(0,0L),
-            "stale remote frame expires within the same minute");
+            "monotonic TTL expires remote frame within the same minute");
         Check(!ageLimited.Apply(frame,now),
             "expired frame cannot be replayed to revive stale counters");
         var recovered = a.Snapshot(now);
         Check(ageLimited.Apply(recovered,now) &&
               ageLimited.PeerTelemetry(now)==(1,2L),
             "new higher-sequence frame restores live remote telemetry");
-        clock = clock.AddSeconds(-30);
+        clock = clock.AddHours(-1);
+        monotonicClock.SetUtcNow(clock);
+        Check(ageLimited.Status(now).RemoteReportedInCurrentMinute,
+            "wall-clock rollback does not invalidate freshly received peer telemetry");
+        monotonicClock.Advance(TimeSpan.FromSeconds(7));
         Check(!ageLimited.Status(now).RemoteReportedInCurrentMinute,
-            "backward local clock does not present stale telemetry as live");
+            "monotonic TTL expires telemetry despite wall-clock rollback");
         var invalidFreshness = false;
         try { _ = new PeerStateJournal("node-b","node-a",secret,2,
                           TimeSpan.FromSeconds(61)); }
