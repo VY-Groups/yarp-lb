@@ -74,10 +74,11 @@ def wait_for_listener(port: int, process: subprocess.Popen[str], name: str) -> N
     raise TimeoutError(f"{name} HTTPS listener did not start")
 
 
-def was_stopped_by_test(process: subprocess.Popen[str]) -> bool:
+def was_stopped_by_test(process: subprocess.Popen[str], terminated_by_test: bool) -> bool:
     # Python's terminate() uses TerminateProcess on Windows, whose expected
     # process exit status is 1; POSIX reports SIGTERM as -15.
-    return process.returncode in (0, -15) or (os.name == "nt" and process.returncode == 1)
+    return process.returncode in (0, -15) or (
+        terminated_by_test and os.name == "nt" and process.returncode == 1)
 
 
 def request_status(port: int, cert: Path, key: Path, root: Path) -> int:
@@ -302,6 +303,7 @@ authorityKeyIdentifier = keyid,issuer
                 agent_log_stream.close()
                 raise
             expected_chain_rejections: list[tuple[str, tuple[str, ...], str]] = []
+            terminated_by_test = False
             try:
                 deadline = time.monotonic() + 30
                 last_connect_error: BaseException | None = None
@@ -338,6 +340,7 @@ authorityKeyIdentifier = keyid,issuer
                     raise AssertionError("valid client stopped working after unknown-chain rejection")
                 print("PASS: valid client remains admitted after unknown-chain rejection", flush=True)
             finally:
+                terminated_by_test = process.poll() is None
                 process.terminate()
                 try:
                     process.wait(timeout=3)
@@ -362,7 +365,7 @@ authorityKeyIdentifier = keyid,issuer
                             f"with status {statuses}; agent logs:\n{logs}")
                     status = matching_statuses[0]
                     print(f"PASS: agent chain log identifies {reason} with status {status}", flush=True)
-                if not was_stopped_by_test(process):
+                if not was_stopped_by_test(process, terminated_by_test):
                     raise RuntimeError(f"GatewayAgent exited {process.returncode}; logs:\n" + logs)
 
             # Windows caches CRLs by issuer. Use a distinct one-use CA and agent
@@ -422,18 +425,20 @@ crlDistributionPoints = URI:http://127.0.0.1:{dead_port}/crl.pem
             with offline_log.open("w", encoding="utf-8") as stream:
                 offline_process = subprocess.Popen(["dotnet", str(AGENT)], cwd=temp, env=offline_env,
                                                    stdout=stream, stderr=subprocess.STDOUT, text=True)
+                offline_terminated_by_test = False
                 try:
                     wait_for_listener(offline_port, offline_process, "offline-CRL GatewayAgent")
                     require_no_http_response(offline_port, offline_cert, offline_key, temp / "root.pem",
                                              "an unavailable CRL endpoint from an uncached CA")
                 finally:
+                    offline_terminated_by_test = offline_process.poll() is None
                     offline_process.terminate()
                     try:
                         offline_process.wait(timeout=3)
                     except subprocess.TimeoutExpired:
                         offline_process.kill()
                         offline_process.wait(timeout=3)
-                if not was_stopped_by_test(offline_process):
+                if not was_stopped_by_test(offline_process, offline_terminated_by_test):
                     raise RuntimeError(f"offline-CRL GatewayAgent exited {offline_process.returncode}; logs:\n"
                                        + offline_log.read_text(encoding="utf-8", errors="replace"))
             offline_logs = offline_log.read_text(encoding="utf-8", errors="replace")
