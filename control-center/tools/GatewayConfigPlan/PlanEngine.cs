@@ -1,13 +1,11 @@
-using System.Security.Cryptography;
-using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 
 namespace GatewayConfigPlan;
 
 public sealed record PlanChange(string Kind, string Id);
-public sealed record ConfigPlan(string Status, string CurrentRevision, string DesiredRevision,
-    IReadOnlyList<PlanChange> Changes, IReadOnlyList<string> Warnings);
+public sealed record ConfigPlan(string Status, IReadOnlyList<PlanChange> Changes, IReadOnlyList<string> Warnings);
 
 /// <summary>Offline, read-only planner for the supported YARP routes/clusters subset. It never applies configuration.</summary>
 public static class PlanEngine
@@ -22,9 +20,8 @@ public static class PlanEngine
         var changes = new List<PlanChange>();
         Diff("route", current.Routes, desired.Routes, changes);
         Diff("cluster", current.Clusters, desired.Clusters, changes);
-        Diff("disabled-destination", current.Disabled, desired.Disabled, changes);
         changes.Sort((a, b) => StringComparer.Ordinal.Compare($"{a.Kind}/{a.Id}", $"{b.Kind}/{b.Id}"));
-        return new ConfigPlan("valid", Hash(currentJson), Hash(desiredJson), changes,
+        return new ConfigPlan("valid", changes,
             ["Plan is read-only; it does not write appsettings, approve changes, or deploy a gateway."]);
     }
 
@@ -34,24 +31,26 @@ public static class PlanEngine
         try { root = JsonNode.Parse(json)?.AsObject() ?? throw new FormatException("document must be an object"); }
         catch (Exception e) when (e is JsonException or InvalidOperationException or FormatException)
         { throw new ArgumentException($"{label} config: invalid JSON ({e.Message})", nameof(json)); }
-        var allowed = new HashSet<string>(["schemaVersion", "routes", "clusters", "disabled"], StringComparer.Ordinal);
+        var allowed = new HashSet<string>(["schemaVersion", "routes", "clusters"], StringComparer.Ordinal);
         var unknown = root.Select(x => x.Key).Where(k => !allowed.Contains(k)).ToArray();
         if (unknown.Length != 0) throw new ArgumentException($"{label} config: unsupported field(s): {string.Join(", ", unknown)}", nameof(json));
         if (!TryInt(root["schemaVersion"], out var schemaVersion) || schemaVersion != 1)
             throw new ArgumentException($"{label} config: schemaVersion must be 1", nameof(json));
         var routes = root["routes"] as JsonObject ?? throw new ArgumentException($"{label} config: routes must be an object", nameof(json));
         var clusters = root["clusters"] as JsonObject ?? throw new ArgumentException($"{label} config: clusters must be an object", nameof(json));
-        var disabled = root["disabled"] as JsonObject ?? new JsonObject();
-        if (routes.Count > 100 || clusters.Count > 100 || disabled.Count > 4000)
-            throw new ArgumentException($"{label} config exceeds route, cluster, or disabled-destination limits", nameof(json));
+        if (routes.Count > 100 || clusters.Count > 100)
+            throw new ArgumentException($"{label} config exceeds route or cluster limits", nameof(json));
         foreach (var (id, route) in routes)
         {
             RequireId(id, label, "route");
-            if (route is not JsonObject) throw new ArgumentException($"{label} config: route {id} must be an object", nameof(json));
-            var cluster = TryString(route["ClusterId"]);
+            if (route is not JsonObject routeObject || !HasOnly(routeObject, "ClusterId", "Match"))
+                throw new ArgumentException($"{label} config: route {id} must contain only ClusterId and Match", nameof(json));
+            var cluster = TryString(routeObject["ClusterId"]);
             if (string.IsNullOrWhiteSpace(cluster) || !clusters.ContainsKey(cluster))
                 throw new ArgumentException($"{label} config: route {id} references a missing cluster", nameof(json));
-            var match = route["Match"] as JsonObject;
+            var match = routeObject["Match"] as JsonObject;
+            if (match is null || !HasOnly(match, "Path"))
+                throw new ArgumentException($"{label} config: route {id} Match must contain only Path", nameof(json));
             var path = TryString(match?["Path"]);
             if (path is null || !path.StartsWith('/') || path.Length > 300 || path.Contains('\\'))
                 throw new ArgumentException($"{label} config: route {id} has an invalid Match.Path", nameof(json));
@@ -59,18 +58,22 @@ public static class PlanEngine
         foreach (var (id, cluster) in clusters)
         {
             RequireId(id, label, "cluster");
-            if (cluster is not JsonObject obj || obj["Destinations"] is not JsonObject destinations || destinations.Count is 0 or > 40)
+            if (cluster is not JsonObject obj || !HasOnly(obj, "Destinations") ||
+                obj["Destinations"] is not JsonObject destinations || destinations.Count is 0 or > 40)
                 throw new ArgumentException($"{label} config: cluster {id} must have 1..40 destinations", nameof(json));
             foreach (var (destinationId, destination) in destinations)
             {
                 RequireId(destinationId, label, "destination");
-                var address = TryString(destination?["Address"]);
+                if (destination is not JsonObject destObj || !HasOnly(destObj, "Address"))
+                    throw new ArgumentException($"{label} config: destination {id}/{destinationId} must contain only Address", nameof(json));
+                var address = TryString(destObj["Address"]);
                 if (!Uri.TryCreate(address, UriKind.Absolute, out var uri) ||
-                    uri.Scheme is not ("http" or "https") || string.IsNullOrWhiteSpace(uri.Host) || uri.UserInfo.Length != 0)
-                    throw new ArgumentException($"{label} config: destination {id}/{destinationId} must use an HTTP(S) origin without userinfo", nameof(json));
+                    uri.Scheme is not ("http" or "https") || string.IsNullOrWhiteSpace(uri.Host) || uri.UserInfo.Length != 0 ||
+                    uri.Query.Length != 0 || uri.Fragment.Length != 0 || uri.AbsolutePath != "/")
+                    throw new ArgumentException($"{label} config: destination {id}/{destinationId} must use an HTTP(S) origin without path, query, fragment, or userinfo", nameof(json));
             }
         }
-        return new(routes, clusters, disabled);
+        return new(routes, clusters);
     }
 
     private static void RequireId(string id, string label, string kind)
@@ -80,6 +83,9 @@ public static class PlanEngine
 
     private static string? TryString(JsonNode? node) =>
         node is JsonValue value && value.TryGetValue<string>(out var result) ? result : null;
+
+    private static bool HasOnly(JsonObject value, params string[] allowed) =>
+        value.All(property => allowed.Contains(property.Key, StringComparer.Ordinal));
 
     private static bool TryInt(JsonNode? node, out int result)
     {
@@ -98,6 +104,5 @@ public static class PlanEngine
         foreach (var id in current.Select(x => x.Key).Where(id => !desired.ContainsKey(id))) output.Add(new("remove", $"{kind}:{id}"));
     }
 
-    private static string Hash(string json) => Convert.ToHexString(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(json)));
-    private sealed record DesiredConfig(JsonObject Routes, JsonObject Clusters, JsonObject Disabled);
+    private sealed record DesiredConfig(JsonObject Routes, JsonObject Clusters);
 }
