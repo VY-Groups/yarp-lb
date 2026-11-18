@@ -6,6 +6,10 @@
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="Yarp.ReverseProxy" Version="2.3.0" />
+    <PackageReference Include="OpenTelemetry.Extensions.Hosting" Version="1.19.1" />
+    <PackageReference Include="OpenTelemetry.Exporter.OpenTelemetryProtocol" Version="1.19.1" />
+    <PackageReference Include="OpenTelemetry.Instrumentation.AspNetCore" Version="1.21.0" />
+    <PackageReference Include="OpenTelemetry.Instrumentation.Runtime" Version="1.21.0" />
     <Compile Include="../../../src/TrafficPolicies/LoadBalancingCore.cs" Link="LoadBalancingCore.cs" />
     <Compile Include="../../../src/TrafficPolicies/LoadBalancingExtensions.cs" Link="LoadBalancingExtensions.cs" />
     <Compile Include="../../../control-center/TrafficLifecycle.cs" Link="TrafficLifecycle.cs" />
@@ -20,6 +24,9 @@
     <Compile Include="../../../src/TrafficPolicies/RiseFallActiveHealthPolicy.cs" Link="RiseFallActiveHealthPolicy.cs" />
     <Compile Include="../../../control-center/NonBlockingConsoleLogging.cs" Link="NonBlockingConsoleLogging.cs" />
     <Compile Include="../../../control-center/GatewayLoggingConfiguration.cs" Link="GatewayLoggingConfiguration.cs" />
+    <Compile Include="../../../control-center/GatewayOpenTelemetry.cs" Link="GatewayOpenTelemetry.cs" />
+    <Compile Include="../../../control-center/OtlpEndpointPolicy.cs" Link="OtlpEndpointPolicy.cs" />
+    <Compile Include="../../../control-center/GatewayClientAddress.cs" Link="GatewayClientAddress.cs" />
     <Compile Include="../../HA/Heartbeat/HaProcessHeartbeat.cs" Link="HaProcessHeartbeat.cs" />
   </ItemGroup>
 </Project>

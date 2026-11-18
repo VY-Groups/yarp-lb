@@ -8,6 +8,9 @@ using Yarp.ReverseProxy.Model;
 using Yarp.ReverseProxy.LoadBalancing;
 using Yarp.ReverseProxy.Health;
 using Yarp.ReverseProxy.Forwarder;
+using OpenTelemetry.Trace;
+using OpenTelemetry.Metrics;
+using OpenTelemetry.Logs;
 
 // Enabled only by the HA fault-injection harness, not general k6 traffic.
 using var haHeartbeat = HaProcessHeartbeat.StartFromEnvironment();
@@ -62,8 +65,34 @@ builder.Services.AddHostedService<AutonomousRecoveryObserver>();
 builder.Services.AddSingleton<IPassiveHealthCheckPolicy, ImmediateTransportFailureHealthPolicy>();
 builder.Services.AddSingleton<IPassiveHealthCheckPolicy, BoundedTransportFailureHealthPolicy>();
 builder.Services.AddSingleton<IActiveHealthCheckPolicy, RiseFallActiveHealthPolicy>();
+var otelOverheadMode = string.Equals(Environment.GetEnvironmentVariable("YARP_LAB_OTEL_OVERHEAD"), "1", StringComparison.Ordinal);
+if (otelOverheadMode) GatewayOpenTelemetry.Configure(builder.Services, "gatewaylab-otel-overhead");
 
 var app = builder.Build();
+if (otelOverheadMode)
+{
+    var accessLogger = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("GatewayCore.AccessLog");
+    app.Use(async (ctx, next) =>
+    {
+        if (ctx.Request.Path.StartsWithSegments("/lab")) { await next(); return; }
+        var started = Stopwatch.GetTimestamp();
+        var clientAddress = GatewayClientAddress.ForAccessLog(ctx.Connection.RemoteIpAddress,
+            ctx.Request.Headers["X-Forwarded-For"].ToString(), new HashSet<string>(StringComparer.Ordinal));
+        try { await next(); }
+        finally
+        {
+            var routeCandidate = ctx.Features.Get<IReverseProxyFeature>()?.Route?.Config.RouteId;
+            var routeId = routeCandidate is { Length: > 0 and <= 80 } &&
+                          routeCandidate.All(static c => char.IsAsciiLetterOrDigit(c) || c is '_' or '-')
+                ? routeCandidate : "unmatched";
+            var elapsed = Stopwatch.GetElapsedTime(started).TotalMilliseconds;
+            accessLogger.LogInformation(
+                "GATEWAY_ACCESS timestampUtc={TimestampUtc:o} clientIp={ClientIp} clientIpSource={ClientIpSource} method={Method} routeId={RouteId} statusCode={StatusCode} durationMs={DurationMs}",
+                DateTimeOffset.UtcNow, clientAddress.Address?.ToString() ?? "unknown", clientAddress.Source,
+                ctx.Request.Method, routeId, ctx.Response.StatusCode, Math.Round(elapsed, 3));
+        }
+    });
+}
 var gatewayId = Environment.GetEnvironmentVariable("YARP_LAB_GATEWAY_ID") ?? "";
 var lifecycle = new LabLifecycle();
 bool OnLoopback(HttpContext ctx) => ctx.Connection.RemoteIpAddress is { } address && IPAddress.IsLoopback(address);
@@ -105,6 +134,17 @@ app.MapGet("/lab/stats", () => Results.Ok(new
     gc2Collections = GC.CollectionCount(2),
     timeUtc = DateTimeOffset.UtcNow
 }));
+if (otelOverheadMode)
+{
+    app.MapPost("/lab/otel-flush", (HttpContext ctx) =>
+    {
+        if (!OnLoopback(ctx)) return Results.StatusCode(403);
+        var flushed = app.Services.GetRequiredService<TracerProvider>().ForceFlush(10000) &&
+                      app.Services.GetRequiredService<MeterProvider>().ForceFlush(10000) &&
+                      app.Services.GetRequiredService<LoggerProvider>().ForceFlush(10000);
+        return flushed ? Results.Ok(new { flushed = true }) : Results.StatusCode(503);
+    });
+}
 app.MapReverseProxy(proxyPipeline =>
 {
     proxyPipeline.Use(async (ctx, next) =>
@@ -122,6 +162,29 @@ app.MapReverseProxy(proxyPipeline =>
                 .Where(d => !TrafficLifecycle.IsDraining(d)).ToArray();
         await next();
     });
+    if (otelOverheadMode)
+    {
+        // Use the same telemetry middleware as the shipping Control Center for
+        // the optional end-to-end overhead measurement.
+        proxyPipeline.Use(async (ctx, next) =>
+        {
+            var started = Stopwatch.GetTimestamp();
+            var activity = GatewayOpenTelemetry.StartProxyActivity(ctx);
+            try { await next(); }
+            catch (Exception exception)
+            {
+                GatewayOpenTelemetry.RecordProxyException(activity, exception);
+                throw;
+            }
+            finally
+            {
+                var elapsedMs = Stopwatch.GetElapsedTime(started).TotalMilliseconds;
+                var destination = ctx.GetReverseProxyFeature().ProxiedDestination;
+                GatewayOpenTelemetry.CompleteProxyActivity(activity, ctx, destination?.DestinationId);
+                GatewayOpenTelemetry.RecordProxyResult(ctx, elapsedMs);
+            }
+        });
+    }
     proxyPipeline.UseSessionAffinity();
     proxyPipeline.UseLoadBalancing();
     proxyPipeline.UsePassiveHealthChecks();
