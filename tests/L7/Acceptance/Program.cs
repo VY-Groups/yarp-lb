@@ -225,6 +225,34 @@ void CheckRendezvous()
     Record("rendezvous-remapping", new { moved, total = 5000 });
 }
 
+// The existing workflow_dispatch matrix can run the optional paired OTLP
+// diagnostic at the exact PR head without changing the shared workflow file.
+if (string.Equals(Environment.GetEnvironmentVariable("GITHUB_EVENT_NAME"), "workflow_dispatch",
+        StringComparison.Ordinal))
+{
+    var python = OperatingSystem.IsWindows() ? "python" : "python3";
+    var diagnostic = new ProcessStartInfo(python)
+    {
+        WorkingDirectory = repo,
+        UseShellExecute = false,
+        RedirectStandardOutput = true,
+        RedirectStandardError = true
+    };
+    diagnostic.ArgumentList.Add(Path.Combine(repo, "tests", "L7", "measure_gatewaylab_otel.py"));
+    diagnostic.Environment["GATEWAYLAB_OTEL_EVIDENCE_DIR"] =
+        Path.Combine(output, "gatewaylab-otel-evidence");
+    using var diagnosticProcess = Process.Start(diagnostic)
+        ?? throw new InvalidOperationException("Could not start the GatewayLab OTLP diagnostic");
+    var diagnosticStdout = diagnosticProcess.StandardOutput.ReadToEndAsync();
+    var diagnosticStderr = diagnosticProcess.StandardError.ReadToEndAsync();
+    await diagnosticProcess.WaitForExitAsync();
+    Console.WriteLine(await diagnosticStdout);
+    var diagnosticError = await diagnosticStderr;
+    if (!string.IsNullOrWhiteSpace(diagnosticError)) Console.Error.WriteLine(diagnosticError);
+    if (diagnosticProcess.ExitCode != 0)
+        throw new InvalidOperationException($"GatewayLab OTLP diagnostic failed ({diagnosticProcess.ExitCode})");
+}
+
 var passed = false;
 try
 {
