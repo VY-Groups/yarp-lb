@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
+using System.Text.Json;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -93,6 +94,7 @@ public static class GatewayOtlpExporterAcceptance
             EmitRestrictedLogs(provider);
             if (!tracerProvider.ForceFlush(10000) || !meterProvider.ForceFlush(10000) || !loggerProvider.ForceFlush(10000))
                 throw new Exception("Container OTLP exporters failed to flush before acceptance deadline");
+            await VerifyPrometheusLoggingCountersAsync(endpoint, loggingDropScenario);
             Console.WriteLine("PASS: real OpenTelemetry Collector accepted traces and metrics via OTLP/HTTP");
         }
         finally
@@ -225,6 +227,56 @@ public static class GatewayOtlpExporterAcceptance
             .LogWarning("Administrative audit marker {Secret}", "otlp-audit-secret-canary");
         factory.CreateLogger("Microsoft.Hosting.Lifetime")
             .LogWarning("Application diagnostic marker {Secret}", "otlp-application-secret-canary");
+    }
+
+    private static async Task VerifyPrometheusLoggingCountersAsync(string collectorEndpoint,
+        LoggingDropScenario scenario)
+    {
+        var collector = new Uri(collectorEndpoint, UriKind.Absolute);
+        if (collector.Scheme != Uri.UriSchemeHttp || collector.Port < 1 ||
+            !IPAddress.TryParse(collector.Host, out var address) || !IPAddress.IsLoopback(address))
+            throw new InvalidOperationException("Container acceptance requires a loopback OTLP Collector endpoint");
+        var prometheusBase = new UriBuilder(collector) { Port = 9090, Path = "/api/v1/query", Query = "" };
+        using var client = new HttpClient(new HttpClientHandler { UseProxy = false })
+        { Timeout = TimeSpan.FromSeconds(3) };
+        foreach (var (name, expected) in new[]
+                 {
+                     ("yarp_logging_dropped_total", scenario.TotalDropped),
+                     ("yarp_logging_dropped_low_priority_total", scenario.LowPriorityDropped),
+                     ("yarp_logging_dropped_high_priority_total", scenario.HighPriorityDropped),
+                     ("yarp_logging_write_errors_total", scenario.WriteErrors)
+                 })
+        {
+            if (expected <= 0) throw new Exception($"Container counter fixture did not produce {name}");
+            var deadline = DateTimeOffset.UtcNow.AddSeconds(30);
+            var observed = false;
+            while (!observed && DateTimeOffset.UtcNow < deadline)
+            {
+                var requestBuilder = new UriBuilder(prometheusBase.Uri)
+                { Query = "query=" + Uri.EscapeDataString(name) };
+                var requestUri = requestBuilder.Uri;
+                try
+                {
+                    using var response = await client.GetAsync(requestUri);
+                    response.EnsureSuccessStatusCode();
+                    using var payload = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync());
+                    var root = payload.RootElement;
+                    observed = root.TryGetProperty("status", out var status) && status.GetString() == "success" &&
+                        root.GetProperty("data").GetProperty("result").EnumerateArray().Any(series =>
+                        {
+                            var raw = series.GetProperty("value")[1].GetString();
+                            return double.TryParse(raw, System.Globalization.NumberStyles.Float,
+                                       System.Globalization.CultureInfo.InvariantCulture, out var value) && value == expected;
+                        });
+                }
+                catch (HttpRequestException) { }
+                catch (TaskCanceledException) { }
+                if (!observed) await Task.Delay(1000);
+            }
+            if (!observed)
+                throw new Exception($"Collector-to-Prometheus pipeline did not expose {name}={expected}");
+            Console.WriteLine($"PASS: Prometheus received Collector-exported {name}={expected}");
+        }
     }
 
     private static LoggingDropScenario EmitLoggingDropCounters()
