@@ -56,11 +56,20 @@ def openssl_config_path(path: Path) -> str:
     return path.as_posix()
 
 
-def update_windows_test_root(operation: str, value: str) -> None:
+def update_windows_test_root(operation: str, value: str) -> str:
     if not TEST_HOST.is_file():
         raise FileNotFoundError(f"Build EngineConfigSecurityTests first: {TEST_HOST}")
-    subprocess.run(["dotnet", str(TEST_HOST), f"--crl-test-root-{operation}", value],
-                   check=True, capture_output=True, text=True, timeout=20)
+    try:
+        result = subprocess.run(["dotnet", str(TEST_HOST), f"--crl-test-root-{operation}", value],
+                                check=True, capture_output=True, text=True, timeout=20)
+    except subprocess.TimeoutExpired as timeout:
+        if timeout.stdout:
+            partial = timeout.stdout.decode("utf-8", errors="replace") if isinstance(timeout.stdout, bytes) else timeout.stdout
+            print("WINDOWS_CRL_ROOT_HELPER_PARTIAL_OUTPUT " + partial, flush=True)
+        raise
+    if result.stdout:
+        print("WINDOWS_CRL_ROOT_HELPER_OUTPUT " + result.stdout, flush=True)
+    return result.stdout
 
 
 def free_port() -> int:
@@ -373,7 +382,9 @@ extendedKeyUsage = clientAuth
             crl_thread.join(timeout=2)
             if root_installed:
                 # Fail the test if cleanup cannot remove this exact generated root.
-                update_windows_test_root("remove", root_thumbprint)
+                removal = update_windows_test_root("remove", root_thumbprint)
+                if "removed 1 matching" not in removal:
+                    raise RuntimeError("Windows CRL test root cleanup did not confirm one matching certificate was removed")
                 print("PASS: removed disposable CRL test root from the Windows current-user trust store", flush=True)
                 cleanup_path = os.environ.get("GATEWAY_CRL_TEST_ROOT_THUMBPRINT_FILE")
                 if cleanup_path:

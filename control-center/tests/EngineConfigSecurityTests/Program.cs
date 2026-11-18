@@ -14,8 +14,8 @@ if (args.Length > 0 && args[0].StartsWith("--crl-test-root-", StringComparison.O
             Console.WriteLine("PASS: added disposable CRL root to current-user trust store");
             break;
         case "--crl-test-root-remove":
-            WindowsCrlTestRootStore.Remove(args[1]);
-            Console.WriteLine("PASS: removed disposable CRL root from current-user trust store");
+            var removed = WindowsCrlTestRootStore.Remove(args[1]);
+            Console.WriteLine($"PASS: removed {removed} matching disposable CRL root certificate(s) from current-user trust store");
             break;
         default:
             throw new ArgumentException("Unknown CRL test root helper operation");
