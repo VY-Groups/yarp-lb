@@ -61,7 +61,7 @@ public static class TlsInventory
                 storeState,
                 certificates,
                 configuredEndpoints = endpoints,
-                acmeIntegration = "not-implemented",
+                acmeIntegration = "preflight-policy-only; issuance-and-renewal-not-implemented",
                 backendMutualTlsProvisioning = "not-implemented"
             });
         }).RequireAuthorization(p => p.RequireRole("Administrator", "Operator"));
