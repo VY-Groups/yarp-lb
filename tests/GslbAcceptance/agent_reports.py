@@ -191,7 +191,7 @@ def main():
             os.replace(replacement_key, unsafe_parent_key)
             unsafe_parent_config = dict(observer_config, SigningKeyPem=str(unsafe_parent_key))
             reject_observer_config("unsafe-observer-key-parent", unsafe_parent_config,
-                                   "a replaced key under a group/other-writable parent", "parent directory permissions")
+                                   "a replaced key under a group/other-writable parent", "group/other writes")
 
             report_client_key_link = root / "observer-report-client-link.key"
             report_client_key_link.symlink_to(agents[0]["key"])
@@ -286,7 +286,7 @@ def main():
                 unsafe_dns_path.write_text(json.dumps(unsafe_dns_config))
                 denied = subprocess.run(["dotnet", dns_dll, unsafe_dns_path],
                                          capture_output=True, text=True, timeout=10)
-                assert denied.returncode != 0 and "parent directory permissions" in denied.stderr, \
+                assert denied.returncode != 0 and "group/other writes" in denied.stderr, \
                     "DNS authority accepted a key under a group/other-writable parent"
                 print("PASS: DNS authority refuses keys under group/other-writable parents")
             dns_log = root / f"dns-{node}.log"
