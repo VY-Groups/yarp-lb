@@ -1,0 +1,96 @@
+name: Issue 34 - paired YARP request allocation diagnostic
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/issue34-hotpath-allocation.yml"
+      - "control-center/GatewayAccessLog.cs"
+      - "control-center/Program.cs"
+      - "control-center/GatewayOpenTelemetry.cs"
+      - "control-center/tests/EngineConfigSecurityTests/**"
+      - "tests/L7/GatewayLab/**"
+      - "tests/L7/BackendLab/**"
+      - "tests/L7/measure_gatewaylab_otel.py"
+      - "tests/L7/performance/issue34/**"
+permissions:
+  contents: read
+concurrency:
+  group: issue34-hotpath-allocation-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  paired-allocation:
+    name: Paired allocation - ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2022]
+    steps:
+      - name: Checkout exact base revision
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: baseline
+          persist-credentials: false
+      - name: Checkout exact candidate revision
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: candidate
+          persist-credentials: false
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build pinned before and after GatewayLab/backend binaries
+        shell: pwsh
+        run: |
+          $root = $env:GITHUB_WORKSPACE
+          foreach ($revision in @('baseline', 'candidate')) {
+            $source = Join-Path $root $revision
+            dotnet build (Join-Path $source 'tests/L7/GatewayLab/GatewayLab.csproj') -c Release
+            if ($LASTEXITCODE -ne 0) { throw "GatewayLab build failed for $revision" }
+            dotnet build (Join-Path $source 'tests/L7/BackendLab/BackendLab.csproj') -c Release
+            if ($LASTEXITCODE -ne 0) { throw "BackendLab build failed for $revision" }
+          }
+      - name: Run three same-runner pinned before/after pairs
+        shell: pwsh
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          CANDIDATE_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          $root = $env:GITHUB_WORKSPACE
+          $candidate = Join-Path $root 'candidate'
+          $artifactRoot = Join-Path (Join-Path $root 'artifacts/issue34') $env:RUNNER_OS
+          New-Item -ItemType Directory -Force -Path $artifactRoot | Out-Null
+          function Invoke-OneSample([string]$label, [string]$source, [string]$sha, [int]$pair) {
+            $output = Join-Path $artifactRoot "pair-$pair-$label"
+            New-Item -ItemType Directory -Force -Path $output | Out-Null
+            $env:GATEWAYLAB_OTEL_EVIDENCE_DIR = $output
+            $env:GATEWAYLAB_OTEL_GATEWAY_DLL = Join-Path $root "$source/tests/L7/GatewayLab/bin/Release/net10.0/GatewayLab.dll"
+            $env:GATEWAYLAB_OTEL_BACKEND_DLL = Join-Path $root "$source/tests/L7/BackendLab/bin/Release/net10.0/BackendLab.dll"
+            $env:GATEWAYLAB_OTEL_PAIRS = '1'
+            $env:GATEWAYLAB_OTEL_SOURCE_COMMIT = $sha
+            python (Join-Path $candidate 'tests/L7/measure_gatewaylab_otel.py') *> (Join-Path $output 'runner.log')
+            if ($LASTEXITCODE -ne 0) { throw "GatewayLab sample failed: pair $pair $label" }
+          }
+          for ($pair = 1; $pair -le 3; $pair++) {
+            if ($pair % 2 -eq 1) {
+              Invoke-OneSample 'before' 'baseline' $env:BASE_SHA $pair
+              Invoke-OneSample 'after' 'candidate' $env:CANDIDATE_SHA $pair
+            } else {
+              Invoke-OneSample 'after' 'candidate' $env:CANDIDATE_SHA $pair
+              Invoke-OneSample 'before' 'baseline' $env:BASE_SHA $pair
+            }
+          }
+          python (Join-Path $candidate 'tests/L7/performance/issue34/compare_paired.py') $artifactRoot $env:BASE_SHA $env:CANDIDATE_SHA
+          if ($LASTEXITCODE -ne 0) { throw 'Paired allocation analyzer failed' }
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: issue34-allocation-${{ matrix.os }}
+          path: artifacts/issue34/${{ runner.os }}/
+          if-no-files-found: warn
+          retention-days: 14
