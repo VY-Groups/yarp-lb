@@ -4,6 +4,11 @@
 TLS 1.3 clients can observe the TLS socket as established before Kestrel reports
 the client-chain result. Rejected certificates must receive no HTTP response;
 the test also matches a server-side chain rejection by that certificate's pin.
+
+On Windows, run only on a disposable CI/VM: the test temporarily adds its generated
+root to CurrentUser\\Root and removes that exact thumbprint in finally. Some local
+automation hosts block certificate-store writes; that is an environment limitation,
+not a product result. GitHub's hosted Windows runner is the acceptance environment.
 """
 
 from __future__ import annotations
@@ -23,11 +28,39 @@ import time
 
 REPO = Path(__file__).resolve().parents[3]
 AGENT = REPO / "control-center/GatewayAgent/bin/Release/net10.0/GatewayCoreGatewayAgent.dll"
+TEST_HOST = REPO / "control-center/tests/EngineConfigSecurityTests/bin/Release/net10.0/EngineConfigSecurityTests.dll"
 
 
 def run(*args: str) -> str:
     result = subprocess.run(args, check=True, capture_output=True, text=True, timeout=20)
     return result.stdout
+
+
+def find_openssl() -> str:
+    openssl = shutil.which("openssl")
+    if openssl:
+        return openssl
+    if os.name == "nt":
+        candidates = [
+            Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "Git/usr/bin/openssl.exe",
+            Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "OpenSSL-Win64/bin/openssl.exe",
+        ]
+        for candidate in candidates:
+            if candidate.is_file():
+                return str(candidate)
+    raise RuntimeError("OpenSSL is required for disposable CRL acceptance")
+
+
+def openssl_config_path(path: Path) -> str:
+    # OpenSSL config files parse backslashes as escapes on Windows.
+    return path.as_posix()
+
+
+def update_windows_test_root(operation: str, value: str) -> None:
+    if not TEST_HOST.is_file():
+        raise FileNotFoundError(f"Build EngineConfigSecurityTests first: {TEST_HOST}")
+    subprocess.run(["dotnet", str(TEST_HOST), f"--crl-test-root-{operation}", value],
+                   check=True, capture_output=True, text=True, timeout=20)
 
 
 def free_port() -> int:
@@ -81,9 +114,7 @@ def require_no_http_response(port: int, cert: Path, key: Path, root: Path, reaso
 def main() -> None:
     if not AGENT.is_file():
         raise FileNotFoundError(f"Build GatewayAgent first: {AGENT}")
-    openssl = shutil.which("openssl")
-    if not openssl:
-        raise RuntimeError("OpenSSL is required for disposable CRL acceptance")
+    openssl = find_openssl()
 
     with tempfile.TemporaryDirectory(prefix="gatewaycore-agent-crl-") as temp_name:
         temp = Path(temp_name)
@@ -92,6 +123,8 @@ def main() -> None:
         while dead_port == ca_port:
             dead_port = free_port()
         crl_path = temp / "crl.pem"
+        root_installed = False
+        root_thumbprint = ""
 
         class CrlHandler(http.server.BaseHTTPRequestHandler):
             def do_GET(self) -> None:
@@ -121,12 +154,12 @@ def main() -> None:
             ca_config.write_text(f"""[ ca ]
 default_ca = CA_default
 [ CA_default ]
-database = {temp / 'index.txt'}
-new_certs_dir = {temp}
-certificate = {temp / 'root.pem'}
-private_key = {temp / 'root.key'}
-serial = {temp / 'serial'}
-crlnumber = {temp / 'crlnumber'}
+database = {openssl_config_path(temp / 'index.txt')}
+new_certs_dir = {openssl_config_path(temp)}
+certificate = {openssl_config_path(temp / 'root.pem')}
+private_key = {openssl_config_path(temp / 'root.key')}
+serial = {openssl_config_path(temp / 'serial')}
+crlnumber = {openssl_config_path(temp / 'crlnumber')}
 default_md = sha256
 default_days = 2
 default_crl_days = 1
@@ -154,11 +187,11 @@ subjectAltName = DNS:localhost,IP:127.0.0.1
             unknown_ca_config.write_text(f"""[ ca ]
 default_ca = CA_default
 [ CA_default ]
-database = {temp / 'unknown-index.txt'}
-new_certs_dir = {temp}
-certificate = {temp / 'unknown-root.pem'}
-private_key = {temp / 'unknown-root.key'}
-serial = {temp / 'unknown-serial'}
+database = {openssl_config_path(temp / 'unknown-index.txt')}
+new_certs_dir = {openssl_config_path(temp)}
+certificate = {openssl_config_path(temp / 'unknown-root.pem')}
+private_key = {openssl_config_path(temp / 'unknown-root.key')}
+serial = {openssl_config_path(temp / 'unknown-serial')}
 default_md = sha256
 default_days = 2
 policy = policy
@@ -226,6 +259,22 @@ extendedKeyUsage = clientAuth
             run(openssl, "ca", "-batch", "-config", str(ca_config), "-revoke", str(revoked_cert))
             run(openssl, "ca", "-batch", "-config", str(ca_config), "-gencrl", "-out", str(crl_path))
             run(openssl, "crl", "-in", str(crl_path), "-CAfile", str(temp / "root.pem"), "-verify", "-noout")
+
+            if os.name == "nt":
+                # Windows X509Chain uses the OS trust store; SSL_CERT_FILE only
+                # supplies roots to OpenSSL-based runtimes. The CI VM is
+                # disposable, and the exact temporary root is removed in finally.
+                root_der = temp / "root.cer"
+                run(openssl, "x509", "-in", str(temp / "root.pem"), "-outform", "DER",
+                    "-out", str(root_der))
+                root_thumbprint = run(openssl, "x509", "-in", str(temp / "root.pem"),
+                    "-noout", "-fingerprint", "-sha1").split("=", 1)[1].replace(":", "").strip().upper()
+                root_installed = True
+                cleanup_path = os.environ.get("GATEWAY_CRL_TEST_ROOT_THUMBPRINT_FILE")
+                if cleanup_path:
+                    Path(cleanup_path).write_text(root_thumbprint, encoding="ascii")
+                update_windows_test_root("add", str(root_der))
+                print("PASS: installed disposable CRL test root in the Windows current-user trust store", flush=True)
 
             port = free_port()
             certificates = (good_cert, revoked_cert, offline_cert, expired_cert, unknown_cert)
@@ -322,6 +371,13 @@ extendedKeyUsage = clientAuth
             crl_server.shutdown()
             crl_server.server_close()
             crl_thread.join(timeout=2)
+            if root_installed:
+                # Fail the test if cleanup cannot remove this exact generated root.
+                update_windows_test_root("remove", root_thumbprint)
+                print("PASS: removed disposable CRL test root from the Windows current-user trust store", flush=True)
+                cleanup_path = os.environ.get("GATEWAY_CRL_TEST_ROOT_THUMBPRINT_FILE")
+                if cleanup_path:
+                    Path(cleanup_path).unlink(missing_ok=True)
 
 
 if __name__ == "__main__":

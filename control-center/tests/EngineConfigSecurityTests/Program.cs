@@ -3,6 +3,26 @@ using System.Security.Cryptography.X509Certificates;
 using Microsoft.AspNetCore.Http;
 using System.Text.Json.Nodes;
 
+if (args.Length > 0 && args[0].StartsWith("--crl-test-root-", StringComparison.Ordinal))
+{
+    if (!OperatingSystem.IsWindows() || args.Length != 2)
+        throw new ArgumentException("CRL test root helper is Windows-only and requires one certificate path or thumbprint");
+    switch (args[0])
+    {
+        case "--crl-test-root-add":
+            WindowsCrlTestRootStore.Add(args[1]);
+            Console.WriteLine("PASS: added disposable CRL root to current-user trust store");
+            break;
+        case "--crl-test-root-remove":
+            WindowsCrlTestRootStore.Remove(args[1]);
+            Console.WriteLine("PASS: removed disposable CRL root from current-user trust store");
+            break;
+        default:
+            throw new ArgumentException("Unknown CRL test root helper operation");
+    }
+    return;
+}
+
 static void Must(bool condition, string name)
 {
     if (!condition) throw new Exception("FAIL: "+name);
@@ -251,6 +271,6 @@ Must(invalidPins, "invalid configured controller thumbprint rejects startup");
 await AgentTlsNegativeAcceptance.RunAsync();
 GslbAgentReportStatusParserTests.Run();
 await AgentLabCaTlsAcceptance.RunAsync();
-if (OperatingSystem.IsLinux())
+if (OperatingSystem.IsLinux() || OperatingSystem.IsWindows())
     await AgentCrlAcceptance.RunAsync();
 Console.WriteLine("ENGINE CONFIG CONTRACT ACCEPTANCE PASSED");
