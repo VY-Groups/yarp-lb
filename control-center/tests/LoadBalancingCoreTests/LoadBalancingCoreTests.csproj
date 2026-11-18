@@ -13,6 +13,7 @@
     <Compile Include="../../BoundedPeerRateTable.cs" Link="BoundedPeerRateTable.cs" />
     <Compile Include="../../GatewayClientAddress.cs" Link="GatewayClientAddress.cs" />
     <Compile Include="../../GatewayRequestHistogram.cs" Link="GatewayRequestHistogram.cs" />
+    <Compile Include="../../GatewayTrafficReportCsv.cs" Link="GatewayTrafficReportCsv.cs" />
     <Compile Include="PeerRateTableTests.cs" />
     <Compile Include="../../LoadBalancingCore.cs" Link="LoadBalancingCore.cs" />
     <Compile Include="../../../src/TrafficPolicies/EjectionBudget.cs" Link="EjectionBudget.cs" />
