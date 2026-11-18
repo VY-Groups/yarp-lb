@@ -100,6 +100,9 @@ rollover and multi-authority acceptance remain open.
   allowlist; untrusted resolver sources cannot steer answers with forged ECS.
   Input is normalized and limited to at most
   IPv4 `/24` and IPv6 `/56`, and only explicit operator CIDR routes are used.
+  Malformed or duplicate ECS options, including nonzero unused host bits after
+  a partial source prefix, are ignored for routing and never echoed; the DNS
+  question still uses the resolver-source routing fallback.
   Ambiguous source subnets that cross differently mapped more-specific routes
   fall back to the direct resolver source and are not echoed. A successful ECS
   decision returns the normalized source and matching route scope for cache use.

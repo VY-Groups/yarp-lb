@@ -710,6 +710,65 @@ try
          untrustedEcsReply.AsSpan(untrustedEcsReply.Length-15,4)
              .SequenceEqual(new byte[]{127,0,0,22}),
          "untrusted DNS resolver cannot steer or receive ECS-based answers");
+    var (_, canonicalPartialEcsReply) = await QueryEcsWire("geo.integration.test", 1,
+        IPAddress.Parse("198.51.100.0"), 25);
+    Must(Dns16(canonicalPartialEcsReply, 6) == 1 &&
+         canonicalPartialEcsReply.AsSpan(canonicalPartialEcsReply.Length - 26, 4)
+             .SequenceEqual(new byte[] {127,0,0,22}) &&
+         canonicalPartialEcsReply[canonicalPartialEcsReply.Length - 5] == 24 &&
+         canonicalPartialEcsReply[canonicalPartialEcsReply.Length - 4] == 24 &&
+         canonicalPartialEcsReply.AsSpan(canonicalPartialEcsReply.Length - 3, 3)
+             .SequenceEqual(new byte[] {198,51,100}),
+         "canonical IPv4 /25 ECS uses the normalized /24 route and cache scope");
+
+    var (duplicateEcsRequest, duplicateEcsReply) = await QueryEcsWire(
+        "geo.integration.test", 1, IPAddress.Parse("198.51.100.42"), 32,
+        duplicateEcsOption: true);
+    Must(Dns16(duplicateEcsReply, 6) == 1 &&
+         duplicateEcsReply.AsSpan(duplicateEcsReply.Length - 15, 4)
+             .SequenceEqual(new byte[] {127,0,0,21}) &&
+         duplicateEcsReply.AsSpan(duplicateEcsReply.Length - 11, 11)
+             .SequenceEqual(new byte[] {0,0,41,4,208,0,0,0,0,0,0}),
+         "duplicate ECS options fall back to resolver-source routing and are not echoed over UDP");
+    var duplicateEcsTcpReply = await TcpQuery(duplicateEcsRequest);
+    Must(Dns16(duplicateEcsTcpReply, 6) == 1 &&
+         duplicateEcsTcpReply.AsSpan(duplicateEcsTcpReply.Length - 15, 4)
+             .SequenceEqual(new byte[] {127,0,0,21}) &&
+         duplicateEcsTcpReply.AsSpan(duplicateEcsTcpReply.Length - 11, 11)
+             .SequenceEqual(new byte[] {0,0,41,4,208,0,0,0,0,0,0}),
+         "duplicate ECS options fall back to resolver-source routing and are not echoed over TCP");
+
+    var (malformedV4EcsRequest, malformedV4EcsReply) = await QueryEcsWire(
+        "geo.integration.test", 1, IPAddress.Parse("198.51.100.42"), 25);
+    Must(Dns16(malformedV4EcsReply, 6) == 1 &&
+         malformedV4EcsReply.AsSpan(malformedV4EcsReply.Length - 15, 4)
+             .SequenceEqual(new byte[] {127,0,0,21}) &&
+         malformedV4EcsReply.AsSpan(malformedV4EcsReply.Length - 11, 11)
+             .SequenceEqual(new byte[] {0,0,41,4,208,0,0,0,0,0,0}),
+         "IPv4 ECS with nonzero unused /25 host bits falls back and is not echoed over UDP");
+    var malformedV4EcsTcpReply = await TcpQuery(malformedV4EcsRequest);
+    Must(Dns16(malformedV4EcsTcpReply, 6) == 1 &&
+         malformedV4EcsTcpReply.AsSpan(malformedV4EcsTcpReply.Length - 15, 4)
+             .SequenceEqual(new byte[] {127,0,0,21}) &&
+         malformedV4EcsTcpReply.AsSpan(malformedV4EcsTcpReply.Length - 11, 11)
+             .SequenceEqual(new byte[] {0,0,41,4,208,0,0,0,0,0,0}),
+         "IPv4 ECS with nonzero unused /25 host bits falls back and is not echoed over TCP");
+
+    var (malformedV6EcsRequest, malformedV6EcsReply) = await QueryEcsWire(
+        "geo.integration.test", 1, IPAddress.Parse("2001:db8:abcd:ff::1"), 57);
+    Must(Dns16(malformedV6EcsReply, 6) == 1 &&
+         malformedV6EcsReply.AsSpan(malformedV6EcsReply.Length - 15, 4)
+             .SequenceEqual(new byte[] {127,0,0,21}) &&
+         malformedV6EcsReply.AsSpan(malformedV6EcsReply.Length - 11, 11)
+             .SequenceEqual(new byte[] {0,0,41,4,208,0,0,0,0,0,0}),
+         "IPv6 ECS with nonzero unused /57 host bits falls back and is not echoed over UDP");
+    var malformedV6EcsTcpReply = await TcpQuery(malformedV6EcsRequest);
+    Must(Dns16(malformedV6EcsTcpReply, 6) == 1 &&
+         malformedV6EcsTcpReply.AsSpan(malformedV6EcsTcpReply.Length - 15, 4)
+             .SequenceEqual(new byte[] {127,0,0,21}) &&
+         malformedV6EcsTcpReply.AsSpan(malformedV6EcsTcpReply.Length - 11, 11)
+             .SequenceEqual(new byte[] {0,0,41,4,208,0,0,0,0,0,0}),
+         "IPv6 ECS with nonzero unused /57 host bits falls back and is not echoed over TCP");
     for(var i=0;i<12;i++)
         Must((await Query("geo.integration.test")).Address=="127.0.0.21",
             "IPv4 resolver /32 specific region beats broader /8 mapping");
@@ -1139,7 +1198,8 @@ async Task ExpectTcpDrop(byte[] packet,string scenario)
         socket.SocketErrorCode is SocketError.ConnectionReset or SocketError.ConnectionAborted) { }
 }
 async Task<(byte[] Request,byte[] Reply)> QueryEcsWire(
-    string domain, ushort type, IPAddress clientAddress, int sourcePrefix, IPAddress? resolverSource = null)
+    string domain, ushort type, IPAddress clientAddress, int sourcePrefix,
+    IPAddress? resolverSource = null, bool duplicateEcsOption = false)
 {
     var request = new List<byte>(DnsRequest(domain, type));
     request[10] = 0;
@@ -1147,12 +1207,17 @@ async Task<(byte[] Request,byte[] Reply)> QueryEcsWire(
     var addressBytes = clientAddress.GetAddressBytes();
     var family = clientAddress.AddressFamily == AddressFamily.InterNetwork ? (ushort)1 : (ushort)2;
     var optionLength = 4 + (sourcePrefix + 7) / 8;
-    var optionAndHeaderLength = 4 + optionLength;
+    var optionCount = duplicateEcsOption ? 2 : 1;
+    var optionAndHeaderLength = optionCount * (4 + optionLength);
     request.AddRange(new byte[] { 0, 0, 41, 4, 208, 0, 0, 0, 0,
         (byte)(optionAndHeaderLength >> 8), (byte)optionAndHeaderLength,
-        0, 8, (byte)(optionLength >> 8), (byte)optionLength,
-        (byte)(family >> 8), (byte)family, (byte)sourcePrefix, 0 });
-    request.AddRange(addressBytes.Take((sourcePrefix + 7) / 8));
+    });
+    for (var option = 0; option < optionCount; option++)
+    {
+        request.AddRange(new byte[] { 0, 8, (byte)(optionLength >> 8), (byte)optionLength,
+            (byte)(family >> 8), (byte)family, (byte)sourcePrefix, 0 });
+        request.AddRange(addressBytes.Take((sourcePrefix + 7) / 8));
+    }
     using var alternateClient = resolverSource is null
         ? null : new UdpClient(new IPEndPoint(resolverSource, 0));
     var sender = alternateClient ?? client;

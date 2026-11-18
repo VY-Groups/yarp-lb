@@ -65,6 +65,8 @@ internal static class DnsWireProtocol
         var unsupportedEdns = false;
         var dnssecOk = false;
         EcsInput? ecsInput = null;
+        var ecsSeen = false;
+        var ecsInvalid = false;
         var additionalCount = BinaryPrimitives.ReadUInt16BigEndian(query[10..]);
         if (additionalCount > 1) return null;
         if (additionalCount == 1)
@@ -87,8 +89,21 @@ internal static class DnsWireProtocol
                 if (pos + optionLength > optionEnd) return null;
                 if (optionCode == EcsOption)
                 {
-                    if (ecsInput is not null || !TryReadEcs(query.Slice(pos, optionLength), out ecsInput))
-                        return null;
+                    // Malformed or duplicate ECS must not influence routing. Keep
+                    // answering the DNS question using resolver-source policy, but
+                    // never reflect an invalid subnet back to the recursive resolver.
+                    if (ecsSeen)
+                    {
+                        ecsInput = null;
+                        ecsInvalid = true;
+                    }
+                    else
+                    {
+                        ecsSeen = true;
+                        if (!TryReadEcs(query.Slice(pos, optionLength), out ecsInput))
+                            ecsInvalid = true;
+                    }
+                    if (ecsInvalid) ecsInput = null;
                 }
                 pos += optionLength;
             }
@@ -440,6 +455,16 @@ internal static class DnsWireProtocol
         if (addressLength == 0 || scopePrefix != 0 ||
             data.Length != 4 + (sourcePrefix + 7) / 8)
             return false;
+
+        // RFC 7871 encodes only the source-prefix bytes, with every unused bit
+        // in the final byte set to zero. Reject noncanonical padding instead of
+        // silently turning malformed ECS into a valid steering signal.
+        var partialPrefix = sourcePrefix % 8;
+        if (partialPrefix != 0)
+        {
+            var unusedMask = (1 << (8 - partialPrefix)) - 1;
+            if ((data[^1] & unusedMask) != 0) return false;
+        }
 
         var addressBytes = new byte[addressLength];
         data[4..].CopyTo(addressBytes);
