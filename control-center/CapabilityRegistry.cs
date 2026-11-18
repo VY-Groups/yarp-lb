@@ -38,7 +38,7 @@ public static class CapabilityRegistry
         new("nonblocking-console", "Bounded nonblocking gateway console logging", "Observability", "source-implemented-unverified", "Control Center dedicated background writer", "Real gateway logs cannot wait for stdout; bounded queue with drop/error counters and admin-only readout. Still requires same-load production-binary CI and real deployment validation. Lossy logs are NOT an audit trail."),
         new("config-api", "Dynamic route/cluster configuration", "Control Plane", "local-implemented", "YARP reload + Control Center", "Uses independently approved local config changes."),
         new("fleet", "Fleet rollout/rollback", "Control Plane", "source-implemented-unverified", "Gateway agents", "Staged rollout exists, not atomic; verify fleet reconciliation."),
-        new("gitops", "GitOps, Terraform provider and K8s Gateway API", "Control Plane", "planned", "Separate integrations", "Requires versioned schemas, reconciliation and automated tests."),
+        new("gitops", "GitOps, Terraform provider and K8s Gateway API", "Control Plane", "partial-implementation", "Offline route/cluster planner", "A version-1 read-only planner validates route-to-cluster references and reports redacted ID-only diffs. It does not apply changes; Terraform/provider, Gateway API, signed provenance and fleet reconciliation remain unimplemented."),
         new("multi-tenant", "Multi-tenant isolation", "Control Plane", "planned", "Controller architecture", "Needs authorization boundaries at every API and data layer.")
     ];
 
