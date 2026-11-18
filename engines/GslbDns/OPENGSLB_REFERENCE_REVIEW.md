@@ -25,12 +25,12 @@ review if direct reuse is ever contemplated.
 
 | Reference file | Observable architecture | GatewayCore status |
 | --- | --- | --- |
-| `pkg/dns/handler.go`, `pkg/dns/server.go` | DNS A/AAAA answers and UDP/TCP transport | .NET UDP/TCP with A, NS, SOA; no health-aware AAAA/DNSSEC |
+| `pkg/dns/handler.go`, `pkg/dns/server.go` | DNS A/AAAA answers and UDP/TCP transport | Independent .NET UDP/TCP with A, NS, SOA, health-aware AAAA, and opt-in signed zones |
 | `pkg/routing/failover.go`, `pkg/routing/weighted.go` | Explicit ordered failover, weighted selection | Independent opt-in `Failover` and unchanged default `Weighted` |
 | `pkg/overwatch/validator.go`, `pkg/overwatch/registry.go` | Health-validation authority and backend state | Local HTTP polling only, new bounded success/failure hysteresis |
 | `pkg/routing/geo.go`, `pkg/routing/latency.go` | Geo routing and latency preferences | NOT IMPLEMENTED; don't infer client location |
 | `pkg/overwatch/gossip.go`, `pkg/overwatch/agent_auth.go` | Agent/overwatch state exchange | NOT IMPLEMENTED; no unsigned agent health admitted to DNS |
-| `pkg/dnssec/keys.go`, `pkg/dnssec/signer.go` | DNSSEC key and signing workflows | NOT IMPLEMENTED |
+| `pkg/dnssec/keys.go`, `pkg/dnssec/signer.go` | DNSSEC key and signing workflows | Independent opt-in P-256/SHA-256 DNSKEY, RRSIG and NSEC signer; parent DS/rollover lifecycle remains incomplete |
 | `pkg/api/routing_handlers.go` | API-based DNS policy updates | NOT IMPLEMENTED; local static JSON config only |
 | `CHANGELOG.md` 1.1.10 | Validation failure/success thresholds, health authority | Independently reproduced local rise/fall semantics, not quorum |
 
@@ -55,14 +55,15 @@ No Go binaries were executed during this comparison.
 
 ## Threat model / remaining release gates
 
-- No DNSSEC, TSIG, signing or authenticated multi-site state snapshots;
-  no split-brain partition fencing or independent health-vantage quorum.
+- No TSIG or DNS-node consensus; static DNSSEC keys have no automated rollover,
+  HSM/KMS integration or public parent-delegation acceptance. No split-brain
+  partition fencing or independent health-vantage quorum.
 - Single local probe origin; an isolated DC may misjudge DR readiness.
   Health URL must be application-specific and must not be treated as a
   transactional signing/PKI correctness guarantee.
 - DNS 5–300s TTL and client caching mean DNS answer changes do not cause
   immediate failover at the connection layer.
-- IPv6 AAAA, opt-in DNSSEC, trusted-resolver ECS, and local MMDB country/ASN
+- Trusted-resolver ECS and local MMDB country/ASN
   routing are implemented in the lab; independent public delegation,
   customer database licensing/update operations, multi-authority and resolver
   cache acceptance remain open. There is no DDoS edge shield.

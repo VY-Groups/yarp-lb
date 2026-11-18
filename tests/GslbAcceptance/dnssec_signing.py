@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Independent DNSSEC wire/signature acceptance using dnspython as validator."""
 import json
+import os
 import re
 import shutil
 import socket
@@ -165,6 +166,29 @@ def main():
             }]
         }
         config_path.write_text(json.dumps(config), encoding="utf-8")
+        if os.name != "nt":
+            def reject_key_path(candidate, expected, label):
+                invalid = dict(config)
+                invalid["Zones"] = [dict(config["Zones"][0], DnssecPrivateKeyPath=str(candidate))]
+                invalid_path = temp_path / f"invalid-{label}.json"
+                invalid_path.write_text(json.dumps(invalid), encoding="utf-8")
+                denied = subprocess.run(["dotnet", str(DLL), str(invalid_path)], cwd=ROOT,
+                                        capture_output=True, text=True, timeout=10, check=False)
+                output = denied.stdout + denied.stderr
+                require(denied.returncode != 0 and expected.lower() in output.lower(),
+                        f"DNSSEC startup rejects {label} key path")
+                require("PRIVATE KEY" not in output,
+                        f"DNSSEC startup does not print key material for {label} key path")
+
+            broad_key_path = temp_path / "broad-dnssec-key.pem"
+            shutil.copyfile(key_path, broad_key_path)
+            broad_key_path.chmod(0o644)
+            reject_key_path(broad_key_path, "group/other access", "group-readable")
+
+            linked_key_path = temp_path / "linked-dnssec-key.pem"
+            linked_key_path.symlink_to(key_path)
+            reject_key_path(linked_key_path, "without following links", "symlinked")
+
         process = subprocess.Popen(["dotnet", str(DLL), str(config_path)], cwd=ROOT,
                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                    text=True, encoding="utf-8", errors="replace")
@@ -241,7 +265,8 @@ def main():
             require(any(rrset.rdtype == dns.rdatatype.RRSIG for rrset in rrsig.answer),
                     "direct RRSIG query returns available zone signatures")
             require("PRIVATE KEY" not in startup, "private key material is not written to startup logs")
-            verify_cli_interop(port)
+            if os.name != "nt":
+                verify_cli_interop(port)
         finally:
             process.terminate()
             try:

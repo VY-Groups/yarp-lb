@@ -2,6 +2,7 @@ using System.Buffers.Binary;
 using System.Net;
 using System.Security.Cryptography;
 using System.Text;
+using GatewayCore.Gslb.Contracts;
 
 internal sealed record DnsResource(string Owner, ushort Type, uint Ttl, byte[] Rdata);
 
@@ -36,23 +37,11 @@ internal sealed class DnssecZoneSigner : IDisposable
     {
         this.apex = Canonical(apex);
         this.ttl = ttl;
-        if (string.IsNullOrWhiteSpace(privateKeyPath) || !Path.IsPathFullyQualified(privateKeyPath))
-            throw new InvalidDataException("DNSSEC private key path must be an absolute path");
-        var keyFile = new FileInfo(privateKeyPath);
-        if (!keyFile.Exists || (keyFile.Attributes & FileAttributes.ReparsePoint) != 0)
-            throw new InvalidDataException("DNSSEC private key must be an existing regular file, not a link");
-        if (!OperatingSystem.IsWindows())
-        {
-            var mode = File.GetUnixFileMode(privateKeyPath);
-            if ((mode & (UnixFileMode.GroupRead | UnixFileMode.GroupWrite | UnixFileMode.GroupExecute |
-                         UnixFileMode.OtherRead | UnixFileMode.OtherWrite | UnixFileMode.OtherExecute)) != 0)
-                throw new InvalidDataException("DNSSEC private key permissions must exclude group and other access (chmod 600)");
-        }
-
         key = ECDsa.Create();
         try
         {
-            key.ImportFromPem(File.ReadAllText(privateKeyPath));
+            key.ImportFromPem(PrivateKeyFileSecurity.ReadPrivateKeyPem(
+                privateKeyPath, "DNSSEC signing private key"));
             var parameters = key.ExportParameters(true);
             if (key.KeySize != 256 || parameters.Q.X is not { Length: 32 } x ||
                 parameters.Q.Y is not { Length: 32 } y)
