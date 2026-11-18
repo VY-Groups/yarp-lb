@@ -48,7 +48,7 @@ class Origin(BaseHTTPRequestHandler):
             cls.connection_max_active = 0
 
     def do_GET(self):
-        tracked = self.path.startswith("/connprobe-")
+        tracked = self.path.startswith("/probe-")
         if tracked:
             with Origin.connection_lock:
                 Origin.connection_active += 1
@@ -340,7 +340,7 @@ def verify_max_connections_per_server(base:str,admin:Client,reviewer:Client):
         Origin.reset_connection_counts()
         with ThreadPoolExecutor(max_workers=4) as pool:
             responses=list(pool.map(lambda index: response(base,f"/connlimit/probe-{index}"),range(4)))
-        check(all(status==200 and body.startswith("e2e-origin:/connprobe-") for status,_,body in responses),
+        check(all(status==200 and body.startswith("e2e-origin:/probe-") for status,_,body in responses),
             "real YARP forwards all concurrent HTTP/1.1 connection-cap probes")
         with Origin.connection_lock:
             return Origin.connection_max_active
