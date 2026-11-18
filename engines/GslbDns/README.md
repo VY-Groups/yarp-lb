@@ -82,7 +82,8 @@ rollover and multi-authority acceptance remain open.
   existing names with unsupported types return NODATA with SOA; names outside
   the configured zones are REFUSED.
 - EDNS0 OPT input is syntax checked with a 512–1232-byte UDP buffer limit;
-  unknown options are ignored, not logged or echoed. Unsupported EDNS versions
+  unknown options are ignored, not logged or echoed (responses carry no
+  unknown option payload over UDP or TCP). Unsupported EDNS versions
   return BADVERS via the OPT extended response code. Unsigned zones keep the
   previous safe behavior: DO requests never set AD, claim DO support, or
   fabricate signatures. A zone with `DnssecPrivateKeyPath` enabled returns

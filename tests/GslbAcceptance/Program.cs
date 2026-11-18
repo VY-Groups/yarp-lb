@@ -778,10 +778,16 @@ try
     var nodata = await TcpQuery(DnsRequest("ha.integration.test",28));
     Must((Dns16(nodata,2)&0xF)==0 && Dns16(nodata,6)==0 && Dns16(nodata,8)==1,
         "unsupported AAAA is NODATA, not a fabricated IPv6 address");
-    var (_, edns) = await QueryWire("app.integration.test",1,ednsVersion:0);
-    Must((Dns16(edns,2)&0xF)==0 && Dns16(edns,10)==1 &&
-         edns[^11]==0 && edns[^10]==0 && edns[^9]==41 && edns[^1]==0,
-         "EDNS0 OPT answered without leaking unknown client options or DO bit");
+    var ednsRequest = DnsRequest("app.integration.test",1,ednsVersion:0);
+    foreach (var transport in new[] { "UDP", "TCP" })
+    {
+        var edns = transport == "UDP" ? (await QueryWire("app.integration.test",1,ednsVersion:0)).Reply
+            : await TcpQuery(ednsRequest);
+        Must((Dns16(edns,2)&0xF)==0 && (Dns16(edns,2)&0x0020)==0 && Dns16(edns,6)==1 &&
+             Dns16(edns,10)==1 && Dns16(edns,edns.Length-10)==41 &&
+             Dns16(edns,edns.Length-2)==0 && (edns[^4]&0x80)==0,
+             $"{transport} EDNS0 accepts and ignores an unknown option without echoing its bytes or claiming DNSSEC");
+    }
     foreach (var dnssecType in new ushort[] { 43, 46, 48 }) // DS, RRSIG, DNSKEY
     {
         var dnssecReply = await TcpQuery(DnsRequest("app.integration.test", dnssecType, ednsVersion: 0));
