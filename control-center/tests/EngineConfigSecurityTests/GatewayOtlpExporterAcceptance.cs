@@ -142,6 +142,28 @@ public static class GatewayOtlpExporterAcceptance
                 activity.SetTag("gateway.cluster.id", "acceptance_cluster");
                 activity.SetTag("gateway.destination.id", "target_a");
             }
+            using var aspNetSource = new ActivitySource("Microsoft.AspNetCore");
+            using (var aspNetActivity = aspNetSource.StartActivity(
+                       "GET /orders/customer-id-otlp-secret?token=otlp-secret-canary", ActivityKind.Server))
+            {
+                if (aspNetActivity is null) throw new Exception("ASP.NET HTTP span was not subscribed by the OTel pipeline");
+                aspNetActivity.SetTag("http.request.method", "GET");
+                aspNetActivity.SetTag("http.route", "/orders/{orderId}");
+                aspNetActivity.SetTag("http.target", "/orders/customer-id-otlp-secret?token=otlp-secret-canary");
+                aspNetActivity.SetTag("url.path", "/orders/customer-id-otlp-secret");
+                aspNetActivity.SetTag("url.query", "token=otlp-secret-canary");
+                aspNetActivity.SetTag("client.address", "203.0.113.77");
+            }
+            using (var unmatchedActivity = aspNetSource.StartActivity(
+                       "GET /users/unmatched-id-otlp-secret?key=second-secret-canary", ActivityKind.Server))
+            {
+                if (unmatchedActivity is null) throw new Exception("Unmatched ASP.NET HTTP span was not subscribed by the OTel pipeline");
+                unmatchedActivity.SetTag("http.request.method", "GET");
+                unmatchedActivity.SetTag("http.target", "/users/unmatched-id-otlp-secret?key=second-secret-canary");
+                unmatchedActivity.SetTag("url.path", "/users/unmatched-id-otlp-secret");
+                unmatchedActivity.SetTag("url.query", "key=second-secret-canary");
+                unmatchedActivity.SetTag("client.address", "203.0.113.78");
+            }
 
             var response = new Microsoft.AspNetCore.Http.DefaultHttpContext();
             response.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
@@ -162,12 +184,21 @@ public static class GatewayOtlpExporterAcceptance
                 throw new Exception($"Expected OTLP traces, metrics and logs; received: {string.Join(", ", captured.Select(x => x.Path))}");
 
             var tracePayload = Encoding.Latin1.GetString(traces.SelectMany(x => x.Body).ToArray());
-            foreach (var sensitive in new[] { "203.0.113.99", "otlp-secret-canary", "/private" })
+            foreach (var sensitive in new[]
+                     {
+                         "203.0.113.99", "203.0.113.77", "otlp-secret-canary",
+                         "203.0.113.78", "customer-id-otlp-secret", "unmatched-id-otlp-secret",
+                         "second-secret-canary", "/private"
+                     })
                 if (tracePayload.Contains(sensitive, StringComparison.Ordinal))
                     throw new Exception($"Sensitive value was present in OTLP trace export: {sensitive}");
             foreach (var expected in new[] { "acceptance_route", "acceptance_cluster", "target_a", "gatewaycore-control-center" })
                 if (!tracePayload.Contains(expected, StringComparison.Ordinal))
                     throw new Exception($"Expected bounded trace/resource attribute was absent: {expected}");
+            if (!tracePayload.Contains("GET /orders/{orderId}", StringComparison.Ordinal))
+                throw new Exception("Safe ASP.NET route-template span name was not preserved");
+            if (!tracePayload.Contains("HTTP GET", StringComparison.Ordinal))
+                throw new Exception("Unmatched ASP.NET span did not fall back to a method-only name");
 
             var metricPayload = Encoding.Latin1.GetString(metrics.SelectMany(x => x.Body).ToArray());
             foreach (var expected in new[] { "gateway.proxy.requests", "gateway.proxy.request.duration", "5xx" })
