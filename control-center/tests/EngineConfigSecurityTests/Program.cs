@@ -53,6 +53,7 @@ using (var privacyActivity = new System.Diagnostics.Activity("privacy-contract")
 }
 await GatewayOtlpExporterAcceptance.RunAsync();
 await GatewayOtlpExporterAcceptance.RunWithoutCollectorAsync();
+await GatewayOtlpOverheadAcceptance.RunAsync();
 var containerCollectorEndpoint = Environment.GetEnvironmentVariable("GATEWAY_OTLP_CONTAINER_ENDPOINT");
 if (!string.IsNullOrWhiteSpace(containerCollectorEndpoint))
     await GatewayOtlpExporterAcceptance.RunAgainstCollectorAsync(containerCollectorEndpoint);
