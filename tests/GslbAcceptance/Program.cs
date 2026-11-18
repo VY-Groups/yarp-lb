@@ -6,6 +6,8 @@ using System.Text;
 using System.Text.Json;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
+using System.Security.AccessControl;
+using System.Security.Principal;
 using GatewayCore.Gslb.Contracts;
 
 // A malformed, altered or overlong report must never verify as signed agent evidence.
@@ -41,6 +43,25 @@ var reportRoot = Path.Combine(Path.GetTempPath(), "gslb-agent-contract-" + Guid.
 Directory.CreateDirectory(reportRoot);
 if (!OperatingSystem.IsWindows())
     File.SetUnixFileMode(reportRoot, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+else
+{
+    var identity = WindowsIdentity.GetCurrent().User
+        ?? throw new InvalidOperationException("Windows test identity has no SID");
+    var security = new DirectoryInfo(reportRoot).GetAccessControl();
+    security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
+    security.AddAccessRule(new FileSystemAccessRule(identity, FileSystemRights.FullControl,
+        InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+        PropagationFlags.None, AccessControlType.Allow));
+    security.AddAccessRule(new FileSystemAccessRule(
+        new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null), FileSystemRights.FullControl,
+        InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+        PropagationFlags.None, AccessControlType.Allow));
+    security.AddAccessRule(new FileSystemAccessRule(
+        new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null), FileSystemRights.FullControl,
+        InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+        PropagationFlags.None, AccessControlType.Allow));
+    new DirectoryInfo(reportRoot).SetAccessControl(security);
+}
 try
 {
     using var signing1 = ECDsa.Create(ECCurve.NamedCurves.nistP256);
@@ -82,6 +103,28 @@ try
     var targets = new[] { new AgentReportTarget("lab.example.test", "mumbai",
         ["agent-1", "agent-2", "agent-3"], MinimumHealthyVantageGroups: 2) };
     var statePath = Path.Combine(reportRoot, "replay-state.json");
+    if (OperatingSystem.IsWindows())
+    {
+        var broadAclDirectory = Path.Combine(reportRoot, "broad-replay-acl");
+        Directory.CreateDirectory(broadAclDirectory);
+        var security = new DirectoryInfo(broadAclDirectory).GetAccessControl();
+        var everyone = new SecurityIdentifier(WellKnownSidType.WorldSid, null);
+        security.AddAccessRule(new FileSystemAccessRule(everyone,
+            FileSystemRights.Modify | FileSystemRights.ReadAndExecute,
+            InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+            PropagationFlags.None, AccessControlType.Allow));
+        new DirectoryInfo(broadAclDirectory).SetAccessControl(security);
+        var broadAclRejected = false;
+        try
+        {
+            using var invalidReports = new AgentHealthReportStore(agents, targets,
+                Path.Combine(broadAclDirectory, "replay-state.json"), 10, 5, 2);
+        }
+        catch (InvalidDataException) { broadAclRejected = true; }
+        if (!broadAclRejected)
+            throw new Exception("FAIL: Windows replay-state directory with Everyone access was accepted");
+        Console.WriteLine("PASS: broadly accessible Windows replay-state ACL rejected");
+    }
     var duplicateVantageRejected = false;
     try
     {

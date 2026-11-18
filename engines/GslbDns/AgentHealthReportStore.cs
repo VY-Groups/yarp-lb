@@ -1,5 +1,7 @@
 using System.Net.Security;
 using System.Security.Cryptography;
+using System.Security.AccessControl;
+using System.Security.Principal;
 using System.Security.Cryptography.X509Certificates;
 using System.Text.Json;
 using GatewayCore.Gslb.Contracts;
@@ -291,6 +293,8 @@ internal sealed class AgentHealthReportStore : IDisposable
             {
                 if (!OperatingSystem.IsWindows())
                     File.SetUnixFileMode(temporary, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+                else
+                    EnsurePrivateWindowsAcl(temporary, isDirectory: false);
                 stream.Write(bytes);
                 stream.Flush(flushToDisk: true);
             }
@@ -321,12 +325,23 @@ internal sealed class AgentHealthReportStore : IDisposable
                     UnixFileMode.OtherExecute)) != 0)
                 throw new InvalidDataException("Replay state directory must be private to the DNS service account");
         }
+        else EnsurePrivateWindowsAcl(parent, isDirectory: true);
         var lockPath = path + ".lock";
         EnsureNotLink(lockPath);
         EnsureNotLink(path);
         var stream = new FileStream(lockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
-        if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(lockPath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
-        return stream;
+        try
+        {
+            if (!OperatingSystem.IsWindows())
+                File.SetUnixFileMode(lockPath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+            else EnsurePrivateWindowsAcl(lockPath, isDirectory: false);
+            return stream;
+        }
+        catch
+        {
+            stream.Dispose();
+            throw;
+        }
     }
 
     private static void EnsurePrivateFile(string path)
@@ -337,6 +352,32 @@ internal sealed class AgentHealthReportStore : IDisposable
              UnixFileMode.GroupExecute | UnixFileMode.OtherRead | UnixFileMode.OtherWrite |
              UnixFileMode.OtherExecute)) != 0)
             throw new InvalidDataException("Replay state file must be private to the DNS service account");
+        else if (OperatingSystem.IsWindows()) EnsurePrivateWindowsAcl(path, isDirectory: false);
+    }
+
+    private static void EnsurePrivateWindowsAcl(string path, bool isDirectory)
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        var currentUser = WindowsIdentity.GetCurrent().User
+            ?? throw new InvalidDataException("Cannot determine DNS service identity for replay state ACL validation");
+        var allowed = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            currentUser.Value,
+            new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null).Value,
+            new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null).Value
+        };
+        AuthorizationRuleCollection rules = isDirectory
+            ? new DirectoryInfo(path).GetAccessControl(AccessControlSections.Access)
+                .GetAccessRules(includeExplicit: true, includeInherited: true, targetType: typeof(SecurityIdentifier))
+            : new FileInfo(path).GetAccessControl(AccessControlSections.Access)
+                .GetAccessRules(includeExplicit: true, includeInherited: true, targetType: typeof(SecurityIdentifier));
+        foreach (FileSystemAccessRule rule in rules)
+        {
+            if (rule.AccessControlType == AccessControlType.Allow &&
+                rule.FileSystemRights != 0 &&
+                rule.IdentityReference is SecurityIdentifier sid && !allowed.Contains(sid.Value))
+                throw new InvalidDataException("Replay state ACL grants access beyond the DNS service identity, SYSTEM and Administrators");
+        }
     }
 
     private static void EnsureNotLink(string path)
