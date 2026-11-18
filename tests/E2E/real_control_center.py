@@ -17,6 +17,7 @@ import socket
 import ssl
 import subprocess
 import tempfile
+import threading
 import time
 from threading import Thread
 from concurrent.futures import ThreadPoolExecutor
@@ -36,19 +37,41 @@ def port():
         return s.getsockname()[1]
 
 class Origin(BaseHTTPRequestHandler):
+    connection_lock = threading.Lock()
+    connection_active = 0
+    connection_max_active = 0
+
+    @classmethod
+    def reset_connection_counts(cls):
+        with cls.connection_lock:
+            cls.connection_active = 0
+            cls.connection_max_active = 0
+
     def do_GET(self):
+        tracked = self.path.startswith("/connprobe-")
+        if tracked:
+            with Origin.connection_lock:
+                Origin.connection_active += 1
+                Origin.connection_max_active = max(Origin.connection_max_active, Origin.connection_active)
         body = ("e2e-origin:" + self.path).encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "text/plain")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        # Headers arrive immediately but the full response stream remains open.
-        # This makes the admission E2E prove that a permit covers response-body copy.
-        if self.path.startswith("/hold-short"):
-            time.sleep(.8)
-        elif self.path.startswith("/hold"):
-            time.sleep(3.5)
-        self.wfile.write(body)
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            # Headers arrive immediately but the full response stream remains open.
+            # This makes the admission E2E prove that a permit covers response-body copy.
+            if self.path.startswith("/hold-short"):
+                time.sleep(.8)
+            elif self.path.startswith("/hold"):
+                time.sleep(3.5)
+            elif tracked:
+                time.sleep(.4)
+            self.wfile.write(body)
+        finally:
+            if tracked:
+                with Origin.connection_lock:
+                    Origin.connection_active -= 1
     def log_message(self, *_): pass
 
 class Client:
@@ -277,6 +300,64 @@ def verify_destination_admission(base:str,admin:Client,reviewer:Client,initial:d
         "bounded-label queue wait summary is exported for dashboards")
     return pending
 
+def verify_max_connections_per_server(base:str,admin:Client,reviewer:Client):
+    # Exercise YARP's actual outgoing HTTP connection cap independently from the
+    # per-destination request gate: the latter is configured above the test load.
+    def apply_connection_limit(limit:int):
+        state=admin.request("GET","/admin/api/state")
+        routes=dict(state["routes"])
+        routes["connlimit-e2e"]={"ClusterId":"fixture","Match":{"Path":"/connlimit/{**catch-all}"},
+            "Transforms":[{"PathRemovePrefix":"/connlimit"}]}
+        clusters=json.loads(json.dumps(state["clusters"]))
+        fixture=clusters["fixture"]
+        fixture["HttpRequest"]={"Version":"1.1"}
+        fixture.setdefault("HttpClient",{})["MaxConnectionsPerServer"]=limit
+        destination=fixture["Destinations"]["origin"]
+        metadata=destination.get("Metadata",{})
+        for key in ("GatewayCore.Admission.MaxInFlight", "GatewayCore.Admission.MaxPending",
+                    "GatewayCore.Admission.QueueTimeoutMs"):
+            metadata.pop(key,None)
+        if metadata:
+            destination["Metadata"]=metadata
+        else:
+            destination.pop("Metadata",None)
+        payload={"routes":routes,"clusters":clusters,"disabled":state["disabled"],"revision":state["revision"]}
+        pending=admin.request("POST","/admin/api/change-requests",{
+            "reason":f"E2E verify upstream HTTP connection cap {limit}","payload":payload})
+        reviewer.request("POST",f"/admin/api/change-requests/{pending['id']}/decision",{
+            "decision":"approve","reason":f"Approved isolated upstream connection cap {limit}"})
+        deadline=time.monotonic()+6
+        while time.monotonic()<deadline:
+            metrics=admin.request("GET","/gateway/metrics")
+            admission_rows=[line for line in metrics.splitlines()
+                if "yarp_control_destination_admission_" in line and 'destination="fixture/origin"' in line]
+            if not admission_rows:
+                return
+            time.sleep(.05)
+        raise AssertionError(f"per-destination admission state was not retired before HTTP connection-cap test: {admission_rows!r}")
+
+    def run_concurrent_probes():
+        Origin.reset_connection_counts()
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            responses=list(pool.map(lambda index: response(base,f"/connlimit/probe-{index}"),range(4)))
+        check(all(status==200 and body.startswith("e2e-origin:/connprobe-") for status,_,body in responses),
+            "real YARP forwards all concurrent HTTP/1.1 connection-cap probes")
+        with Origin.connection_lock:
+            return Origin.connection_max_active
+
+    apply_connection_limit(8)
+    unconstrained=run_concurrent_probes()
+    check(unconstrained>=2,"backend sees concurrent HTTP/1.1 requests before a one-connection cap")
+    apply_connection_limit(1)
+    constrained=0
+    deadline=time.monotonic()+8
+    while time.monotonic()<deadline:
+        constrained=run_concurrent_probes()
+        if constrained==1:
+            break
+        time.sleep(.1)
+    check(constrained==1,"MaxConnectionsPerServer=1 limits actual concurrent upstream connections to one")
+
 def acceptance(base:str,origin_port:int):
     anonymous=Client(base)
     check(not anonymous.session()["initialized"],"clean state requires bootstrap")
@@ -357,6 +438,7 @@ def acceptance(base:str,origin_port:int):
     eventually(anonymous,"/e2e/real-proxy","e2e-origin:/real-proxy")
     rollback_backup=admin.request("GET","/admin/api/backups")[0]
     verify_destination_admission(base,admin,reviewer,approved)
+    verify_max_connections_per_server(base,admin,reviewer)
     check(admin.request("GET","/admin/api/change-requests/"+pending["id"])["status"]=="Approved",
         "approved change recorded and auditable")
     admin.request("POST","/admin/api/change-requests",change,expect=200)  # stale drafts may be submitted but not applied
