@@ -177,6 +177,14 @@ app.MapGet("/agent/v1/engines/gslb/runtime-status", async (CancellationToken can
         var body = await response.Content.ReadAsStringAsync(cancellationToken);
         if (!GslbRuntimeMetricsParser.TryParse(body, out var snapshot) || snapshot is null)
             return Results.StatusCode(StatusCodes.Status502BadGateway);
+        using var statusResponse = await client.GetAsync(
+            $"http://127.0.0.1:{gslbMetricsPort}/agent-report-status", cancellationToken);
+        if (!statusResponse.IsSuccessStatusCode ||
+            statusResponse.Content.Headers.ContentType?.MediaType != "application/json")
+            return Results.StatusCode(StatusCodes.Status502BadGateway);
+        var statusBody = await statusResponse.Content.ReadAsStringAsync(cancellationToken);
+        if (!GslbAgentReportStatusParser.TryParse(statusBody, out var agentStatus) || agentStatus is null)
+            return Results.StatusCode(StatusCodes.Status502BadGateway);
         return Results.Ok(new
         {
             type = "loopback-gslb-runtime-metrics",
@@ -185,7 +193,9 @@ app.MapGet("/agent/v1/engines/gslb/runtime-status", async (CancellationToken can
                 quorum = snapshot.QuorumTargets, belowQuorum = snapshot.BelowQuorumTargets },
             observerReports = new { healthy = snapshot.HealthyReports,
                 unhealthy = snapshot.UnhealthyReports, unknown = snapshot.UnknownReports,
-                staleOrMissing = snapshot.StaleOrMissingReports }
+                staleOrMissing = snapshot.StaleOrMissingReports },
+            observerAgentsCheckedUtc = agentStatus.CheckedUtc,
+            observerAgents = agentStatus.Agents
         });
     }
     catch (HttpRequestException)

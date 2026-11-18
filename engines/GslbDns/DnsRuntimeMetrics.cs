@@ -147,6 +147,17 @@ internal sealed class DnsMetricsServer : IAsyncDisposable
             return Results.Text(metrics.Render(groups, reportStore, reportTargets, Environment.TickCount64),
                 "text/plain; version=0.0.4; charset=utf-8");
         });
+        web.MapGet("/agent-report-status", (HttpContext context) =>
+        {
+            context.Response.Headers.CacheControl = "no-store";
+            if (reportStore is null) return Results.NotFound();
+            return Results.Json(new
+            {
+                type = "loopback-gslb-agent-report-status",
+                checkedUtc = DateTimeOffset.UtcNow,
+                agents = reportStore.AgentStatus(Environment.TickCount64)
+            });
+        });
         app = web;
         try { await web.StartAsync(token); }
         catch

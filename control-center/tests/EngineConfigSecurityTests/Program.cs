@@ -249,6 +249,7 @@ try { AgentClientCertificatePolicy.ParsePinnedThumbprints(new[]{"not-a-thumbprin
 catch (InvalidOperationException) { invalidPins=true; }
 Must(invalidPins, "invalid configured controller thumbprint rejects startup");
 await AgentTlsNegativeAcceptance.RunAsync();
+GslbAgentReportStatusParserTests.Run();
 await AgentLabCaTlsAcceptance.RunAsync();
 if (OperatingSystem.IsLinux())
     await AgentCrlAcceptance.RunAsync();

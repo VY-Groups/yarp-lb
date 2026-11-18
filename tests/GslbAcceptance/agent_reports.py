@@ -7,11 +7,13 @@ import os
 from pathlib import Path
 import shutil
 import socket
+import ssl
 import subprocess
 import tempfile
 import threading
 import time
 import urllib.request
+import urllib.error
 
 
 class Ready(http.server.BaseHTTPRequestHandler):
@@ -55,6 +57,25 @@ def secure_windows_test_directory(path: Path) -> None:
 def scrape_metrics(metrics_port):
     with urllib.request.urlopen(f"http://127.0.0.1:{metrics_port}/metrics", timeout=2) as response:
         return response.read().decode("utf-8")
+
+
+def scrape_agent_status(metrics_port):
+    with urllib.request.urlopen(f"http://127.0.0.1:{metrics_port}/agent-report-status", timeout=2) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def reject_malformed_agent_report(authority, agent, ca_path):
+    context = ssl.create_default_context(cafile=str(ca_path))
+    context.load_cert_chain(str(agent["cert"]), str(agent["key"]))
+    request = urllib.request.Request(
+        f"https://127.0.0.1:{authority['report_port']}/agent-health/v1/reports",
+        data=b"{malformed-json", headers={"Content-Type": "application/json"}, method="POST")
+    try:
+        urllib.request.urlopen(request, context=context, timeout=3)
+    except urllib.error.HTTPError as error:
+        assert error.code == 400, f"malformed signed report returned {error.code}, expected 400"
+    else:
+        raise AssertionError("malformed signed report was accepted")
 
 
 def dns_query(dns_port):
@@ -410,6 +431,22 @@ def main():
         print("PASS: two independent DNS authorities each admit a site with fresh mTLS observer quorum")
         authority_a = authorities["a"]
         authority_b = authorities["b"]
+        reject_malformed_agent_report(authority_a, agents[0], root / "ca.pem")
+        status = scrape_agent_status(authority_a["metrics_port"])
+        assert status["type"] == "loopback-gslb-agent-report-status"
+        status_rows = status["agents"]
+        assert len(status_rows) == 4 and [row["agentId"] for row in status_rows] == [
+            "agent-1", "agent-2", "agent-3", "agent-fanout"]
+        assert all(set(row) == {"agentId", "lastAcceptedUtc", "lastAcceptedAgeSeconds",
+                                "rejectedTotal", "freshReports",
+                                "staleOrMissingReports"} for row in status_rows), \
+            "agent report status exposed fields outside the bounded privacy-safe contract"
+        first_agent = status_rows[0]
+        assert first_agent["rejectedTotal"] >= 1
+        assert isinstance(first_agent["lastAcceptedUtc"], str) and \
+            first_agent["lastAcceptedAgeSeconds"] >= 0 and first_agent["freshReports"] >= 1
+        assert all(len(row["agentId"]) <= 64 for row in status_rows)
+        print("PASS: loopback status exposes bounded IDs, last-accept age, freshness and rejected counters without private fields")
         metrics_text = scrape_metrics(authority_a["metrics_port"])
         accepted_line = 'gatewaycore_gslb_agent_reports_total{result="accepted"} '
         accepted_count = int(next(line[len(accepted_line):] for line in metrics_text.splitlines()
@@ -473,6 +510,11 @@ def main():
                    log_paths=[authority_a["dns_log"], *authority_a["agent_logs"]])
         stale_metrics = scrape_metrics(authority_a["metrics_port"])
         assert 'gatewaycore_gslb_agent_evidence_reports{state="stale_or_missing"} 2' in stale_metrics
+        stale_status = scrape_agent_status(authority_a["metrics_port"])
+        stale_by_id = {row["agentId"]: row for row in stale_status["agents"]}
+        assert stale_by_id["agent-1"]["staleOrMissingReports"] >= 1 and \
+            stale_by_id["agent-2"]["staleOrMissingReports"] >= 1, \
+            "per-agent stale counters did not reflect expired observer feeds"
         start_agent(agents[0], "a")
         expect_dns(authority_a["dns"], authority_a["dns_port"], 0, "192.0.2.17",
                    log_paths=[authority_a["dns_log"], *authority_a["agent_logs"]])

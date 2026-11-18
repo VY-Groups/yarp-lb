@@ -76,7 +76,7 @@ const fleetCtx=vm.createContext({
     assert.equal(url,'/admin/api/fleet/status');
     return {ok:true,status:200,json:async()=>({
       type:'mTLS agent and signed engine-configuration status; not live DNS or YARP destination health',
-      gateways:[{id:'<img src=x>',state:'connected',report:{machine:'node-a',engineConfigStagingEnabled:true},engineConfigState:'available',engines:[{engineId:'gslb',revision:'A'.repeat(64),mode:'signed-file-staging-only',serviceRestarted:false}],gslbRuntimeState:'available',gslbRuntime:{type:'loopback-gslb-runtime-metrics',checkedUtc:'2026-11-17T12:00:00Z',quorumTargets:{configured:1,quorum:1,belowQuorum:0},observerReports:{healthy:2,unhealthy:0,unknown:0,staleOrMissing:1}}}]
+      gateways:[{id:'<img src=x>',state:'connected',report:{machine:'node-a',engineConfigStagingEnabled:true},engineConfigState:'available',engines:[{engineId:'gslb',revision:'A'.repeat(64),mode:'signed-file-staging-only',serviceRestarted:false}],gslbRuntimeState:'available',gslbRuntime:{type:'loopback-gslb-runtime-metrics',checkedUtc:'2026-11-17T12:00:00Z',quorumTargets:{configured:1,quorum:1,belowQuorum:0},observerReports:{healthy:2,unhealthy:0,unknown:0,staleOrMissing:1},observerAgents:[{agentId:'vantage-mumbai',lastAcceptedUtc:'2026-11-17T11:59:00Z',lastAcceptedAgeSeconds:60,rejectedTotal:2,freshReports:2,staleOrMissingReports:0}]}}]
     })};
   }
 });
@@ -94,6 +94,11 @@ assert.match(fleetContent,/GSLB runtime evidence/);
 assert.match(fleetContent,/1 of 1 sites meeting quorum/);
 assert.match(fleetContent,/Fresh healthy: 2/);
 assert.match(fleetContent,/stale or missing: 1/);
+assert.match(fleetContent,/Configured observer agents/);
+assert.match(fleetContent,/vantage-mumbai/);
+assert.match(fleetContent,/Last accepted \(UTC\)/);
+assert.match(fleetContent,/Stale\/missing/);
+assert.match(fleetContent,/Rejected/);
 assert.match(fleetContent,/do not directly query DNS answers or prove agreement between authorities/);
 assert.match(fleetContent,/&lt;img src=x&gt;/);
 assert.doesNotMatch(fleetContent,/<img src=x>/);

@@ -24,6 +24,7 @@ internal sealed class AgentHealthReportStore : IDisposable
     private sealed record ReplayPoint(long Epoch, long Sequence);
     private sealed record ReplayFile(int Version, Dictionary<string, ReplayPoint> Points);
     private sealed record LiveReport(string Verdict, long ExpiresAtTick);
+    private sealed record LastAccepted(long UnixSeconds, long Tick);
     private sealed record ReportPolicy(string[] AgentIds, int MinimumHealthyVantageGroups);
 
     private readonly object gate = new();
@@ -32,6 +33,8 @@ internal sealed class AgentHealthReportStore : IDisposable
     private readonly Dictionary<string, ReplayPoint> highWater;
     private FileStream? stateLock;
     private readonly Dictionary<string, LiveReport> live = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, LastAccepted> lastAccepted = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, int> rejectedByAgent = new(StringComparer.Ordinal);
     private readonly Dictionary<string, (long WindowStart, int Count)> rates = new(StringComparer.Ordinal);
     private readonly string statePath;
     private readonly int maxTtlSeconds;
@@ -91,6 +94,7 @@ internal sealed class AgentHealthReportStore : IDisposable
                 }
                 if (!agents.TryAdd(item.AgentId, new AgentTrustEntry(item.VantageGroup, certPins, publicKeys)))
                     throw new InvalidDataException("Duplicate agent identity");
+                rejectedByAgent.Add(item.AgentId, 0);
             }
 
             var targetRows = configuredTargets?.ToArray() ?? throw new InvalidDataException("Agent report targets required");
@@ -175,9 +179,46 @@ internal sealed class AgentHealthReportStore : IDisposable
             }
             live[LiveKey(targetKey, report.AgentId)] = new LiveReport(
                 report.Verdict, checked(nowTick + remainingSeconds * 1000));
+            lastAccepted[report.AgentId] = new LastAccepted(now.ToUnixTimeSeconds(), nowTick);
         }
         return true;
     }
+
+    public void RecordRejectedReport(string agentId)
+    {
+        lock (gate)
+            if (rejectedByAgent.TryGetValue(agentId, out var count))
+                rejectedByAgent[agentId] = SaturatingIncrement(count);
+    }
+
+    public IReadOnlyList<AgentReportStatusSnapshot> AgentStatus(long nowTick)
+    {
+        lock (gate)
+        {
+            return agents.Keys.Order(StringComparer.Ordinal).Select(agentId =>
+            {
+                var configured = targets.Count(target =>
+                    target.Value.AgentIds.Contains(agentId, StringComparer.Ordinal));
+                var fresh = 0;
+                foreach (var target in targets)
+                {
+                    if (!target.Value.AgentIds.Contains(agentId, StringComparer.Ordinal)) continue;
+                    if (live.TryGetValue(LiveKey(target.Key, agentId), out var report) &&
+                        nowTick < report.ExpiresAtTick)
+                        fresh++;
+                }
+                var staleOrMissing = configured - fresh;
+                var last = lastAccepted.GetValueOrDefault(agentId);
+                long? ageSeconds = last is null ? null : Math.Max(0, nowTick - last.Tick) / 1000;
+                DateTimeOffset? acceptedUtc = last is null
+                    ? null : DateTimeOffset.FromUnixTimeSeconds(last.UnixSeconds);
+                return new AgentReportStatusSnapshot(agentId, acceptedUtc, ageSeconds,
+                    rejectedByAgent[agentId], fresh, staleOrMissing);
+            }).ToArray();
+        }
+    }
+
+    private static int SaturatingIncrement(int value) => value == int.MaxValue ? value : value + 1;
 
     public bool IsAuthorizedCertificate(X509Certificate2? certificate, string agentId,
         IReadOnlySet<string>? revokedSha256 = null)
@@ -440,3 +481,6 @@ internal sealed class AgentHealthReportStore : IDisposable
         }
     }
 }
+
+internal sealed record AgentReportStatusSnapshot(string AgentId, DateTimeOffset? LastAcceptedUtc,
+    long? LastAcceptedAgeSeconds, int RejectedTotal, int FreshReports, int StaleOrMissingReports);
