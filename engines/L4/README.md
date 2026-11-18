@@ -2,6 +2,8 @@
 
 This is a separate .NET 10 process, **not YARP middleware**. It binds explicit TCP and UDP listeners; TCP forwards bidirectional streams with half-close propagation, health-probed connect-time fallback, explicit per-backend admission drain, configurable idle timeout, and opt-in PROXY protocol v1; UDP uses per-client source IP/port sessions with backend replies routed to their original client. Both use round-robin across configured backends. It limits UDP sessions to 1,024 per listener and expires idle sessions after approximately 30 seconds of inactivity (when new packets arrive).
 
+The Windows/Linux socket acceptance includes a TCP half-close case: after the client sends its request and shuts down only its send direction, the backend must observe EOF, produce a complete response, and close its send direction; the client must receive that response through EOF. This verifies bidirectional FIN propagation in the loopback lab only. It does not demonstrate packet-loss behavior or WAN reliability.
+
 ## Lab execution
 
 ```powershell
