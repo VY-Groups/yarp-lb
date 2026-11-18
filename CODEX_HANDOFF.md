@@ -736,9 +736,9 @@ unmeasured.
 
 **This section is the current operational snapshot and supersedes older “current state” statements above.** The earlier handoff sections remain a historical record; check live GitHub again before subsequent work.
 
-- Canonical `main` at this update: `f93e55792ee7b326a2ac913ee782b9e174d7df26`.
+- Canonical `main` at this update: `f792d797530e644ebd853e8e4f509f97d1757395`.
 - Open feature PRs before this handoff refresh: **0**. The documentation refresh is being prepared in a focused PR.
-- Open GitHub issues: **16** (see live issue list). No issue was closed by the recent scoped PR merges because each canonical issue still has unmet acceptance criteria.
+- Open GitHub issues: **14**. #39 (future multi-tenant SaaS) and #61 (post-v1 Redis Sentinel) were closed as `NOT_PLANNED` for the declared single-organization on-prem v1 scope; neither feature is implemented or claimed.
 - Release: controlled development/test only; **production NO-GO**. The annual 99.9% availability target is unmeasured and must not be inferred from CI or short fault tests.
 
 ### Recent merged increments
@@ -764,6 +764,8 @@ Exact-head Actions results are recorded on the PRs and listed below where applic
 | [#158](../../pull/158) | `e251fc14d6897b643bace0d4a1feedcb9c6b4944` | OTLP span export removes raw URL/path/query/client-address tags and normalizes ASP.NET display names to safe method/route templates or method-only fallback. Real OTLP canary test and all 31 Actions checks passed; independent review found no blocker. | #50 still needs deployed Collector/alert delivery, retention, cross-node observability and production-overhead evidence. |
 | [#157](../../pull/157) | `aebe451bd8568864b44c660dedab293b845858ea` | ECS partial-prefix host-bit validation and duplicate-option rejection; malformed ECS falls back to resolver-source routing and is not echoed. UDP/TCP acceptance covers IPv4 /25, IPv6 /57, duplicate options and canonical /25. Exact updated head `ab0bc9e5d1be7ccae8691a3d0f64104badee1a03`; 9/9 Actions checks passed and independent review found no blocker. | #52 still has DNS delegation, public resolver/cache/privacy, licensed GeoIP operations and multi-authority acceptance open. |
 | [#159](../../pull/159) | `f93e55792ee7b326a2ac913ee782b9e174d7df26` | Bounded per-agent accepted-time/monotonic-age/freshness/rejection status through loopback-only DNS status and authenticated mTLS relay, rendered in the fleet UI. Exact head `b3ea5361ea43e08a45b8c19f21111775c58e1fa1`; 33 Actions checks passed on Windows/Ubuntu, including Chromium/UI and HA repeats; independent review found no blocker. | #109 still needs quorum/fencing, cross-authority consensus and independent multi-node partition evidence. The status view is not the authority protocol. |
+| [#161](../../pull/161) | `1742fe3bb458a73be598bf810d51f1109919b50c` | Linux production GatewayAgent mTLS acceptance now also rejects expired (`NotTimeValid`) and unknown-CA (`PartialChain`) clients, logs the exact certificate status, and confirms valid-client recovery. Exact-head Actions passed, including Ubuntu/Windows builds and all Windows HA repeats. | #35 still needs OCSP, fleet-wide certificate rotation, Windows revocation runtime acceptance, and enterprise/physical PKI evidence. |
+| [#162](../../pull/162) | `f792d797530e644ebd853e8e4f509f97d1757395` | WAF lab adds blocking-mode benign JSON, XML and ~31 KiB JSON upload cases through a private bounded backend that neither logs nor echoes bodies. WAF acceptance `44371139420` and all L7/HA/load checks passed. | #51 still needs representative OWASP false-positive/false-negative rates, pinned ruleset lifecycle/rollback, matched performance benchmarks and deployment evidence. |
 
 PR #118 is also merged (merge commit `b7f8c0e0ddcfeb82b684aecce7eb92eb46a94fc2`): opt-in ECS routing behind trusted-resolver allowlists, IPv4 `/24` and IPv6 `/56` privacy caps, and configured MaxMind MMDB country/ASN lookups with deterministic fallback. This does **not** establish a licensed production database distribution, public resolver behavior, DNSSEC key lifecycle, or issue #52 completion. Do not describe GeoIP/ECS as absent; describe their exact opt-in and operational limits.
 
@@ -771,7 +773,7 @@ PR #108 is **closed without merge**, head observed as `931c8dfe4032271c8a9ae8e5b
 
 ### Current issue and production boundaries
 
-The live backlog still has **16 open issues**, including P0 #36, #52 and #109 and P1 #100/#101/#50. Merged PRs above complete component increments only; they do not satisfy whole-issue acceptance. Do not close any of those issues without matching evidence in their current acceptance criteria.
+The live backlog now has **14 open issues**, including P0 #36, #52 and #109 and P1 #100/#101/#50. #39 and #61 were closed as `NOT_PLANNED` because they are explicitly future/post-v1 and outside this release's scope; this is not feature completion. Merged PRs above complete component increments only; they do not satisfy whole-issue acceptance. Do not close the remaining issues without matching evidence in their current acceptance criteria.
 
 - **#36 / physical ingress:** no shared VRRP VIP/ECMP gateway acceptance, signed-config convergence or separate-host power/network/partition drill has been completed. Prior dual-IP retry tests and the EC2 loopback admission soaks do not satisfy this issue.
 - **#52 / GSLB:** ECS/MMDB routing and opt-in DNSSEC signing are present in source with lab/Actions evidence. Public parent delegation and DS validation, licensed GeoIP data lifecycle, independent-authority convergence, adversarial/scale qualification and operational key rollover remain open.
