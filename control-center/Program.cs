@@ -1797,28 +1797,36 @@ app.MapReverseProxy(proxyPipeline =>
         }
 
         var selected = candidates[0];
-        if (!DestinationAdmissionPolicy.TryParse(
-                selected.Model.Config.Metadata, out var policy, out var policyError))
-        {
-            context.Response.StatusCode = StatusCodes.Status500InternalServerError;
-            context.Response.Headers["X-GatewayCore-Rejection"] = "invalid_admission_config";
-            await context.Response.WriteAsync("Invalid destination admission configuration.");
-            return;
-        }
-        if (!policy.Enabled) { await next(); return; }
-
         var clusterId = feature.Cluster.Config.ClusterId;
         var manager = context.RequestServices.GetRequiredService<DestinationAdmissionManager>();
-        if (!manager.TryAcquireHandle(clusterId, selected.DestinationId, policy, out var registryHandle, out var policyConflict) || registryHandle is null)
+        if (!manager.TryAcquireHandle(clusterId, selected.DestinationId, out var registryHandle, out var policyConflict) || registryHandle is null)
         {
+            if (policyConflict)
+            {
+                context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+                context.Response.Headers["X-GatewayCore-Rejection"] = "admission_policy_conflict";
+                return;
+            }
+            if (!DestinationAdmissionPolicy.TryParse(
+                    selected.Model.Config.Metadata, out var selectedPolicy, out var policyError))
+            {
+                context.Response.StatusCode = StatusCodes.Status500InternalServerError;
+                context.Response.Headers["X-GatewayCore-Rejection"] = "invalid_admission_config";
+                await context.Response.WriteAsync("Invalid destination admission configuration.");
+                return;
+            }
+            // A disabled snapshot can bypass only when there is no currently
+            // reconciled enabled policy. If a newer applied config enabled it,
+            // the manager returns its current gate before consulting this snapshot.
+            if (!selectedPolicy.Enabled) { await next(); return; }
             context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
-            context.Response.Headers["X-GatewayCore-Rejection"] = policyConflict
-                ? "admission_policy_conflict" : "admission_registry_full";
+            context.Response.Headers["X-GatewayCore-Rejection"] = "admission_configuration_unavailable";
             return;
         }
         using (registryHandle)
         {
         var state = registryHandle.State;
+        var policy = state.Policy;
 
         using var waitCancellation = CancellationTokenSource.CreateLinkedTokenSource(
             context.RequestAborted,

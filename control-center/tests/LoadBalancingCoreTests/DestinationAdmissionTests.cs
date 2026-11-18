@@ -10,6 +10,14 @@ public static class DestinationAdmissionTests
             if (!ok) throw new Exception("FAIL: " + label);
             Console.WriteLine("PASS: " + label);
         }
+        static DestinationAdmissionConfiguration Config(string cluster, string destination,
+            DestinationAdmissionPolicy policy) => new(cluster, destination, policy);
+        static void Apply(DestinationAdmissionManager manager, long revision,
+            params DestinationAdmissionConfiguration[] configured)
+        {
+            var result = manager.ReconcileConfiguredDestinations(revision, configured);
+            if (!result.Applied) throw new Exception("FAIL: fresh applied-config revision was rejected");
+        }
 
         Check(DestinationAdmissionPolicy.TryParse((IReadOnlyDictionary<string, string>?)null, out var disabled, out _) && !disabled.Enabled,
             "per-destination admission stays disabled by default");
@@ -73,9 +81,10 @@ public static class DestinationAdmissionTests
         next.Dispose();
 
         var manager = new DestinationAdmissionManager();
-        Check(manager.TryAcquireHandle("app", "east", new(1, 0, 5000), out var eastHandle, out _) && eastHandle is not null,
+        Apply(manager, 1, Config("app", "east", new(1, 0, 5000)), Config("app", "west", new(1, 0, 5000)));
+        Check(manager.TryAcquireHandle("app", "east", out var eastHandle, out _) && eastHandle is not null,
             "manager creates bounded destination gate");
-        Check(manager.TryAcquireHandle("app", "west", new(1, 0, 5000), out var westHandle, out _) && westHandle is not null,
+        Check(manager.TryAcquireHandle("app", "west", out var westHandle, out _) && westHandle is not null,
             "manager creates independent destination gate");
         var policyUpdate = new DestinationAdmissionState(new DestinationAdmissionPolicy(1, 1, 5000));
         using var updateHeld = await policyUpdate.AcquireAsync(CancellationToken.None) ??
@@ -99,7 +108,8 @@ public static class DestinationAdmissionTests
         westHandle.Dispose();
 
         var boundedManager = new DestinationAdmissionManager();
-        Check(boundedManager.TryAcquireHandle("app", "queued", new(1, 1, 5000), out var queuedHandle, out _) && queuedHandle is not null,
+        Apply(boundedManager, 1, Config("app", "queued", new(1, 1, 5000)));
+        Check(boundedManager.TryAcquireHandle("app", "queued", out var queuedHandle, out _) && queuedHandle is not null,
             "manager creates a queued destination state");
         using var queuedStateHandle = queuedHandle!;
         var queuedState = queuedStateHandle.State;
@@ -119,29 +129,30 @@ public static class DestinationAdmissionTests
         Check(boundedManager.PendingCount == 0, "granted waiter releases global queue capacity");
 
         var retirementManager = new DestinationAdmissionManager();
-        Check(retirementManager.TryAcquireHandle("app", "retiring", new(1, 0, 5000), out var firstHandle, out _) && firstHandle is not null,
+        Apply(retirementManager, 1, Config("app", "retiring", new(1, 0, 5000)));
+        Check(retirementManager.TryAcquireHandle("app", "retiring", out var firstHandle, out _) && firstHandle is not null,
             "registry returns a reference-counted handle");
         var firstState = firstHandle!.State;
         using var firstLease = await firstState.AcquireAsync(CancellationToken.None) ??
             throw new Exception("FAIL: retiring fixture permit should be acquired");
-        retirementManager.ReconcileConfiguredDestinations(Array.Empty<(string, string)>());
-        Check(retirementManager.TryAcquireHandle("app", "retiring", new(1, 0, 5000), out var concurrentHandle, out _) &&
-              ReferenceEquals(firstState, concurrentHandle!.State),
-            "retirement cannot replace a gate while a forwarding lease is live");
-        using (concurrentHandle!) { }
+        Apply(retirementManager, 2);
+        Check(!retirementManager.TryAcquireHandle("app", "retiring", out _, out _) &&
+              retirementManager.TrackedDestinationCount == 1,
+            "retired destination stops new handles but keeps its gate while a forwarding lease is live");
         firstLease.Dispose();
         firstHandle.Dispose();
         Check(retirementManager.TrackedDestinationCount == 0,
             "retired gate is reclaimed after its last handle and forwarding lease finish");
 
         var racingManager = new DestinationAdmissionManager();
+        Apply(racingManager, 1, Config("app", "race", new(1, 0, 5000)));
         var overlap = 0;
         var maximumOverlap = 0;
         var racers = Enumerable.Range(0, 2).Select(_iteration => Task.Run(async () =>
         {
             for (var i = 0; i < 500; i++)
             {
-                if (!racingManager.TryAcquireHandle("app", "race", new(1, 0, 5000), out var handle, out _) || handle is null)
+                if (!racingManager.TryAcquireHandle("app", "race", out var handle, out _) || handle is null)
                     throw new Exception("FAIL: race registry lookup unexpectedly failed");
                 using (handle)
                 {
@@ -154,24 +165,86 @@ public static class DestinationAdmissionTests
                     await Task.Yield();
                     Interlocked.Decrement(ref overlap);
                 }
-                racingManager.ReconcileConfiguredDestinations(Array.Empty<(string, string)>());
             }
         })).ToArray();
         await Task.WhenAll(racers);
-        Check(maximumOverlap == 1 && racingManager.TrackedDestinationCount == 0,
-            "concurrent acquire and retirement never split one destination into independent gates");
+        Check(maximumOverlap == 1 && racingManager.TrackedDestinationCount == 1,
+            "concurrent acquisition never splits one configured destination into independent gates");
+
+        var snapshotManager = new DestinationAdmissionManager();
+        using var staleCaptured = new ManualResetEventSlim();
+        using var releaseStaleSnapshot = new ManualResetEventSlim();
+        DestinationAdmissionReconcileResult staleResult = default;
+        var stalePublisher = Task.Run(() =>
+        {
+            // Simulate an older applied-config snapshot captured before revision 2,
+            // but delayed until after revision 2 has already reconciled.
+            staleCaptured.Set();
+            releaseStaleSnapshot.Wait();
+            staleResult = snapshotManager.ReconcileConfiguredDestinations(1,
+                [Config("app", "revision-race", new(2, 0, 5000))]);
+        });
+        staleCaptured.Wait();
+        Apply(snapshotManager, 2, Config("app", "revision-race", new(1, 0, 5000)));
+        releaseStaleSnapshot.Set();
+        await stalePublisher.WaitAsync(TimeSpan.FromSeconds(2));
+        Check(!staleResult.Applied, "older applied-config revision is rejected after a newer revision");
+        if (!snapshotManager.TryAcquireHandle("app", "revision-race", out var currentPolicyHandle, out _) ||
+            currentPolicyHandle is null)
+            throw new Exception("FAIL: reconciled destination could not be acquired");
+        Check(currentPolicyHandle.State.Policy == new DestinationAdmissionPolicy(1, 0, 5000),
+            "delayed permissive snapshot cannot restore stale higher limits");
+        using (currentPolicyHandle)
+        using (var onlyPermit = await currentPolicyHandle.State.AcquireAsync(CancellationToken.None) ??
+               throw new Exception("FAIL: current admission permit should be available"))
+        {
+            Check(await currentPolicyHandle.State.AcquireAsync(CancellationToken.None) is null,
+                "reconciled current policy governs subsequent requests");
+        }
+
+        var conflictManager = new DestinationAdmissionManager();
+        Apply(conflictManager, 1, Config("app", "shrink-conflict", new(1, 1, 5000)));
+        if (!conflictManager.TryAcquireHandle("app", "shrink-conflict", out var conflictHandle, out _) ||
+            conflictHandle is null)
+            throw new Exception("FAIL: conflict fixture destination could not be acquired");
+        using (conflictHandle)
+        using (var heldConflictPermit = await conflictHandle.State.AcquireAsync(CancellationToken.None) ??
+               throw new Exception("FAIL: conflict fixture permit should be acquired"))
+        {
+            var acceptedWaiter = conflictHandle.State.AcquireAsync(CancellationToken.None).AsTask();
+            Check(conflictHandle.State.Snapshot.Queued == 1,
+                "applied policy shrink fixture has one accepted waiter");
+            var conflicted = conflictManager.ReconcileConfiguredDestinations(2,
+                [Config("app", "shrink-conflict", new(1, 0, 5000))]);
+            Check(conflicted.Applied && conflicted.PolicyConflicts == 1 &&
+                  !conflictManager.TryAcquireHandle("app", "shrink-conflict", out _, out var updateConflict) && updateConflict,
+                "unsafe applied queue shrink blocks new handles until accepted waiter drains");
+            heldConflictPermit.Dispose();
+            using var drainedWaiter = await acceptedWaiter.WaitAsync(TimeSpan.FromSeconds(2)) ??
+                throw new Exception("FAIL: previously accepted waiter should drain under old policy");
+            drainedWaiter.Dispose();
+        }
+        var safeRetry = conflictManager.ReconcileConfiguredDestinations(3,
+            [Config("app", "shrink-conflict", new(1, 0, 5000))]);
+        if (!safeRetry.Applied || safeRetry.PolicyConflicts != 0 ||
+            !conflictManager.TryAcquireHandle("app", "shrink-conflict", out var retryHandle, out _) || retryHandle is null)
+            throw new Exception("FAIL: later applied revision did not install the safe policy");
+        Check(retryHandle.State.Policy == new DestinationAdmissionPolicy(1, 0, 5000),
+            "later monotonic applied revision installs the policy after accepted waiters drain");
+        retryHandle.Dispose();
 
         var canceledManager = new DestinationAdmissionManager();
-        Check(canceledManager.TryAcquireHandle("app", "cancel", new(1, 1, 5000), out var ownerHandle, out _) && ownerHandle is not null,
+        Apply(canceledManager, 1, Config("app", "cancel", new(1, 1, 5000)));
+        Check(canceledManager.TryAcquireHandle("app", "cancel", out var ownerHandle, out _) && ownerHandle is not null,
             "cancellation registry owner acquired");
         using var ownerLease = await ownerHandle!.State.AcquireAsync(CancellationToken.None) ??
             throw new Exception("FAIL: cancellation registry owner permit should be acquired");
-        Check(canceledManager.TryAcquireHandle("app", "cancel", new(1, 1, 5000), out var waiterHandle, out _) && waiterHandle is not null,
+        Check(canceledManager.TryAcquireHandle("app", "cancel", out var waiterHandle, out _) && waiterHandle is not null,
             "cancellation waiter holds a registry reference");
         using var waiterRegistryHandle = waiterHandle!;
         using var timeoutToken = new CancellationTokenSource();
         var timedWait = waiterRegistryHandle.State.AcquireAsync(timeoutToken.Token).AsTask();
-        canceledManager.ReconcileConfiguredDestinations(Array.Empty<(string, string)>());
+        Apply(canceledManager, 2);
         timeoutToken.Cancel();
         try { await timedWait.WaitAsync(TimeSpan.FromSeconds(2)); }
         catch (OperationCanceledException) { waiterRegistryHandle.State.RecordTimeout(); }
@@ -183,14 +256,15 @@ public static class DestinationAdmissionTests
 
         var churnManager = new DestinationAdmissionManager();
         var churnSucceeded = true;
+        long churnRevision = 0;
         for (var i = 0; i <= DestinationAdmissionManager.MaximumTrackedDestinations; i++)
         {
             var key = "destination-" + i;
-            if (!churnManager.TryAcquireHandle("churn", key, new(1, 0, 5000), out var churnHandle, out _) || churnHandle is null)
+            Apply(churnManager, ++churnRevision, Config("churn", key, new(1, 0, 5000)));
+            if (!churnManager.TryAcquireHandle("churn", key, out var churnHandle, out _) || churnHandle is null)
             { churnSucceeded = false; break; }
             churnHandle!.Dispose();
-            churnManager.ReconcileConfiguredDestinations(new[] { ("churn", key) });
-            churnManager.ReconcileConfiguredDestinations(Array.Empty<(string, string)>());
+            Apply(churnManager, ++churnRevision);
         }
         Check(churnSucceeded && churnManager.TrackedDestinationCount == 0,
             "4097 destination replacements are reclaimed without exceeding the registry cap");

@@ -86,6 +86,12 @@ public readonly record struct DestinationAdmissionSnapshot(
     int InFlight, int Queued, long Rejected, long TimedOut, long Canceled,
     long WaitDurationCount, double WaitDurationSecondsSum);
 
+public readonly record struct DestinationAdmissionConfiguration(
+    string Cluster, string Destination, DestinationAdmissionPolicy Policy);
+
+public readonly record struct DestinationAdmissionReconcileResult(
+    bool Applied, int PolicyConflicts, int CapacityExceeded);
+
 /// <summary>
 /// FIFO request gate for one stable cluster/destination identity. It tracks the
 /// whole proxy middleware lifetime, rather than a TCP connection or response-header wait.
@@ -140,6 +146,11 @@ public sealed class DestinationAdmissionState
     public bool IsIdle
     {
         get { lock (_sync) return _inFlight == 0 && _waiters.Count == 0; }
+    }
+
+    public DestinationAdmissionPolicy Policy
+    {
+        get { lock (_sync) return _policy; }
     }
 
     /// <summary>
@@ -306,57 +317,80 @@ public sealed class DestinationAdmissionManager
         public DestinationAdmissionState State { get; } = state;
         public int References;
         public bool Configured;
+        public bool PolicyConflict;
     }
     private readonly Dictionary<(string Cluster, string Destination), Entry> _states = new();
     private int _pending;
+    private long _lastConfigurationRevision;
     public int PendingCount => Volatile.Read(ref _pending);
     public int TrackedDestinationCount { get { lock (_sync) return _states.Count; } }
 
-    public bool TryAcquireHandle(string clusterId, string destinationId, DestinationAdmissionPolicy policy,
+    public bool TryAcquireHandle(string clusterId, string destinationId,
         out DestinationAdmissionHandle? handle, out bool policyConflict)
     {
         lock (_sync)
         {
             var key = (clusterId, destinationId);
-            if (_states.TryGetValue(key, out var existing))
+            if (_states.TryGetValue(key, out var existing) && existing.Configured)
             {
                 handle = null;
-                if (!existing.State.TryUpdatePolicy(policy)) { policyConflict = true; return false; }
+                if (existing.PolicyConflict) { policyConflict = true; return false; }
                 existing.References++;
                 handle = new(existing.State, () => ReleaseHandle(key, existing));
                 policyConflict = false;
                 return true;
             }
-
-            if (_states.Count >= MaximumTrackedDestinations)
-            {
-                handle = null;
-                policyConflict = false;
-                return false;
-            }
-
-            var entry = new Entry(new DestinationAdmissionState(policy, TryReservePending, ReleasePending))
-            { References = 1, Configured = true };
-            _states.Add(key, entry);
-            handle = new(entry.State, () => ReleaseHandle(key, entry));
+            handle = null;
             policyConflict = false;
-            return true;
+            return false;
         }
     }
 
-    /// <summary>Replace the active set with keys from an already accepted proxy snapshot.</summary>
-    public void ReconcileConfiguredDestinations(IEnumerable<(string Cluster, string Destination)> configured)
+    /// <summary>
+    /// Apply policies from an already-applied proxy snapshot. Monotonic revisions
+    /// fence delayed snapshots; request-time lookups never change a gate's policy.
+    /// </summary>
+    public DestinationAdmissionReconcileResult ReconcileConfiguredDestinations(long revision,
+        IEnumerable<DestinationAdmissionConfiguration> configured)
     {
-        var active = configured.ToHashSet();
+        var active = configured.Where(item => item.Policy.Enabled)
+            .ToDictionary(item => (item.Cluster, item.Destination), item => item.Policy);
         lock (_sync)
         {
+            if (revision <= _lastConfigurationRevision)
+                return new(false, 0, 0);
+
+            var policyConflicts = 0;
+            var capacityExceeded = 0;
+            foreach (var (key, policy) in active)
+            {
+                if (_states.TryGetValue(key, out var existing))
+                {
+                    existing.Configured = true;
+                    existing.PolicyConflict = !existing.State.TryUpdatePolicy(policy);
+                    if (existing.PolicyConflict) policyConflicts++;
+                    continue;
+                }
+                if (_states.Count >= MaximumTrackedDestinations)
+                {
+                    capacityExceeded++;
+                    continue;
+                }
+
+                var entry = new Entry(new DestinationAdmissionState(policy, TryReservePending, ReleasePending))
+                { Configured = true };
+                _states.Add(key, entry);
+            }
+
             foreach (var pair in _states.ToArray())
             {
-                var isConfigured = active.Contains(pair.Key);
+                var isConfigured = active.ContainsKey(pair.Key);
                 pair.Value.Configured = isConfigured;
                 if (!isConfigured && pair.Value.References == 0 && pair.Value.State.IsIdle)
                     _states.Remove(pair.Key);
             }
+            _lastConfigurationRevision = revision;
+            return new(true, policyConflicts, capacityExceeded);
         }
     }
 
