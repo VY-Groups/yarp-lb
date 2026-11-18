@@ -72,7 +72,8 @@ internal sealed class AgentHealthReportServer : IAsyncDisposable
     public async Task StartAsync(CancellationToken token)
     {
         if (app is not null) throw new InvalidOperationException("Health report server already started");
-        using var pem = X509Certificate2.CreateFromPemFile(config.ServerCertificatePem, config.ServerKeyPem);
+        var keyPem = PrivateKeyFileSecurity.ReadPrivateKeyPem(config.ServerKeyPem, "Agent report TLS private key");
+        using var pem = X509Certificate2.CreateFromPem(File.ReadAllText(config.ServerCertificatePem), keyPem);
         serverCertificate = X509CertificateLoader.LoadPkcs12(pem.Export(X509ContentType.Pkcs12), null);
         var address = IPAddress.Parse(config.ListenAddress);
         var builder = WebApplication.CreateSlimBuilder();

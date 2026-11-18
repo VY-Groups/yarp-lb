@@ -10,6 +10,8 @@ using System.Security.AccessControl;
 using System.Security.Principal;
 using GatewayCore.Gslb.Contracts;
 
+PrivateKeyFileSecurityTests.Run();
+
 // A malformed, altered or overlong report must never verify as signed agent evidence.
 using (var agentKey = ECDsa.Create(ECCurve.NamedCurves.nistP256))
 using (var verifierKey = ECDsa.Create(agentKey.ExportParameters(false)))

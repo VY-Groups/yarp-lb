@@ -5,6 +5,7 @@ import http.server
 import json
 import os
 from pathlib import Path
+import shutil
 import socket
 import subprocess
 import tempfile
@@ -143,6 +144,86 @@ def main():
                         "public": public_key, "pin": hashlib.sha256(der).hexdigest().upper(),
                         "upstream": serve(stack)}
 
+        if os.name != "nt":
+            def reject_observer_config(name, document, reason, expected_error):
+                invalid_config = root / f"{name}.json"
+                invalid_config.write_text(json.dumps(document))
+                denied = subprocess.run(["dotnet", observer_dll, invalid_config],
+                                         capture_output=True, text=True, timeout=10)
+                assert denied.returncode != 0 and expected_error in denied.stderr, \
+                    f"observer did not reject {reason} through private-key file security; " \
+                    f"exit={denied.returncode}, stdout={denied.stdout[-1000:]}, stderr={denied.stderr[-2000:]}"
+                print(f"PASS: observer refuses {reason}")
+
+            insecure_observer_key = root / "insecure-observer-signing.key"
+            shutil.copyfile(agents[0]["signer"], insecure_observer_key)
+            insecure_observer_key.chmod(0o644)
+            observer_config = {
+                "ListenAddress": "127.0.0.1", "Port": port(),
+                "PublicUrl": "https://127.0.0.1:18443/ready",
+                "HealthUrl": "http://127.0.0.1:1/ready",
+                "ServerCertificatePem": str(server_cert), "ServerKeyPem": str(server_key),
+                "SigningKeyPem": str(insecure_observer_key),
+                "AllowedClientSha256": [agents[0]["pin"]]
+            }
+            invalid_config = root / "insecure-observer.json"
+            invalid_config.write_text(json.dumps(observer_config))
+            denied = subprocess.run(["dotnet", observer_dll, invalid_config],
+                                     capture_output=True, text=True, timeout=10)
+            assert denied.returncode != 0 and "group/other access" in denied.stderr, \
+                "observer accepted a group-readable report-signing key"
+            print("PASS: observer refuses group-readable report-signing private keys")
+
+            observer_key_link = root / "observer-server-link.key"
+            observer_key_link.symlink_to(server_key)
+            linked_server_config = dict(observer_config, ServerKeyPem=str(observer_key_link))
+            reject_observer_config("linked-observer-server", linked_server_config,
+                                   "a symlinked TLS private key", "without following links")
+
+            signing_key_link = root / "observer-signing-link.key"
+            signing_key_link.symlink_to(agents[0]["signer"])
+            linked_signing_config = dict(observer_config, SigningKeyPem=str(signing_key_link))
+            reject_observer_config("linked-observer-signing", linked_signing_config,
+                                   "a symlinked report-signing private key", "without following links")
+
+            linked_key_directory = root / "observer-key-directory-link"
+            linked_key_directory.symlink_to(root, target_is_directory=True)
+            linked_parent_config = dict(observer_config,
+                                        SigningKeyPem=str(linked_key_directory / agents[0]["signer"].name))
+            reject_observer_config("linked-observer-key-parent", linked_parent_config,
+                                   "a key path with a symlinked parent directory", "without following links")
+
+            unsafe_key_directory = Path(tempfile.mkdtemp(prefix="gslb-observer-unsafe-key-parent-"))
+            stack.callback(shutil.rmtree, unsafe_key_directory, ignore_errors=True)
+            unsafe_key_directory.chmod(0o777)
+            unsafe_parent_key = unsafe_key_directory / "signing.key"
+            shutil.copyfile(agents[0]["signer"], unsafe_parent_key)
+            unsafe_parent_key.chmod(0o600)
+            replacement_key = unsafe_key_directory / "replacement.key"
+            shutil.copyfile(agents[1]["signer"], replacement_key)
+            replacement_key.chmod(0o600)
+            os.replace(replacement_key, unsafe_parent_key)
+            unsafe_parent_config = dict(observer_config, SigningKeyPem=str(unsafe_parent_key))
+            reject_observer_config("unsafe-observer-key-parent", unsafe_parent_config,
+                                   "a replaced key under a group/other-writable parent", "group/other writes")
+
+            report_client_key_link = root / "observer-report-client-link.key"
+            report_client_key_link.symlink_to(agents[0]["key"])
+            linked_client_config = dict(observer_config)
+            linked_client_config.update({
+                "SigningKeyPem": str(agents[0]["signer"]),
+                "ReportUrl": "https://127.0.0.1:18443/agent-health/v1/reports",
+                "AgentId": "agent-1", "Zone": "lab.example.test", "SiteId": "mumbai",
+                "ReportClientCertificatePem": str(agents[0]["cert"]),
+                "ReportClientKeyPem": str(report_client_key_link),
+                "ReportServerCaPem": str(root / "ca.pem"),
+                "ReportServerRevocationMode": "NoCheck",
+                "ReportSequenceStatePath": str(root / "observer-sequence.json"),
+                "ReportIntervalSeconds": 1, "ReportTtlSeconds": 8
+            })
+            reject_observer_config("linked-observer-report-client", linked_client_config,
+                                   "a symlinked report-client TLS private key", "without following links")
+
         local = serve(stack)
         for agent in agents:
             agent["upstream"] = serve(stack)
@@ -164,8 +245,7 @@ def main():
                             "SigningPublicKeyPems": [str(a["public"])]}
                            for a in [*agents, fanout_agent]]
             }
-            dns_config = root / f"zones-{node}.json"
-            dns_config.write_text(json.dumps({
+            config_document = {
                 "ListenHost": "127.0.0.1", "ListenPort": dns_port,
                 "MetricsListenHost": "127.0.0.1", "MetricsListenPort": metrics_port,
                 "ProbeIntervalSeconds": 1, "AgentReports": report_config,
@@ -176,7 +256,53 @@ def main():
                                       "Weight": 1, "AgentSiteId": "mumbai",
                                       "RequiredAgentIds": [a["id"] for a in agents],
                                       "MinimumHealthyAgentReports": 2}]}]
-            }))
+            }
+            dns_config = root / f"zones-{node}.json"
+            dns_config.write_text(json.dumps(config_document))
+            if node == "a" and os.name != "nt":
+                insecure_dns_key = root / "insecure-dns-report-server.key"
+                shutil.copyfile(dns_key, insecure_dns_key)
+                insecure_dns_key.chmod(0o644)
+                invalid_config = json.loads(json.dumps(config_document))
+                invalid_config["AgentReports"]["ServerKeyPem"] = str(insecure_dns_key)
+                invalid_config["AgentReports"]["ListenPort"] = port()
+                invalid_path = root / "insecure-dns-report-server.json"
+                invalid_path.write_text(json.dumps(invalid_config))
+                denied = subprocess.run(["dotnet", dns_dll, invalid_path],
+                                         capture_output=True, text=True, timeout=10)
+                assert denied.returncode != 0 and "group/other access" in denied.stderr, \
+                    "DNS authority accepted a group-readable report TLS private key"
+                print("PASS: DNS authority refuses group-readable report TLS private keys")
+
+                linked_dns_key = root / "dns-report-server-link.key"
+                linked_dns_key.symlink_to(dns_key)
+                linked_config = json.loads(json.dumps(config_document))
+                linked_config["AgentReports"]["ServerKeyPem"] = str(linked_dns_key)
+                linked_config["AgentReports"]["ListenPort"] = port()
+                linked_path = root / "linked-dns-report-server.json"
+                linked_path.write_text(json.dumps(linked_config))
+                denied = subprocess.run(["dotnet", dns_dll, linked_path],
+                                         capture_output=True, text=True, timeout=10)
+                assert denied.returncode != 0 and "links" in denied.stderr, \
+                    "DNS authority accepted a symlinked report TLS private key"
+                print("PASS: DNS authority refuses symlinked report TLS private keys")
+
+                unsafe_dns_key_directory = Path(tempfile.mkdtemp(prefix="gslb-dns-unsafe-key-parent-"))
+                stack.callback(shutil.rmtree, unsafe_dns_key_directory, ignore_errors=True)
+                unsafe_dns_key_directory.chmod(0o777)
+                unsafe_dns_key = unsafe_dns_key_directory / "server.key"
+                shutil.copyfile(dns_key, unsafe_dns_key)
+                unsafe_dns_key.chmod(0o600)
+                unsafe_dns_config = json.loads(json.dumps(config_document))
+                unsafe_dns_config["AgentReports"]["ServerKeyPem"] = str(unsafe_dns_key)
+                unsafe_dns_config["AgentReports"]["ListenPort"] = port()
+                unsafe_dns_path = root / "unsafe-dns-report-server.json"
+                unsafe_dns_path.write_text(json.dumps(unsafe_dns_config))
+                denied = subprocess.run(["dotnet", dns_dll, unsafe_dns_path],
+                                         capture_output=True, text=True, timeout=10)
+                assert denied.returncode != 0 and "group/other writes" in denied.stderr, \
+                    "DNS authority accepted a key under a group/other-writable parent"
+                print("PASS: DNS authority refuses keys under group/other-writable parents")
             dns_log = root / f"dns-{node}.log"
             dns_log_handle = dns_log.open("w")
             stack.callback(dns_log_handle.close)
