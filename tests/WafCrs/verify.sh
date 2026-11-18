@@ -26,6 +26,43 @@ if [[ "$ready" != "1" ]]; then
 fi
 grep -q 'YARP-WAF-CI-BENIGN' "$DIR/benign-body.txt"
 echo "PASS: benign HTTP request proxied through ModSecurity CRS"
+# Check a small, explicitly selected benign request corpus while CRS is in
+# blocking mode. The backend returns only metadata and never reflects payloads.
+assert_benign_post() {
+  local name="$1" content_type="$2" payload_file="$3" response_file="$4"
+  local status
+  status="$(curl --silent --show-error --max-time 10 -X POST \
+    -H "Content-Type: $content_type" --data-binary "@$payload_file" \
+    -o "$response_file" -w '%{http_code}' "http://127.0.0.1:18888/acceptance")"
+  printf '%s\n' "$status" > "$DIR/$name-http-status.txt"
+  if [[ "$status" != "200" ]]; then
+    echo "FAIL: benign $name request was blocked (HTTP $status)" >&2; exit 1
+  fi
+  python3 - "$response_file" "$payload_file" "$content_type" <<'PY'
+import json, pathlib, sys
+response = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+payload_bytes = pathlib.Path(sys.argv[2]).stat().st_size
+content_type = sys.argv[3].split(";", 1)[0].strip().lower()
+assert response == {"accepted": True, "contentType": content_type, "bytes": payload_bytes}, response
+PY
+  echo "PASS: benign $name request passed CRS and reached the bounded backend"
+}
+
+FIXTURES="$ROOT/tests/WafCrs/fixtures"
+assert_benign_post json application/json "$FIXTURES/benign.json" "$DIR/json-response.json"
+assert_benign_post xml application/xml "$FIXTURES/benign.xml" "$DIR/xml-response.json"
+python3 - "$DIR/large-json.json" <<'PY'
+import json, pathlib, sys
+records = [
+    {"id": i, "name": f"service-{i:04d}", "description": "ordinary inventory metadata " * 7}
+    for i in range(128)
+]
+path = pathlib.Path(sys.argv[1])
+path.write_text(json.dumps({"records": records}, separators=(",", ":")), encoding="utf-8")
+size = path.stat().st_size
+assert 16_384 < size < 65_536, size
+PY
+assert_benign_post large-json application/json "$DIR/large-json.json" "$DIR/large-json-response.json"
 xss_code="$(curl --silent --show-error --max-time 8 -o "$DIR/xss-response.txt" \
   -w '%{http_code}' --get --data-urlencode \
   'q=<script>alert(1)</script>' "http://127.0.0.1:18888/")"
@@ -88,7 +125,7 @@ observe_code="$(curl --silent --show-error --max-time 8 --get \
 printf '%s\n' "$observe_code" > "$DIR/detection-only-status.txt"
 [[ "$observe_code" == 200 ]] || { echo "FAIL: detection-only did not forward payload" >&2; exit 1; }
 docker compose -f "$COMPOSE" logs --no-color waf > "$DIR/detection-only-audit.log" 2>&1 || true
-echo "PASS: CRS attack corpus, body cap, benign query and detection-only forwarding"
+echo "PASS: CRS attack corpus, benign JSON/XML/large upload corpus, body cap, benign query and detection-only forwarding"
 # Compose 'port' output is not proof of a host port binding; inspect Docker's
 # actual NetworkSettings.Ports and reject any published HostIp/HostPort.
 app_id="$(docker compose -f "$COMPOSE" ps --quiet protected-app)"
