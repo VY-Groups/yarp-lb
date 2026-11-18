@@ -63,6 +63,63 @@ public static class PrivateKeyFileSecurity
         return new UTF8Encoding(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true).GetString(bytes);
     }
 
+    /// <summary>
+    /// Validates the full Linux parent chain for durable private state. The
+    /// final directory must remain service-private; trusted sticky ancestors
+    /// such as root-owned /tmp are permitted.
+    /// </summary>
+    public static void ValidateLinuxPrivateStateDirectory(string? path, string purpose)
+    {
+        if (!OperatingSystem.IsLinux()) return;
+        if (string.IsNullOrWhiteSpace(path) || !Path.IsPathFullyQualified(path))
+            throw new InvalidDataException($"{purpose} directory path must be absolute");
+
+        var components = Path.GetFullPath(path).Split(Path.DirectorySeparatorChar,
+            StringSplitOptions.RemoveEmptyEntries);
+        if (components.Length == 0)
+            throw new InvalidDataException($"{purpose} directory must not be the filesystem root");
+
+        SafeFileHandle? directory = OpenLinux("/", LinuxReadOnly | LinuxDirectory | LinuxCloseOnExec,
+            purpose, "parent directory");
+        try
+        {
+            ValidateLinuxOpenedObject(directory, purpose, isDirectory: true);
+            for (var i = 0; i < components.Length; i++)
+            {
+                var next = OpenLinuxAt(directory, components[i],
+                    LinuxReadOnly | LinuxDirectory | LinuxNoFollow | LinuxCloseOnExec,
+                    purpose, "parent directory");
+                LinuxStatx metadata;
+                try { metadata = ValidateLinuxOpenedObject(next, purpose, isDirectory: true); }
+                catch { next.Dispose(); throw; }
+
+                if (i == components.Length - 1 &&
+                    (((UnixFileMode)metadata.Mode & (UnixFileMode.GroupRead | UnixFileMode.GroupWrite |
+                      UnixFileMode.GroupExecute | UnixFileMode.OtherRead | UnixFileMode.OtherWrite |
+                      UnixFileMode.OtherExecute)) != 0))
+                {
+                    next.Dispose();
+                    throw new InvalidDataException($"{purpose} directory must be private to the service identity");
+                }
+
+                directory.Dispose();
+                directory = next;
+            }
+        }
+        finally { directory?.Dispose(); }
+    }
+
+    /// <summary>Validates an existing Linux state file using the opened object, without following links.</summary>
+    public static void ValidateLinuxPrivateStateFile(string? path, string purpose)
+    {
+        if (!OperatingSystem.IsLinux() || !File.Exists(path)) return;
+        using var handle = OpenLinuxNoFollow(path!, purpose);
+        var attributes = File.GetAttributes(handle);
+        if ((attributes & (FileAttributes.Directory | FileAttributes.ReparsePoint | FileAttributes.Device)) != 0)
+            throw new InvalidDataException($"{purpose} must be a regular file, not a directory, device, or link");
+        ValidateLinuxOpenedObject(handle, purpose, isDirectory: false);
+    }
+
     private static SafeFileHandle OpenLinuxNoFollow(string path, string purpose)
     {
         var absolute = Path.GetFullPath(path);
@@ -97,7 +154,7 @@ public static class PrivateKeyFileSecurity
         }
     }
 
-    private static void ValidateLinuxOpenedObject(SafeFileHandle handle, string purpose, bool isDirectory)
+    private static LinuxStatx ValidateLinuxOpenedObject(SafeFileHandle handle, string purpose, bool isDirectory)
     {
         var requiredMask = LinuxStatxMode | LinuxStatxUid;
         if (StatxUnix(handle.DangerousGetHandle().ToInt32(), "", LinuxAtEmptyPath,
@@ -106,6 +163,7 @@ public static class PrivateKeyFileSecurity
                 new Win32Exception(Marshal.GetLastPInvokeError()));
 
         ValidateLinuxPathObject(metadata.OwnerUid, metadata.Mode, GetEffectiveUid(), isDirectory, purpose);
+        return metadata;
     }
 
     internal static void ValidateLinuxPathObject(uint ownerUid, uint mode, uint effectiveUid,
