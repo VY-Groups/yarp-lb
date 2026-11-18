@@ -224,6 +224,26 @@ def main():
             reject_observer_config("linked-observer-report-client", linked_client_config,
                                    "a symlinked report-client TLS private key", "without following links")
 
+            unsafe_sequence_parent = Path(tempfile.mkdtemp(prefix="gslb-observer-unsafe-sequence-parent-"))
+            stack.callback(shutil.rmtree, unsafe_sequence_parent, ignore_errors=True)
+            unsafe_sequence_parent.chmod(0o777)
+            sequence_directory = unsafe_sequence_parent / "state"
+            sequence_directory.mkdir()
+            sequence_directory.chmod(0o700)
+            replacement_directory = unsafe_sequence_parent / "replacement"
+            replacement_directory.mkdir()
+            replacement_directory.chmod(0o700)
+            sequence_directory.rename(unsafe_sequence_parent / "state-original")
+            replacement_directory.rename(sequence_directory)
+            unsafe_sequence_config = dict(linked_client_config)
+            unsafe_sequence_config.update({
+                "Port": port(),
+                "ReportClientKeyPem": str(agents[0]["key"]),
+                "ReportSequenceStatePath": str(sequence_directory / "sequence.json")
+            })
+            reject_observer_config("unsafe-observer-sequence-parent", unsafe_sequence_config,
+                                   "sequence state below a replaceable writable ancestor", "group/other writes")
+
         local = serve(stack)
         for agent in agents:
             agent["upstream"] = serve(stack)
