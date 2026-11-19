@@ -12,6 +12,15 @@ using GatewayCore.Gslb.Contracts;
 
 PrivateKeyFileSecurityTests.Run();
 AuthorityFenceTests.Run();
+var nsec3Vector = DnssecZoneSigner.Base32Hex(DnssecZoneSigner.Nsec3Hash(
+    "ns1.example.", Convert.FromHexString("AABBCCDD"), 12));
+if (!string.Equals(nsec3Vector, "2T7B4G4VSA5SMI47K61MV5BV1A22BOJR", StringComparison.Ordinal))
+    throw new Exception($"FAIL: RFC 5155 Appendix B.2 NSEC3 hash vector mismatch: {nsec3Vector}");
+var mixedCaseNsec3Vector = DnssecZoneSigner.Base32Hex(DnssecZoneSigner.Nsec3Hash(
+    "Ns1.ExAmPlE.", Convert.FromHexString("AABBCCDD"), 12));
+if (!string.Equals(mixedCaseNsec3Vector, nsec3Vector, StringComparison.Ordinal))
+    throw new Exception("FAIL: NSEC3 name hashing is not DNS case-canonical");
+Console.WriteLine("PASS: RFC 5155 Appendix B.2 NSEC3 SHA-1/base32hex hash vector");
 
 // A malformed, altered or overlong report must never verify as signed agent evidence.
 using (var agentKey = ECDsa.Create(ECCurve.NamedCurves.nistP256))

@@ -1,5 +1,11 @@
 # GatewayCore / YARP Control Center — v0.1
 
+## License
+
+This repository is licensed under AGPL-3.0-or-later; see [LICENSE](LICENSE).
+The root license applies to the project as a whole. Adapted third-party code
+and its scope are listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
 A **single-tenant, on-premises HTTP(S) L7 reverse proxy and management control center**, built with .NET 10 and [YARP](https://microsoft.github.io/reverse-proxy/). Designed for isolated Windows and Linux testing with a controlled configuration approval workflow.
 
 > **Status: GO for controlled test/staging environments; NOT production-certified.** Successful GitHub Actions and real-browser integration tests do not prove actual-server HA, sustained capacity, external identity/PKI acceptance or security signoff. Do not deploy this test build in front of production services.

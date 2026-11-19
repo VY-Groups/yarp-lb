@@ -170,6 +170,19 @@ Add this to the zone JSON (the zone must also configure NS records):
 
     "DnssecPrivateKeyPath": "/etc/gatewaycore/dnssec/app.example.test.pem"
 
+NSEC is the default. To use NSEC3 instead, configure a fixed salt and an
+explicit iteration count (0 is supported and often preferable):
+
+    "DnssecPrivateKeyPath": "/etc/gatewaycore/dnssec/app.example.test.pem",
+    "DnssecDenialMode": "Nsec3",
+    "DnssecNsec3SaltHex": "0011223344556677",
+    "DnssecNsec3Iterations": 0
+
+The salt is 8..32 bytes of hex and iterations are bounded to 0..50. Store the
+same values in every authority's signed zone configuration; different values
+produce incompatible denial chains. The service rejects an omitted iteration
+field, random runtime salt, unsupported name encoding and excessive bounds.
+
 At startup the DNS process logs each key's public `DS` record in presentation
 format, with a phase label (`active`, `prepublish`, or `dual-sign`). The output
 is deterministically ordered and can be checked against the independently
@@ -636,8 +649,18 @@ The parent returns an authoritative negative SOA for a DS query at an unsigned
 delegation. When DNSSEC signing is enabled, it includes signed NSEC proof that
 the parent has no DS for that child.
 
-DNSSEC uses NSEC denial proofs, ECDSA P-256/SHA-256 (algorithm 13), and a
-pre-provisioned PEM private key per zone. The server logs the public DS value
+DNSSEC defaults to NSEC denial proofs. A zone may opt into RFC 5155 NSEC3 with
+`DnssecDenialMode: "Nsec3"`, an explicit shared `DnssecNsec3SaltHex`, and
+`DnssecNsec3Iterations` from 0 to 50. Use the same stable salt, iteration
+count, signed zone contents, key material and serial on every authority; the
+salt is never generated at runtime. NSEC3 uses SHA-1, base32hex names and
+Opt-Out disabled. The implementation builds a canonical hash ring from all
+configured authoritative owner names and empty non-terminals; it supports
+exact-owner NODATA and closest-encloser, next-closer and wildcard NXDOMAIN
+proofs. NSEC remains the default and its wire behavior is unchanged.
+
+Both modes use ECDSA P-256/SHA-256 (algorithm 13) and a pre-provisioned PEM
+private key per zone. The server logs the public DS value
 in presentation format; publish that DS at the parent registrar/zone before
 delegating a signed child. For multi-authority service, provision the same key
 securely to every authority and use the same zone/serial configuration. Keep
@@ -646,7 +669,8 @@ the service identity (`chmod 600` on Linux and an equivalent Windows ACL),
 and back it up using the organization's approved secret-management process.
 The signer refreshes signatures as they approach expiry.
 
-This signer is limited: NSEC only; no automated KSK/ZSK or algorithm rollover,
+This signer is limited: NSEC3 has no salt rotation or Opt-Out mode; neither
+denial mode implements automated KSK/ZSK or algorithm rollover,
 HSM/KMS integration, DS publication workflow, child-zone signing, key revocation,
 TSIG, AXFR/IXFR, or external authority synchronization. Manual CSK
 prepublication and dual-sign overlap are opt-in configuration phases, not an

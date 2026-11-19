@@ -1,5 +1,35 @@
 # GatewayCore — Codex handoff, verified repository snapshot
 
+## Current continuation update (2026-11-19)
+
+This update supersedes the historical 2026-11-16 snapshot below where they
+conflict. Live GitHub was checked on 2026-11-19:
+
+- Current `origin/main`: `58b2df750c686e93fa1b6b0017e77650853c905a` (PR #200).
+- Open issues: 13 — #34, #36, #37, #38, #48, #49, #50, #51, #52, #53, #100,
+  #101, and #109. P0 #36, #52, and #109 remain open; none is complete from this
+  NSEC3 increment.
+- Open pull requests: #198 (paired allocation profiling) and draft #199
+  (failover recovery alerting). PRs #189 and #200 are merged.
+- Latest observed GSLB workflow success is run `44475498981` on PR #189 head
+  `501339b8fb740dae65b0f365d1857a94928e460c`; it is not an NSEC3 run and does
+  not validate this branch. Current main's latest GSLB-specific run in the
+  observed list is #188's run `44449819566`, success at its exact PR head.
+- NSEC3 work is isolated in branch `codex/issue52-nsec3-denial`, local commit
+  `59f2cff3a766454542063306ca6ed59219960cad` before the final DNS-name guard
+  and handoff updates. Local Windows GslbAcceptance, existing NSEC DNSSEC
+  acceptance, and the focused NSEC3 acceptance have passed; exact-head GitHub
+  Actions and independent public-authority tests have not yet run.
+- The user explicitly authorized reuse under AGPL on 2026-11-19. The NSEC3
+  branch adds a root AGPL-3.0-or-later license applying to the repository as a
+  whole, plus third-party attribution. Only OpenGSLB's canonical NSEC3 hash
+  encoding is adapted. Its synthetic proof-generation code is not reused;
+  GatewayCore builds proofs from its actual canonical sorted hash ring.
+- NSEC3 is opt-in, requires explicit shared salt and iterations, and does not
+  change NSEC defaults. Issue #52 remains open; no public DNS delegation,
+  multi-authority, physical deployment, annual availability, or production
+  acceptance is established. Production remains **NO-GO**.
+
 **Snapshot date:** 2026-11-16 (UTC; refresh all live status before acting)  
 **Repository:** this checkout’s configured `origin` remote (verify with `git remote -v`)
 **Product:** GatewayCore — .NET 10 / YARP ADC-style single-organization on-premises L7 gateway and management UI, with separate experimental L4, WAF integration, and GSLB/DNS engines.  

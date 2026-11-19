@@ -128,6 +128,30 @@ foreach(var zone in config.Zones)
     var hasDnssecKeyConfig = !string.IsNullOrWhiteSpace(zone.DnssecPrivateKeyPath) ||
         zone.DnssecPrepublishPublicKeyPaths is { Length: > 0 } ||
         zone.DnssecAdditionalSigningKeyPaths is { Length: > 0 };
+    var denialMode = zone.DnssecDenialMode ?? "Nsec";
+    if (!string.Equals(denialMode, "Nsec", StringComparison.OrdinalIgnoreCase) &&
+        !string.Equals(denialMode, "Nsec3", StringComparison.OrdinalIgnoreCase))
+        throw new InvalidDataException("DnssecDenialMode must be Nsec or Nsec3");
+    if (string.Equals(denialMode, "Nsec3", StringComparison.OrdinalIgnoreCase) && !hasDnssecKeyConfig)
+        throw new InvalidDataException("NSEC3 mode requires DNSSEC signing to be enabled");
+    if (string.Equals(denialMode, "Nsec", StringComparison.OrdinalIgnoreCase) &&
+        (zone.DnssecNsec3SaltHex is not null || zone.DnssecNsec3Iterations is not null))
+        throw new InvalidDataException("NSEC3 salt and iterations require DnssecDenialMode=Nsec3");
+    if (string.Equals(denialMode, "Nsec3", StringComparison.OrdinalIgnoreCase) &&
+        (zone.DnssecNsec3SaltHex is null || zone.DnssecNsec3Iterations is null or < 0 or > 50 ||
+         zone.DnssecNsec3SaltHex.Length is < 16 or > 64 || zone.DnssecNsec3SaltHex.Length % 2 != 0 ||
+         !zone.DnssecNsec3SaltHex.All(Uri.IsHexDigit)))
+        throw new InvalidDataException("NSEC3 requires an explicit 8..32 byte hex salt and 0..50 iterations");
+    if (string.Equals(denialMode, "Nsec3", StringComparison.OrdinalIgnoreCase) &&
+        (zone.Name.EndsWith("..", StringComparison.Ordinal) ||
+         zone.SoaContact?.EndsWith("..", StringComparison.Ordinal) == true ||
+         (zone.NameServers ?? []).Any(server => server is not null &&
+             server.Host.EndsWith("..", StringComparison.Ordinal)) ||
+         (zone.Delegations ?? []).Any(cut => cut is not null &&
+             (cut.Name.EndsWith("..", StringComparison.Ordinal) ||
+              (cut.NameServers ?? []).Any(server => server is not null &&
+                  server.Host.EndsWith("..", StringComparison.Ordinal))))))
+        throw new InvalidDataException("NSEC3 names may have at most one terminal root dot");
     if ((zone.DnssecPrepublishPublicKeyPaths?.Length ?? 0) > 2 ||
         (zone.DnssecAdditionalSigningKeyPaths?.Length ?? 0) > 2 ||
         (hasDnssecKeyConfig && string.IsNullOrWhiteSpace(zone.DnssecPrivateKeyPath)))
@@ -220,7 +244,8 @@ foreach(var zone in config.Zones)
         zone.FailClosedWhenAllSitesDown, servers.ToArray(), contact, zone.SoaSerial,
         zone.RoutingPolicy,cidrTable,zone.EnableEcsGeoRouting,trustedEcsResolvers,geoIpTable,
         delegations.ToArray(), zone.DnssecPrivateKeyPath, origin,
-        zone.DnssecPrepublishPublicKeyPaths, zone.DnssecAdditionalSigningKeyPaths));
+        zone.DnssecPrepublishPublicKeyPaths, zone.DnssecAdditionalSigningKeyPaths,
+        denialMode, zone.DnssecNsec3SaltHex, zone.DnssecNsec3Iterations ?? 0));
     if (groups[origin].Dnssec is { } dnssec)
     {
         foreach (var entry in dnssec.ParentDsMaterial)
@@ -499,6 +524,9 @@ sealed record DnsZone(string Name,int TtlSeconds,DnsSite[] Sites,
     public string? DnssecPrivateKeyPath { get; init; }
     public string[]? DnssecPrepublishPublicKeyPaths { get; init; }
     public string[]? DnssecAdditionalSigningKeyPaths { get; init; }
+    public string? DnssecDenialMode { get; init; }
+    public string? DnssecNsec3SaltHex { get; init; }
+    public int? DnssecNsec3Iterations { get; init; }
 }
 sealed record DnsNameServerConfig(string Host,string Address);
 sealed record DnsNameServer(string Host,IPAddress Address)
@@ -557,7 +585,9 @@ sealed class SiteGroup
         DnsDelegation[]? delegations = null,
         string? dnssecPrivateKeyPath = null, string? zoneName = null,
         IReadOnlyList<string>? dnssecPrepublishPublicKeyPaths = null,
-        IReadOnlyList<string>? dnssecAdditionalSigningKeyPaths = null)
+        IReadOnlyList<string>? dnssecAdditionalSigningKeyPaths = null,
+        string dnssecDenialMode = "Nsec", string? dnssecNsec3SaltHex = null,
+        int dnssecNsec3Iterations = 0)
     {
         (Sites,Ttl,FailClosedWhenAllSitesDown,NameServers,SoaContact,SoaSerial,RoutingPolicy,CidrTable)
             =(sites,ttl,failClosedWhenAllSitesDown,nameServers,soaContact,soaSerial,routingPolicy,cidrTable);
@@ -570,7 +600,8 @@ sealed class SiteGroup
                 (uint)ttl, dnssecPrivateKeyPath, soaContact, soaSerial, nameServers,
                 Delegations, sites.Any(s => s.Address.AddressFamily == AddressFamily.InterNetwork),
                 sites.Any(s => s.Address.AddressFamily == AddressFamily.InterNetworkV6),
-                dnssecPrepublishPublicKeyPaths, dnssecAdditionalSigningKeyPaths);
+                dnssecPrepublishPublicKeyPaths, dnssecAdditionalSigningKeyPaths,
+                dnssecDenialMode, dnssecNsec3SaltHex, dnssecNsec3Iterations);
     }
     public string RoutingPolicy { get; }
     // 3 local successful measurements; at most 3 probe periods, clamped 6..60s.
