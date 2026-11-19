@@ -21,6 +21,7 @@ import shutil
 import socket
 import ssl
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -465,6 +466,15 @@ crlDistributionPoints = URI:http://127.0.0.1:{dead_port}/crl.pem
                     status in offline_logs for status in ("OfflineRevocation", "RevocationStatusUnknown")):
                 raise AssertionError("unavailable CRL was not logged as a client-chain rejection:\n" + offline_logs)
             print("PASS: production chain rejects an unavailable CRL from a separate uncached test CA", flush=True)
+            # Keep OCSP in a separate two-tier CA fixture so an OCSP cache or
+            # the preceding CRL responder cannot satisfy the wrong check.
+            ocsp_env = os.environ.copy()
+            ocsp_env["GATEWAY_TEST_OPENSSL"] = openssl
+            subprocess.run(
+                [sys.executable,
+                 str(Path(__file__).with_name("agent_ocsp_acceptance.py"))],
+                check=True, timeout=180, env=ocsp_env,
+            )
         finally:
             crl_server.shutdown()
             crl_server.server_close()
