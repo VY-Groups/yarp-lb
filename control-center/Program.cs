@@ -1914,7 +1914,9 @@ app.MapReverseProxy(proxyPipeline =>
         }
 
         var selected = candidates[0];
-        var clusterId = feature.Cluster.Config.ClusterId;
+        var selectedConfig = selected.Model.Config;
+        var selectedClusterConfig = feature.Cluster.Config;
+        var clusterId = selectedClusterConfig.ClusterId;
         var manager = context.RequestServices.GetRequiredService<DestinationAdmissionManager>();
         if (!manager.TryAcquireHandle(clusterId, selected.DestinationId, out var registryHandle, out var policyConflict) || registryHandle is null)
         {
@@ -1948,6 +1950,7 @@ app.MapReverseProxy(proxyPipeline =>
         using var waitCancellation = CancellationTokenSource.CreateLinkedTokenSource(
             context.RequestAborted,
             context.RequestServices.GetRequiredService<IHostApplicationLifetime>().ApplicationStopping);
+        var waitStartedTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
         waitCancellation.CancelAfter(policy.QueueTimeoutMs);
         DestinationAdmissionState.DestinationAdmissionLease? lease;
         try
@@ -1985,13 +1988,37 @@ app.MapReverseProxy(proxyPipeline =>
             // Do not transfer the request to a different backend. If a queued
             // destination was removed, drained or made unhealthy, fail locally.
             var lookup = context.RequestServices.GetRequiredService<IProxyStateLookup>();
-            if (context.RequestAborted.IsCancellationRequested) return;
+            // Atomically fence the queue deadline before forwarding. Stopping
+            // the timer and checking its token alone would miss a timer whose
+            // callback had not run by the time the permit continuation resumed.
+            var failureAfterGrant = DestinationAdmissionForwarding.CompleteQueueWait(
+                waitCancellation,
+                context.RequestAborted,
+                context.RequestServices.GetRequiredService<IHostApplicationLifetime>().ApplicationStopping,
+                waitStartedTimestamp,
+                TimeSpan.FromMilliseconds(policy.QueueTimeoutMs));
+            if (failureAfterGrant == DestinationAdmissionFailure.ClientAborted) return;
+            if (failureAfterGrant != DestinationAdmissionFailure.None)
+            {
+                context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+                if (failureAfterGrant == DestinationAdmissionFailure.ServiceStopping)
+                    context.Response.Headers["X-GatewayCore-Rejection"] = "gateway_shutdown";
+                else
+                {
+                    state.RecordTimeout();
+                    context.Response.Headers["X-GatewayCore-Rejection"] = "destination_queue_timeout";
+                }
+                return;
+            }
             if (!lookup.TryGetCluster(clusterId, out var currentCluster) ||
+                !ReferenceEquals(currentCluster.Model.Config, selectedClusterConfig) ||
                 !DestinationAdmissionForwarding.IsStillEligibleAfterWait(
                     selected.DestinationId,
                     currentCluster.DestinationsState.AvailableDestinations,
                     static destination => destination.DestinationId,
-                    TrafficLifecycle.IsDraining))
+                    TrafficLifecycle.IsDraining,
+                    destination => ReferenceEquals(destination, selected) &&
+                        ReferenceEquals(destination.Model.Config, selectedConfig)))
             {
                 context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
                 context.Response.Headers["X-GatewayCore-Rejection"] = "destination_unavailable_after_queue";
