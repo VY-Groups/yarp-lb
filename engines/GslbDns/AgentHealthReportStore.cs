@@ -32,6 +32,7 @@ internal sealed class AgentHealthReportStore : IDisposable
     private readonly Dictionary<string, ReportPolicy> targets;
     private readonly Dictionary<string, ReplayPoint> highWater;
     private FileStream? stateLock;
+    private bool stateFaulted;
     private readonly Dictionary<string, LiveReport> live = new(StringComparer.Ordinal);
     private readonly Dictionary<string, LastAccepted> lastAccepted = new(StringComparer.Ordinal);
     private readonly Dictionary<string, int> rejectedByAgent = new(StringComparer.Ordinal);
@@ -130,7 +131,10 @@ internal sealed class AgentHealthReportStore : IDisposable
                     target.RequiredAgentIds.ToArray(), target.MinimumHealthyVantageGroups)))
                     throw new InvalidDataException("Duplicate report-gated zone/site");
             }
-            stateLock = AcquireStateLock(statePath);
+            stateLock = AcquireStateLock(statePath, out var newLock);
+            var stateExists = File.Exists(statePath);
+            if (!stateExists && !newLock)
+                throw new InvalidDataException("Agent replay state is missing while its durable lock exists");
             highWater = LoadReplayState(statePath);
             var maximumPoints = targets.Values.Sum(policy => policy.AgentIds.Length);
             var allowedPoints = targets.SelectMany(target => target.Value.AgentIds.Select(agentId =>
@@ -138,6 +142,9 @@ internal sealed class AgentHealthReportStore : IDisposable
                 .ToHashSet(StringComparer.Ordinal);
             if (highWater.Count > maximumPoints || highWater.Keys.Any(key => !allowedPoints.Contains(key)))
                 throw new InvalidDataException("Replay state exceeds configured report targets");
+            // Establish an empty durable state on first enrollment, even if
+            // no reports arrive before a clean shutdown.
+            if (!stateExists) PersistReplayState();
         }
         catch
         {
@@ -177,6 +184,14 @@ internal sealed class AgentHealthReportStore : IDisposable
         var replayKey = ReplayKey(report.AgentId, report.Zone, report.SiteId);
         lock (gate)
         {
+            // Never recreate lost replay state from an incoming report. A
+            // detected integrity failure is sticky until operator recovery.
+            if (stateFaulted || !File.Exists(statePath))
+            {
+                stateFaulted = true;
+                live.Clear();
+                return false;
+            }
             if (highWater.TryGetValue(replayKey, out var previous) &&
                 (report.Epoch < previous.Epoch ||
                  (report.Epoch == previous.Epoch && report.Sequence <= previous.Sequence)))
@@ -190,6 +205,8 @@ internal sealed class AgentHealthReportStore : IDisposable
             {
                 if (old is null) highWater.Remove(replayKey);
                 else highWater[replayKey] = old;
+                stateFaulted = true;
+                live.Clear();
                 throw;
             }
             live[LiveKey(targetKey, report.AgentId)] = new LiveReport(
@@ -371,7 +388,7 @@ internal sealed class AgentHealthReportStore : IDisposable
         agentId + "\n" + TargetKey(zone, siteId);
     private static string LiveKey(string targetKey, string agentId) => targetKey + "\n" + agentId;
 
-    private static FileStream AcquireStateLock(string path)
+    private static FileStream AcquireStateLock(string path, out bool newLock)
     {
         var parent = Path.GetDirectoryName(path)!;
         var existed = Directory.Exists(parent);
@@ -388,7 +405,17 @@ internal sealed class AgentHealthReportStore : IDisposable
         var lockPath = path + ".lock";
         EnsureNotLink(lockPath);
         EnsureNotLink(path);
-        var stream = new FileStream(lockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+        FileStream stream;
+        try
+        {
+            stream = new FileStream(lockPath, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None);
+            newLock = true;
+        }
+        catch (IOException) when (File.Exists(lockPath))
+        {
+            stream = new FileStream(lockPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+            newLock = false;
+        }
         try
         {
             if (!OperatingSystem.IsWindows())

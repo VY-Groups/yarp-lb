@@ -278,7 +278,31 @@ try
         if (!recovered.TryAccept(Report("agent-1", 3, "healthy", 1000, 14, signing1Rotated), client1Rotated,
                 DateTimeOffset.FromUnixTimeSeconds(observed), 104))
             throw new Exception("FAIL: overlapping client certificate and signing-key rotation rejected");
+        if (!recovered.IsHealthy("lab.example.test", "mumbai", 106))
+            throw new Exception("FAIL: expected a fresh quorum before replay state loss");
+        var savedState = File.ReadAllBytes(statePath);
+        File.Delete(statePath);
+        if (recovered.TryAccept(Report("agent-2", 3, "healthy", 1000, 20, signing2), client2,
+                DateTimeOffset.FromUnixTimeSeconds(observed), 107) ||
+            recovered.IsHealthy("lab.example.test", "mumbai", 108) || File.Exists(statePath))
+            throw new Exception("FAIL: detected replay state loss did not withdraw live quorum");
+        File.WriteAllBytes(statePath, savedState);
+        if (!OperatingSystem.IsWindows())
+            File.SetUnixFileMode(statePath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+        if (recovered.TryAccept(Report("agent-2", 3, "healthy", 1000, 20, signing2), client2,
+                DateTimeOffset.FromUnixTimeSeconds(observed), 109))
+            throw new Exception("FAIL: replay state fault was silently reset in the running process");
     }
+    File.Delete(statePath);
+    var missingReplayRejected = false;
+    try
+    {
+        using var invalid = new AgentHealthReportStore(agents, targets, statePath, 10, 5, 2);
+    }
+    catch (InvalidDataException) { missingReplayRejected = true; }
+    if (!missingReplayRejected)
+        throw new Exception("FAIL: restart silently reset deleted replay state with retained lock");
+    Console.WriteLine("PASS: observer replay state loss fences live evidence and prevents silent restart reset");
 }
 finally { Directory.Delete(reportRoot, recursive: true); }
 Console.WriteLine("PASS: agent identity, 2-of-3 vantage quorum, negative veto, replay persistence, expiry and recovery");
