@@ -44,6 +44,9 @@ for series in required_series:
 assert "count_over_time" in queries and "3090528" in queries, (
     "rolling-year SLI must stay hidden until at least 98% of 10-second samples exist"
 )
+assert 'probe_success{job="gatewaycore-availability"}' in queries and "sum_over_time" in queries, (
+    "dashboard must expose sampled external interruption duration"
+)
 assert re.search(r'job=~"\$job"', queries), "panels must share the bounded job selector"
 for private_label in ("clientIp", "client_ip", "request_path", "authorization"):
     assert private_label not in queries, f"dashboard must not query private label {private_label}"

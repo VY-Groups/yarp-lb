@@ -1,6 +1,17 @@
 # Control Center actual metrics; requires same-host local agent and external TLS probe.
 # P99 cap of 100ms is ONLY A PLACEHOLDER; match the approved test scenario before use.
 groups:
+  - name: gatewaycore-failover-recovery
+    interval: 5s
+    rules:
+      - alert: GatewayFailoverRecoveryExceeded
+        expr: probe_success{job="gatewaycore-availability"} == 0
+        for: 10s
+        labels: {severity: critical}
+        annotations:
+          summary: "GatewayCore service has not recovered within the 10-second failover budget"
+          description: "Independent probe {{ $labels.instance }} has continuously observed {{ $labels.service }} unavailable in {{ $labels.region }}. This is user-visible outage duration; check gateway health, ingress, and DNS. The probe cannot identify which failover mechanism failed."
+          runbook_url: "https://github.com/VY-Groups/yarp-lb/blob/main/control-center/docs/AVAILABILITY_SLO.md"
   - name: yarp-onprem-ops
     interval: 30s
     rules:
