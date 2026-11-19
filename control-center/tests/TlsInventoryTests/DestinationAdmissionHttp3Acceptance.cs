@@ -180,7 +180,7 @@ internal static class DestinationAdmissionHttp3Acceptance
                 EnableMultipleHttp2Connections = true
             };
             using var client = new HttpClient(handler) { Timeout = Timeout.InfiniteTimeSpan };
-            var endpoint = new Uri($"https://localhost:{tlsPort}/admit/slow");
+            var endpoint = new Uri($"https://127.0.0.1:{tlsPort}/admit/slow");
 
             using (var readinessTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(15)))
             {
@@ -191,7 +191,7 @@ internal static class DestinationAdmissionHttp3Acceptance
                     try
                     {
                         using var readiness = new HttpRequestMessage(HttpMethod.Get,
-                            $"https://localhost:{tlsPort}/gateway/health")
+                            $"https://127.0.0.1:{tlsPort}/gateway/health")
                         { Version = HttpVersion.Version30, VersionPolicy = HttpVersionPolicy.RequestVersionExact };
                         using var response = await client.SendAsync(readiness, readinessTimeout.Token);
                         if (response.StatusCode == HttpStatusCode.OK) break;
