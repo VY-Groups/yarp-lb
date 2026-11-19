@@ -3,5 +3,6 @@
     <Nullable>enable</Nullable><ImplicitUsings>enable</ImplicitUsings></PropertyGroup>
   <ItemGroup><FrameworkReference Include="Microsoft.AspNetCore.App" />
     <Compile Include="../../TlsInventory.cs" Link="TlsInventory.cs" />
-    <Compile Include="../../AcmeTargetPolicy.cs" Link="AcmeTargetPolicy.cs" /></ItemGroup>
+    <Compile Include="../../AcmeTargetPolicy.cs" Link="AcmeTargetPolicy.cs" />
+    <Compile Include="../../TrafficHttpProtocols.cs" Link="TrafficHttpProtocols.cs" /></ItemGroup>
 </Project>

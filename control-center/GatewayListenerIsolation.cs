@@ -1,4 +1,5 @@
 using System.Net;
+using System.Net.Quic;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Text.Json;
@@ -48,8 +49,9 @@ public sealed class GatewayListenerIsolation
             throw new InvalidOperationException("Four listener ports must be unique and between 1 and 65535");
         if (config.MaxConcurrentConnections <= 0)
             throw new InvalidOperationException("REQUIRED_INPUT MaxConcurrentConnections must be derived from measured peak");
-        if (config.HttpVersion is not ("1.1" or "2"))
-            throw new InvalidOperationException("HttpVersion must be 1.1 or 2 and match the baseline ALPN");
+        _ = TrafficHttpProtocols.Parse(config.HttpVersion);
+        if (config.HttpVersion == "3" && !QuicConnection.IsSupported)
+            throw new InvalidOperationException("HttpVersion 3 requires a .NET runtime with working MsQuic support");
         if (config.ClientThumbprints is null || config.ClientThumbprints.Length == 0)
             throw new InvalidOperationException("At least one pinned management client certificate is required");
         _pins = new HashSet<string>(config.ClientThumbprints.Select(NormalizeThumbprint), StringComparer.Ordinal);
@@ -143,7 +145,7 @@ public sealed class GatewayListenerIsolation
             options.Listen(_traffic, Config.TrafficHttpPort, listen => listen.Protocols = HttpProtocols.Http1);
             options.Listen(_traffic, Config.TrafficHttpsPort, listen =>
             {
-                listen.Protocols = Config.HttpVersion == "2" ? HttpProtocols.Http2 : HttpProtocols.Http1;
+                listen.Protocols = TrafficHttpProtocols.Parse(Config.HttpVersion);
                 listen.UseHttps(_trafficCertificate);
             });
             void ConfigureManagement(ListenOptions listen)
