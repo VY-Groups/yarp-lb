@@ -86,6 +86,7 @@ using (var http = new HttpClient(unauthorized))
     }
 }
 EnterpriseOidcPolicyTests.Run();
+await ExternalAuditIntentTests.RunAsync();
 Console.WriteLine("PASS: ALL mail provider security checks");
 
 var auditRoot = Path.Combine(Path.GetTempPath(), "gatewaycore-audit-" + Guid.NewGuid().ToString("N"));
