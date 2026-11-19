@@ -128,7 +128,13 @@ public sealed class GatewayListenerIsolation : IDisposable
         var password = File.ReadAllText(passFile).TrimEnd('\r','\n');
         if (password.Length == 0)
             throw new InvalidOperationException("Listener PFX password cannot be empty");
-        var cert = X509CertificateLoader.LoadPkcs12FromFile(file, password, X509KeyStorageFlags.EphemeralKeySet);
+        // Windows Schannel/MsQuic need an OS-backed private key handle.
+        // UserKeySet avoids the machine-wide store; without PersistKeySet
+        // the imported key is owned by the certificate lifetime.
+        var keyFlags = OperatingSystem.IsWindows()
+            ? X509KeyStorageFlags.UserKeySet
+            : X509KeyStorageFlags.EphemeralKeySet;
+        var cert = X509CertificateLoader.LoadPkcs12FromFile(file, password, keyFlags);
         if (!cert.HasPrivateKey || cert.NotBefore.ToUniversalTime() > DateTime.UtcNow ||
             cert.NotAfter.ToUniversalTime() <= DateTime.UtcNow.AddDays(1))
         {
@@ -226,5 +232,11 @@ public sealed class GatewayListenerIsolation : IDisposable
         proxy.GetClusters().Any(cluster =>
             cluster.Destinations.Values.Any(d => d.Health.Active == DestinationHealth.Healthy));
 
-    public void Dispose() => _trafficCertificateRotation?.Dispose();
+    public void Dispose()
+    {
+        _trafficCertificateRotation?.Dispose();
+        _trafficCertificate?.Dispose();
+        _managementCertificate.Dispose();
+        _clientCa.Dispose();
+    }
 }
