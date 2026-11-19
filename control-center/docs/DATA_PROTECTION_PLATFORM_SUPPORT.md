@@ -44,7 +44,13 @@ the Windows service lifecycle is **not supported by this release**.
 ## Linux production configuration requirements
 
 The Linux mode fails startup when these inputs are absent or invalid; it has no
-persistent plaintext fallback:
+persistent plaintext fallback. Before registering certificate wrapping, it
+also checks existing key-ring XML for owner-only permissions, symlinks and an
+encrypted-secret envelope. A legacy plaintext ring is refused without deleting
+or rewriting it. This is a read-only startup format check, not proof that every
+wrapped key decrypts, authentication of the on-disk ring, or anti-rollback.
+Recover an approved protected backup in isolation; do not remove existing
+keys merely to make the service start:
 
 - `YARP_CONTROL_PLANE_DIR`: absolute private root owned by the service identity.
 - `YARP_RUNTIME_CONFIG_PATH`: exactly `config/appsettings.json` beneath that root.

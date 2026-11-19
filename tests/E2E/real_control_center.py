@@ -534,6 +534,29 @@ def acceptance(base:str,https_base:str,origin_port:int):
     operator.request("POST","/admin/api/change-requests",change,expect=423)
     admin.request("POST","/admin/api/setup/freeze",{"frozen":False,
         "reason":"E2E completed maintenance freeze test"})
+    plan={"schemaVersion":1,"payload":payload}
+    before_drafts=admin.request("GET","/admin/api/change-requests")
+    before_backups=admin.request("GET","/admin/api/backups")
+    result=operator.request("POST","/admin/api/gitops/plan",plan)
+    check(result["dryRun"] and result["approvalRequired"] and
+          result["revision"]==initial["revision"] and result["routes"]["added"]==["e2e"] and
+          not result["clusters"]["added"],
+          "versioned GitOps plan reports route additions without returning configuration values")
+    check(operator.request("POST","/admin/api/gitops/plan",plan)==result,
+          "same revision and desired configuration produce identical deterministic plans")
+    viewer.request("POST","/admin/api/gitops/plan",plan,expect=403)
+    operator.request("POST","/admin/api/gitops/plan",plan,csrf=False,expect=403)
+    operator.request("POST","/admin/api/gitops/plan",dict(plan,schemaVersion=2),expect=400)
+    bad=json.loads(json.dumps(plan))
+    bad["payload"]["routes"]["e2e"]["ClusterId"]="missing-cluster"
+    operator.request("POST","/admin/api/gitops/plan",bad,expect=400)
+    stale=json.loads(json.dumps(plan))
+    stale["payload"]["revision"]="0"*64
+    operator.request("POST","/admin/api/gitops/plan",stale,expect=409)
+    check(admin.request("GET","/admin/api/state")["revision"]==initial["revision"] and
+          admin.request("GET","/admin/api/change-requests")==before_drafts and
+          admin.request("GET","/admin/api/backups")==before_backups,
+          "planning never modifies configuration, drafts or backups")
     pending=operator.request("POST","/admin/api/change-requests",change)
     check(pending["status"]=="Pending","operator submitted real configuration draft")
     operator.request("POST",f"/admin/api/change-requests/{pending['id']}/decision",
@@ -544,6 +567,15 @@ def acceptance(base:str,https_base:str,origin_port:int):
     check("e2e" in approved["routes"] and approved["revision"]!=initial["revision"],
         "second admin applied approved route with revision bump")
     eventually(anonymous,"/e2e/real-proxy","e2e-origin:/real-proxy")
+    operator.request("POST","/admin/api/gitops/plan",plan,expect=409)
+    unchanged={"schemaVersion":1,"payload":{key:approved[key] for key in ("routes","clusters","disabled","revision")}}
+    unchanged_plan=operator.request("POST","/admin/api/gitops/plan",unchanged)
+    check(all(not unchanged_plan[section][kind]
+              for section in ("routes","clusters","disabled")
+              for kind in ("added","removed","updated")) and
+          all(unchanged_plan[section]["unchanged"]==len(approved[section])
+              for section in ("routes","clusters","disabled")),
+          "fresh post-approval GitOps plan converges to empty diff and old revision is stale")
     rollback_backup=admin.request("GET","/admin/api/backups")[0]
     verify_destination_admission(base,https_base,admin,reviewer,approved)
     verify_max_connections_per_server(base,admin,reviewer)

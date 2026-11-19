@@ -282,15 +282,22 @@ try
             throw new Exception("FAIL: expected a fresh quorum before replay state loss");
         var savedState = File.ReadAllBytes(statePath);
         File.Delete(statePath);
+        // No incoming report: both existing positive observations would
+        // otherwise remain live at tick 1106 (well inside their age limit).
+        if (recovered.IsHealthy("lab.example.test", "mumbai", 1106) ||
+            recovered.EvidenceCounts(1106) != (0, 0, 0, 3) ||
+            recovered.AgentStatus(1106).Any(status => status.FreshReports != 0) ||
+            File.Exists(statePath))
+            throw new Exception("FAIL: DNS evidence reads did not fence missing replay state during report silence");
         if (recovered.TryAccept(Report("agent-2", 3, "healthy", 1000, 20, signing2), client2,
-                DateTimeOffset.FromUnixTimeSeconds(observed), 107) ||
-            recovered.IsHealthy("lab.example.test", "mumbai", 108) || File.Exists(statePath))
-            throw new Exception("FAIL: detected replay state loss did not withdraw live quorum");
+                DateTimeOffset.FromUnixTimeSeconds(observed), 1107))
+            throw new Exception("FAIL: incoming report accepted after read-side replay state fault");
         File.WriteAllBytes(statePath, savedState);
         if (!OperatingSystem.IsWindows())
             File.SetUnixFileMode(statePath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
         if (recovered.TryAccept(Report("agent-2", 3, "healthy", 1000, 20, signing2), client2,
-                DateTimeOffset.FromUnixTimeSeconds(observed), 109))
+                DateTimeOffset.FromUnixTimeSeconds(observed), 1109) ||
+            recovered.IsHealthy("lab.example.test", "mumbai", 1110))
             throw new Exception("FAIL: replay state fault was silently reset in the running process");
     }
     File.Delete(statePath);
@@ -1089,9 +1096,11 @@ try
         ednsVersion: 0, udpPayloadSize: 512);
     Must((Dns16(edns512Reply,2)&0x0400)!=0 && (Dns16(edns512Reply,2)&0x0200)!=0 &&
          (Dns16(edns512Reply,2)&0xF)==0 && edns512Reply.Length<=512 &&
+         Dns16(edns512Reply,6)==0 && Dns16(edns512Reply,8)==0 &&
+         Dns16(edns512Reply,10)==1 &&
          Dns16(edns512Reply,edns512Reply.Length-10)==41 &&
          Dns16(edns512Reply,edns512Reply.Length-8)==1232,
-         "EDNS 512-byte client budget returns bounded TC while OPT advertises the server's 1232-byte receive size");
+         "EDNS 512-byte client budget omits the entire non-fitting NS RRset, sets TC, and preserves OPT");
     var edns512Retry = await TcpQuery(edns512Request);
     Must((Dns16(edns512Retry,2)&0x0200)==0 && Dns16(edns512Retry,6)==2 &&
          edns512Retry.Length>512 && Dns16(edns512Retry,edns512Retry.Length-8)==1232,

@@ -10,9 +10,11 @@ prove that an address is publicly reachable.
 
 An opt-in HTTP-01 response primitive now serves an exact
 `/.well-known/acme-challenge/{token}` GET from a bounded, process-local table.
-It validates the RFC 8555 token/key-authorization binding, limits entries and
-lifetimes, expires challenges, disables caching, and returns 404 for unknown or
-expired tokens. It has no remote write API or disk persistence. The route is
+It validates the RFC 8555 token/key-authorization binding and binds each
+publication to a normalized eligible DNS hostname. The request Host must match
+that hostname; another host cannot retrieve, replace or remove a live token.
+It limits entries and lifetimes, expires challenges, disables caching, and
+returns 404 for unknown, expired or wrong-host tokens. It has no remote write API or disk persistence. The route is
 disabled by default and requires
 `YARP_ACME_HTTP01_PUBLIC_ENTRYPOINT=true` plus the explicit isolated listener
 configuration; the route checks the configured traffic IP and HTTP port and

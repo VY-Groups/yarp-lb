@@ -66,13 +66,15 @@ public sealed class PeerSyncPublisher : BackgroundService
         // No persisted challenge: learn the current receiver boot from an
         // authenticated HTTPS response, then send a new snapshot next tick.
         var receiverEpoch = "";
+        PeerStateFrame? acknowledged = null;
         while (!stoppingToken.IsCancellationRequested)
         {
             try
             {
                 var now=DateTimeOffset.UtcNow.ToUnixTimeSeconds();
                 var snapshot=journal.Snapshot(now / 60) with { ReceiverEpoch = receiverEpoch };
-                var payload=JsonSerializer.SerializeToUtf8Bytes(snapshot);
+                var frame = PeerDelta.Select(snapshot, acknowledged);
+                var payload=JsonSerializer.SerializeToUtf8Bytes(frame);
                 if (payload.Length > 262144)
                     throw new InvalidOperationException("Peer frame exceeds 256 KiB limit");
                 var (nonce, signature)=signing.Sign(settings.NodeId,now,payload);
@@ -85,6 +87,9 @@ public sealed class PeerSyncPublisher : BackgroundService
                 req.Content.Headers.ContentType=new System.Net.Http.Headers.MediaTypeHeaderValue("application/json");
                 using var result=await factory.CreateClient("peer-sync")
                     .SendAsync(req,HttpCompletionOption.ResponseHeadersRead,stoppingToken);
+                // Only a successful HTTPS response confirms this exact outbound baseline.
+                // No chain of queued deltas: one previous full image is retained, bounded.
+                acknowledged = result.IsSuccessStatusCode ? snapshot : null;
                 if (result.StatusCode == System.Net.HttpStatusCode.Conflict &&
                     result.Headers.TryGetValues(PeerStateJournal.ReceiverEpochHeader, out var values))
                 {
@@ -105,6 +110,7 @@ public sealed class PeerSyncPublisher : BackgroundService
             catch (OperationCanceledException) when(stoppingToken.IsCancellationRequested) { break; }
             catch (Exception ex)
             {
+                acknowledged = null;
                 logger.LogWarning("Peer sync unavailable: {ErrorType}",ex.GetType().Name);
             }
             try
