@@ -43,9 +43,8 @@ files are checked for the same allowlist. Unsafe pre-existing ACLs fail startup
 without being changed. Apply any required migration offline through a reviewed
 procedure that preserves the DPAPI key bytes and validates cookie recovery; no
 automatic ACL or key-ring migration is included. There is no supported Windows
-Service registration script. Until service identity provisioning, installation,
-reboot and recovery are qualified, the Windows service lifecycle is **not
-supported by this release**.
+Service registration script. The Windows service lifecycle is not supported by this release
+until service identity provisioning, installation, reboot and recovery are qualified.
 
 ## Linux production configuration requirements
 
