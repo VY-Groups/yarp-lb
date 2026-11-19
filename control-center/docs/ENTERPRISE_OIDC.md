@@ -1,0 +1,36 @@
+# Enterprise SSO and upstream phishing-resistant MFA (opt-in)
+
+GatewayCore uses the ASP.NET Core OpenID Connect handler for Authorization Code + PKCE, state/correlation, nonce, signature and JWKS rotation. It does not implement a WebAuthn relying party or store passkeys: the configured identity provider must actually verify the RP origin, challenge, user presence and verification and issue a trusted assurance claim. An arbitrary "mfa" AMR is not sufficient.
+
+## Before enabling
+
+1. Provision the local recovery Administrator and enable/test its SMTP OTP before turning on enterprise mode. Create local accounts with the intended role; their password is not usable in enterprise mode. Keep at least two distinct mapped administrators for the existing two-person workflow.
+2. Register a confidential OIDC client at a single HTTPS issuer. Register exactly MANAGEMENT_ORIGIN/admin/oidc/callback. Enable code flow, S256 PKCE, signed ID tokens and an IdP policy that mandates phishing-resistant authentication. Configure the ID token to contain immutable sub, aud, auth_time, acr, amr and groups. Allow only the configured management origin and existing management-side mTLS/IP restrictions. A reverse proxy must not spoof Host or TLS; forwarded headers are not enabled by this feature.
+3. Choose an exact IdP-specific phishing-resistant ACR and one exact method from fido2, webauthn, passkey, hwk. The ACR must be documented by the IdP as requiring phishing-resistant authentication, not merely hardware-key presence. Check the real provider's signed claims; not every IdP emits these claims by default. Unsupported profiles fail closed.
+4. Create an owner-only config and separate client secret file, with absolute paths and protected parent directories. On Windows set service-account/authorized-administrator ACLs; on Linux mode 0600. No real secret in Git or logs.
+
+Set GATEWAY_OIDC_CONFIG_FILE to the absolute JSON configuration file. Example (replace all illustrative values):
+```json
+{
+  "Issuer": "https://idp.example.invalid/realm/gateway",
+  "ClientId": "gateway-control-center",
+  "ClientSecretFile": "/etc/gatewaycore/private/oidc-client-secret",
+  "ManagementOrigin": "https://manage.example.invalid:9443",
+  "RequiredAcr": "urn:example:phishing-resistant",
+  "RequiredAmr": "fido2",
+  "BreakGlassUsername": "recovery",
+  "Accounts": [
+    { "Subject": "immutable-idp-subject-a", "Username": "alice", "Group": "gateway-admins", "Role": "Administrator" },
+    { "Subject": "immutable-idp-subject-b", "Username": "bob", "Group": "gateway-admins", "Role": "Administrator" },
+    { "Subject": "immutable-idp-subject-c", "Username": "operator", "Group": "gateway-operators", "Role": "Operator" }
+  ]
+}
+```
+
+Restart the gateway. The login page offers Enterprise SSO / passkey. A mapped identity maps by exact issuer + immutable subject + required group and matching existing local role; no auto-enrollment, email matching or IdP-asserted privilege elevation. A configured policy requires enterprise sign-in for every normal account; only the named local recovery Administrator can sign in with password plus delivered OTP. The recovery mechanism is a logged, deliberately weaker emergency exception, not FIDO2. Disable the account or revoke its local security stamp to invalidate existing cookies; a policy edit plus restart invalidates previous tickets. Removing the environment setting restores legacy behavior; old enterprise-mode cookies are rejected.
+
+The normal session is limited to 10 minutes after the signed auth_time; every authenticated administrative mutation except logout requires authentication within five minutes. Sign out, sign in again, then explicitly review/retry a denied change; no automatic replay. The existing CSRF, RBAC, local account enable flag, security stamp, rate limit, management isolation and two-person approval remain enforced. No access/refresh/ID tokens stored in local session cookies. This is local session termination, not federated global logout or IdP back-channel revocation; an IdP account/group revocation can take up to the bounded local session lifetime. Immediate provider revocation, live multi-IdP verification, direct WebAuthn and recovery policy acceptance remain open.
+
+## Acceptance boundary
+
+Unit/security CI checks issuer, audience, claim multiplicity, required group, role mapping, assurance method, fresh authentication and local policy changes. The framework supplies protocol-level state, nonce, PKCE, lifetime and signature checks; a disposable HTTPS IdP integration test is necessary to prove callback interoperability and negative paths. Production testing requires actual IdP registration, real passkey authenticator, key rotation/outage, certificate trust and break-glass drill. The data plane is unchanged. Do not enable enterprise mode before staging acceptance.
