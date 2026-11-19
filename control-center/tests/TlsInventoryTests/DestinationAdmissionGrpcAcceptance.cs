@@ -70,7 +70,9 @@ internal static class DestinationAdmissionGrpcAcceptance
         var backendAttempts = new ConcurrentQueue<string>();
         // Trust a unique disposable CA only in the CI account's root store.
         // Never disable shipping outbound certificate validation.
+        Console.WriteLine($"START: {protocol} gRPC origin setup");
         using var originTrust = useHttp3 ? new OriginTrust() : null;
+        Console.WriteLine($"START: {protocol} gRPC origin trust ready");
         var backendPort = useHttp3 ? GetDualTransportPort() : 0;
         var backendBuilder = WebApplication.CreateBuilder();
         backendBuilder.WebHost.ConfigureKestrel(options => options.Listen(IPAddress.Loopback, backendPort, listen =>
@@ -120,7 +122,9 @@ internal static class DestinationAdmissionGrpcAcceptance
                 "duplex origin observes request half-close");
             context.Response.AppendTrailer("grpc-status", "0");
         });
-        await backend.StartAsync();
+        using (var startup = new CancellationTokenSource(TimeSpan.FromSeconds(15)))
+            await backend.StartAsync(startup.Token);
+        Console.WriteLine($"START: {protocol} gRPC origin listening");
         var backendAddress = useHttp3 ? $"https://127.0.0.1:{backendPort}" :
             backend.Services.GetRequiredService<IServer>().Features.Get<IServerAddressesFeature>()!.Addresses.Single();
 
@@ -448,7 +452,10 @@ internal static class DestinationAdmissionGrpcAcceptance
             }
             if (!expectedStop && appProcess.ExitCode != 0)
                 throw new Exception($"GatewayCore process exited with code {appProcess.ExitCode}");
-            await backend.StopAsync();
+            Console.WriteLine($"CLEANUP: {protocol} gRPC origin stopping");
+            using var shutdown = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            await backend.StopAsync(shutdown.Token);
+            Console.WriteLine($"CLEANUP: {protocol} gRPC origin stopped");
         }
 
         static X509Certificate2 CreateCertificate(string subject, bool ca, bool serverAndClient)
@@ -525,10 +532,18 @@ internal static class DestinationAdmissionGrpcAcceptance
     private sealed class OriginTrust : IDisposable
     {
         private readonly X509Certificate2 root;
+        private readonly StoreLocation trustLocation;
         public X509Certificate2 ServerCertificate { get; }
 
         public OriginTrust()
         {
+            // Adding to the Windows CurrentUser Root store can block on a
+            // confirmation dialog in unattended CI. Only a disposable
+            // GitHub-hosted Windows runner may use its machine trust store.
+            if (OperatingSystem.IsWindows() &&
+                Environment.GetEnvironmentVariable("RUNNER_ENVIRONMENT") != "github-hosted")
+                throw new InvalidOperationException("Windows gRPC test trust requires a disposable GitHub-hosted runner");
+            trustLocation = OperatingSystem.IsWindows() ? StoreLocation.LocalMachine : StoreLocation.CurrentUser;
             using var caKey = RSA.Create(2048);
             var ca = new CertificateRequest("CN=GatewayCore CI gRPC " + Guid.NewGuid().ToString("N"),
                 caKey, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
@@ -551,9 +566,11 @@ internal static class DestinationAdmissionGrpcAcceptance
                 OperatingSystem.IsWindows() ? X509KeyStorageFlags.UserKeySet : X509KeyStorageFlags.EphemeralKeySet);
             try
             {
-                using var store = new X509Store(StoreName.Root, StoreLocation.CurrentUser);
+                using var store = new X509Store(StoreName.Root, trustLocation);
                 store.Open(OpenFlags.ReadWrite);
+                Console.WriteLine($"START: installing disposable gRPC CA in {trustLocation} Root");
                 store.Add(root);
+                Console.WriteLine("START: disposable gRPC CA installed");
             }
             catch { ServerCertificate.Dispose(); root.Dispose(); throw; }
         }
@@ -562,9 +579,10 @@ internal static class DestinationAdmissionGrpcAcceptance
         {
             try
             {
-                using var store = new X509Store(StoreName.Root, StoreLocation.CurrentUser);
+                using var store = new X509Store(StoreName.Root, trustLocation);
                 store.Open(OpenFlags.ReadWrite);
                 store.Remove(root);
+                Console.WriteLine("CLEANUP: disposable gRPC CA removed");
             }
             finally { ServerCertificate.Dispose(); root.Dispose(); }
         }
