@@ -1044,9 +1044,11 @@ try
         ednsVersion: 0, udpPayloadSize: 512);
     Must((Dns16(edns512Reply,2)&0x0400)!=0 && (Dns16(edns512Reply,2)&0x0200)!=0 &&
          (Dns16(edns512Reply,2)&0xF)==0 && edns512Reply.Length<=512 &&
+         Dns16(edns512Reply,6)==0 && Dns16(edns512Reply,8)==0 &&
+         Dns16(edns512Reply,10)==1 &&
          Dns16(edns512Reply,edns512Reply.Length-10)==41 &&
          Dns16(edns512Reply,edns512Reply.Length-8)==1232,
-         "EDNS 512-byte client budget returns bounded TC while OPT advertises the server's 1232-byte receive size");
+         "EDNS 512-byte client budget omits the entire non-fitting NS RRset, sets TC, and preserves OPT");
     var edns512Retry = await TcpQuery(edns512Request);
     Must((Dns16(edns512Retry,2)&0x0200)==0 && Dns16(edns512Retry,6)==2 &&
          edns512Retry.Length>512 && Dns16(edns512Retry,edns512Retry.Length-8)==1232,
