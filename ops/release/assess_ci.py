@@ -22,6 +22,8 @@ REQUIRED = (
     "Control Center 0.1 - complete application source checks",
     "v0.1 EOD 750 Mbps single-gateway diagnostic (nonproduction)",
     "YARP 0.1 - L7 build and traffic acceptance",
+    "GSLB authoritative DNS health/failover acceptance",
+    "L4 experimental engine socket acceptance",
     "v0.1 real-socket listener isolation and actual metrics",
     "Windows HA 10-run stability gate",
 )
