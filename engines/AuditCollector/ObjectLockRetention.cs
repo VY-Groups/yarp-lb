@@ -65,7 +65,7 @@ internal sealed class ObjectLockRetention : IAuditRetention, IDisposable
                     BucketName = bucket, Key = key, InputStream = body,
                     ContentType = "application/json", IfNoneMatch = "*",
                     ChecksumSHA256 = Convert.ToBase64String(SHA256.HashData(exactRecord)),
-                    ObjectLockMode = ObjectLockMode.COMPLIANCE, ObjectLockRetainUntilDate = retainUntilUtc
+                    ObjectLockMode = ObjectLockMode.FindValue("COMPLIANCE"), ObjectLockRetainUntilDate = retainUntilUtc
                 }, ct);
                 if (result.HttpStatusCode != HttpStatusCode.OK || !RealVersion(result.VersionId)) return false;
                 version = result.VersionId;
