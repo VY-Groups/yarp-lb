@@ -85,6 +85,7 @@ using (var http = new HttpClient(unauthorized))
             "OAuth provider error body never exposed to operator or logs");
     }
 }
+EnterpriseOidcPolicyTests.Run();
 await ExternalAuditIntentTests.RunAsync();
 Console.WriteLine("PASS: ALL mail provider security checks");
 
