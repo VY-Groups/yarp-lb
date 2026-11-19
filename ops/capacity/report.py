@@ -142,41 +142,7 @@ try:
     for row in rows:
         raw=row["gc_prometheus_raw"]
         heaps=re.findall(r"^yarp_control_gc_heap_bytes ([0-9]+)\r?$",raw,re.M)
-        gen2=re.findall(r'^yarp_control_gc_collections_total\{generation="2"\} ([0-9]+)\r?
-    if start and (times[0]>start+10 or times[-1]<end-10):raise ValueError("missing telemetry time coverage")
-    if any(b-a<=0 or b-a>15 for a,b in zip(times,times[1:])):raise ValueError("telemetry out of order/gaps")
-    for key in ("rx_dropped","tx_dropped","process_cpu_seconds"):
-        values=[float(x[key]) for x in rows]
-        if any(not math.isfinite(x) or x<0 for x in values):raise ValueError("invalid "+key)
-        # Cumulative counters must never roll back within a single evidence
-        # interval. Checking only endpoints could hide a drop followed by reset.
-        if any(b<a for a,b in zip(values,values[1:])):
-            errors.append(f"counter decreased/reset: {key}")
-        if key in ("rx_dropped","tx_dropped") and any(b>a for a,b in zip(values,values[1:])):
-            errors.append(f"NIC drops increased: {key}")
-    for key in ("rss_bytes","threads"):
-        values=[float(x[key]) for x in rows]
-        if any(not math.isfinite(x) or x<=0 for x in values):raise ValueError("invalid "+key)
-    for metric in ("yarp_logging_dropped_total","yarp_logging_dropped_high_priority_total","yarp_logging_write_errors_total"):
-        values=[]
-        for row in rows:
-            matches=re.findall(r"^"+re.escape(metric)+r" ([0-9.]+)$",row["logs_prometheus_raw"],re.M)
-            if len(matches)!=1:raise ValueError("missing/duplicate real metric "+metric)
-            values.append(float(matches[0]))
-        if any(b<a for a,b in zip(values,values[1:])) or values[-1]!=values[0]:
-            errors.append("log drops/writer errors changed: "+metric)
-    telemetry={"node":node,"samples":len(rows),"file":str(args.gateway_csv)}
-except (OSError,ValueError,KeyError,TypeError,IndexError) as e:errors.append("unusable gateway telemetry: "+str(e))
-result={"decision":"NO-GO" if errors else "GO","required_rps":target["rps"],"required_body_gbps":target["gbps"],
-        "min_window_rps":min((x["rps"] for x in window_rows),default=None),
-        "min_window_body_gbps":min((x["body_gbps"] for x in window_rows),default=None),
-        "overlapping_seconds":end-start if start is not None else None,"window_results":window_rows,
-        "gateway_telemetry":telemetry,"error_reasons":errors}
-args.out.parent.mkdir(parents=True,exist_ok=True)
-args.out.write_text(json.dumps(result,indent=2)+"\n")
-print(json.dumps({k:v for k,v in result.items() if k!="window_results"},indent=2))
-sys.exit(bool(errors))
-,raw,re.M)
+        gen2=re.findall(r'^yarp_control_gc_collections_total\{generation="2"\} ([0-9]+)\r?$',raw,re.M)
         if len(heaps)!=1 or len(gen2)!=1:
             raise ValueError("missing/invalid/duplicate real GC heap/Gen2 metrics")
         gc_gen2.append(int(gen2[0]))
