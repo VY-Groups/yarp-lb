@@ -304,7 +304,10 @@ var authorityTargets = config.AuthorityFence is null ? [] : groups.SelectMany(zo
          (reportStore?.IsHealthy(zone.Key, site.AgentSiteId!, nowTick) ?? false))))).ToArray();
 var authorityFenceStore = config.AuthorityFence is null ? null : new AuthorityFenceStore(
     config.AuthorityFence, AuthorityFenceFingerprint.Compute(config.Zones, config.AgentReports,
-        config.ProbeIntervalSeconds, config.MaxConcurrentHealthProbes), authorityTargets);
+        config.ProbeIntervalSeconds, config.MaxConcurrentHealthProbes,
+        groups.Where(pair => pair.Value.Dnssec is not null)
+            .ToDictionary(pair => pair.Key, pair => pair.Value.Dnssec!, StringComparer.OrdinalIgnoreCase)),
+    authorityTargets);
 using var authorityFenceStoreLifetime = authorityFenceStore;
 await using var authorityFenceRuntime = authorityFenceStore is null || config.AuthorityFence is null
     ? null : new AuthorityFenceRuntime(config.AuthorityFence, authorityFenceStore);
