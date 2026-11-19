@@ -54,6 +54,25 @@ var concurrentRouteValues = concurrentTags.Select(tags => (string?)tags.First(x 
 Must(concurrentDimensionBudget.TrackedTuples <= 15 && concurrentRouteValues.Length <= 16 &&
      concurrentRouteValues.Contains("_other", StringComparer.Ordinal),
     "concurrent OTLP dimension registration stays inside named-plus-reserved overflow tuple budget");
+static long MeasureWarmDimensionTagAllocations(GatewayTelemetryDimensionBudget budget)
+{
+    var tags = default(System.Diagnostics.TagList);
+    for (var i = 0; i < 20_000; i++)
+        tags = budget.CreateTags("route_fixed", "cluster_fixed", "destination_fixed", "2xx");
+    GC.Collect();
+    GC.WaitForPendingFinalizers();
+    GC.Collect();
+    var before = GC.GetAllocatedBytesForCurrentThread();
+    for (var i = 0; i < 100_000; i++)
+        tags = budget.CreateTags("route_fixed", "cluster_fixed", "destination_fixed", "2xx");
+    var allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+    GC.KeepAlive(tags);
+    return allocated;
+}
+var allocationMeasurement = MeasureWarmDimensionTagAllocations(new GatewayTelemetryDimensionBudget());
+Console.WriteLine($"DIMENSION_TAG_WARM_ALLOCATIONS bytes={allocationMeasurement} calls=100000 bytes_per_call={allocationMeasurement / 100000.0:F3}");
+Must(allocationMeasurement <= 100_000,
+    "warmed OTLP dimension tag creation stays at or below 1 allocated byte per request after registration");
 using (var privacyActivity = new System.Diagnostics.Activity("privacy-contract"))
 {
     privacyActivity.SetTag("client.address", "203.0.113.8");

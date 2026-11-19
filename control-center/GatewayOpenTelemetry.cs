@@ -261,7 +261,10 @@ internal sealed class GatewayTelemetryDimensionBudget
 {
     public const int MaximumTotalTuples = 4096;
     private readonly int _maximumNamedTuples;
-    private readonly ConcurrentDictionary<string, byte> _tracked = new(StringComparer.Ordinal);
+    // These keys live on the per-request metrics path. Keep them as value tuples
+    // so an already-registered route/cluster/destination doesn't allocate a
+    // composite string for every measurement.
+    private readonly ConcurrentDictionary<(string Route, string Cluster, string Destination), byte> _tracked = new();
     private readonly object _registrationLock = new();
     private volatile bool _saturated;
 
@@ -280,7 +283,7 @@ internal sealed class GatewayTelemetryDimensionBudget
         var route = SafeId(routeId) ? routeId! : "_other";
         var cluster = SafeId(clusterId) ? clusterId! : "_other";
         var destination = SafeId(destinationId) ? destinationId! : "_other";
-        var key = string.Concat(route, "\0", cluster, "\0", destination);
+        var key = (Route: route, Cluster: cluster, Destination: destination);
         if (!_tracked.ContainsKey(key) && !_saturated)
         {
             lock (_registrationLock)
@@ -311,8 +314,16 @@ internal sealed class GatewayTelemetryDimensionBudget
         };
     }
 
-    private static bool SafeId(string? value) => value is { Length: > 0 and <= 80 } &&
-        value.All(c => char.IsAsciiLetterOrDigit(c) || c is '_' or '-');
+    private static bool SafeId(string? value)
+    {
+        if (value is not { Length: > 0 and <= 80 }) return false;
+        // Avoid LINQ over string here: its interface enumerator can allocate on
+        // every proxied request when metric attributes are recorded.
+        foreach (var character in value)
+            if (!char.IsAsciiLetterOrDigit(character) && character is not ('_' or '-'))
+                return false;
+        return true;
+    }
 }
 
 /// <summary>Keep client identifiers, request paths and secrets out of OTLP spans.</summary>
