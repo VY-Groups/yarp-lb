@@ -1,6 +1,6 @@
 rule_files:
   - gateway-alerts.yml
-evaluation_interval: 1m
+evaluation_interval: 5s
 tests:
   - interval: 5s
     input_series:
