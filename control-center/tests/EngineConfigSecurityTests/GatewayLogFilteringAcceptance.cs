@@ -17,7 +17,10 @@ internal static class GatewayLogFilteringAcceptance
         await backend.StartAsync();
         var backendAddress = GetAddress(backendPort);
 
-        var output = new StringWriter(new StringBuilder());
+        // The provider drains log lines on a background thread while this test
+        // polls the capture. StringWriter/StringBuilder are not thread-safe;
+        // concurrent ToString and WriteLine can corrupt the builder on Linux.
+        var output = new SynchronizedCaptureWriter();
         var (gateway, gatewayPort) = BuildGateway(output, backendAddress);
         var accessLogger = gateway.Services.GetRequiredService<ILoggerFactory>()
             .CreateLogger("GatewayCore.AccessLog");
@@ -134,5 +137,23 @@ internal static class GatewayLogFilteringAcceptance
     {
         if (!condition) throw new InvalidOperationException("FAIL: " + description);
         Console.WriteLine("PASS: " + description);
+    }
+
+    private sealed class SynchronizedCaptureWriter : TextWriter
+    {
+        private readonly object sync = new();
+        private readonly StringBuilder content = new();
+
+        public override Encoding Encoding => Encoding.UTF8;
+
+        public override void WriteLine(string? value)
+        {
+            lock (sync) content.AppendLine(value);
+        }
+
+        public override string ToString()
+        {
+            lock (sync) return content.ToString();
+        }
     }
 }
