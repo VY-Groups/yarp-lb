@@ -1,10 +1,11 @@
 import unittest
+from io import BytesIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from instrument_lab_stats import ADDITION, ANCHOR, instrument
 from report import build_report
-from run_paired_profile import measurement as parse_measurement
+from run_paired_profile import _drain_bounded_log, measurement as parse_measurement
 
 
 def measurement(alloc, *, rps=100.0, p95=30.0, p99=50.0, errors=0):
@@ -161,6 +162,16 @@ class ReportTests(unittest.TestCase):
             path.write_text("no known anchor\n", encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "exactly one"):
                 instrument(source)
+
+    def test_process_log_is_capped_and_stream_is_drained(self):
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "process.log"
+            source = BytesIO(b"x" * 100)
+            _drain_bounded_log(source, path, limit=16)
+            value = path.read_bytes()
+            self.assertTrue(value.startswith(b"x" * 16))
+            self.assertIn(b"truncated at 16 bytes", value)
+            self.assertEqual(source.read(), b"")
 
 
 if __name__ == "__main__":

@@ -10,6 +10,7 @@ import signal
 import statistics
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -35,13 +36,44 @@ def request_json(url: str, timeout: float = 2.0) -> dict:
     return value
 
 
-def wait_for(label: str, callback, processes: list[subprocess.Popen], timeout: float = 90.0):
+def _drain_bounded_log(pipe, path: Path, limit: int = 1024 * 1024) -> None:
+    written = 0
+    truncated = False
+    with path.open("wb") as output:
+        while True:
+            chunk = pipe.read(64 * 1024)
+            if not chunk:
+                break
+            remaining = limit - written
+            if remaining > 0:
+                output.write(chunk[:remaining])
+                written += min(len(chunk), remaining)
+            if len(chunk) > max(remaining, 0):
+                truncated = True
+        if truncated:
+            output.write(f"\n[process log truncated at {limit} bytes; stream fully drained]\n".encode())
+
+
+def wait_for(label: str, callback, processes: list[subprocess.Popen],
+             log_paths: dict[int, Path] | None = None,
+             log_threads: dict[int, threading.Thread] | None = None,
+             timeout: float = 90.0):
     deadline = time.monotonic() + timeout
     last_error = "not ready"
     while time.monotonic() < deadline:
         for process in processes:
             if process.poll() is not None:
-                raise RuntimeError(f"{label}: lab process exited with {process.returncode}")
+                thread = (log_threads or {}).get(process.pid)
+                if thread is not None:
+                    thread.join(timeout=1)
+                log_path = (log_paths or {}).get(process.pid)
+                tail = ""
+                if log_path is not None and log_path.is_file():
+                    tail = log_path.read_text(encoding="utf-8", errors="replace")[-4000:]
+                details = f"; see {log_path}" if log_path else ""
+                if tail:
+                    details += "\n" + tail
+                raise RuntimeError(f"{label}: lab process exited with {process.returncode}{details}")
         try:
             value = callback()
             if value:
@@ -108,6 +140,8 @@ class Lab:
         self.source = source
         self.output = output
         self.processes: list[subprocess.Popen] = []
+        self.log_threads: dict[int, threading.Thread] = {}
+        self.log_paths: dict[int, Path] = {}
         self.env = os.environ.copy()
         gateway_bin = source / "tests/L7/GatewayLab/bin/Release/net10.0"
         backend_bin = source / "tests/L7/BackendLab/bin/Release/net10.0"
@@ -118,32 +152,41 @@ class Lab:
         self.env["YARP_LAB_HTTP_PORT"] = str(GATEWAY_PORT)
         self.env["YARP_LAB_TLS_PORT"] = "18443"
         try:
-            self.processes.append(subprocess.Popen(
-                ["dotnet", str(backend_bin / "BackendLab.dll"), str(BACKEND_A_PORT), "A"],
-                cwd=backend_bin, env=self.env, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT))
-            self.processes.append(subprocess.Popen(
-                ["dotnet", str(backend_bin / "BackendLab.dll"), str(BACKEND_B_PORT), "B"],
-                cwd=backend_bin, env=self.env, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT))
+            self._start(["dotnet", str(backend_bin / "BackendLab.dll"), str(BACKEND_A_PORT), "A"],
+                        backend_bin, "backend-a")
+            self._start(["dotnet", str(backend_bin / "BackendLab.dll"), str(BACKEND_B_PORT), "B"],
+                        backend_bin, "backend-b")
             wait_for("backend readiness", lambda: (
                 request_json(f"{BASE_URL}:{BACKEND_A_PORT}/health/ready").get("ready") is True and
                 request_json(f"{BASE_URL}:{BACKEND_B_PORT}/health/ready").get("ready") is True),
-                self.processes)
-            self.processes.append(subprocess.Popen(
-                ["dotnet", str(gateway_bin / "GatewayLab.dll")], cwd=gateway_bin,
-                env=self.env, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT))
+                self.processes, self.log_paths, self.log_threads)
+            self._start(["dotnet", str(gateway_bin / "GatewayLab.dll")], gateway_bin, "gateway")
             wait_for("gateway listener", lambda: request_json(f"{BASE_URL}:{GATEWAY_PORT}/lab/stats"),
-                     self.processes)
+                     self.processes, self.log_paths, self.log_threads)
             wait_for("gateway active health", lambda: request_json(f"{BASE_URL}:{GATEWAY_PORT}/api/identity"),
-                     self.processes)
+                     self.processes, self.log_paths, self.log_threads)
         except Exception:
             self.close()
             raise
+
+    def _start(self, command: list[str], cwd: Path, label: str) -> None:
+        log_path = self.output / f"{label}.log"
+        process = subprocess.Popen(command, cwd=cwd, env=self.env,
+                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        thread = threading.Thread(target=_drain_bounded_log,
+                                  args=(process.stdout, log_path), daemon=True)
+        thread.start()
+        self.processes.append(process)
+        self.log_threads[process.pid] = thread
+        self.log_paths[process.pid] = log_path
 
     def stats(self) -> dict:
         return request_json(f"{BASE_URL}:{GATEWAY_PORT}/lab/stats")
 
     def close(self) -> None:
         stop_processes(self.processes)
+        for thread in self.log_threads.values():
+            thread.join(timeout=2)
 
     def __enter__(self):
         return self
