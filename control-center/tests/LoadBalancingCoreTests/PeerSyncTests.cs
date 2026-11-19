@@ -39,6 +39,11 @@ public static class PeerSyncTests
         Check(System.Text.Json.JsonDocument.Parse(serializedFrame).RootElement
                   .GetProperty("ProtocolVersion").GetInt32() == PeerStateFrame.CurrentProtocolVersion,
             "peer snapshots carry an explicit protocol version");
+        var frameJson = System.Text.Json.JsonDocument.Parse(serializedFrame).RootElement;
+        Check(frameJson.GetProperty("TableId").GetString() == PeerStateTableContract.TableId &&
+              frameJson.GetProperty("TableVersion").GetInt32() == PeerStateTableContract.TableVersion &&
+              frameJson.GetProperty("EntryTtlSeconds").GetInt32() == PeerStateTableContract.EntryTtlSeconds,
+            "peer snapshots carry a typed table schema and bounded entry TTL");
         var missingVersionRejected = false;
         try
         {
@@ -47,10 +52,23 @@ public static class PeerSyncTests
         }
         catch (System.Text.Json.JsonException) { missingVersionRejected = true; }
         Check(missingVersionRejected, "unversioned legacy peer frames are rejected");
+        var missingTableContractRejected = false;
+        try
+        {
+            _ = System.Text.Json.JsonSerializer.Deserialize<PeerStateFrame>(
+                "{\"NodeId\":\"node-a\",\"Minute\":1,\"Sequence\":1,\"Counters\":{},\"SourceEpoch\":1,\"ProtocolVersion\":2}");
+        }
+        catch (System.Text.Json.JsonException) { missingTableContractRejected = true; }
+        Check(missingTableContractRejected, "peer frames missing required table contract are rejected");
         Check(!b.Apply(frame with { ProtocolVersion = PeerStateFrame.CurrentProtocolVersion + 1 }, now),
             "unknown peer protocol versions are rejected without changing state");
         Check(b.PeerTelemetry(now) == (0, 0L),
             "unknown peer protocol version leaves receiver telemetry unchanged");
+        Check(!b.Apply(frame with { TableId = "unknown-table" }, now) &&
+              !b.Apply(frame with { TableVersion = PeerStateTableContract.TableVersion + 1 }, now) &&
+              !b.Apply(frame with { EntryTtlSeconds = PeerStateTableContract.EntryTtlSeconds + 1 }, now) &&
+              b.RetainedRemoteEntries == 0,
+            "unknown table, schema version, and TTL are rejected without retaining state");
         Check(frame.Counters.Count==1 && frame.Counters.Values.Single()==2,
             "IPv4 and mapped IPv6 share one hashed identity");
         Check(!frame.Counters.Keys.Single().Contains("10.123"),"no plaintext peer IP transmitted");
@@ -72,13 +90,13 @@ public static class PeerSyncTests
         clock = monotonicClock.GetUtcNow();
         Check(!ageLimited.Status(now).RemoteReportedInCurrentMinute &&
               ageLimited.Status(now).RemoteIdentities == 0 &&
-              ageLimited.PeerTelemetry(now)==(0,0L),
-            "monotonic TTL expires remote frame within the same minute");
+              ageLimited.PeerTelemetry(now)==(0,0L) && ageLimited.RetainedRemoteEntries == 0,
+            "monotonic TTL expires and collects remote frame within the same minute");
         Check(!ageLimited.Apply(frame,now),
             "expired frame cannot be replayed to revive stale counters");
         var recovered = a.Snapshot(now);
         Check(ageLimited.Apply(recovered,now) &&
-              ageLimited.PeerTelemetry(now)==(1,2L),
+              ageLimited.PeerTelemetry(now)==(1,2L) && ageLimited.RetainedRemoteEntries == 1,
             "new higher-sequence frame restores live remote telemetry");
         clock = clock.AddHours(-1);
         monotonicClock.SetUtcNow(clock);
@@ -87,6 +105,8 @@ public static class PeerSyncTests
         monotonicClock.Advance(TimeSpan.FromSeconds(7));
         Check(!ageLimited.Status(now).RemoteReportedInCurrentMinute,
             "monotonic TTL expires telemetry despite wall-clock rollback");
+        Check(ageLimited.RetainedRemoteEntries == 0,
+            "monotonic expiry collects remote state while preserving replay high-water marks");
         var invalidFreshness = false;
         try { _ = new PeerStateJournal("node-b","node-a",secret,2,
                           TimeSpan.FromSeconds(61)); }
@@ -158,6 +178,23 @@ public static class PeerSyncTests
             "old boot epoch cannot replay an obsolete snapshot after recovery");
 
         Check(b.PeerTelemetry(now+1)==(0,0L),"stale peer telemetry expires from current minute");
+
+        var localGc = new PeerStateJournal("node-a", "node-b", secret, 2);
+        localGc.Observe(IPAddress.Parse("10.123.4.11"), now);
+        Check(localGc.RetainedLocalEntries == 1, "local peer table retains current-minute entry");
+        _ = localGc.Status(now + 1);
+        Check(localGc.RetainedLocalEntries == 0,
+            "local table is collected at the first observation boundary after its minute TTL");
+
+        var remoteMinuteGcSource = new PeerStateJournal("node-a", "node-b", secret, 2);
+        remoteMinuteGcSource.Observe(IPAddress.Parse("10.123.4.12"), now);
+        var remoteMinuteGc = new PeerStateJournal("node-b", "node-a", secret, 2);
+        Check(remoteMinuteGc.Apply(remoteMinuteGcSource.Snapshot(now), now) &&
+              remoteMinuteGc.RetainedRemoteEntries == 1,
+            "remote peer table retains accepted current-minute entry");
+        _ = remoteMinuteGc.Status(now + 1);
+        Check(remoteMinuteGc.RetainedRemoteEntries == 0,
+            "remote table is collected after its declared minute TTL");
 
         var maxFrame = new PeerStateJournal("node-a", "node-b", secret, 2048);
         for (var i = 0; i < 2048; i++)
