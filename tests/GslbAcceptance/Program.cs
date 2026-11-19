@@ -1017,7 +1017,23 @@ try
     var (_, badVers) = await QueryWire("app.integration.test",1,ednsVersion:1);
     Must(Dns16(badVers,6)==0 && Dns16(badVers,10)==1 &&
          badVers[^6]==1,"EDNS version mismatch signals BADVERS, without A answer");
+    // RFC 1035: a legal 255-octet QNAME includes the label length octets
+    // and the root terminator. More than 32 short labels are also legal.
+    var maxWireName = string.Join(".", new[] { new string('a', 63), new string('b', 63),
+        new string('c', 63), new string('d', 61) });
+    var manyLabels = string.Join(".", Enumerable.Repeat("x", 127));
+    foreach (var legalName in new[] { maxWireName, manyLabels })
+    {
+        var (legalRequest, legalUdp) = await QueryWire(legalName, 1);
+        Must(legalRequest.Length == 12 + 255 + 4, "fixture reaches exact DNS wire-name limit");
+        var legalTcp = await TcpQuery(legalRequest);
+        Must((Dns16(legalUdp, 2) & 0xF) == 5 && (Dns16(legalTcp, 2) & 0xF) == 5,
+            "valid maximum-length out-of-zone QNAME receives REFUSED over UDP and TCP");
+    }
+    var oversizedName = DnsRequest(maxWireName + "d", 1);
     var malformedBase = DnsRequest("app.integration.test",1);
+    var nonAsciiName = (byte[])malformedBase.Clone();
+    nonAsciiName[13] = 0xFF;
     var noQuestions = (byte[])malformedBase.Clone();
     BinaryPrimitives.WriteUInt16BigEndian(noQuestions.AsSpan(4,2),0);
     var multipleQuestions = (byte[])malformedBase.Clone();
@@ -1035,6 +1051,8 @@ try
         (noQuestions,"zero-question frame"),
         (multipleQuestions,"multiple-question frame"),
         (badLabel,"oversized DNS label"),
+        (oversizedName,"256-octet DNS wire name"),
+        (nonAsciiName,"unsupported non-ASCII owner octet"),
         (compressedQuestion,"compressed question name"),
         (trailingData,"unaccounted trailing byte"),
         (multipleAdditionals,"multiple additional records"),
