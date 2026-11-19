@@ -181,6 +181,19 @@
       "targets": [{"expr": "yarp_control_destination_telemetry_untracked_requests_total{job=~\"$job\"}", "legendFormat": "{{instance}} untracked destination requests", "refId": "A"}],
       "title": "Destination telemetry cardinality overflow",
       "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "gatewaycore-prometheus"},
+      "description": "Approximate unavailable seconds across the last hour, computed as failed samples times the documented 10-second probe cadence. It is a sampled user-visible interruption measure; short gaps may be undercounted and this does not identify the failover mechanism.",
+      "fieldConfig": {"defaults": {"unit": "s", "min": 0}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 56},
+      "id": 15,
+      "options": {"legend": {"displayMode": "table", "placement": "bottom"}, "tooltip": {"mode": "multi"}},
+      "targets": [
+        {"expr": "sum by (service,region) (sum_over_time((probe_success{job=\"gatewaycore-availability\"} == bool 0)[1h:10s])) * 10", "legendFormat": "{{service}} {{region}} unavailable seconds / 1h", "refId": "A"}
+      ],
+      "title": "Observed external interruption time (rolling 1h)",
+      "type": "timeseries"
     }
   ],
   "refresh": "30s",

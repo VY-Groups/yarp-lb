@@ -84,6 +84,18 @@ customer's Alertmanager to its real operator channel; promtool tests validate
 rule behavior only. The monitoring endpoint must not be exposed through the
 public gateway listener.
 
+`GatewayFailoverRecoveryExceeded` is a short-window warning that a successful
+external probe has not returned for more than the 10-second planning budget.
+Its dedicated rule group evaluates every five seconds, while the external
+probe is expected every ten seconds. Actual notification delay also includes
+probe timeout, scrape timing, rule evaluation and Alertmanager delivery. It
+reports sampled user-visible unavailability; it cannot attribute the event to
+a particular gateway or prove that automatic failover was attempted. The
+Grafana interruption panel estimates failed seconds in the rolling hour as
+failed probe samples multiplied by the configured 10-second cadence, so gaps
+shorter than that cadence can be undercounted. Neither measure is a substitute
+for a controlled, timestamped failover drill.
+
 Evidence record per outage: incident ID, UTC start/end, affected region and
 service, failed probe samples, user-visible request impact, alert delivery
 time, node/backend state, DNS behavior, recovery action, and follow-up issue.

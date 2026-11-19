@@ -1,7 +1,28 @@
 rule_files:
   - gateway-alerts.yml
-evaluation_interval: 1m
+evaluation_interval: 5s
 tests:
+  - interval: 5s
+    input_series:
+      - series: 'probe_success{job="gatewaycore-availability",instance="probe-south",service="gatewaycore-http",region="ap-south-1"}'
+        values: '0 0 0 0 0 0'
+    alert_rule_test:
+      - eval_time: 15s
+        alertname: GatewayFailoverRecoveryExceeded
+        exp_alerts:
+          - exp_labels: {job: gatewaycore-availability, instance: probe-south, service: gatewaycore-http, region: ap-south-1, severity: critical}
+            exp_annotations:
+              summary: "GatewayCore service has not recovered within the 10-second failover budget"
+              description: "Independent probe probe-south has continuously observed gatewaycore-http unavailable in ap-south-1. This is user-visible outage duration; check gateway health, ingress, and DNS. The probe cannot identify which failover mechanism failed."
+              runbook: "control-center/docs/AVAILABILITY_SLO.md"
+  - interval: 5s
+    input_series:
+      - series: 'probe_success{job="gatewaycore-availability",instance="probe-south",service="gatewaycore-http",region="ap-south-1"}'
+        values: '0 0 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 15s
+        alertname: GatewayFailoverRecoveryExceeded
+        exp_alerts: []
   - interval: 1m
     input_series:
       - series: 'up{job="gatewaycore-gateway",instance="gateway-01"}'
