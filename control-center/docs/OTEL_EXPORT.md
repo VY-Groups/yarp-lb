@@ -1,6 +1,6 @@
 # OpenTelemetry export
 
-GatewayCore can export ASP.NET Core request spans, YARP proxy child spans, ASP.NET Core metrics, runtime metrics, bounded proxy request count/latency metrics, and structured access logs to an OTLP/HTTP protobuf collector. This is opt-in; without `YARP_OTEL_ENDPOINT`, no OpenTelemetry providers are registered.
+GatewayCore can export ASP.NET Core request spans, YARP proxy child spans, ASP.NET Core metrics, runtime metrics, bounded proxy request count/latency metrics, and structured access logs to an OTLP/HTTP protobuf collector. Proxy request count and duration metrics include validated configured route, cluster and destination IDs plus a fixed HTTP status class. At most 4,096 distinct route/cluster/destination tuples are retained per process; later tuples are aggregated into one `_other` tuple. This bounds proxy-metric identity cardinality independently of traffic volume. This is opt-in; without `YARP_OTEL_ENDPOINT`, no OpenTelemetry providers are registered.
 
 ## Configuration
 
