@@ -252,6 +252,7 @@ Must(invalidPins, "invalid configured controller thumbprint rejects startup");
 await AgentTlsNegativeAcceptance.RunAsync();
 GslbAgentReportStatusParserTests.Run();
 await AgentLabCaTlsAcceptance.RunAsync();
+await AgentFleetRotationAcceptance.RunAsync();
 if (OperatingSystem.IsLinux() || OperatingSystem.IsWindows())
     await AgentCrlAcceptance.RunAsync();
 if (OperatingSystem.IsWindows())
