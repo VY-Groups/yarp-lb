@@ -71,7 +71,7 @@ internal static class DestinationAdmissionHttp3Acceptance
             backendReady.TrySetResult();
             try
             {
-                await Task.Delay(TimeSpan.FromMilliseconds(650), context.RequestAborted);
+                await Task.Delay(TimeSpan.FromMilliseconds(1500), context.RequestAborted);
                 await context.Response.WriteAsync(id, context.RequestAborted);
             }
             finally { Interlocked.Decrement(ref backendInFlight); }
@@ -186,6 +186,17 @@ internal static class DestinationAdmissionHttp3Acceptance
                 EnableMultipleHttp2Connections = true
             };
             using var client = new HttpClient(handler) { Timeout = Timeout.InfiniteTimeSpan };
+            using var managementHandler = new SocketsHttpHandler
+            {
+                UseProxy = false,
+                SslOptions = new SslClientAuthenticationOptions
+                {
+                    EnabledSslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13,
+                    RemoteCertificateValidationCallback = (_, _, _, _) => true,
+                    ClientCertificates = new X509CertificateCollection { managementCert }
+                }
+            };
+            using var managementClient = new HttpClient(managementHandler) { Timeout = Timeout.InfiniteTimeSpan };
             var endpoint = new Uri($"https://127.0.0.1:{tlsPort}/admit/slow");
             using (var discoveryWarmup = new HttpRequestMessage(HttpMethod.Get,
                 $"https://127.0.0.1:{tlsPort}/gateway/health")
@@ -241,6 +252,24 @@ internal static class DestinationAdmissionHttp3Acceptance
                     await Task.Delay(10, timeout.Token);
             }
 
+            async Task WaitForServerCancellationAsync()
+            {
+                using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+                var metricsEndpoint = new Uri($"https://127.0.0.2:{metricsPort}/gateway/metrics");
+                while (true)
+                {
+                    using var request = new HttpRequestMessage(HttpMethod.Get, metricsEndpoint)
+                    { Version = HttpVersion.Version11, VersionPolicy = HttpVersionPolicy.RequestVersionExact };
+                    using var response = await managementClient.SendAsync(request, timeout.Token);
+                    var body = await response.Content.ReadAsStringAsync(timeout.Token);
+                    if (response.IsSuccessStatusCode && body.Split('\n').Any(line =>
+                            line.StartsWith("yarp_control_destination_admission_waiter_canceled_total{", StringComparison.Ordinal) &&
+                            line.TrimEnd().EndsWith(" 1", StringComparison.Ordinal)))
+                        return;
+                    await Task.Delay(25, timeout.Token);
+                }
+            }
+
             var firstTask = Send("active");
             await backendReady.Task.WaitAsync(TimeSpan.FromSeconds(12));
             var secondTask = Send("queued");
@@ -272,6 +301,7 @@ internal static class DestinationAdmissionHttp3Acceptance
             try { using var unexpected = await cancelWaiterTask; }
             catch (OperationCanceledException) { cancellationObserved = true; }
             Check(cancellationObserved, "HTTP/3 client cancellation terminates a queued POST");
+            await WaitForServerCancellationAsync();
             var afterCancellationTask = Send("after-cancel");
             await Task.Delay(100);
             Check(!afterCancellationTask.IsCompleted,
