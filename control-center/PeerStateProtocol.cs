@@ -1,12 +1,20 @@
 using System.Net;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json.Serialization;
 
 /// <summary>Bounded, eventually consistent two-node telemetry; never a strict
 /// global rate limiter. The Redis atomic quota remains the admission authority.</summary>
 public sealed record PeerStateFrame(string NodeId, long Minute, long Sequence,
     Dictionary<string,int> Counters)
 {
+    // The receiver deliberately accepts only the protocol version it knows.
+    // This is a compatibility fence: rollout must keep both peers on the same
+    // version until an explicit negotiation/upgrade protocol is introduced.
+    public const int CurrentProtocolVersion = 1;
+    [JsonRequired]
+    public int ProtocolVersion { get; init; } = CurrentProtocolVersion;
+
     // Boot epoch allows full resynchronization when a peer process restarts.
     public long SourceEpoch { get; init; }
 }
@@ -97,7 +105,8 @@ public sealed class PeerStateJournal
 
     public bool Apply(PeerStateFrame? frame, long currentMinute)
     {
-        if (frame is null || frame.NodeId != remoteId ||
+        if (frame is null || frame.ProtocolVersion != PeerStateFrame.CurrentProtocolVersion ||
+            frame.NodeId != remoteId ||
             frame.Minute != currentMinute || frame.Sequence <= 0 || frame.SourceEpoch <= 0 ||
             frame.Counters is null || frame.Counters.Count > maxIdentities ||
             frame.Counters.Any(p => p.Key.Length != 64 ||

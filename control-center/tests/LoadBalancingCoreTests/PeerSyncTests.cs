@@ -35,6 +35,22 @@ public static class PeerSyncTests
         a.Observe(client,now);
         a.Observe(IPAddress.Parse("::ffff:10.123.4.5"),now);
         var frame=a.Snapshot(now);
+        var serializedFrame = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(frame);
+        Check(System.Text.Json.JsonDocument.Parse(serializedFrame).RootElement
+                  .GetProperty("ProtocolVersion").GetInt32() == PeerStateFrame.CurrentProtocolVersion,
+            "peer snapshots carry an explicit protocol version");
+        var missingVersionRejected = false;
+        try
+        {
+            _ = System.Text.Json.JsonSerializer.Deserialize<PeerStateFrame>(
+                "{\"NodeId\":\"node-a\",\"Minute\":1,\"Sequence\":1,\"Counters\":{},\"SourceEpoch\":1}");
+        }
+        catch (System.Text.Json.JsonException) { missingVersionRejected = true; }
+        Check(missingVersionRejected, "unversioned legacy peer frames are rejected");
+        Check(!b.Apply(frame with { ProtocolVersion = PeerStateFrame.CurrentProtocolVersion + 1 }, now),
+            "unknown peer protocol versions are rejected without changing state");
+        Check(b.PeerTelemetry(now) == (0, 0L),
+            "unknown peer protocol version leaves receiver telemetry unchanged");
         Check(frame.Counters.Count==1 && frame.Counters.Values.Single()==2,
             "IPv4 and mapped IPv6 share one hashed identity");
         Check(!frame.Counters.Keys.Single().Contains("10.123"),"no plaintext peer IP transmitted");
