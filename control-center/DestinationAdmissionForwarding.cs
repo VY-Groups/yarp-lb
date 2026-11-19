@@ -1,6 +1,19 @@
 /// <summary>Guards a queued request against forwarding to a destination that changed after selection.</summary>
 public static class DestinationAdmissionForwarding
 {
+    // Cancellation may win just after the queue completes but before its
+    // asynchronous continuation runs. A granted lease is not permission
+    // to forward a timed-out, aborted or stopping request.
+    public static DestinationAdmissionFailure FailureAfterGrant(
+        CancellationToken requestAborted, CancellationToken applicationStopping,
+        CancellationToken queueWait)
+    {
+        if (requestAborted.IsCancellationRequested) return DestinationAdmissionFailure.ClientAborted;
+        if (applicationStopping.IsCancellationRequested) return DestinationAdmissionFailure.ServiceStopping;
+        if (queueWait.IsCancellationRequested) return DestinationAdmissionFailure.QueueTimeout;
+        return DestinationAdmissionFailure.None;
+    }
+
     /// <summary>
     /// A queued request is bound to its original destination. Recheck the current
     /// available set after the permit is granted; never transfer it to another
