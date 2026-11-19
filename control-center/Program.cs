@@ -1890,7 +1890,26 @@ app.MapReverseProxy(proxyPipeline =>
             // Do not transfer the request to a different backend. If a queued
             // destination was removed, drained or made unhealthy, fail locally.
             var lookup = context.RequestServices.GetRequiredService<IProxyStateLookup>();
-            if (context.RequestAborted.IsCancellationRequested) return;
+            var failureAfterGrant = DestinationAdmissionForwarding.FailureAfterGrant(
+                context.RequestAborted,
+                context.RequestServices.GetRequiredService<IHostApplicationLifetime>().ApplicationStopping,
+                waitCancellation.Token);
+            if (failureAfterGrant == DestinationAdmissionFailure.ClientAborted) return;
+            if (failureAfterGrant != DestinationAdmissionFailure.None)
+            {
+                context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+                if (failureAfterGrant == DestinationAdmissionFailure.ServiceStopping)
+                    context.Response.Headers["X-GatewayCore-Rejection"] = "gateway_shutdown";
+                else
+                {
+                    state.RecordTimeout();
+                    context.Response.Headers["X-GatewayCore-Rejection"] = "destination_queue_timeout";
+                }
+                return;
+            }
+            // The timer is for admission only; it must not govern a
+            // long-lived HTTP/2, gRPC, WebSocket or streaming response.
+            waitCancellation.CancelAfter(Timeout.Infinite);
             if (!lookup.TryGetCluster(clusterId, out var currentCluster) ||
                 !DestinationAdmissionForwarding.IsStillEligibleAfterWait(
                     selected.DestinationId,
