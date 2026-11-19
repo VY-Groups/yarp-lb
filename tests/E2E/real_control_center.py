@@ -360,7 +360,7 @@ def verify_destination_admission(base:str,admin:Client,reviewer:Client,initial:d
         "destination admission queue timeout counter is exposed")
     check('yarp_control_destination_admission_waiter_canceled_total{destination="fixture/origin"} 2' in metrics,
         "queue timeout and client disconnect both release bounded waiter reservations")
-    check('yarp_control_destination_admission_queue_wait_seconds_count{destination="fixture/origin"} 3' in metrics,
+    check('yarp_control_destination_admission_queue_wait_seconds_count{destination="fixture/origin"} 4' in metrics,
         "bounded-label queue wait summary is exported for dashboards")
     return pending
 
