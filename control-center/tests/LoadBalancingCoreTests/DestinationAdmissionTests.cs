@@ -80,6 +80,38 @@ public static class DestinationAdmissionTests
             throw new Exception("FAIL: next waiter should receive the released permit");
         next.Dispose();
 
+        var grantRaceGate = new DestinationAdmissionState(new DestinationAdmissionPolicy(1, 1, 5000));
+        using (var raceHeld = await grantRaceGate.AcquireAsync(CancellationToken.None) ??
+            throw new Exception("FAIL: grant/cancellation race fixture"))
+        using (var raceAbort = new CancellationTokenSource())
+        using (var raceShutdown = new CancellationTokenSource())
+        using (var raceTimeout = CancellationTokenSource.CreateLinkedTokenSource(raceAbort.Token, raceShutdown.Token))
+        {
+            var raceWaiter = grantRaceGate.AcquireAsync(raceTimeout.Token).AsTask();
+            raceHeld.Dispose();
+            using (var granted = await raceWaiter.WaitAsync(TimeSpan.FromSeconds(2)) ??
+                throw new Exception("FAIL: race waiter must receive a permit"))
+            {
+                Check(DestinationAdmissionForwarding.FailureAfterGrant(raceAbort.Token,
+                    raceShutdown.Token, raceTimeout.Token) == DestinationAdmissionFailure.None,
+                    "uncanceled granted request remains eligible");
+                raceTimeout.Cancel();
+                Check(DestinationAdmissionForwarding.FailureAfterGrant(raceAbort.Token,
+                    raceShutdown.Token, raceTimeout.Token) == DestinationAdmissionFailure.QueueTimeout,
+                    "queue timeout after grant fences forwarding");
+                raceShutdown.Cancel();
+                Check(DestinationAdmissionForwarding.FailureAfterGrant(raceAbort.Token,
+                    raceShutdown.Token, raceTimeout.Token) == DestinationAdmissionFailure.ServiceStopping,
+                    "shutdown wins over queue timeout after grant");
+                raceAbort.Cancel();
+                Check(DestinationAdmissionForwarding.FailureAfterGrant(raceAbort.Token,
+                    raceShutdown.Token, raceTimeout.Token) == DestinationAdmissionFailure.ClientAborted,
+                    "client abort wins over other rejection causes");
+            }
+            Check(grantRaceGate.Snapshot is { InFlight: 0, Queued: 0 },
+                "post-grant cancellation rejection releases the lease and queue slot");
+        }
+
         var drainGate = new DestinationAdmissionState(new DestinationAdmissionPolicy(1, 1, 5000));
         using var activeOnEast = await drainGate.AcquireAsync(CancellationToken.None) ??
             throw new Exception("FAIL: selected destination permit should be acquired");
