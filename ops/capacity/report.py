@@ -141,9 +141,21 @@ try:
     node=s["isolated_gateway"]
     if any(x["gateway_node"]!=node for x in rows):raise ValueError("wrong embedded gateway identity")
     if len({(x["process_id"],x["process_start_utc"]) for x in rows})!=1:raise ValueError("process restarted")
-    if any("yarp_control_gc_collections_total" not in x["gc_prometheus_raw"] or "yarp_control_gc_heap_bytes" not in x["gc_prometheus_raw"] for x in rows):
-        raise ValueError("missing real GC heap/Gen2 metrics")
+    # Metric names in HELP comments or malformed samples are not evidence.
+    # The shipping exporter emits integer heap bytes and generation counters.
+    gc_gen2=[]
+    for row in rows:
+        raw=row["gc_prometheus_raw"]
+        heaps=re.findall(r"^yarp_control_gc_heap_bytes ([0-9]+)\r?$",raw,re.M)
+        gen2=re.findall(r'^yarp_control_gc_collections_total\{generation="2"\} ([0-9]+)\r?$',raw,re.M)
+        if len(heaps)!=1 or len(gen2)!=1:
+            raise ValueError("missing/invalid/duplicate real GC heap/Gen2 metrics")
+        gc_gen2.append(int(gen2[0]))
+    if any(b<a for a,b in zip(gc_gen2,gc_gen2[1:])):
+        errors.append("counter decreased/reset: GC generation 2 collections")
     times=[stamp(x["timestamp_utc"]) for x in rows]
+    if int(rows[0]["process_id"])<=0 or stamp(rows[0]["process_start_utc"])>times[0]:
+        raise ValueError("invalid process identity/start time")
     if start and (times[0]>start+10 or times[-1]<end-10):raise ValueError("missing telemetry time coverage")
     if any(b-a<=0 or b-a>15 for a,b in zip(times,times[1:])):raise ValueError("telemetry out of order/gaps")
     for key in ("rx_dropped","tx_dropped","process_cpu_seconds"):
