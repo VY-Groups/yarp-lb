@@ -36,6 +36,11 @@ if (!OperatingSystem.IsLinux() || ec2Lab)
 var keyDir = Path.Combine(privateDir, "data-protection-keys");
 if (!OperatingSystem.IsLinux() || ec2Lab)
     Directory.CreateDirectory(keyDir);
+using var externalAuditIntent = ExternalAuditIntent.FromEnvironment(
+    Environment.GetEnvironmentVariable("GATEWAY_AUDIT_INTENT_URL"),
+    Environment.GetEnvironmentVariable("GATEWAY_AUDIT_NODE_ID"),
+    Environment.GetEnvironmentVariable("GATEWAY_AUDIT_SENDER_KEY_FILE"),
+    Environment.GetEnvironmentVariable("GATEWAY_AUDIT_COLLECTOR_PUBLIC_KEY_FILE"));
 var builder = WebApplication.CreateBuilder(args);
 GatewayOpenTelemetry.Configure(builder.Services);
 // Explicit v0.1 multi-socket mode; legacy loopback remains CI migration-only.
@@ -1099,7 +1104,7 @@ app.MapHttp01Challenge(acmeHttp01PublicEntrypointEnabled,
     ctx => isolatedListeners?.OnTrafficHttp(ctx) == true);
 // Readiness is on the DATA listener only in isolated mode; unknown/empty backends fail closed.
 app.MapGet("/gateway/health/ready", (IProxyStateLookup proxy) =>
-    GatewayListenerIsolation.AnyDestinationHealthy(proxy)
+    !app.Lifetime.ApplicationStopping.IsCancellationRequested && GatewayListenerIsolation.AnyDestinationHealthy(proxy)
         ? Results.Ok(new { ready = true })
         : Results.StatusCode(503));
 
@@ -1107,7 +1112,7 @@ app.MapGet("/gateway/health/ready", (IProxyStateLookup proxy) =>
 // to make the dashboard poll the public readiness endpoint.
 app.MapGet("/admin/api/gateway-readiness", (IProxyStateLookup proxy) =>
     Results.Ok(new {
-        ready = GatewayListenerIsolation.AnyDestinationHealthy(proxy),
+        ready = !app.Lifetime.ApplicationStopping.IsCancellationRequested && GatewayListenerIsolation.AnyDestinationHealthy(proxy),
         scope = "Local active destination health",
         collectedUtc = DateTimeOffset.UtcNow
     })).RequireAuthorization();
@@ -1292,13 +1297,23 @@ async Task<IResult> CommitReviewedChange(HttpContext ctx, JsonObject submitted)
         proxy["Clusters"] = clusters.DeepClone();
         proxy["AdminDisabledDestinations"] = disabled.DeepClone();
         doc["ReverseProxy"] = proxy;
+        var newConfig = doc.ToJsonString(new JsonSerializerOptions { WriteIndented = true });
+        if (externalAuditIntent is not null)
+        {
+            if (!await externalAuditIntent.ConfirmAsync(Actor(ctx), "CONFIG_APPLY_INTENT", currentRevision,
+                    Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(newConfig))), ctx.RequestAborted) ||
+                ctx.RequestAborted.IsCancellationRequested)
+                return Results.Json(new { error = "External audit receipt unavailable; configuration unchanged" }, statusCode: 503);
+            if (!File.ReadAllBytes(configPath).AsSpan().SequenceEqual(snapshot))
+                return Results.Conflict(new { error = "Configuration changed during external audit confirmation" });
+        }
         Directory.CreateDirectory(backupFolder);
         var stamp = DateTimeOffset.UtcNow.ToString("yyyyMMddTHHmmssfffffffZ");
         var backup = Path.Combine(backupFolder, $"appsettings-{stamp}.json");
         using (var backupStream = new FileStream(backup, FileMode.CreateNew, FileAccess.Write, FileShare.None))
             await backupStream.WriteAsync(snapshot);
         var temp = configPath + ".tmp";
-        await File.WriteAllTextAsync(temp, doc.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+        await File.WriteAllTextAsync(temp, newConfig);
         File.Move(temp, configPath, overwrite: true);
         await Audit(Actor(ctx), "CONFIG_APPLIED", new { routes = routes.Count, clusters = clusters.Count, backup = Path.GetFileName(backup) });
         return Results.Ok(new { saved = true, backup = Path.GetFileName(backup), message = "Saved to appsettings.json; YARP config reload typically occurs automatically. Verify gateway logs." });
@@ -1465,6 +1480,17 @@ app.MapPost("/admin/api/restore/{name}", async (HttpContext ctx, string name) =>
     {
         var json = await File.ReadAllTextAsync(path);
         if (JsonNode.Parse(json)?["ReverseProxy"] is null) return Results.BadRequest(new { error = "Backup lacks ReverseProxy configuration" });
+        if (externalAuditIntent is not null)
+        {
+            var restoreSnapshot = File.ReadAllBytes(configPath);
+            if (!await externalAuditIntent.ConfirmAsync(Actor(ctx), "CONFIG_RESTORE_INTENT",
+                    Convert.ToHexString(SHA256.HashData(restoreSnapshot)),
+                    Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(json))), ctx.RequestAborted) ||
+                ctx.RequestAborted.IsCancellationRequested)
+                return Results.Json(new { error = "External audit receipt unavailable; configuration unchanged" }, statusCode: 503);
+            if (!File.ReadAllBytes(configPath).AsSpan().SequenceEqual(restoreSnapshot))
+                return Results.Conflict(new { error = "Configuration changed during external audit confirmation" });
+        }
         var safety = Path.Combine(backupFolder, $"appsettings-{DateTimeOffset.UtcNow:yyyyMMddTHHmmssfffffff}Z.json");
         File.Copy(configPath, safety);
         await File.WriteAllTextAsync(configPath + ".tmp", json);
@@ -1795,6 +1821,19 @@ app.MapOrganizationProfile(privateDir);
 app.MapTlsInventory();
 app.MapReverseProxy(proxyPipeline =>
 {
+    // Fence new proxy work as soon as the host starts graceful shutdown.
+    // Existing forwarded streams are not linked to ApplicationStopping.
+    var stopping = app.Lifetime.ApplicationStopping;
+    proxyPipeline.Use(async (context, next) =>
+    {
+        if (stopping.IsCancellationRequested)
+        {
+            context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+            context.Response.Headers["X-GatewayCore-Rejection"] = "gateway_shutdown";
+            return;
+        }
+        await next();
+    });
     if (peerStateJournal is not null)
         proxyPipeline.Use(async (context,next) => {
             // Telemetry only. Never use eventual peer counters for strict admission.
@@ -2000,6 +2039,19 @@ app.MapReverseProxy(proxyPipeline =>
             await next();
         }
         }
+    });
+    // A request might have passed the first fence before shutdown while
+    // queued or during selection. Recheck immediately before forwarding,
+    // including destinations without an admission policy.
+    proxyPipeline.Use(async (context, next) =>
+    {
+        if (stopping.IsCancellationRequested)
+        {
+            context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+            context.Response.Headers["X-GatewayCore-Rejection"] = "gateway_shutdown";
+            return;
+        }
+        await next();
     });
     proxyPipeline.UsePassiveHealthChecks();
 }).RequireRateLimiting("proxy-concurrency");
