@@ -197,7 +197,7 @@ internal static class DestinationAdmissionHttp3Acceptance
                     "real GatewayCore HTTPS listener is ready over HTTP/1.1 before HTTP/3 admission traffic");
                 Check(discoveryResponse.Headers.TryGetValues("Alt-Svc", out var altSvc) &&
                     altSvc.Any(value => value.Contains("h3=", StringComparison.OrdinalIgnoreCase)),
-                    "HTTP/2 readiness response advertises the listener's HTTP/3 endpoint");
+                    "HTTP/1.1 readiness response advertises the listener's HTTP/3 endpoint");
             }
 
             using (var readinessTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(15)))
@@ -286,7 +286,7 @@ internal static class DestinationAdmissionHttp3Acceptance
             Check(backendPeak == 1 && backendInFlight == 0,
                 $"real upstream concurrency never exceeds max-inflight=1; peak={backendPeak}, current={backendInFlight}");
             Check(backendAttempts.Order(StringComparer.Ordinal).SequenceEqual(
-                    new[] { "active", "queued", "cancel-active", "after-cancel" }),
+                    new[] { "active", "after-cancel", "cancel-active", "queued" }),
                 "rejected and canceled non-idempotent HTTP/3 POSTs never reach or replay to an upstream backend");
             Console.WriteLine("PASS: real HTTP/3 request lifecycle exercised GatewayCore per-destination admission");
         }
