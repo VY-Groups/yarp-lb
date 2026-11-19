@@ -72,6 +72,15 @@ public static class PeerSyncTests
         Check(frame.Counters.Count==1 && frame.Counters.Values.Single()==2,
             "IPv4 and mapped IPv6 share one hashed identity");
         Check(!frame.Counters.Keys.Single().Contains("10.123"),"no plaintext peer IP transmitted");
+        var nonCanonicalKey = new string('a', 64);
+        var canonicalKey = nonCanonicalKey.ToUpperInvariant();
+        Check(!b.Apply(frame with { Counters = new Dictionary<string, int>
+            { [canonicalKey] = 1, [nonCanonicalKey] = 1 } }, now) &&
+            b.PeerTelemetry(now) == (0, 0L),
+            "case aliases cannot create two identities for one digest");
+        Check(!b.Apply(frame with { Counters = new Dictionary<string, int>
+            { [nonCanonicalKey] = 1 } }, now),
+            "noncanonical lowercase identity rejected without advancing replay state");
         Check(b.Apply(frame,now),"accept first bounded peer snapshot");
         Check(b.PeerTelemetry(now)==(1,2L),"peer telemetry matches signed source counts");
         // Accepted snapshots must have a recent receipt time, not merely
