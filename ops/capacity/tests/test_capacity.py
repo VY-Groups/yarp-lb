@@ -141,6 +141,24 @@ class CapacityEvidence(unittest.TestCase):
         doc["perProfile"][0]["body_bytes"]-=1;f.write_text(json.dumps(doc))
         r,d=self.report();self.assertNotEqual(r.returncode,0)
         self.assertIn("mixed body/count",str(d["error_reasons"]))
+    def test_short_raw_profile_cannot_claim_full_window(self):
+        f=self.p/"results"/"h1"/"window-007-profile-small.json"
+        doc=json.loads(f.read_text())
+        doc["summary"]["total"]=30
+        doc["summary"]["requestsPerSec"]=800
+        f.write_text(json.dumps(doc))
+        r,d=self.report()
+        self.assertNotEqual(r.returncode,0)
+        self.assertIn("invalid raw oha summary",str(d["error_reasons"]))
+    def test_short_aggregate_cannot_inflate_rates(self):
+        f=self.p/"results"/"h1"/"window-007.json"
+        doc=json.loads(f.read_text())
+        doc["summary"]["total"]=30
+        doc["summary"]["requestsPerSec"]=1600
+        f.write_text(json.dumps(doc))
+        r,d=self.report()
+        self.assertNotEqual(r.returncode,0)
+        self.assertIn("aggregate duration inconsistent",str(d["error_reasons"]))
     def test_missing_raw_subprofile_fails_closed(self):
         (self.p/"results"/"h1"/"window-007-profile-small.json").unlink()
         r,d=self.report();self.assertNotEqual(r.returncode,0)
