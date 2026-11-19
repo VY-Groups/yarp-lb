@@ -182,5 +182,32 @@ public static class WindowsDpapiAcceptance
         {
             Directory.Delete(unsafeKeyProduct, recursive: true);
         }
+
+        var legacyRoot = Path.Combine(Path.GetTempPath(), "gatewaycore-windows-legacy-state-" + Guid.NewGuid().ToString("N"));
+        var programData = Path.Combine(legacyRoot, "ProgramData");
+        var priorState = Path.Combine(programData, "PriorYarp", "ControlPlane");
+        var newProduct = Path.Combine(programData, "GatewayCoreYarp");
+        var newState = Path.Combine(newProduct, "ControlPlane");
+        Directory.CreateDirectory(priorState);
+        File.WriteAllText(Path.Combine(priorState, "admin-users.json"), "{}");
+        try
+        {
+            var refused = false;
+            try
+            {
+                LegacyStateGuard.RejectUnmigratedWindowsState(newState);
+            }
+            catch (InvalidOperationException)
+            {
+                refused = true;
+            }
+            Must(refused && !Directory.Exists(newProduct) && !Directory.Exists(newState) &&
+                 !Directory.Exists(Path.Combine(newState, "data-protection-keys")),
+                "legacy Windows state is rejected before any new product, state, or key directory is created");
+        }
+        finally
+        {
+            Directory.Delete(legacyRoot, recursive: true);
+        }
     }
 }
