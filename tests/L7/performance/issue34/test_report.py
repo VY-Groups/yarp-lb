@@ -6,7 +6,7 @@ from tempfile import TemporaryDirectory
 from instrument_lab_stats import ADDITION, ANCHOR, instrument
 from report import build_report
 from run_paired_profile import (_drain_bounded_log, measurement as parse_measurement,
-                               resolve_checkout)
+                               format_early_trace_exit, resolve_checkout)
 
 
 def measurement(alloc, *, rps=100.0, p95=30.0, p99=50.0, errors=0):
@@ -203,6 +203,12 @@ class ReportTests(unittest.TestCase):
             resolved = resolve_checkout(relative)
             self.assertEqual(resolved, checkout.resolve())
             self.assertTrue(resolved.is_absolute())
+
+    def test_early_trace_exit_diagnostic_includes_exit_code_target_and_log(self):
+        message = format_early_trace_exit("before", 1234, 17, "diagnostic socket denied")
+        self.assertIn("exit 17", message)
+        self.assertIn("target pid 1234", message)
+        self.assertIn("diagnostic socket denied", message)
 
 
 if __name__ == "__main__":

@@ -30,6 +30,11 @@ def resolve_checkout(source: Path) -> Path:
     return source.expanduser().resolve(strict=True)
 
 
+def format_early_trace_exit(revision: str, pid: int, exit_code: int, log_tail: str) -> str:
+    return (f"dotnet-trace exited before collection became active for {revision} "
+            f"(exit {exit_code}, target pid {pid}); log tail:\n{log_tail}")
+
+
 def request_json(url: str, timeout: float = 2.0) -> dict:
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     with opener.open(url, timeout=timeout) as response:
@@ -267,26 +272,41 @@ def trace_revision(source: Path, workspace: Path, output: Path, load_script: Pat
     trace_metadata = trace_dir / f"{revision}-metadata.json"
     with Lab(source, trace_dir) as lab:
         pid = lab.stats()["processId"]
+        version = subprocess.run([dotnet_trace, "--version"], text=True,
+                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                 timeout=10, check=False)
+        if version.returncode != 0:
+            raise RuntimeError(f"dotnet-trace --version failed ({version.returncode}): "
+                               f"{version.stdout[-2000:]}")
+        trace_log.write_text(
+            f"tool_version={version.stdout.strip()}\n"
+            f"target_pid={pid}\n"
+            f"trace_directory_writable={os.access(trace_dir, os.W_OK)}\n",
+            encoding="utf-8")
         command = [dotnet_trace, "collect", "--process-id", str(pid), "--profile", "gc-verbose",
                    "--buffersize", "64", "--duration", f"00:00:00:{trace_seconds:02d}",
                    "--output", str(trace_path)]
-        with trace_log.open("w", encoding="utf-8") as log:
+        early_exit_code = None
+        with trace_log.open("a", encoding="utf-8") as log:
             trace = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT, text=True)
             time.sleep(3)
-            if trace.poll() is not None:
-                raise RuntimeError(f"dotnet-trace exited early for {revision}; see {trace_log}")
-            k6_metrics, _ = run_k6(workspace, load_script, trace_dir / f"{revision}-trace-load.log",
-                                   "proxy", vus, f"{trace_seconds - 5}s", payload_bytes)
-            if int(k6_metrics["http_reqs"]["count"]) < 1000:
-                raise ValueError(f"{revision} trace workload was too small")
-            try:
-                trace.wait(timeout=trace_seconds + 30)
-            except subprocess.TimeoutExpired:
-                trace.kill()
-                trace.wait(timeout=5)
-                raise TimeoutError(f"dotnet-trace exceeded bounded duration for {revision}")
-            if trace.returncode != 0:
-                raise RuntimeError(f"dotnet-trace failed for {revision}; see {trace_log}")
+            early_exit_code = trace.poll()
+            if early_exit_code is None:
+                k6_metrics, _ = run_k6(workspace, load_script, trace_dir / f"{revision}-trace-load.log",
+                                       "proxy", vus, f"{trace_seconds - 5}s", payload_bytes)
+                if int(k6_metrics["http_reqs"]["count"]) < 1000:
+                    raise ValueError(f"{revision} trace workload was too small")
+                try:
+                    trace.wait(timeout=trace_seconds + 30)
+                except subprocess.TimeoutExpired:
+                    trace.kill()
+                    trace.wait(timeout=5)
+                    raise TimeoutError(f"dotnet-trace exceeded bounded duration for {revision}")
+                if trace.returncode != 0:
+                    raise RuntimeError(f"dotnet-trace failed for {revision}; see {trace_log}")
+        if early_exit_code is not None:
+            tail = trace_log.read_text(encoding="utf-8", errors="replace")[-4000:]
+            raise RuntimeError(format_early_trace_exit(revision, pid, early_exit_code, tail))
         if not trace_path.is_file() or trace_path.stat().st_size <= 0:
             raise RuntimeError(f"dotnet-trace output missing for {revision}")
         if trace_path.stat().st_size > MAX_TRACE_BYTES:
