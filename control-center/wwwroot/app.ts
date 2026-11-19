@@ -513,7 +513,7 @@ function showLogin(first:boolean){authGeneration++;readinessGeneration++;readine
  $('auth-submit').textContent=first?'Create administrator':'Sign in';
  $('auth-email-row').hidden=!first;$('auth-provider-row').hidden=first;$('auth-otp-row').hidden=true;($('auth-password') as HTMLInputElement).required=true;($('auth-otp') as HTMLInputElement).required=false;otpChallenge='';
  ($('auth-form') as HTMLFormElement).dataset.mode=first?'bootstrap':'login';
- $('auth-message').textContent='';if(!first)void fetch('/admin/api/auth-methods').then(r=>r.json()).then(m=>{const x=$('auth-provider') as HTMLSelectElement;x.querySelectorAll<HTMLOptionElement>('option[value="directory"]').forEach(o=>{o.disabled=!m.activeDirectory;o.textContent=m.activeDirectory?'Active Directory / LDAPS':'Active Directory (not configured)'});}).catch(()=>{});}
+ $('auth-message').textContent='';const sso=document.getElementById('auth-sso-link');if(sso)sso.hidden=true;if(!first)void fetch('/admin/api/auth-methods').then(r=>r.json()).then(m=>{if(sso)sso.hidden=!m.enterpriseOidc;const x=$('auth-provider') as HTMLSelectElement;x.querySelectorAll<HTMLOptionElement>('option[value="directory"]').forEach(o=>{o.disabled=!m.activeDirectory;o.textContent=m.activeDirectory?'Active Directory / LDAPS':'Active Directory (not configured)'});}).catch(()=>{});}
 ($('auth-provider') as HTMLSelectElement).onchange=()=>{($('auth-password') as HTMLInputElement).minLength=($('auth-provider') as HTMLSelectElement).value==='directory'?1:16};
 ($('auth-form') as HTMLFormElement).onsubmit=async e=>{
  e.preventDefault();
