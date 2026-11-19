@@ -34,8 +34,8 @@ def require(value, message):
     print(f"PASS: {message}", flush=True)
 
 
-def query(port, name, qtype, transport="udp"):
-    request = dns.message.make_query(name, qtype, want_dnssec=True)
+def query(port, name, qtype, transport="udp", want_dnssec=True):
+    request = dns.message.make_query(name, qtype, want_dnssec=want_dnssec)
     request.flags &= ~dns.flags.RD
     return (dns.query.udp(request, "127.0.0.1", port=port, timeout=3) if transport == "udp"
             else dns.query.tcp(request, "127.0.0.1", port=port, timeout=3))
@@ -99,6 +99,14 @@ def main():
         key_path.write_bytes(key.private_bytes(serialization.Encoding.PEM,
             serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
         key_path.chmod(0o600)
+        child_zone = dns.name.from_text("child.nsec3.integration.test.")
+        unsigned_child_zone = dns.name.from_text("unsigned.nsec3.integration.test.")
+        child_key = ec.generate_private_key(ec.SECP256R1())
+        child_pub = child_key.public_key().public_bytes(
+            serialization.Encoding.X962, serialization.PublicFormat.UncompressedPoint)
+        child_dnskey = dns.rdata.from_text(dns.rdataclass.IN, dns.rdatatype.DNSKEY,
+            "257 3 13 " + base64.b64encode(child_pub[1:]).decode("ascii"))
+        child_ds = dns.dnssec.make_ds(child_zone, child_dnskey, "SHA256")
         port = start_port()
         config = {"AllowNonLoopbackListeners": False, "ListenHost": "127.0.0.1",
             "ListenPort": port, "ProbeIntervalSeconds": 2, "Zones": [{
@@ -109,8 +117,13 @@ def main():
                 "NameServers": [
                     {"Host": "ns1.nsec3.integration.test", "Address": "127.0.0.1"},
                     {"Host": "ns1.branch.nsec3.integration.test", "Address": "127.0.0.2"}],
-                "Delegations": [{"Name": "child.nsec3.integration.test", "NameServers": [
-                    {"Host": "ns1.child.nsec3.integration.test", "Address": "192.0.2.53"}]}],
+                "Delegations": [
+                    {"Name": str(child_zone).rstrip("."), "NameServers": [
+                        {"Host": "ns1.child.nsec3.integration.test", "Address": "192.0.2.53"}],
+                     "DsRecords": [{"KeyTag": child_ds.key_tag, "Algorithm": child_ds.algorithm,
+                        "DigestType": child_ds.digest_type, "DigestHex": child_ds.digest.hex().upper()}]},
+                    {"Name": str(unsigned_child_zone).rstrip("."), "NameServers": [
+                        {"Host": "ns1.unsigned.nsec3.integration.test", "Address": "192.0.2.54"}]}],
                 "FailClosedWhenAllSitesDown": False,
                 "Sites": [{"Address": "192.0.2.80", "Weight": 1,
                            "HealthCheckType": "Tcp", "TcpPort": 9}]}]}
@@ -158,6 +171,37 @@ def main():
             keys_rrset = next(rr for rr in response.answer if rr.rdtype == dns.rdatatype.DNSKEY)
             keys = {ZONE: keys_rrset}
             require(validate_sections(response, keys) == 1, "NSEC3 zone DNSKEY signature validates")
+
+            for transport in ("udp", "tcp"):
+                ds_response = query(port, child_zone, "DS", transport)
+                ds_rrset = next(rr for rr in ds_response.answer if rr.rdtype == dns.rdatatype.DS)
+                ds_signature = ds_response.find_rrset(ds_response.answer, ds_rrset.name,
+                    ds_rrset.rdclass, dns.rdatatype.RRSIG, covers=dns.rdatatype.DS)
+                dns.dnssec.validate(ds_rrset, ds_signature, keys, now=time.time())
+                require(next(iter(ds_rrset)) == child_ds,
+                        f"NSEC3 {transport.upper()} child DS matches DNSKEY and has valid parent signature")
+
+                referral = query(port, "www." + str(child_zone), "A", transport)
+                ref_ds = next(rr for rr in referral.authority if rr.rdtype == dns.rdatatype.DS)
+                ref_sig = referral.find_rrset(referral.authority, ref_ds.name, ref_ds.rdclass,
+                    dns.rdatatype.RRSIG, covers=dns.rdatatype.DS)
+                dns.dnssec.validate(ref_ds, ref_sig, keys, now=time.time())
+                require(not referral.flags & dns.flags.AA and next(iter(ref_ds)) == child_ds,
+                        f"NSEC3 {transport.upper()} child referral carries a valid signed DS")
+
+                insecure = query(port, "www." + str(unsigned_child_zone), "A", transport)
+                proof = next(rr for rr in insecure.authority if rr.rdtype == dns.rdatatype.NSEC3)
+                proof_sig = insecure.find_rrset(insecure.authority, proof.name, proof.rdclass,
+                    dns.rdatatype.RRSIG, covers=dns.rdatatype.NSEC3)
+                dns.dnssec.validate(proof, proof_sig, keys, now=time.time())
+                require(not insecure.flags & dns.flags.AA and
+                        any(rr.rdtype == dns.rdatatype.NS for rr in insecure.authority),
+                        f"NSEC3 {transport.upper()} unsigned-child referral proves DS absence")
+                non_do = query(port, "www." + str(child_zone), "A", transport,
+                               want_dnssec=False)
+                require(not any(rr.rdtype in (dns.rdatatype.DS, dns.rdatatype.RRSIG)
+                                for rr in non_do.authority),
+                        f"NSEC3 {transport.upper()} non-DO referral omits DS and signature records")
 
             param = query(port, str(ZONE), "NSEC3PARAM", "tcp")
             param_rrset = next(rr for rr in param.answer if rr.rdtype == dns.rdatatype.NSEC3PARAM)
@@ -224,9 +268,9 @@ def main():
                             for rr in records for record in rr),
                         "all NSEC3 proof records use matching parameters and disable opt-out")
 
-            ds = query(port, "child." + str(ZONE), "DS", "tcp")
+            ds = query(port, str(unsigned_child_zone), "DS", "tcp")
             ds_exact = [rr for rr in ds.authority if rr.rdtype == dns.rdatatype.NSEC3 and
-                        rr.name.labels[0].decode("ascii").upper() == nsec3_hash("child." + str(ZONE))]
+                        rr.name.labels[0].decode("ascii").upper() == nsec3_hash(str(unsigned_child_zone))]
             require(ds.rcode() == dns.rcode.NOERROR and validate_sections(ds, keys) >= 2 and
                     bool(ds_exact) and "NS" in str(next(iter(ds_exact[0]))).split() and
                     "DS" not in str(next(iter(ds_exact[0]))).split() and
