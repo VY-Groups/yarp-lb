@@ -16,12 +16,13 @@ internal static class EnterpriseOidcAuthentication
         string usersPath, LocalAdminAudit audit)
     {
         var settings = policy.Settings;
+        var secret = policy.ReadClientSecret();
         builder.AddOpenIdConnect(EnterpriseOidcPolicy.Scheme, options =>
         {
             options.SignInScheme = CookieAuthenticationDefaults.AuthenticationScheme;
             options.Authority = settings.Issuer;
             options.ClientId = settings.ClientId;
-            options.ClientSecret = policy.ReadClientSecret();
+            options.ClientSecret = secret;
             options.CallbackPath = EnterpriseOidcPolicy.Callback;
             options.ResponseType = "code";
             options.ResponseMode = "query";
@@ -32,6 +33,8 @@ internal static class EnterpriseOidcAuthentication
             options.GetClaimsFromUserInfoEndpoint = false;
             options.RefreshOnIssuerKeyNotFound = true;
             options.RemoteAuthenticationTimeout = TimeSpan.FromMinutes(3);
+            options.ProtocolValidator.RequireNonce = true;
+            options.ProtocolValidator.NonceLifetime = TimeSpan.FromMinutes(3);
             options.BackchannelTimeout = TimeSpan.FromSeconds(10);
             options.BackchannelHttpHandler = new SocketsHttpHandler
             {
@@ -88,12 +91,12 @@ internal static class EnterpriseOidcAuthentication
                     if (row is null || !long.TryParse(authenticationTime,
                         NumberStyles.None, CultureInfo.InvariantCulture, out var time) ||
                         !EnterpriseOidcPolicy.Fresh(time, DateTimeOffset.UtcNow, EnterpriseOidcPolicy.StepUpLifetime))
-                    { ctx.Fail("OIDC ticket not authorized"); return; }
+                    { ctx.HandleResponse(); ctx.Response.Redirect("/admin/oidc/error"); return; }
                     var users = JsonSerializer.Deserialize<List<AdminUser>>(await File.ReadAllTextAsync(usersPath)) ?? [];
                     var user = users.SingleOrDefault(u => u.Username.Equals(row.Username, StringComparison.OrdinalIgnoreCase));
                     if (user is null || !user.Enabled || user.Provider != "Local" || user.Role != row.Role ||
                         string.IsNullOrEmpty(user.SecurityStamp))
-                    { ctx.Fail("Mapped local account not authorized"); return; }
+                    { ctx.HandleResponse(); ctx.Response.Redirect("/admin/oidc/error"); return; }
                     var claims = new[]
                     {
                         new Claim(ClaimTypes.Name, user.Username),
@@ -117,7 +120,7 @@ internal static class EnterpriseOidcAuthentication
                     await audit.AppendAsync(user.Username, "OIDC_LOGIN_AUTHORIZED", new { role = user.Role });
                 }
                 catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or InvalidOperationException)
-                { ctx.Fail("Local authorization or audit unavailable"); }
+                { ctx.HandleResponse(); ctx.Response.Redirect("/admin/oidc/error"); }
             };
             options.Events.OnRemoteFailure = async ctx =>
             {
