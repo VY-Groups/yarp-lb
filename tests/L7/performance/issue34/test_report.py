@@ -5,12 +5,13 @@ from pathlib import Path
 import subprocess
 import sys
 from tempfile import TemporaryDirectory
+import urllib.request
 
 from instrument_lab_stats import (ADDITION, ANCHOR, METRIC_CALL,
                                  METRIC_CALL_WITH_DIMENSIONS, instrument)
 from report import build_report
 from run_paired_profile import (_drain_bounded_log, measurement as parse_measurement,
-                               format_early_trace_exit, resolve_checkout)
+                               format_early_trace_exit, OtlpReceiver, resolve_checkout)
 
 
 ISSUE34_DIR = Path(__file__).resolve().parent
@@ -67,6 +68,21 @@ def records(before_commit="before-sha", after_commit="after-sha"):
 
 
 class ReportTests(unittest.TestCase):
+    def test_disposable_otlp_receiver_counts_nonempty_signal_exports(self):
+        receiver = OtlpReceiver()
+        try:
+            for signal in ("traces", "metrics", "logs"):
+                request = urllib.request.Request(
+                    f"{receiver.endpoint}/v1/{signal}", data=b"\x0a\x01x",
+                    headers={"Content-Type": "application/x-protobuf"}, method="POST")
+                with urllib.request.urlopen(request, timeout=2) as response:
+                    self.assertEqual(response.status, 200)
+            snapshot = receiver.snapshot()
+            for signal in ("traces", "metrics", "logs"):
+                self.assertEqual(snapshot[signal], {"requests": 1, "payload_bytes": 3})
+        finally:
+            receiver.close()
+
     def test_k6_and_gateway_counter_parser_keeps_all_requested_metrics(self):
         metrics = {
             "http_reqs": {"count": 4500, "rate": 100.0},

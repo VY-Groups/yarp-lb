@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 from pathlib import Path
@@ -23,6 +24,60 @@ GATEWAY_PORT = 18080
 BACKEND_A_PORT = 18081
 BACKEND_B_PORT = 18082
 MAX_TRACE_BYTES = 256 * 1024 * 1024
+OTLP_SIGNALS = ("traces", "metrics", "logs")
+
+
+class OtlpReceiver:
+    """Disposable loopback OTLP/HTTP sink that proves the provider is active."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._received = {signal: {"requests": 0, "payload_bytes": 0}
+                          for signal in OTLP_SIGNALS}
+        receiver = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self) -> None:
+                signal = self.path.rsplit("/", 1)[-1]
+                if self.path not in {f"/v1/{value}" for value in OTLP_SIGNALS}:
+                    self.send_error(404)
+                    return
+                try:
+                    length = int(self.headers.get("Content-Length", "0"))
+                except ValueError:
+                    self.send_error(400)
+                    return
+                if length <= 0 or length > 8 * 1024 * 1024:
+                    self.send_error(413)
+                    return
+                body = self.rfile.read(length)
+                if len(body) != length:
+                    self.send_error(400)
+                    return
+                with receiver._lock:
+                    receiver._received[signal]["requests"] += 1
+                    receiver._received[signal]["payload_bytes"] += length
+                self.send_response(200)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def log_message(self, _format: str, *_args) -> None:
+                return
+
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self._server.daemon_threads = True
+        self.endpoint = f"http://127.0.0.1:{self._server.server_address[1]}"
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        self._thread.start()
+
+    def snapshot(self) -> dict:
+        with self._lock:
+            return json.loads(json.dumps(self._received))
+
+    def close(self) -> None:
+        self._server.shutdown()
+        self._server.server_close()
+        self._thread.join(timeout=2)
 
 
 def resolve_checkout(source: Path) -> Path:
@@ -155,6 +210,15 @@ class Lab:
         self.log_threads: dict[int, threading.Thread] = {}
         self.log_paths: dict[int, Path] = {}
         self.env = os.environ.copy()
+        self.otel_receiver = None
+        self.otel_received = None
+        if self.env.get("YARP_LAB_OTEL_OVERHEAD") == "1":
+            self.otel_receiver = OtlpReceiver()
+            self.env["YARP_OTEL_ENDPOINT"] = self.otel_receiver.endpoint
+            self.env["YARP_OTEL_TRACE_SAMPLE_RATIO"] = "0.05"
+        else:
+            self.env.pop("YARP_OTEL_ENDPOINT", None)
+            self.env.pop("YARP_OTEL_TRACE_SAMPLE_RATIO", None)
         gateway_bin = self.source / "tests/L7/GatewayLab/bin/Release/net10.0"
         backend_bin = self.source / "tests/L7/BackendLab/bin/Release/net10.0"
         for binary in (gateway_bin / "GatewayLab.dll", backend_bin / "BackendLab.dll"):
@@ -178,7 +242,7 @@ class Lab:
             wait_for("gateway active health", lambda: request_json(f"{BASE_URL}:{GATEWAY_PORT}/api/identity"),
                      self.processes, self.log_paths, self.log_threads)
         except Exception:
-            self.close()
+            self.close(require_otel=False)
             raise
 
     def _start(self, command: list[str], cwd: Path, label: str) -> None:
@@ -195,16 +259,25 @@ class Lab:
     def stats(self) -> dict:
         return request_json(f"{BASE_URL}:{GATEWAY_PORT}/lab/stats")
 
-    def close(self) -> None:
+    def close(self, *, require_otel: bool = True) -> None:
         stop_processes(self.processes)
         for thread in self.log_threads.values():
             thread.join(timeout=2)
+        if self.otel_receiver is not None:
+            self.otel_received = self.otel_receiver.snapshot()
+            self.otel_receiver.close()
+            if require_otel:
+                missing = [signal for signal, counts in self.otel_received.items()
+                           if counts["requests"] == 0 or counts["payload_bytes"] == 0]
+                if missing:
+                    raise RuntimeError("GatewayLab did not export non-empty OTLP signals: " +
+                                       ", ".join(missing))
 
     def __enter__(self):
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
-        self.close()
+        self.close(require_otel=exc_type is None)
 
 
 def run_k6(workspace: Path, script: Path, output: Path, mode: str, vus: int,
@@ -350,24 +423,27 @@ def run_revision(source: Path, workspace: Path, output: Path, script: Path,
             samples[mode] = measurement(metrics, elapsed, before, after)
             if mode == "direct":
                 time.sleep(2)
-        return {
-            "round": round_number,
-            "revision": revision,
-            "commit": commit,
-            "workload": {
-                "vus": vus,
-                "duration": duration,
-                "payload_bytes": payload_bytes,
-                "warmup": warmup,
-                "connection_reuse": True,
-                "direct_backend_mix": "70/30",
-                "k6_image": "grafana/k6:0.55.0",
-                "runner_image": "ubuntu-24.04",
-            },
-            "measurement_order": ["direct", "proxy"],
-            "direct": samples["direct"],
-            "proxy": samples["proxy"],
-        }
+    otel_received = lab.otel_received
+    return {
+        "round": round_number,
+        "revision": revision,
+        "commit": commit,
+        "workload": {
+            "vus": vus,
+            "duration": duration,
+            "payload_bytes": payload_bytes,
+            "warmup": warmup,
+            "connection_reuse": True,
+            "direct_backend_mix": "70/30",
+            "k6_image": "grafana/k6:0.55.0",
+            "runner_image": "ubuntu-24.04",
+            "otel_enabled": os.environ.get("YARP_LAB_OTEL_OVERHEAD") == "1",
+        },
+        "otel_received": otel_received,
+        "measurement_order": ["direct", "proxy"],
+        "direct": samples["direct"],
+        "proxy": samples["proxy"],
+    }
 
 
 def parse_args() -> argparse.Namespace:
