@@ -4,6 +4,7 @@ using System.Net;
 using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Security.AccessControl;
@@ -705,6 +706,44 @@ File.WriteAllText(configuration,JsonSerializer.Serialize(new {
    FailClosedWhenAllSitesDown=true }
  }
 }));
+foreach (var duplicateHost in new[]
+         {
+             "ns.child.delegated.integration.test",
+             "NS.CHILD.DELEGATED.INTEGRATION.TEST."
+         })
+{
+    var invalidConfig = JsonNode.Parse(File.ReadAllText(configuration))!.AsObject();
+    var delegatedZone = invalidConfig["Zones"]!.AsArray().Single(zone =>
+        string.Equals((string?)zone?["Name"], "delegated.integration.test", StringComparison.Ordinal))
+        ?? throw new InvalidDataException("Delegation negative-test zone fixture is absent");
+    var childCut = delegatedZone["Delegations"]!.AsArray().Single(cut =>
+        string.Equals((string?)cut?["Name"], "child.delegated.integration.test", StringComparison.Ordinal))
+        ?? throw new InvalidDataException("Delegation negative-test cut fixture is absent");
+    childCut["NameServers"]!.AsArray().Add(new JsonObject
+    {
+        ["Host"] = duplicateHost,
+        ["Address"] = "192.0.2.62"
+    });
+    var invalidPath = Path.Combine(temp, "duplicate-glue-" + Guid.NewGuid().ToString("N") + ".json");
+    await File.WriteAllTextAsync(invalidPath, invalidConfig.ToJsonString());
+    var invalidInfo = new ProcessStartInfo("dotnet")
+    {
+        UseShellExecute = false, CreateNoWindow = true,
+        WorkingDirectory = Path.GetDirectoryName(dll)!,
+        RedirectStandardOutput = true, RedirectStandardError = true
+    };
+    invalidInfo.ArgumentList.Add(dll);
+    invalidInfo.ArgumentList.Add(invalidPath);
+    using var invalidDns = Process.Start(invalidInfo) ?? throw new Exception("Invalid DNS fixture did not start");
+    var invalidStdout = invalidDns.StandardOutput.ReadToEndAsync();
+    var invalidStderr = invalidDns.StandardError.ReadToEndAsync();
+    using var invalidDeadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+    await invalidDns.WaitForExitAsync(invalidDeadline.Token);
+    var invalidOutput = (await invalidStdout) + (await invalidStderr);
+    Must(invalidDns.ExitCode != 0 && invalidOutput.Contains("Duplicate delegated name-server address family", StringComparison.Ordinal),
+        "duplicate same-family glue rejects startup, including case/trailing-dot normalized hostnames");
+    File.Delete(invalidPath);
+}
 var info=new ProcessStartInfo("dotnet"){ UseShellExecute=false,CreateNoWindow=true,
  WorkingDirectory=Path.GetDirectoryName(dll)!,RedirectStandardOutput=true,RedirectStandardError=true };
 info.ArgumentList.Add(dll);info.ArgumentList.Add(configuration);
