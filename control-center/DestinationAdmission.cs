@@ -109,6 +109,7 @@ public sealed class DestinationAdmissionState
         internal LinkedListNode<Waiter>? Node;
         internal CancellationTokenRegistration Registration;
         internal bool Completed;
+        internal long GrantedTimestamp;
         internal Action? ReleasePending = releasePending;
         internal void StartQueueTimeout(TimeSpan? timeout)
         {
@@ -314,6 +315,7 @@ public sealed class DestinationAdmissionState
             waiter.Node = null;
             waiter.Completed = true;
             _inFlight++;
+            waiter.GrantedTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
             (granted ??= new List<Waiter>()).Add(waiter);
         }
         return granted;
@@ -329,7 +331,8 @@ public sealed class DestinationAdmissionState
             RecordWaitDuration(waiter);
             waiter.ReleasePendingReservation();
             waiter.Completion.TrySetResult(new DestinationAdmissionLease(
-                this, wasQueued: true, waiter.CreatedTimestamp, waiter.CancellationToken));
+                this, wasQueued: true, waiter.CreatedTimestamp, waiter.GrantedTimestamp,
+                waiter.CancellationToken));
         }
     }
 
@@ -337,15 +340,18 @@ public sealed class DestinationAdmissionState
     {
         private DestinationAdmissionState? _owner;
         internal DestinationAdmissionLease(DestinationAdmissionState owner, bool wasQueued = false,
-            long queueStartedTimestamp = 0, CancellationToken queueWaitToken = default)
+            long queueStartedTimestamp = 0, long queueGrantedTimestamp = 0,
+            CancellationToken queueWaitToken = default)
         {
             _owner = owner;
             WasQueued = wasQueued;
             QueueStartedTimestamp = queueStartedTimestamp;
+            QueueGrantedTimestamp = queueGrantedTimestamp;
             QueueWaitToken = queueWaitToken;
         }
         public bool WasQueued { get; }
         public long QueueStartedTimestamp { get; }
+        public long QueueGrantedTimestamp { get; }
         public CancellationToken QueueWaitToken { get; }
         public void Dispose() => Interlocked.Exchange(ref _owner, null)?.Release();
     }

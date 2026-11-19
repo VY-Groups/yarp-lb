@@ -19,21 +19,24 @@ public static class DestinationAdmissionForwarding
     // permit grant but its cancellation callback has not run yet.
     public static DestinationAdmissionFailure CompleteQueueWait(
         bool wasQueued,
-        CancellationToken queueWait,
         CancellationToken requestAborted,
         CancellationToken applicationStopping,
         long waitStartedTimestamp,
+        long waitGrantedTimestamp,
         TimeSpan queueTimeout)
     {
-        if (wasQueued && waitStartedTimestamp < 0) throw new ArgumentOutOfRangeException(nameof(waitStartedTimestamp));
+        if (wasQueued && (waitStartedTimestamp < 0 || waitGrantedTimestamp < waitStartedTimestamp))
+            throw new ArgumentOutOfRangeException(nameof(waitGrantedTimestamp));
         if (queueTimeout <= TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(queueTimeout));
 
         if (requestAborted.IsCancellationRequested) return DestinationAdmissionFailure.ClientAborted;
         if (applicationStopping.IsCancellationRequested) return DestinationAdmissionFailure.ServiceStopping;
         if (!wasQueued) return DestinationAdmissionFailure.None;
-        if (queueWait.IsCancellationRequested) return DestinationAdmissionFailure.QueueTimeout;
-
-        return System.Diagnostics.Stopwatch.GetElapsedTime(waitStartedTimestamp) >= queueTimeout
+        // The timeout ends when the gate grants a permit, not when the async
+        // continuation happens to run. Grant time is captured under the gate lock.
+        // Once a lease exists, the recorded time is authoritative: the timer may
+        // fire between the grant and timer disarm, after an on-time grant.
+        return System.Diagnostics.Stopwatch.GetElapsedTime(waitStartedTimestamp, waitGrantedTimestamp) >= queueTimeout
             ? DestinationAdmissionFailure.QueueTimeout
             : DestinationAdmissionFailure.None;
     }

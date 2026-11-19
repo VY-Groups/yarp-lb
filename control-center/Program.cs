@@ -2032,10 +2032,10 @@ app.MapReverseProxy(proxyPipeline =>
             // callback had not run by the time the permit continuation resumed.
             var failureAfterGrant = DestinationAdmissionForwarding.CompleteQueueWait(
                 lease.WasQueued,
-                lease.QueueWaitToken,
                 context.RequestAborted,
                 applicationStopping,
                 lease.QueueStartedTimestamp,
+                lease.QueueGrantedTimestamp,
                 TimeSpan.FromMilliseconds(policy.QueueTimeoutMs));
             if (failureAfterGrant == DestinationAdmissionFailure.ClientAborted) return;
             if (failureAfterGrant != DestinationAdmissionFailure.None)
