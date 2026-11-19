@@ -1147,8 +1147,12 @@ function showLogin(first) {
     otpChallenge = '';
     $('auth-form').dataset.mode = first ? 'bootstrap' : 'login';
     $('auth-message').textContent = '';
+    const sso = document.getElementById('auth-sso-link');
+    if (sso)
+        sso.hidden = true;
     if (!first)
-        void fetch('/admin/api/auth-methods').then(r => r.json()).then(m => { const x = $('auth-provider'); x.querySelectorAll('option[value="directory"]').forEach(o => { o.disabled = !m.activeDirectory; o.textContent = m.activeDirectory ? 'Active Directory / LDAPS' : 'Active Directory (not configured)'; }); }).catch(() => { });
+        void fetch('/admin/api/auth-methods').then(r => r.json()).then(m => { if (sso)
+            sso.hidden = !m.enterpriseOidc; const x = $('auth-provider'); x.querySelectorAll('option[value="directory"]').forEach(o => { o.disabled = !m.activeDirectory; o.textContent = m.activeDirectory ? 'Active Directory / LDAPS' : 'Active Directory (not configured)'; }); }).catch(() => { });
 }
 $('auth-provider').onchange = () => { $('auth-password').minLength = $('auth-provider').value === 'directory' ? 1 : 16; };
 $('auth-form').onsubmit = async (e) => {
