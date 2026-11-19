@@ -7,6 +7,9 @@ on:
       - "tests/SharedQuota/**"
       - "ops/test-server/compose.sharedquota.yml"
       - "ops/test-server/Dockerfile.sharedquota"
+      - "tests/CI/stack/Dockerfile.gateway"
+      - "tests/CI/stack/entrypoint.sh"
+      - "ops/test-server/compose.yml"
       - ".github/workflows/shared-quota-two-nodes.yml"
   workflow_dispatch:
 permissions:
