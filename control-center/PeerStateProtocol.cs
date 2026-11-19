@@ -23,7 +23,7 @@ public sealed record PeerStateFrame(string NodeId, long Minute, long Sequence,
     // The receiver deliberately accepts only the protocol version it knows.
     // This is a compatibility fence: rollout must keep both peers on the same
     // version until an explicit negotiation/upgrade protocol is introduced.
-    public const int CurrentProtocolVersion = 2;
+    public const int CurrentProtocolVersion = 3;
     [JsonRequired]
     public int ProtocolVersion { get; init; } = CurrentProtocolVersion;
 
@@ -38,6 +38,11 @@ public sealed record PeerStateFrame(string NodeId, long Minute, long Sequence,
 
     // Boot epoch allows full resynchronization when a peer process restarts.
     public long SourceEpoch { get; init; }
+
+    // Signed receiver challenge prevents captured snapshots from being
+    // accepted by a replacement process with an empty replay cache.
+    [JsonRequired]
+    public string ReceiverEpoch { get; init; } = "";
 }
 
 public sealed record PeerSyncStatus(bool Enabled, string LocalNode, string RemoteNode,
@@ -54,6 +59,23 @@ public static class PeerSyncFreshness
 
 public sealed class PeerStateJournal
 {
+    public const string ReceiverEpochHeader = "X-GC-Peer-Receiver-Epoch";
+    public string ReceiverEpoch { get; } =
+        Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
+
+    public static bool IsReceiverEpoch(string? value) =>
+        value is { Length: 64 } && value.All(c =>
+            c is >= '0' and <= '9' or >= 'A' and <= 'F');
+
+    public bool MatchesReceiverEpoch(PeerStateFrame? frame) =>
+        frame is not null && frame.ProtocolVersion == PeerStateFrame.CurrentProtocolVersion &&
+        frame.NodeId == remoteId && string.Equals(frame.ReceiverEpoch, ReceiverEpoch, StringComparison.Ordinal);
+
+    // Network callers must authenticate the original bytes before invoking
+    // this method; the boot epoch is part of that signed payload.
+    public bool ApplyBoundFrame(PeerStateFrame? frame, long currentMinute) =>
+        MatchesReceiverEpoch(frame) && Apply(frame, currentMinute);
+
     private readonly object gate = new();
     private readonly byte[] secret;
     private readonly string localId;
@@ -133,7 +155,7 @@ public sealed class PeerStateJournal
         }
     }
 
-    public bool Apply(PeerStateFrame? frame, long currentMinute)
+    internal bool Apply(PeerStateFrame? frame, long currentMinute)
     {
         if (frame is null || frame.ProtocolVersion != PeerStateFrame.CurrentProtocolVersion ||
             !PeerStateTableContract.IsSupported(frame.TableId, frame.TableVersion, frame.EntryTtlSeconds) ||
