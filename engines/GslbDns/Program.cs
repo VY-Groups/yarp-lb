@@ -125,7 +125,24 @@ foreach(var zone in config.Zones)
     if (sites.Any(site => site.RequiredAgentIds.Length > 0) &&
         sites.Any(site => site.RequiredAgentIds.Length == 0))
         throw new InvalidDataException("All sites in an agent-report zone must use an explicit report quorum");
-    if (!string.IsNullOrWhiteSpace(zone.DnssecPrivateKeyPath) &&
+    var hasDnssecKeyConfig = !string.IsNullOrWhiteSpace(zone.DnssecPrivateKeyPath) ||
+        zone.DnssecPrepublishPublicKeyPaths is { Length: > 0 } ||
+        zone.DnssecAdditionalSigningKeyPaths is { Length: > 0 };
+    if ((zone.DnssecPrepublishPublicKeyPaths?.Length ?? 0) > 2 ||
+        (zone.DnssecAdditionalSigningKeyPaths?.Length ?? 0) > 2 ||
+        (hasDnssecKeyConfig && string.IsNullOrWhiteSpace(zone.DnssecPrivateKeyPath)))
+        throw new InvalidDataException("DNSSEC rollover keys require an active private key and at most two keys per rollover role");
+    if ((zone.DnssecPrepublishPublicKeyPaths ?? []).Any(string.IsNullOrWhiteSpace) ||
+        (zone.DnssecAdditionalSigningKeyPaths ?? []).Any(string.IsNullOrWhiteSpace))
+        throw new InvalidDataException("DNSSEC rollover key paths must not be empty");
+    var dnssecPaths = new[] { zone.DnssecPrivateKeyPath }
+        .Concat(zone.DnssecPrepublishPublicKeyPaths ?? [])
+        .Concat(zone.DnssecAdditionalSigningKeyPaths ?? [])
+        .Where(path => !string.IsNullOrWhiteSpace(path)).Select(path => path!).ToArray();
+    if (dnssecPaths.Any(path => string.IsNullOrWhiteSpace(path) || !Path.IsPathFullyQualified(path)) ||
+        dnssecPaths.Select(Path.GetFullPath).Distinct(StringComparer.OrdinalIgnoreCase).Count() != dnssecPaths.Length)
+        throw new InvalidDataException("DNSSEC active, rollover and prepublish key paths must be unique absolute paths");
+    if (hasDnssecKeyConfig &&
         (zone.NameServers is not { Length: > 0 } || zone.SoaSerial == 0))
         throw new InvalidDataException("DNSSEC requires authoritative NS records and a nonzero SOA serial");
     var origin = zone.Name.TrimEnd('.').ToLowerInvariant();
@@ -202,9 +219,16 @@ foreach(var zone in config.Zones)
     groups.Add(origin, new SiteGroup(sites.ToArray(), zone.TtlSeconds,
         zone.FailClosedWhenAllSitesDown, servers.ToArray(), contact, zone.SoaSerial,
         zone.RoutingPolicy,cidrTable,zone.EnableEcsGeoRouting,trustedEcsResolvers,geoIpTable,
-        delegations.ToArray(), zone.DnssecPrivateKeyPath, origin));
+        delegations.ToArray(), zone.DnssecPrivateKeyPath, origin,
+        zone.DnssecPrepublishPublicKeyPaths, zone.DnssecAdditionalSigningKeyPaths));
     if (groups[origin].Dnssec is { } dnssec)
-        Console.WriteLine($"GSLB_DNSSEC zone={origin} algorithm=13 keyTag={dnssec.KeyTag} DS=\"{dnssec.KeyTag} 13 2 {Convert.ToHexString(dnssec.Ds.Rdata[4..])}\"");
+    {
+        foreach (var entry in dnssec.ParentDsMaterial)
+        {
+            var dsText = $"{entry.KeyTag} 13 2 {Convert.ToHexString(entry.Ds.Rdata[4..])}";
+            Console.WriteLine($"GSLB_DNSSEC zone={origin} phase={entry.Phase} algorithm=13 keyTag={entry.KeyTag} DS=\"{dsText}\"");
+        }
+    }
 }
 if (config.AuthorityFence is not null)
 {
@@ -473,6 +497,8 @@ sealed record DnsZone(string Name,int TtlSeconds,DnsSite[] Sites,
     public GeoAsnRoute[]? GeoAsnRoutes { get; init; }
     public DnsDelegationConfig[]? Delegations { get; init; }
     public string? DnssecPrivateKeyPath { get; init; }
+    public string[]? DnssecPrepublishPublicKeyPaths { get; init; }
+    public string[]? DnssecAdditionalSigningKeyPaths { get; init; }
 }
 sealed record DnsNameServerConfig(string Host,string Address);
 sealed record DnsNameServer(string Host,IPAddress Address)
@@ -529,7 +555,9 @@ sealed class SiteGroup
         DnsCidrRegionTable? cidrTable,bool enableEcsGeoRouting,
         DnsCidrRegionTable? trustedEcsResolvers,GeoIpEcsRegionTable? geoIpTable = null,
         DnsDelegation[]? delegations = null,
-        string? dnssecPrivateKeyPath = null, string? zoneName = null)
+        string? dnssecPrivateKeyPath = null, string? zoneName = null,
+        IReadOnlyList<string>? dnssecPrepublishPublicKeyPaths = null,
+        IReadOnlyList<string>? dnssecAdditionalSigningKeyPaths = null)
     {
         (Sites,Ttl,FailClosedWhenAllSitesDown,NameServers,SoaContact,SoaSerial,RoutingPolicy,CidrTable)
             =(sites,ttl,failClosedWhenAllSitesDown,nameServers,soaContact,soaSerial,routingPolicy,cidrTable);
@@ -541,7 +569,8 @@ sealed class SiteGroup
             Dnssec = new DnssecZoneSigner(zoneName ?? throw new InvalidDataException("DNSSEC zone name is required"),
                 (uint)ttl, dnssecPrivateKeyPath, soaContact, soaSerial, nameServers,
                 Delegations, sites.Any(s => s.Address.AddressFamily == AddressFamily.InterNetwork),
-                sites.Any(s => s.Address.AddressFamily == AddressFamily.InterNetworkV6));
+                sites.Any(s => s.Address.AddressFamily == AddressFamily.InterNetworkV6),
+                dnssecPrepublishPublicKeyPaths, dnssecAdditionalSigningKeyPaths);
     }
     public string RoutingPolicy { get; }
     // 3 local successful measurements; at most 3 probe periods, clamped 6..60s.

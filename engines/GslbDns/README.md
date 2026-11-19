@@ -170,20 +170,63 @@ Add this to the zone JSON (the zone must also configure NS records):
 
     "DnssecPrivateKeyPath": "/etc/gatewaycore/dnssec/app.example.test.pem"
 
-At startup the DNS process logs a public `DS` record in presentation format.
-Copy that exact DS to the parent zone/registrar only after checking it against
-the independently generated DNSKEY. For a child delegation, publish the DS at
-the parent. All authorities serving the same signed zone must use the same
-key and serial. On Linux, every path component is opened without following
+At startup the DNS process logs each key's public `DS` record in presentation
+format, with a phase label (`active`, `prepublish`, or `dual-sign`). The output
+is deterministically ordered and can be checked against the independently
+generated DNSKEY. The server does not publish DS records to a parent zone or
+registrar. All authorities serving the same signed zone must use the same key
+set and serial. On Linux, private-key paths are opened without following
 symlinks, ownership and restrictive mode are checked on the opened key, and
 the PEM imported is read from that same handle; the key must be owned by root
 or the service identity and have no group/other permissions (`0600` is
 recommended). On Windows, the final reparse point is not followed, but key ACL
 authorization is deployment-managed: grant read access only to the GatewayCore
 service identity using a restrictive NTFS ACL. Private key contents are never
-logged. This static-key workflow does not provide automated rollover, HSM/KMS
-storage, or safe multi-authority key distribution; do not use it as a substitute
-for those controls, public delegation validation, or a security review.
+logged.
+
+### Manual CSK prepublication and overlap
+
+This is an operator-controlled routine rollover procedure. It does not automate
+parent DS updates, reload files, coordinate authorities, or provide emergency
+key-compromise recovery. Use a separate `0600` P-256 private key at each signer;
+export its public SubjectPublicKeyInfo PEM for prepublication:
+
+    openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out /etc/gatewaycore/dnssec/app-next.pem
+    chmod 600 /etc/gatewaycore/dnssec/app-next.pem
+    openssl pkey -in /etc/gatewaycore/dnssec/app-next.pem -pubout -out /etc/gatewaycore/dnssec/app-next.pub.pem
+
+1. **Prepublish.** Keep the current `DnssecPrivateKeyPath` unchanged and add
+   `DnssecPrepublishPublicKeyPaths` with the absolute `app-next.pub.pem` path:
+
+       "DnssecPrivateKeyPath": "/etc/gatewaycore/dnssec/app-current.pem",
+       "DnssecPrepublishPublicKeyPaths": ["/etc/gatewaycore/dnssec/app-next.pub.pem"]
+
+   All authorities publish both DNSKEYs; the old key continues signing. Keep
+   only the old DS at the parent. Compare the logged new DS with an independent
+   derivation and wait at least one zone DNSKEY TTL on every authority.
+2. **Dual-sign.** Remove `DnssecPrepublishPublicKeyPaths` and add
+   `DnssecAdditionalSigningKeyPaths` with the new absolute private-key path.
+   Keep the old key as `DnssecPrivateKeyPath`:
+
+       "DnssecPrivateKeyPath": "/etc/gatewaycore/dnssec/app-current.pem",
+       "DnssecAdditionalSigningKeyPaths": ["/etc/gatewaycore/dnssec/app-next.pem"]
+
+   Verify the `dual-sign` DS output
+   and that DNSKEY, A/AAAA, SOA, NS, and denial RRsets carry signatures from both
+   key tags on every authority. Wait at least one DNSKEY TTL so cached keysets
+   include both signatures before changing parent DS data.
+3. **Parent overlap.** Add the new DS to the parent while retaining the old DS.
+   Independently validate both chains and wait for the parent DS TTL and the
+   zone's DNSKEY/signature TTLs to expire.
+4. **Retire.** Remove the old DS at the parent and wait out its published TTL.
+   Then set `DnssecPrivateKeyPath` to the new private key and remove
+   `DnssecAdditionalSigningKeyPaths`; restart every authority and verify only
+   the new DNSKEY/signatures remain. Retain the old key offline under the
+   organization's recovery policy until acceptance is complete.
+
+Any failed file, key, phase, or signer startup fails closed. Do not skip a wait
+because the lab test passed. Production DNSSEC still requires parent-chain,
+multi-authority and operational acceptance.
 
     {
       "AllowNonLoopbackListeners": false,
@@ -605,9 +648,11 @@ The signer refreshes signatures as they approach expiry.
 
 This signer is limited: NSEC only; no automated KSK/ZSK or algorithm rollover,
 HSM/KMS integration, DS publication workflow, child-zone signing, key revocation,
-TSIG, AXFR/IXFR, or external authority synchronization. The configured DS is
-not automatically published to the parent, and differing keys/serials across
-authorities will break validation. Do not enable signing for a public zone until
-independent resolver/parent-delegation and multi-authority acceptance is complete.
+TSIG, AXFR/IXFR, or external authority synchronization. Manual CSK
+prepublication and dual-sign overlap are opt-in configuration phases, not an
+automated lifecycle. The configured DS is not automatically published to the
+parent, and differing keys/serials across authorities will break validation.
+Do not enable signing for a public zone until independent
+resolver/parent-delegation and multi-authority acceptance is complete.
 Zone serials are operator-configured and do not automatically increment.
 AXFR/IXFR, NOTIFY, TSIG and recursive service are also unsupported.

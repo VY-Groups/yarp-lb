@@ -181,7 +181,7 @@ internal static class DnsWireProtocol
             }
             else if (zone.Dnssec is { } signer && qtype == Dnskey && atApex)
             {
-                answers.Add(signer.DnsKey);
+                answers.AddRange(signer.DnsKeys);
             }
             else if (zone.Dnssec is { } nsecSigner && qtype == Nsec && nsecSigner.NsecAt(domain) is { } nsec)
             {
@@ -192,7 +192,7 @@ internal static class DnsWireProtocol
                 answers.AddRange(sigSigner.SignaturesAt(domain));
                 if (domain == apex)
                     foreach (var site in zone.Sites)
-                        answers.Add(sigSigner.SignRrset(domain,
+                        answers.AddRange(sigSigner.SignRrsets(domain,
                             site.Address.AddressFamily == AddressFamily.InterNetwork ? A : Aaaa,
                             (uint)zone.Ttl, [site.Address.GetAddressBytes()]));
             }
@@ -383,7 +383,7 @@ internal static class DnsWireProtocol
         {
             var signatures = section.Where(r => r.Type != Rrsig)
                 .GroupBy(r => (r.Owner, r.Type))
-                .Select(set => signer.SignRrset(set.Key.Owner, set.Key.Type, set.First().Ttl,
+                .SelectMany(set => signer.SignRrsets(set.Key.Owner, set.Key.Type, set.First().Ttl,
                     set.Select(r => r.Rdata).ToArray())).ToArray();
             section.AddRange(signatures);
         }
