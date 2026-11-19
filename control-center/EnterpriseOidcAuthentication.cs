@@ -95,7 +95,7 @@ internal static class EnterpriseOidcAuthentication
                     var users = JsonSerializer.Deserialize<List<AdminUser>>(await File.ReadAllTextAsync(usersPath)) ?? [];
                     var user = users.SingleOrDefault(u => u.Username.Equals(row.Username, StringComparison.OrdinalIgnoreCase));
                     if (user is null || !user.Enabled || user.Provider != "Local" || user.Role != row.Role ||
-                        string.IsNullOrEmpty(user.SecurityStamp))
+                        string.IsNullOrEmpty(user.SecurityStamp) || user.OidcRevokedBefore < 0 || time <= user.OidcRevokedBefore)
                     { ctx.HandleResponse(); ctx.Response.Redirect("/admin/oidc/error"); return; }
                     var claims = new[]
                     {
