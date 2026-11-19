@@ -275,6 +275,9 @@ public static class GatewayOtlpExporterAcceptance
                 throw new Exception($"Local rejection metric labels were not the fixed allowlist plus other: [{string.Join(",", rejectionCounts.Keys)}]");
             if (!rejectionCounts.TryGetValue("gateway_shutdown", out var shutdownCount) || shutdownCount != 1)
                 throw new Exception($"Early pipeline shutdown was not recorded exactly once (observed {shutdownCount})");
+            foreach (var reason in expectedRejectionLabels)
+                if (!rejectionCounts.TryGetValue(reason, out var reasonCount) || reasonCount != 1)
+                    throw new Exception($"Local rejection reason '{reason}' was not counted exactly once (observed {reasonCount})");
             var metricValues = ReadOtlpMetricValues(metrics.SelectMany(x => x.Body).ToArray());
             foreach (var expected in new[]
                      {
