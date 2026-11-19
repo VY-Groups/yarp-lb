@@ -138,7 +138,14 @@ class Idp:
         if mode=="events": token["events"]={"unrelated":{}}
         if mode=="subject": token["sub"]="unknown-account"
         if mode=="jti": del token["jti"]
-        unsigned=b64url(json.dumps({"alg":"RS256","kid":"fixture-1","typ":"logout+jwt"}).encode())+"."+b64url(json.dumps(token).encode())
+        typ="logout+jwt"
+        if mode=="typ-jwt": typ="JWT"
+        if mode=="typ-application": typ="application/logout+jwt"
+        if mode=="typ-case": typ="Logout+jwt"
+        if mode=="typ-other": typ="other"
+        header={"alg":"RS256","kid":"fixture-1"}
+        if mode!="typ-absent": header["typ"]=typ
+        unsigned=b64url(json.dumps(header).encode())+"."+b64url(json.dumps(token).encode())
         sig=cmd("openssl","dgst","-sha256","-sign",str(self.signing),input=unsigned.encode())
         if mode=="signature": sig=bytes(len(sig))
         return unsigned+"."+b64url(sig),stamp
@@ -237,13 +244,17 @@ def main():
                     original,old_jar=browser(origin,ctx)
                     original.request("GET","/admin/oidc/start")
                     check(original.session()["authenticated"],"real session before provider revocation")
-                    for mode in ("issuer","audience","nonce","stale","events","subject","jti","signature"):
+                    for mode in ("issuer","audience","nonce","stale","events","subject","jti","signature",
+                                 "typ-jwt","typ-application","typ-case","typ-other"):
                         forged,_=idp.logout_notice(mode)
                         backchannel(origin,ctx,forged,400)
                         check(original.session()["authenticated"],"invalid logout cannot revoke session: "+mode)
                     notice,stamp=idp.logout_notice()
                     backchannel(origin,ctx,notice,200)
                     check(not original.session()["authenticated"],"valid IdP notice revokes next authenticated request")
+                    absent_typ,_=idp.logout_notice("typ-absent",issued=stamp)
+                    backchannel(origin,ctx,absent_typ,200)
+                    check(not original.session()["authenticated"],"valid logout token without typ is accepted")
                     idp.auth_override=stamp
                     stale,_=browser(origin,ctx)
                     stale.request("GET","/admin/oidc/start",expect=403)
