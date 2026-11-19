@@ -220,7 +220,10 @@ set `ListenHost` to the intended service address, `ListenPort` to `53`, and
 independent local public-bind permission. Configure OS capabilities/service
 permissions for UDP and TCP port 53 rather than running as root. Keep the
 management and metrics listeners private; this engine is non-recursive and
-serves only explicitly configured zones.
+serves only explicitly configured zones. Each zone on a non-loopback listener
+must configure at least one apex `NameServers` entry. Startup fails closed if a
+publicly reachable zone cannot answer its authoritative NS query. Loopback-only
+legacy A behavior remains available for local development.
 
 ## Original behavior preserved
 

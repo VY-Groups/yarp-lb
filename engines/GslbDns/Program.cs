@@ -30,6 +30,7 @@ if (!IPAddress.TryParse(config.ListenHost, out var listen) ||
     config.MetricsListenPort is < 0 or > 65535 ||
     config.Zones is not { Length: >= 1 and <= 64 })
     throw new InvalidDataException("Invalid DNS listener or zones. Non-loopback binding requires explicit opt-in.");
+DnsListenerValidation.ValidateAuthoritativeZones(listen, config.Zones);
 if (config.MetricsListenPort != 0)
 {
     if (!IPAddress.TryParse(config.MetricsListenHost, out var metricsListen) ||

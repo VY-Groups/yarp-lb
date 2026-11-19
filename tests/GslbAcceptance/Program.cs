@@ -398,6 +398,23 @@ catch (InvalidDataException) { staleGeoDatabaseRejected = true; }
 if (!staleGeoDatabaseRejected)
     throw new Exception("FAIL: a GeoIP database outside the configured freshness window was accepted");
 if(!File.Exists(dll))throw new FileNotFoundException("Compile DNS server first",dll);
+// A non-loopback authoritative DNS service must not expose a zone that has no
+// apex NS data; preserve A-only legacy behavior on isolated loopback listeners.
+var zoneWithoutNs = new DnsZone("missing-ns.integration.test", 30,
+    [new DnsSite("192.0.2.21", "http://127.0.0.1:19711/ready", 1)]);
+var publicNsRejected = false;
+try { DnsListenerValidation.ValidateAuthoritativeZones(IPAddress.Any, [zoneWithoutNs]); }
+catch (InvalidDataException e) when (e.Message.Contains("Non-loopback authoritative DNS requires", StringComparison.Ordinal))
+{ publicNsRejected = true; }
+if (!publicNsRejected)
+    throw new Exception("FAIL: public DNS accepted a zone without explicit apex NS data");
+DnsListenerValidation.ValidateAuthoritativeZones(IPAddress.Loopback, [zoneWithoutNs]);
+var zoneWithNs = zoneWithoutNs with
+{
+    NameServers = [new DnsNameServerConfig("ns1.missing-ns.integration.test", "192.0.2.53")]
+};
+DnsListenerValidation.ValidateAuthoritativeZones(IPAddress.Any, [zoneWithNs]);
+Console.WriteLine("PASS: public DNS requires apex NS metadata while loopback legacy zones remain compatible");
 using var cancel=new CancellationTokenSource();
 var s1=new ProbeState { DelayMs=180 };var s2=new ProbeState();var s3=new ProbeState();
 var healthA=new TcpListener(IPAddress.Loopback,19711);
