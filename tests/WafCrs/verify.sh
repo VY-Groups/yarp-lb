@@ -11,7 +11,12 @@ function teardown {
 }
 trap teardown EXIT
 docker compose -f "$COMPOSE" config --quiet
-docker compose -f "$COMPOSE" up --detach
+WAF_MODE=On docker compose -f "$COMPOSE" up --detach
+# Record the exact pulled WAF image, not just the mutable tag in Compose.
+waf_id="$(docker compose -f "$COMPOSE" ps --quiet waf)"
+waf_image_id="$(docker inspect "$waf_id" --format '{{.Image}}')"
+printf '%s\n' "$waf_image_id" > "$DIR/waf-image-id.txt"
+docker image inspect "$waf_image_id" --format '{{json .RepoDigests}}' > "$DIR/waf-image-digests.json"
 ready=0
 for i in $(seq 1 150); do
   code="$(curl --silent --max-time 2 -w '%{http_code}' "http://127.0.0.1:18888/" -o "$DIR/benign-body.txt" || true)"
@@ -124,7 +129,15 @@ observe_code="$(curl --silent --show-error --max-time 8 --get \
   -o "$DIR/detection-only-response.txt" -w '%{http_code}' "http://127.0.0.1:18888/")"
 printf '%s\n' "$observe_code" > "$DIR/detection-only-status.txt"
 [[ "$observe_code" == 200 ]] || { echo "FAIL: detection-only did not forward payload" >&2; exit 1; }
-docker compose -f "$COMPOSE" logs --no-color waf > "$DIR/detection-only-audit.log" 2>&1 || true
+grep -Fxq 'YARP-WAF-CI-BENIGN' "$DIR/detection-only-response.txt" || { echo "FAIL: detection-only response did not come from the test backend" >&2; exit 1; }
+# Require evidence that CRS actually detected the XSS, rather than merely allowing it.
+docker compose -f "$COMPOSE" logs --no-color waf > "$DIR/detection-only-audit.log" 2>&1
+if ! grep -Eq '\[id "941[0-9]{3}"\]' "$DIR/detection-only-audit.log"; then
+  echo "FAIL: detection-only XSS lacks a CRS 941xxx rule diagnostic" >&2; exit 1
+fi
+# A detection-only restart must exercise the same image as the blocking phase.
+observe_id="$(docker compose -f "$COMPOSE" ps --quiet waf)"
+[[ "$(docker inspect "$observe_id" --format '{{.Image}}')" == "$waf_image_id" ]] || { echo "FAIL: WAF image changed between modes" >&2; exit 1; }
 echo "PASS: CRS attack corpus, benign JSON/XML/large upload corpus, body cap, benign query and detection-only forwarding"
 # Compose 'port' output is not proof of a host port binding; inspect Docker's
 # actual NetworkSettings.Ports and reject any published HostIp/HostPort.
