@@ -142,6 +142,9 @@ internal static class AuthorityFenceTests
                 Check(!receiver.IsAllowedPeerAddress(IPAddress.Parse("127.0.0.2")) &&
                       !receiver.IsAllowedPeerAddress(null),
                     "inbound peer IP allowlist rejects wrong or missing source addresses");
+                Check(!receiver.IsPeerEligible("fence.example.test", "primary", 101),
+                    "inbound lease alone cannot authorize a one-way partition");
+                receiver.RecordPeerAcknowledgement(100, 101);
                 Check(receiver.IsPeerEligible("fence.example.test.", "primary", 101),
                     "fresh matching eligible peer lease opens the fence");
                 Check(!receiver.TryAccept(initial, tlsA, now, 102), "duplicate authority snapshot is replay rejected");
@@ -162,12 +165,22 @@ internal static class AuthorityFenceTests
                 Check(!restartedReceiver.TryAccept(initial, tlsA, now, 200),
                     "durable receiver high-water rejects a pre-restart snapshot replay");
                 var recovered = restartedSource.CreateSnapshot(201);
+                restartedReceiver.RecordPeerAcknowledgement(201, 202);
                 Check(recovered.Epoch > initial.Epoch &&
                       restartedReceiver.TryAccept(recovered, tlsA, now, 201) &&
                       restartedReceiver.IsPeerEligible("fence.example.test", "primary", 202),
                     "new sender epoch provides fresh recovery after authority restart");
+                var freshInbound = restartedSource.CreateSnapshot(5200);
+                Check(restartedReceiver.TryAccept(freshInbound, tlsA, now, 5200),
+                    "fresh inbound report during one-way outage accepted as evidence");
                 Check(!restartedReceiver.IsPeerEligible("fence.example.test", "primary", 5202),
-                    "peer eligibility expires at the bounded monotonic lease");
+                    "fresh inbound evidence cannot extend expired outbound acknowledgement");
+                restartedReceiver.RecordPeerAcknowledgement(201, 5202);
+                Check(!restartedReceiver.IsPeerEligible("fence.example.test", "primary", 5202),
+                    "delayed acknowledgement cannot resurrect expired outbound lease");
+                restartedReceiver.RecordPeerAcknowledgement(5202, 5203);
+                Check(restartedReceiver.IsPeerEligible("fence.example.test", "primary", 5203),
+                    "fresh outbound acknowledgement restores bidirectional eligibility");
                 Check(!restartedReceiver.TryAccept(recovered with { Signature = "A" }, tlsA, now, 5203),
                     "tampered authority signature is rejected");
             }
@@ -185,6 +198,7 @@ internal static class AuthorityFenceTests
             {
                 Check(deletionReceiver.TryAccept(deletionSource.CreateSnapshot(400), tlsA, now, 400),
                     "replay state initializes once for a new authority pair");
+                deletionReceiver.RecordPeerAcknowledgement(400, 400);
                 Check(deletionReceiver.IsPeerEligible("fence.example.test", "primary", 400),
                     "valid lease initially authorizes a target before durable state loss");
                 File.Delete(deletionConfig.ReplayStatePath);
