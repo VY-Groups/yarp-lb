@@ -58,6 +58,7 @@ internal sealed class AgentHealthReportStore : IDisposable
             throw new InvalidDataException("Agent trust list must contain 2..64 identities");
         agents = new Dictionary<string, AgentTrustEntry>(StringComparer.Ordinal);
         var usedPins = new HashSet<string>(StringComparer.Ordinal);
+        var usedSigningKeys = new HashSet<string>(StringComparer.Ordinal);
         try
         {
             foreach (var item in trust)
@@ -89,8 +90,13 @@ internal sealed class AgentHealthReportStore : IDisposable
                     if (key.ExportParameters(false).Curve.Oid.Value != "1.2.840.10045.3.1.7")
                         throw new InvalidDataException("Agent report signing keys must use P-256");
                     var encodedKey = key.ExportSubjectPublicKeyInfo();
-                    if (!publicKeys.TryAdd(AgentHealthReportContract.KeyId(key), encodedKey))
+                    var keyId = AgentHealthReportContract.KeyId(key);
+                    if (!publicKeys.TryAdd(keyId, encodedKey))
                         throw new InvalidDataException("Duplicate agent report signing key");
+                    // Distinct identities/vantage groups must not share a signing
+                    // credential, including overlapping rotation windows.
+                    if (!usedSigningKeys.Add(keyId))
+                        throw new InvalidDataException("Agent report signing keys must identify exactly one agent");
                 }
                 if (!agents.TryAdd(item.AgentId, new AgentTrustEntry(item.VantageGroup, certPins, publicKeys)))
                     throw new InvalidDataException("Duplicate agent identity");
