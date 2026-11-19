@@ -91,6 +91,8 @@ internal sealed class GeoIpEcsRegionTable
     private readonly TimeProvider clock;
     private readonly long openedAt;
     private readonly TimeSpan? remainingLifetime;
+    private readonly DateTime? expiresUtc;
+    private int expired;
 
     public GeoIpEcsRegionTable(Reader? country, Reader? asn,
         IEnumerable<GeoCountryRoute> countryRoutes, IEnumerable<GeoAsnRoute> asnRoutes,
@@ -123,9 +125,13 @@ internal sealed class GeoIpEcsRegionTable
             foreach (var reader in new[] { country, asn })
             {
                 if (reader is null) continue;
-                var remaining = reader.Metadata.BuildDate.AddDays(maxAgeDays) - now;
+                var expiry = reader.Metadata.BuildDate.AddDays(maxAgeDays);
+                var remaining = expiry - now;
                 if (remainingLifetime is null || remaining < remainingLifetime.Value)
+                {
                     remainingLifetime = remaining;
+                    expiresUtc = expiry;
+                }
             }
         }
     }
@@ -136,9 +142,17 @@ internal sealed class GeoIpEcsRegionTable
     public (string Region, int PrefixLength)? RegionForEcs(IPAddress address, int sourcePrefixLength)
     {
         ArgumentNullException.ThrowIfNull(address);
-        if (remainingLifetime is { } lifetime &&
-            clock.GetElapsedTime(openedAt) >= lifetime)
-            return null; // Expired geography is unknown; normal healthy-site fallback applies.
+        if (remainingLifetime is { } lifetime)
+        {
+            // Either clock can expire the database. Once observed expired,
+            // a subsequent wall-clock rollback must not re-enable steering.
+            var elapsed = clock.GetElapsedTime(openedAt);
+            if (elapsed < TimeSpan.Zero || elapsed >= lifetime ||
+                (expiresUtc is { } deadline && clock.GetUtcNow().UtcDateTime >= deadline))
+                Interlocked.Exchange(ref expired, 1);
+            if (Volatile.Read(ref expired) != 0)
+                return null; // Unknown geography: normal healthy-site fallback.
+        }
         var maxPrefix = address.GetAddressBytes().Length * 8;
         if (sourcePrefixLength < 0 || sourcePrefixLength > maxPrefix ||
             address.IsIPv4MappedToIPv6 || address.AddressFamily is not
