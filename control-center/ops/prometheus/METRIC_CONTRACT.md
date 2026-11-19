@@ -32,6 +32,13 @@ yarp_logging_write_errors_total
 yarp_peer_sync_enabled
 yarp_peer_sync_last_accepted_age_seconds
 yarp_peer_sync_remote_fresh
+yarp_peer_sync_publish_attempts_total
+yarp_peer_sync_publish_acknowledgements_total
+yarp_peer_sync_publish_http_failures_total
+yarp_peer_sync_publish_transport_failures_total
+yarp_peer_sync_publish_resynchronizations_total
+yarp_peer_sync_publish_last_ack_age_seconds
+yarp_peer_sync_publish_in_flight
 ```
 
 ### Required gateway-series (exact samples, not invented aliases)
@@ -60,6 +67,13 @@ yarp_peer_sync_remote_fresh
 - `yarp_peer_sync_enabled`
 - `yarp_peer_sync_remote_fresh`
 - `yarp_peer_sync_last_accepted_age_seconds`
+- `yarp_peer_sync_publish_attempts_total`
+- `yarp_peer_sync_publish_acknowledgements_total`
+- `yarp_peer_sync_publish_http_failures_total`
+- `yarp_peer_sync_publish_transport_failures_total`
+- `yarp_peer_sync_publish_resynchronizations_total`
+- `yarp_peer_sync_publish_last_ack_age_seconds`
+- `yarp_peer_sync_publish_in_flight`
 
 The logging counters are process-lifetime values and reset at restart. The
 low/high counters partition the total (`dropped_total = low_priority_total +
@@ -72,6 +86,16 @@ Peer-sync gauges are also process-local. `enabled` and `remote_fresh` are 0/1;
 `last_accepted_age_seconds` is monotonic and remains measurable after stale
 counters are collected. It is `NaN` until the first authenticated peer frame;
 these fixed-cardinality series have no peer, node, client, or identity labels.
+
+Publisher diagnostics are process-local, reset at restart, and also have no
+labels. The publisher performs one request at a time and has no durable queue;
+an acknowledgment is an HTTPS status response, not a durability guarantee.
+Expected signed receiver-boot challenges do not increment HTTP failures.
+`yarp_peer_sync_publish_last_ack_age_seconds` uses the monotonic clock and is
+`NaN` before the first successful acknowledgment. `in_flight` is bounded to 0
+or 1 by the serial publisher. A `resynchronizations_total` increment means a
+previously known receiver boot epoch changed; initial epoch discovery is not a
+resynchronization event.
 
 Per-destination request counters have a process-local cap of 4,096 distinct
 IDs. Requests for additional IDs increment

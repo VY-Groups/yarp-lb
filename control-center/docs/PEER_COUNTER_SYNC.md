@@ -16,7 +16,7 @@ Optional `GATEWAY_PEER_SYNC_CAPACITY` default 2048 (1..2048), `GATEWAY_PEER_SYNC
 
 A sender emits one bounded full snapshot or acknowledged-base delta per interval, signed by HMAC-SHA256 over sender identity, UTC timestamp, random nonce and SHA-256 of the serialized body. Protocol version 4 explicitly identifies its only supported table as `hashed-client-minute-request-count`, table schema version 1, with a 60-second entry lifetime. Unknown protocol/table/schema/TTL values fail closed; peers must be upgraded together because there is no version negotiation or mixed-version fallback. The receiver checks the expected node ID, a 30-second time window, single-use nonces, a 256 KiB body cap and monotonic per-minute sequence and counts. Client IP values are HMAC-hashed, never sent in plaintext. Received identity keys must be exactly 64 uppercase hexadecimal characters matching the shipping SHA-256 representation in both full and delta frames; case aliases are rejected without advancing the accepted baseline; accepted identity cardinality is capped to 2048 so a worst-case hexadecimal-key JSON snapshot stays under the signed 256 KiB transport ceiling. Local and remote table entries are collected when the minute/monotonic freshness boundary is observed; remote expiry retains epoch/sequence replay high-water marks.
 
-This contract is deliberately one typed table only. It implements absolute-counter deltas for this single table and full snapshot backfill; generic table negotiation and multi-peer fanout remain unsupported. Those remain open parts of issue #101, along with operator UI/metrics and physical partition/soak acceptance.
+This contract is deliberately one typed table only. It implements absolute-counter deltas for this single table and full snapshot backfill; generic table negotiation and multi-peer fanout remain unsupported. Sender diagnostics expose process-local attempt, acknowledgment, HTTP failure, transport failure, receiver-epoch resynchronization, in-flight and last-ack age values through the authenticated operator status API, UI and fixed-cardinality Prometheus series. The sender is serial with at most one request in flight and has no durable queue; a failed exchange is retried on a later periodic tick according to the existing full/delta rules. These counters reset on process restart and do not prove durable receiver persistence. Physical partition/soak acceptance and broader HAProxy compatibility remain open parts of issue #101.
 
 **Availability/consistency:** best-effort telemetry gossip can diverge during partitions. It has no quorum, replay of CA requests, external mutation or leader election, and MUST NEVER be used to enforce a strict global quota. To enforce an atomic shared limit across nodes, use the independent opt-in `SharedPeerRateLimiter` single Redis writer. Its own fail-closed 503 behavior on disconnect remains unchanged. Asynchronous Redis replica promotion can also lose writes and is NOT certified for hard limits.
 
@@ -60,10 +60,19 @@ Receipt-age expiry uses the process monotonic clock (`TimeProvider`), so NTP
 correction or wall-clock rollback cannot lengthen or prematurely expire this
 TTL. The authenticated `/admin/api/peer-sync/status` view exposes the last
 accepted UTC timestamp and monotonic `lastAcceptedAgeSeconds`; the operator UI
-uses monotonic age when deciding whether an exchange is recent. The protected
+uses monotonic age when deciding whether an exchange is recent. It also exposes
+outbound publisher counters and monotonic last-ack age. The protected
 `/gateway/metrics` scrape exposes fixed-cardinality `yarp_peer_sync_enabled`,
-`yarp_peer_sync_remote_fresh`, and `yarp_peer_sync_last_accepted_age_seconds`
-gauges without node, IP, identity or secret labels. Age remains observable after
+`yarp_peer_sync_remote_fresh`, `yarp_peer_sync_last_accepted_age_seconds`,
+`yarp_peer_sync_publish_attempts_total`,
+`yarp_peer_sync_publish_acknowledgements_total`,
+`yarp_peer_sync_publish_http_failures_total`,
+`yarp_peer_sync_publish_transport_failures_total`,
+`yarp_peer_sync_publish_resynchronizations_total`,
+`yarp_peer_sync_publish_last_ack_age_seconds`, and
+`yarp_peer_sync_publish_in_flight` series without node, peer, IP, identity or
+secret labels. Expected receiver boot challenges are excluded from HTTP failure
+counts. Age remains observable after
 remote counters expire; it is `NaN` until the first accepted frame and resets
 only after a newly accepted frame or process restart. The current-minute protocol check still uses UTC wall time; if that minute
 is incorrect or regresses, snapshots fail closed until the minute agrees again.

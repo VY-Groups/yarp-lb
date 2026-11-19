@@ -42,6 +42,75 @@ public sealed record PeerSyncSettings(string NodeId, string RemoteId, Uri Remote
     }
 }
 
+/// <summary>
+/// Fixed-cardinality publisher-side diagnostics. This reports delivery
+/// attempts only; it does not imply durable queuing or remote persistence.
+/// </summary>
+public sealed record PeerSyncPublisherStatus(long AttemptsTotal, long AcknowledgementsTotal,
+    long HttpFailuresTotal, long TransportFailuresTotal, long ResynchronizationsTotal,
+    long? LastAcknowledgedAgeSeconds, DateTimeOffset? LastAcknowledgedUtc,
+    int InFlightRequests);
+
+public sealed class PeerSyncPublisherDiagnostics
+{
+    private sealed record AcknowledgementMark(long Timestamp, long UtcTicks);
+
+    private readonly TimeProvider timeProvider;
+    private long attempts, acknowledgements, httpFailures, transportFailures, resynchronizations;
+    private AcknowledgementMark? lastAcknowledgement;
+    private int inFlight;
+
+    public PeerSyncPublisherDiagnostics(TimeProvider? timeProvider = null) =>
+        this.timeProvider = timeProvider ?? TimeProvider.System;
+
+    public void BeginAttempt()
+    {
+        Interlocked.Increment(ref attempts);
+        Interlocked.Increment(ref inFlight);
+    }
+
+    public void EndAttempt() => Interlocked.Decrement(ref inFlight);
+
+    public void RecordResponse(bool acknowledged, bool expectedChallenge = false)
+    {
+        if (!acknowledged)
+        {
+            if (!expectedChallenge) Interlocked.Increment(ref httpFailures);
+            return;
+        }
+
+        var acknowledgedUtcTicks = timeProvider.GetUtcNow().UtcDateTime.Ticks;
+        var acknowledgedTimestamp = timeProvider.GetTimestamp();
+        var acknowledgement = new AcknowledgementMark(acknowledgedTimestamp, acknowledgedUtcTicks);
+        Interlocked.Exchange(ref lastAcknowledgement, acknowledgement);
+        Interlocked.Increment(ref acknowledgements);
+    }
+
+    public void RecordTransportFailure() => Interlocked.Increment(ref transportFailures);
+    public void RecordResynchronization() => Interlocked.Increment(ref resynchronizations);
+
+    public PeerSyncPublisherStatus Snapshot()
+    {
+        var acknowledgedAt = Volatile.Read(ref lastAcknowledgement);
+        long? ageSeconds = null;
+        if (acknowledgedAt is not null)
+        {
+            var elapsed = timeProvider.GetElapsedTime(acknowledgedAt.Timestamp);
+            if (elapsed >= TimeSpan.Zero)
+                ageSeconds = (long)Math.Floor(elapsed.TotalSeconds);
+        }
+
+        DateTimeOffset? acknowledgedUtc = acknowledgedAt is null
+            ? null
+            : new DateTimeOffset(acknowledgedAt.UtcTicks, TimeSpan.Zero);
+        return new PeerSyncPublisherStatus(
+            Interlocked.Read(ref attempts), Interlocked.Read(ref acknowledgements),
+            Interlocked.Read(ref httpFailures), Interlocked.Read(ref transportFailures),
+            Interlocked.Read(ref resynchronizations), ageSeconds, acknowledgedUtc,
+            Math.Max(0, Volatile.Read(ref inFlight)));
+    }
+}
+
 public sealed class PeerSyncPublisher : BackgroundService
 {
     private readonly PeerSyncSettings settings;
@@ -49,15 +118,18 @@ public sealed class PeerSyncPublisher : BackgroundService
     private readonly PeerSignedMessages signing;
     private readonly IHttpClientFactory factory;
     private readonly ILogger<PeerSyncPublisher> logger;
+    private readonly PeerSyncPublisherDiagnostics diagnostics;
 
     public PeerSyncPublisher(PeerSyncSettings settings, PeerStateJournal journal,
-        PeerSignedMessages signing,IHttpClientFactory factory,ILogger<PeerSyncPublisher> logger)
+        PeerSignedMessages signing,IHttpClientFactory factory,ILogger<PeerSyncPublisher> logger,
+        PeerSyncPublisherDiagnostics diagnostics)
     {
         this.settings=settings;
         this.journal=journal;
         this.signing=signing;
         this.factory=factory;
         this.logger=logger;
+        this.diagnostics=diagnostics;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -69,6 +141,7 @@ public sealed class PeerSyncPublisher : BackgroundService
         PeerStateFrame? acknowledged = null;
         while (!stoppingToken.IsCancellationRequested)
         {
+            var attemptStarted = false;
             try
             {
                 var now=DateTimeOffset.UtcNow.ToUnixTimeSeconds();
@@ -85,18 +158,24 @@ public sealed class PeerSyncPublisher : BackgroundService
                 req.Headers.TryAddWithoutValidation("X-GC-Peer-Sig",signature);
                 req.Content=new ByteArrayContent(payload);
                 req.Content.Headers.ContentType=new System.Net.Http.Headers.MediaTypeHeaderValue("application/json");
+                diagnostics.BeginAttempt();
+                attemptStarted = true;
                 using var result=await factory.CreateClient("peer-sync")
                     .SendAsync(req,HttpCompletionOption.ResponseHeadersRead,stoppingToken);
                 // Only a successful HTTPS response confirms this exact outbound baseline.
                 // No chain of queued deltas: one previous full image is retained, bounded.
                 acknowledged = result.IsSuccessStatusCode ? snapshot : null;
+                var expectedChallenge = false;
                 if (result.StatusCode == System.Net.HttpStatusCode.Conflict &&
                     result.Headers.TryGetValues(PeerStateJournal.ReceiverEpochHeader, out var values))
                 {
                     var candidates = values.Take(2).ToArray();
                     if (candidates.Length == 1 && PeerStateJournal.IsReceiverEpoch(candidates[0]))
                     {
+                        if (receiverEpoch.Length > 0 && receiverEpoch != candidates[0])
+                            diagnostics.RecordResynchronization();
                         receiverEpoch = candidates[0];
+                        expectedChallenge = true;
                         // Never replay the previous POST or reset local counters.
                         // The next periodic iteration sends a fresh signed snapshot.
                         logger.LogDebug("Peer receiver epoch learned; next periodic snapshot will resynchronize");
@@ -106,12 +185,18 @@ public sealed class PeerSyncPublisher : BackgroundService
                 }
                 else if (!result.IsSuccessStatusCode)
                     logger.LogWarning("Peer counter sync rejected with HTTP {Status}",(int)result.StatusCode);
+                diagnostics.RecordResponse(result.IsSuccessStatusCode, expectedChallenge);
             }
             catch (OperationCanceledException) when(stoppingToken.IsCancellationRequested) { break; }
             catch (Exception ex)
             {
+                diagnostics.RecordTransportFailure();
                 acknowledged = null;
                 logger.LogWarning("Peer sync unavailable: {ErrorType}",ex.GetType().Name);
+            }
+            finally
+            {
+                if (attemptStarted) diagnostics.EndAttempt();
             }
             try
             {
