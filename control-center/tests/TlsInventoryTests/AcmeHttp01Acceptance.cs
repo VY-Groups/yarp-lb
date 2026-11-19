@@ -72,7 +72,12 @@ internal static class AcmeHttp01Acceptance
             Check(store.TryGet(token, out _), "forward wall-clock correction does not prematurely expire a challenge");
             clock.AdjustUtc(TimeSpan.FromHours(-24));
             clock.Advance(TimeSpan.FromMinutes(2) - TimeSpan.FromTicks(1));
-            Check(store.TryGet(token, out _), "challenge is valid immediately before its monotonic deadline");
+            Check(store.TryPublish(token, authorization, TimeSpan.FromMinutes(10)),
+                "identical live publication is idempotent");
+            Check(!store.TryPublish(token, token + "." + new string('B', 43), TimeSpan.FromMinutes(2)),
+                "conflicting live key authorization cannot replace the original");
+            Check(store.TryGet(token, out var retained) && retained == authorization,
+                "live challenge retains its original account authorization");
             clock.Advance(TimeSpan.FromTicks(1));
             Check(!store.TryGet(token, out _), "challenge expires at its monotonic deadline despite wall-clock rollback");
             clock.AdjustUtc(TimeSpan.FromHours(-12));

@@ -33,7 +33,12 @@ public sealed class AcmeHttp01ChallengeStore
         {
             var now = timeProvider.GetTimestamp();
             RemoveExpired(now);
-            if (!entries.ContainsKey(token) && entries.Count >= MaximumEntries)
+            // A live token is owned by its original authorization. A
+            // concurrent issuer may safely retry the identical publication,
+            // but must not replace it or silently extend its lifetime.
+            if (entries.TryGetValue(token, out var existing))
+                return string.Equals(existing.KeyAuthorization, keyAuthorization, StringComparison.Ordinal);
+            if (entries.Count >= MaximumEntries)
                 return false;
             entries[token] = new Entry(keyAuthorization, now, lifetime);
             return true;
