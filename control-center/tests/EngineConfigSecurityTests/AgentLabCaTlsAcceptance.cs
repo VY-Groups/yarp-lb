@@ -22,6 +22,8 @@ public static class AgentLabCaTlsAcceptance
         if (!File.Exists(dll)) throw new FileNotFoundException("Build real agent first",dll);
         var dir=Path.Combine(Path.GetTempPath(),"agent-ephemeral-pki-"+Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(dir);
+        try
+        {
         using var caKey=RSA.Create(2048);
         var rootReq=new CertificateRequest("CN=ephemeral-agent-ca",caKey,
             HashAlgorithmName.SHA256,RSASignaturePadding.Pkcs1);
@@ -60,6 +62,23 @@ public static class AgentLabCaTlsAcceptance
             portSource.Start();var port=((IPEndPoint)portSource.LocalEndpoint).Port;portSource.Stop();
             var metricsPortSource=new TcpListener(IPAddress.Loopback,0);
             metricsPortSource.Start();var metricsPort=((IPEndPoint)metricsPortSource.LocalEndpoint).Port;metricsPortSource.Stop();
+            int UnusedPort()
+            {
+                using var source=new TcpListener(IPAddress.Loopback,0);
+                source.Start();
+                return ((IPEndPoint)source.LocalEndpoint).Port;
+            }
+            var secondaryPort=UnusedPort();
+            while(secondaryPort==port || secondaryPort==metricsPort) secondaryPort=UnusedPort();
+            var urlsPort=UnusedPort();
+            while(urlsPort==port || urlsPort==metricsPort || urlsPort==secondaryPort) urlsPort=UnusedPort();
+            var defaultHttpPort=UnusedPort();
+            while(defaultHttpPort==port || defaultHttpPort==metricsPort || defaultHttpPort==secondaryPort || defaultHttpPort==urlsPort)
+                defaultHttpPort=UnusedPort();
+            var defaultHttpsPort=UnusedPort();
+            while(defaultHttpsPort==port || defaultHttpsPort==metricsPort || defaultHttpsPort==secondaryPort ||
+                defaultHttpsPort==urlsPort || defaultHttpsPort==defaultHttpPort)
+                defaultHttpsPort=UnusedPort();
             var metricsBody = ValidMetrics();
             var agentStatusBody = ValidAgentStatus();
             var metricsBuilder = WebApplication.CreateSlimBuilder();
@@ -84,14 +103,101 @@ public static class AgentLabCaTlsAcceptance
                     }
                 }));
             SetPins([old.Thumbprint]);
-            var info=new ProcessStartInfo("dotnet") {
-                WorkingDirectory=dir,UseShellExecute=false,CreateNoWindow=true,
-                RedirectStandardOutput=true,RedirectStandardError=true
-            };
-            info.ArgumentList.Add(dll);
-            info.Environment["Kestrel__Endpoints__AgentHttps__Url"]="https://127.0.0.1:"+port;
-            info.Environment["Kestrel__Endpoints__AgentHttps__Certificate__Path"]=pfx;
-            info.Environment["Kestrel__Endpoints__AgentHttps__Certificate__Password"]=pass;
+            ProcessStartInfo StartAgent(string agentUrl)
+            {
+                var start=new ProcessStartInfo("dotnet") {
+                    WorkingDirectory=dir,UseShellExecute=false,CreateNoWindow=true,
+                    RedirectStandardOutput=true,RedirectStandardError=true
+                };
+                start.ArgumentList.Add(dll);
+                start.Environment["Kestrel__Endpoints__AgentHttps__Url"]=agentUrl;
+                start.Environment["Kestrel__Endpoints__AgentHttps__Certificate__Path"]=pfx;
+                start.Environment["Kestrel__Endpoints__AgentHttps__Certificate__Password"]=pass;
+                return start;
+            }
+            async Task<bool> IsLoopbackPortOpenAsync(int candidatePort)
+            {
+                using var probe=new TcpClient();
+                try
+                {
+                    using var timeout=new CancellationTokenSource(TimeSpan.FromMilliseconds(250));
+                    await probe.ConnectAsync(IPAddress.Loopback,candidatePort,timeout.Token);
+                    return true;
+                }
+                catch (Exception ex) when (ex is SocketException or OperationCanceledException)
+                { return false; }
+            }
+            async Task RequireLabListenerRejectedAsync(string name,ProcessStartInfo start,
+                params int[] forbiddenPorts)
+            {
+                using var rejected=Process.Start(start) ??
+                    throw new Exception("Could not start lab listener rejection case: "+name);
+                var rejectedOut=rejected.StandardOutput.ReadToEndAsync();
+                var rejectedError=rejected.StandardError.ReadToEndAsync();
+                using var timeout=new CancellationTokenSource(TimeSpan.FromSeconds(8));
+                try { await rejected.WaitForExitAsync(timeout.Token); }
+                catch (OperationCanceledException)
+                {
+                    // Some Windows hosting threads can outlive the startup throw.
+                    // Confirm no endpoint was opened, then stop the failed process.
+                    foreach(var candidatePort in forbiddenPorts)
+                        if(await IsLoopbackPortOpenAsync(candidatePort))
+                        {
+                            rejected.Kill(entireProcessTree:true);
+                            await rejected.WaitForExitAsync();
+                            throw new Exception("Rejected lab startup nevertheless opened a listener for "+name);
+                        }
+                    rejected.Kill(entireProcessTree:true);
+                    await rejected.WaitForExitAsync();
+                    var timedOutOutput=await rejectedOut;
+                    var timedOutError=await rejectedError;
+                    if(!timedOutError.Contains(
+                        "Isolated client test CA is restricted to HTTPS loopback-only listeners",
+                        StringComparison.Ordinal))
+                        throw new Exception("Public lab listener was not rejected by the specific trust guard: "+name+
+                            "; stdout="+timedOutOutput[..Math.Min(1500,timedOutOutput.Length)]+
+                            "; stderr="+timedOutError[..Math.Min(3000,timedOutError.Length)]);
+                    if(timedOutOutput.Contains(pass,StringComparison.Ordinal) ||
+                        timedOutError.Contains(pass,StringComparison.Ordinal) ||
+                        (timedOutOutput+timedOutError).Contains("BEGIN PRIVATE KEY",StringComparison.Ordinal))
+                        throw new Exception("Lab-listener rejection diagnostics exposed secret material for "+name);
+                    Console.WriteLine("PASS: lab self-signed trust startup refused before binding for "+name);
+                    return;
+                }
+                var errorText=await rejectedError;
+                var outputText=await rejectedOut;
+                if(rejected.ExitCode==0 || !errorText.Contains(
+                    "Isolated client test CA is restricted to HTTPS loopback-only listeners",
+                    StringComparison.Ordinal))
+                    throw new Exception("Public lab listener did not fail closed with the expected guard for "+name);
+                var combined=outputText+errorText;
+                if(combined.Contains(pass,StringComparison.Ordinal) ||
+                    combined.Contains("BEGIN PRIVATE KEY",StringComparison.Ordinal))
+                    throw new Exception("Lab-listener rejection diagnostics exposed secret material for "+name);
+                Console.WriteLine("PASS: lab self-signed trust startup refused for "+name);
+            }
+
+            // Exercise actual executable startup, not just a helper predicate.
+            var directPublic=StartAgent("https://0.0.0.0:"+port);
+            await RequireLabListenerRejectedAsync("public wildcard AgentHttps endpoint",directPublic);
+            var secondaryPublic=StartAgent("https://127.0.0.1:"+port);
+            secondaryPublic.Environment["Kestrel__Endpoints__ManagementHttps__Url"]="https://0.0.0.0:"+secondaryPort;
+            secondaryPublic.Environment["Kestrel__Endpoints__ManagementHttps__Certificate__Path"]=pfx;
+            secondaryPublic.Environment["Kestrel__Endpoints__ManagementHttps__Certificate__Password"]=pass;
+            await RequireLabListenerRejectedAsync("secondary public Kestrel endpoint",secondaryPublic,port,secondaryPort);
+            var urlsPublic=StartAgent("https://127.0.0.1:"+port);
+            urlsPublic.Environment["ASPNETCORE_URLS"]="https://0.0.0.0:"+urlsPort;
+            await RequireLabListenerRejectedAsync("public ASPNETCORE_URLS binding",urlsPublic,port,urlsPort);
+            var httpPortsPublic=StartAgent("https://127.0.0.1:"+port);
+            httpPortsPublic.Environment["ASPNETCORE_HTTP_PORTS"]=defaultHttpPort.ToString();
+            await RequireLabListenerRejectedAsync("wildcard ASPNETCORE_HTTP_PORTS binding",
+                httpPortsPublic,port,defaultHttpPort);
+            var httpsPortsPublic=StartAgent("https://127.0.0.1:"+port);
+            httpsPortsPublic.Environment["ASPNETCORE_HTTPS_PORTS"]=defaultHttpsPort.ToString();
+            await RequireLabListenerRejectedAsync("wildcard ASPNETCORE_HTTPS_PORTS binding",
+                httpsPortsPublic,port,defaultHttpsPort);
+
+            var info=StartAgent("https://127.0.0.1:"+port);
             using var process=Process.Start(info) ?? throw new Exception("Agent start failed");
             var stdout=process.StandardOutput.ReadToEndAsync();
             var stderr=process.StandardError.ReadToEndAsync();
@@ -162,11 +268,29 @@ public static class AgentLabCaTlsAcceptance
             {
                 if(!process.HasExited)process.Kill(entireProcessTree:true);
                 await process.WaitForExitAsync();
-                _=await stdout;_=await stderr;
-                await metricsApp.StopAsync();
-                Directory.Delete(dir,true);
+                var auditOutput=(await stdout)+"\n"+(await stderr);
+                try
+                {
+                    if(!auditOutput.Contains("Rejected lab TLS client certificate",StringComparison.Ordinal) ||
+                        !auditOutput.Contains(expired.Thumbprint.ToUpperInvariant(),StringComparison.Ordinal) ||
+                        !auditOutput.Contains("NotTimeValid",StringComparison.Ordinal))
+                        throw new Exception("Expired lab client certificate rejection did not produce a bounded fingerprint/status audit record");
+                    if(auditOutput.Contains(pass,StringComparison.Ordinal) ||
+                        auditOutput.Contains("BEGIN PRIVATE KEY",StringComparison.Ordinal))
+                        throw new Exception("Agent certificate audit output exposed password or private-key material");
+                    Console.WriteLine("PASS: rejected client audit contains only certificate fingerprint and chain status");
+                }
+                finally { await metricsApp.StopAsync(); }
             }
         }
+        }
+        finally
+        {
+            if(Directory.Exists(dir)) Directory.Delete(dir,true);
+        }
+        if(Directory.Exists(dir))
+            throw new Exception("Temporary PKI directory survived acceptance; private keys must not remain as CI artifacts");
+        Console.WriteLine("PASS: disposable PKI directory and private-key files removed after acceptance");
     }
 
     private static X509Certificate2 Issue(X509Certificate2 ca,string cn,

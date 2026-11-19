@@ -67,13 +67,41 @@ ILogger? clientCertificateLogger = null;
 if (!string.IsNullOrWhiteSpace(labCaPath))
 {
     var listener = builder.Configuration["Kestrel:Endpoints:AgentHttps:Url"] ?? "";
+    static bool IsLoopbackHttpsUrl(string? value)
+    {
+        if (!Uri.TryCreate(value, UriKind.Absolute, out var uri) ||
+            uri.Scheme != Uri.UriSchemeHttps || !string.IsNullOrEmpty(uri.UserInfo) ||
+            !string.IsNullOrEmpty(uri.Query) || !string.IsNullOrEmpty(uri.Fragment) ||
+            uri.AbsolutePath != "/" ||
+            !IPAddress.TryParse(uri.IdnHost, out var address))
+            return false;
+        return IPAddress.IsLoopback(address);
+    }
+    var configuredEndpoints = builder.Configuration.GetSection("Kestrel:Endpoints")
+        .GetChildren().ToArray();
+    var everyEndpointIsLoopback = configuredEndpoints.Length > 0 &&
+        configuredEndpoints.All(endpoint => IsLoopbackHttpsUrl(
+            builder.Configuration[$"Kestrel:Endpoints:{endpoint.Key}:Url"]));
+    // Kestrel may also receive URL bindings from ASPNETCORE_URLS. Reject an
+    // unsafe secondary binding even when explicit named endpoints are present.
+    var configuredUrls = builder.Configuration["urls"];
+    var everyUrlIsLoopback = string.IsNullOrWhiteSpace(configuredUrls) ||
+        configuredUrls.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .All(IsLoopbackHttpsUrl);
+    // ASPNETCORE_HTTP_PORTS / ASPNETCORE_HTTPS_PORTS are WebHost defaults that
+    // bind wildcard listeners. They do not flow through the `urls` setting, so
+    // reject them explicitly while the isolated lab trust root is enabled.
+    var configuredHttpPorts = builder.Configuration["http_ports"];
+    var configuredHttpsPorts = builder.Configuration["https_ports"];
+    var hasDefaultPortBindings = !string.IsNullOrWhiteSpace(configuredHttpPorts) ||
+        !string.IsNullOrWhiteSpace(configuredHttpsPorts);
     if (!Path.IsPathFullyQualified(labCaPath) || !File.Exists(labCaPath) ||
-        !Uri.TryCreate(listener, UriKind.Absolute, out var bound) ||
-        bound.Scheme != "https" || !IPAddress.TryParse(bound.Host,out var bindIp) ||
-        !IPAddress.IsLoopback(bindIp) || allowConfigChanges || allowEngineConfigChanges ||
+        !IsLoopbackHttpsUrl(listener) || !everyEndpointIsLoopback || !everyUrlIsLoopback ||
+        hasDefaultPortBindings ||
+        allowConfigChanges || allowEngineConfigChanges ||
         allowActions)
         throw new InvalidOperationException(
-            "Isolated client test CA is restricted to HTTPS loopback with all management changes disabled");
+            "Isolated client test CA is restricted to HTTPS loopback-only listeners with all management changes disabled");
     // Public test-root PEM has NO private key; do not call CreateFromPemFile,
     // which attempts to load a corresponding key from the same PEM path.
     labRoot = X509CertificateLoader.LoadCertificateFromFile(labCaPath);
