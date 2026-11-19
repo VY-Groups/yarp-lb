@@ -403,8 +403,7 @@ app.MapGet("/admin/api/peer-sync/status", () =>
         });
     var info = peerStateJournal.Status(PeerStateJournal.CurrentMinute());
     var tolerance = TimeSpan.FromSeconds(Math.Max(15, peerSyncSettings.IntervalSeconds * 3));
-    var recentExchange = info.LastAcceptedAgeSeconds is { } ageSeconds &&
-        ageSeconds <= tolerance.TotalSeconds;
+    var recentExchange = PeerSyncFreshness.IsRecent(info, tolerance);
     return Results.Ok(new {
         enabled = true, mode = "signed HTTPS peer telemetry",
         info.LocalNode, info.RemoteNode,

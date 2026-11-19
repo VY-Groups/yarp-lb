@@ -86,6 +86,20 @@ public static class PeerSyncTests
         monotonicClock.SetUtcNow(clock);
         Check(ageLimited.Status(now).RemoteReportedInCurrentMinute,
             "wall-clock rollback does not prematurely expire monotonic peer freshness");
+        var boundaryClock = new ManualTimeProvider(DateTimeOffset.UtcNow);
+        var boundaryJournal = new PeerStateJournal("node-b", "node-a", secret, 2,
+            TimeSpan.FromSeconds(60), timeProvider: boundaryClock);
+        Check(boundaryJournal.Apply(frame, now), "peer recency boundary fixture accepts a signed frame");
+        boundaryClock.Advance(TimeSpan.FromSeconds(15));
+        Check(PeerSyncFreshness.IsRecent(boundaryJournal.Status(now), TimeSpan.FromSeconds(15)),
+            "exact recency tolerance remains recent");
+        boundaryClock.Advance(TimeSpan.FromMilliseconds(900));
+        var overTolerance = boundaryJournal.Status(now);
+        Check(overTolerance.LastAcceptedAgeSeconds == 15 &&
+              overTolerance.LastAcceptedElapsed is { } exactAge &&
+              exactAge > TimeSpan.FromSeconds(15) && exactAge < TimeSpan.FromSeconds(16) &&
+              !PeerSyncFreshness.IsRecent(overTolerance, TimeSpan.FromSeconds(15)),
+            "a 15.9-second monotonic age is not recent at a 15-second threshold despite integer display rounding");
         monotonicClock.Advance(TimeSpan.FromSeconds(7));
         clock = monotonicClock.GetUtcNow();
         Check(!ageLimited.Status(now).RemoteReportedInCurrentMinute &&
@@ -106,8 +120,8 @@ public static class PeerSyncTests
         PeerSyncPrometheus.Append(disabledMetricText, configured: false, status: null);
         Check(disabledMetricText.ToString().Contains("yarp_peer_sync_enabled 0\n", StringComparison.Ordinal) &&
               disabledMetricText.ToString().Contains("yarp_peer_sync_remote_fresh 0\n", StringComparison.Ordinal) &&
-              !disabledMetricText.ToString().Contains("\nyarp_peer_sync_last_accepted_age_seconds ", StringComparison.Ordinal),
-            "unconfigured peer metrics report disabled without inventing a receipt age");
+              disabledMetricText.ToString().Contains("yarp_peer_sync_last_accepted_age_seconds NaN\n", StringComparison.Ordinal),
+            "unconfigured peer metrics report disabled and unknown receipt age with NaN");
         Check(!ageLimited.Apply(frame,now),
             "expired frame cannot be replayed to revive stale counters");
         var recovered = a.Snapshot(now);

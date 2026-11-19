@@ -49,8 +49,8 @@ uses monotonic age when deciding whether an exchange is recent. The protected
 `/gateway/metrics` scrape exposes fixed-cardinality `yarp_peer_sync_enabled`,
 `yarp_peer_sync_remote_fresh`, and `yarp_peer_sync_last_accepted_age_seconds`
 gauges without node, IP, identity or secret labels. Age remains observable after
-remote counters expire and resets only after a newly accepted frame or process
-restart. The current-minute protocol check still uses UTC wall time; if that minute
+remote counters expire; it is `NaN` until the first accepted frame and resets
+only after a newly accepted frame or process restart. The current-minute protocol check still uses UTC wall time; if that minute
 is incorrect or regresses, snapshots fail closed until the minute agrees again.
 Within one source epoch, frames from a minute older than the last accepted minute
 are rejected, so a receiver clock rollback cannot replace newer telemetry with a

@@ -43,7 +43,14 @@ public sealed record PeerStateFrame(string NodeId, long Minute, long Sequence,
 public sealed record PeerSyncStatus(bool Enabled, string LocalNode, string RemoteNode,
     int LocalIdentities, long LocalRequests, int RemoteIdentities, long RemoteRequests,
     bool RemoteReportedInCurrentMinute, DateTimeOffset? LastAcceptedUtc, long RemoteSequence,
-    long? LastAcceptedAgeSeconds);
+    long? LastAcceptedAgeSeconds, TimeSpan? LastAcceptedElapsed);
+
+public static class PeerSyncFreshness
+{
+    public static bool IsRecent(PeerSyncStatus status, TimeSpan tolerance) =>
+        status.LastAcceptedElapsed is { } age &&
+        age >= TimeSpan.Zero && age <= tolerance;
+}
 
 public sealed class PeerStateJournal
 {
@@ -187,11 +194,15 @@ public sealed class PeerStateJournal
             var validLocal = localMinute == minute;
             var validRemote = RemoteFresh(minute);
             long? lastAcceptedAgeSeconds = null;
+            TimeSpan? lastAcceptedElapsed = null;
             if (lastAcceptedTimestamp is { } acceptedTimestamp)
             {
                 var elapsed = timeProvider.GetElapsedTime(acceptedTimestamp);
                 if (elapsed >= TimeSpan.Zero)
+                {
+                    lastAcceptedElapsed = elapsed;
                     lastAcceptedAgeSeconds = (long)Math.Floor(elapsed.TotalSeconds);
+                }
             }
             return new PeerSyncStatus(true, localId, remoteId,
                 validLocal ? local.Count : 0,
@@ -199,7 +210,8 @@ public sealed class PeerStateJournal
                 validRemote ? remote.Count : 0,
                 validRemote ? remote.Values.Sum(x => (long)x) : 0,
                 validRemote, lastAcceptedUtc,
-                validRemote ? receivedSequence : 0, lastAcceptedAgeSeconds);
+                validRemote ? receivedSequence : 0, lastAcceptedAgeSeconds,
+                lastAcceptedElapsed);
         }
     }
 

@@ -1,6 +1,6 @@
 # v0.1 real exporter metric contract
 
-Source: shipping `control-center/Program.cs`, `GatewayRequestHistogram.cs`.
+Source: shipping `control-center/Program.cs`, `GatewayRequestHistogram.cs`, and `PeerSyncPrometheus.cs`.
 Machine-checked in GitHub Actions against **actual HTTP response** from the
 real Control Center loopback-internal socket, not copied documentation.
 
@@ -29,6 +29,9 @@ yarp_logging_dropped_high_priority_total
 yarp_logging_dropped_low_priority_total
 yarp_logging_dropped_total
 yarp_logging_write_errors_total
+yarp_peer_sync_enabled
+yarp_peer_sync_last_accepted_age_seconds
+yarp_peer_sync_remote_fresh
 ```
 
 ### Required gateway-series (exact samples, not invented aliases)
@@ -54,6 +57,9 @@ yarp_logging_write_errors_total
 - `yarp_logging_dropped_low_priority_total`
 - `yarp_logging_dropped_high_priority_total`
 - `yarp_logging_write_errors_total`
+- `yarp_peer_sync_enabled`
+- `yarp_peer_sync_remote_fresh`
+- `yarp_peer_sync_last_accepted_age_seconds`
 
 The logging counters are process-lifetime values and reset at restart. The
 low/high counters partition the total (`dropped_total = low_priority_total +
@@ -61,6 +67,11 @@ high_priority_total`); writer errors are tracked separately. These series carry
 no request, client, route, or backend labels. Grafana shows all four values,
 while the critical high-priority-drop and writer-error rules remain separately
 actionable.
+
+Peer-sync gauges are also process-local. `enabled` and `remote_fresh` are 0/1;
+`last_accepted_age_seconds` is monotonic and remains measurable after stale
+counters are collected. It is `NaN` until the first authenticated peer frame;
+these fixed-cardinality series have no peer, node, client, or identity labels.
 
 Per-destination request counters have a process-local cap of 4,096 distinct
 IDs. Requests for additional IDs increment

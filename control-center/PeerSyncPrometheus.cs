@@ -14,10 +14,10 @@ public static class PeerSyncPrometheus
         output.AppendLine("# TYPE yarp_peer_sync_remote_fresh gauge");
         output.Append("yarp_peer_sync_remote_fresh ")
             .Append(status?.RemoteReportedInCurrentMinute == true ? 1 : 0).Append('\n');
-        output.AppendLine("# HELP yarp_peer_sync_last_accepted_age_seconds Monotonic age of the most recently accepted peer frame; omitted before first acceptance");
+        output.AppendLine("# HELP yarp_peer_sync_last_accepted_age_seconds Monotonic age of the most recently accepted peer frame; NaN means no frame has been accepted");
         output.AppendLine("# TYPE yarp_peer_sync_last_accepted_age_seconds gauge");
-        if (status?.LastAcceptedAgeSeconds is { } ageSeconds)
-            output.Append("yarp_peer_sync_last_accepted_age_seconds ")
-                .Append(ageSeconds.ToString(CultureInfo.InvariantCulture)).Append('\n');
+        output.Append("yarp_peer_sync_last_accepted_age_seconds ")
+            .Append(status?.LastAcceptedAgeSeconds is { } ageSeconds
+                ? ageSeconds.ToString(CultureInfo.InvariantCulture) : "NaN").Append('\n');
     }
 }
