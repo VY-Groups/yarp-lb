@@ -2,6 +2,8 @@
 
 GatewayCore can export ASP.NET Core request spans, YARP proxy child spans, ASP.NET Core metrics, runtime metrics, bounded proxy request count/latency metrics, local rejection counts, and structured access logs to an OTLP/HTTP protobuf collector. Proxy request count and duration metrics include validated configured route, cluster and destination IDs plus a fixed HTTP status class. At most 4,096 distinct route/cluster/destination tuples are exported per process, including one reserved `_other` tuple for overflow (so at most 4,095 named tuples are retained). Local rejections use `gateway.proxy.local_rejections` with only `gateway.proxy.rejection.reason`; the eight GatewayCore rejection codes are allowlisted and every other value is collapsed to `other`, for at most nine reason series per process. This bounds proxy-metric identity cardinality independently of traffic volume. This is opt-in; without `YARP_OTEL_ENDPOINT`, no OpenTelemetry providers are registered.
 
+The per-request dimension budget keeps validated IDs in a value-tuple key and validates them with a non-allocating character scan. This avoids building a composite string or LINQ string enumerator for every proxy metric sample after a tuple has been registered. A Windows baseline run of the pre-change helper measured 208 allocated bytes per warmed call; the candidate measured 0 bytes across 100,000 calls. The Windows/Linux EngineConfig acceptance keeps a regression check at no more than one allocated byte per call. This focused measurement covers the helper only; the current-main paired Issue #34 profile and allocation traces are still pending before claiming a whole-request improvement.
+
 ## Configuration
 
 Set the following in the GatewayCore service environment:
