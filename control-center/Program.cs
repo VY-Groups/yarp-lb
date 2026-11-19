@@ -209,11 +209,16 @@ if (peerSyncSettings is not null)
         peerSyncSettings.RemoteId, peerSyncSettings.Secret, peerSyncSettings.Capacity,
         TimeSpan.FromSeconds(Math.Clamp(peerSyncSettings.IntervalSeconds * 3, 6, 60))));
     builder.Services.AddSingleton(sp => new PeerSignedMessages(peerSyncSettings.Secret));
+    builder.Services.AddSingleton<PeerSyncPublisherDiagnostics>();
     builder.Services.AddHttpClient("peer-sync", client => client.Timeout = TimeSpan.FromSeconds(5))
         .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler {
             AllowAutoRedirect = false, UseCookies = false
         });
-    builder.Services.AddHostedService<PeerSyncPublisher>();
+    builder.Services.AddHostedService(sp => new PeerSyncPublisher(peerSyncSettings,
+        sp.GetRequiredService<PeerStateJournal>(), sp.GetRequiredService<PeerSignedMessages>(),
+        sp.GetRequiredService<IHttpClientFactory>(),
+        sp.GetRequiredService<ILogger<PeerSyncPublisher>>(),
+        sp.GetRequiredService<PeerSyncPublisherDiagnostics>()));
 }
 var app = builder.Build();
 var accessLogger = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("GatewayCore.AccessLog");
@@ -221,6 +226,7 @@ var trustedAccessLogProxies = GatewayClientAddress.ParseTrustedProxyAddresses(
     Environment.GetEnvironmentVariable("GATEWAY_TRUSTED_PROXY_IPS"));
 var peerStateJournal = app.Services.GetService<PeerStateJournal>();
 var peerSigner = app.Services.GetService<PeerSignedMessages>();
+var peerPublisherDiagnostics = app.Services.GetService<PeerSyncPublisherDiagnostics>();
 if (sharedPeerLimiter is not null)
     app.Lifetime.ApplicationStopped.Register(sharedPeerLimiter.Dispose);
 if (ec2Lab)
@@ -439,6 +445,7 @@ app.MapGet("/admin/api/peer-sync/status", () =>
             strictAdmission = sharedPeerLimiter is not null ? "atomic Redis" : "local process"
         });
     var info = peerStateJournal.Status(PeerStateJournal.CurrentMinute());
+    var publisher = peerPublisherDiagnostics?.Snapshot();
     var tolerance = TimeSpan.FromSeconds(Math.Max(15, peerSyncSettings.IntervalSeconds * 3));
     var recentExchange = PeerSyncFreshness.IsRecent(info, tolerance);
     return Results.Ok(new {
@@ -448,6 +455,14 @@ app.MapGet("/admin/api/peer-sync/status", () =>
         info.RemoteIdentities, info.RemoteRequests,
         info.RemoteReportedInCurrentMinute, info.LastAcceptedUtc,
         info.LastAcceptedAgeSeconds,
+        publisherAttemptsTotal = publisher?.AttemptsTotal ?? 0,
+        publisherAcknowledgementsTotal = publisher?.AcknowledgementsTotal ?? 0,
+        publisherHttpFailuresTotal = publisher?.HttpFailuresTotal ?? 0,
+        publisherTransportFailuresTotal = publisher?.TransportFailuresTotal ?? 0,
+        publisherResynchronizationsTotal = publisher?.ResynchronizationsTotal ?? 0,
+        publisherLastAcknowledgedAgeSeconds = publisher?.LastAcknowledgedAgeSeconds,
+        publisherLastAcknowledgedUtc = publisher?.LastAcknowledgedUtc,
+        publisherInFlightRequests = publisher?.InFlightRequests ?? 0,
         info.RemoteSequence, recentExchange,
         expectedIntervalSeconds = peerSyncSettings.IntervalSeconds,
         trackedIdentityLimit = peerSyncSettings.Capacity,
@@ -635,7 +650,9 @@ app.MapGet("/gateway/metrics", (HttpContext ctx) =>
     output.Append("yarp_logging_write_errors_total ").Append(boundedConsole.WriteErrors).Append('\n');
     var peerStatus = peerSyncSettings is not null && peerStateJournal is not null
         ? peerStateJournal.Status(PeerStateJournal.CurrentMinute()) : null;
-    PeerSyncPrometheus.Append(output, peerSyncSettings is not null, peerStatus);
+    var peerPublisherStatus = peerSyncSettings is not null
+        ? peerPublisherDiagnostics?.Snapshot() : null;
+    PeerSyncPrometheus.Append(output, peerSyncSettings is not null, peerStatus, peerPublisherStatus);
     output.AppendLine("# HELP yarp_control_destination_inflight_requests YARP in-flight requests by destination");
     output.AppendLine("# TYPE yarp_control_destination_inflight_requests gauge");
     output.AppendLine("# HELP yarp_control_destination_active_health YARP active health 1 healthy, 0 unknown, -1 unhealthy");

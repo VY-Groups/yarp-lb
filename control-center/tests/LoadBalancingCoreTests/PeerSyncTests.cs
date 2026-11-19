@@ -28,6 +28,45 @@ public static class PeerSyncTests
             Console.WriteLine("PASS: " + name);
         }
         var secret=Enumerable.Repeat((byte)0x42,32).ToArray();
+        var publisherClock = new ManualTimeProvider(DateTimeOffset.UtcNow);
+        var publisherDiagnostics = new PeerSyncPublisherDiagnostics(publisherClock);
+        var initialPublisher = publisherDiagnostics.Snapshot();
+        Check(initialPublisher.AttemptsTotal == 0 && initialPublisher.AcknowledgementsTotal == 0 &&
+              initialPublisher.LastAcknowledgedAgeSeconds is null && initialPublisher.InFlightRequests == 0,
+            "publisher diagnostics start bounded with no fabricated acknowledgement");
+        publisherDiagnostics.BeginAttempt();
+        Check(publisherDiagnostics.Snapshot().InFlightRequests == 1,
+            "publisher diagnostics expose one in-flight request without queueing");
+        publisherDiagnostics.RecordResponse(acknowledged: false);
+        publisherDiagnostics.EndAttempt();
+        publisherDiagnostics.BeginAttempt();
+        publisherDiagnostics.RecordResponse(acknowledged: true);
+        publisherDiagnostics.EndAttempt();
+        publisherDiagnostics.BeginAttempt();
+        publisherDiagnostics.RecordResponse(acknowledged: false, expectedChallenge: true);
+        publisherDiagnostics.EndAttempt();
+        publisherClock.Advance(TimeSpan.FromSeconds(4));
+        publisherDiagnostics.BeginAttempt();
+        publisherDiagnostics.RecordTransportFailure();
+        publisherDiagnostics.EndAttempt();
+        publisherDiagnostics.RecordResynchronization();
+        var publisherStatus = publisherDiagnostics.Snapshot();
+        Check(publisherStatus.AttemptsTotal == 4 && publisherStatus.AcknowledgementsTotal == 1 &&
+              publisherStatus.HttpFailuresTotal == 1 && publisherStatus.TransportFailuresTotal == 1 &&
+              publisherStatus.ResynchronizationsTotal == 1 &&
+              publisherStatus.LastAcknowledgedAgeSeconds == 4 && publisherStatus.InFlightRequests == 0,
+            "publisher diagnostics count acknowledgements, failures, challenges, resynchronization and monotonic ack age");
+        var publisherMetricText = new StringBuilder();
+        PeerSyncPrometheus.Append(publisherMetricText, configured: true, status: null,
+            publisher: publisherStatus);
+        Check(publisherMetricText.ToString().Contains("yarp_peer_sync_publish_attempts_total 4\n", StringComparison.Ordinal) &&
+              publisherMetricText.ToString().Contains("yarp_peer_sync_publish_http_failures_total 1\n", StringComparison.Ordinal) &&
+              publisherMetricText.ToString().Contains("yarp_peer_sync_publish_last_ack_age_seconds 4\n", StringComparison.Ordinal) &&
+              publisherMetricText.ToString().Contains("yarp_peer_sync_publish_in_flight 0\n", StringComparison.Ordinal) &&
+              !publisherMetricText.ToString().Contains("yarp_peer_sync_publish_acknowledgements_total{", StringComparison.Ordinal) &&
+              !publisherMetricText.ToString().Contains("node-a", StringComparison.Ordinal),
+            "publisher metrics expose delivery and age with fixed cardinality and no peer identity labels");
+
         var deltaSource = new PeerStateJournal("delta-a", "delta-b", secret, 2);
         var deltaClock = new ManualTimeProvider(DateTimeOffset.UtcNow);
         var deltaReceiver = new PeerStateJournal("delta-b", "delta-a", secret, 2,

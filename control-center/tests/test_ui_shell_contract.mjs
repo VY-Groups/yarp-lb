@@ -52,6 +52,10 @@ const ctx=vm.createContext({
       localNode:'<script>alert(1)</script>',remoteNode:'node-b',
       localIdentities:2,localRequests:5,remoteIdentities:0,remoteRequests:0,
       lastAcceptedUtc:'2026-11-19T12:00:00Z',lastAcceptedAgeSeconds:17,
+      publisherAttemptsTotal:8,publisherAcknowledgementsTotal:6,
+      publisherHttpFailuresTotal:1,publisherTransportFailuresTotal:1,
+      publisherResynchronizationsTotal:2,publisherLastAcknowledgedAgeSeconds:3,
+      publisherInFlightRequests:0,
       remoteSequence:0,trackedIdentityLimit:2048,strictAdmission:'atomic Redis'
     })};
   }
@@ -63,6 +67,13 @@ const content=node('content').innerHTML;
 assert.match(content,/No recent exchange/);
 assert.match(content,/Last accepted age/);
 assert.match(content,/17 seconds \(monotonic\)/);
+assert.match(content,/Publisher attempts/);
+assert.match(content,/Publisher acknowledgements/);
+assert.match(content,/Publisher HTTP failures/);
+assert.match(content,/Publisher transport failures/);
+assert.match(content,/Receiver resynchronizations/);
+assert.match(content,/3 seconds \(monotonic\)/);
+assert.match(content,/0 queued; 0 in flight/);
 assert.match(content,/atomic Redis/);
 assert.match(content,/&lt;script&gt;/);
 assert.doesNotMatch(content,/<script>alert/);
