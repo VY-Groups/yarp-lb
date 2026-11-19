@@ -6,8 +6,15 @@ internal static class AuthorityFenceFingerprint
 {
     public static string Compute(DnsZone[] zones, AgentReportServerConfig? agentReports,
         int probeIntervalSeconds = 1, int maxConcurrentHealthProbes = 1,
-        IReadOnlyDictionary<string, DnssecZoneSigner>? loadedSigners = null)
+        IReadOnlyDictionary<string, DnssecZoneSigner>? loadedSigners = null,
+        GeoIpAuthorityIdentity? geoIpIdentity = null)
     {
+        var geoRouting = zones.Any(zone => zone.RoutingPolicy == "GeoIpEcs");
+        if (geoRouting && (geoIpIdentity is null ||
+            zones.Any(zone => zone.RoutingPolicy == "GeoIpEcs" &&
+                (zone.GeoCountryRoutes is { Length: > 0 } && geoIpIdentity.CountrySha256 is null ||
+                 zone.GeoAsnRoutes is { Length: > 0 } && geoIpIdentity.AsnSha256 is null))))
+            throw new InvalidDataException("GeoIP authority fingerprint requires loaded database identity");
         // Fingerprint the signer actually serving this zone, not a second
         // read of mutable PEM paths. DS material is public and binds keys
         // and rollover roles without exposing private key bytes.
@@ -109,6 +116,7 @@ internal static class AuthorityFenceFingerprint
         {
             Zones = canonical,
             AgentTrustPolicy = trustPolicy,
+            GeoIpDatabase = geoRouting ? geoIpIdentity : null,
             ProbeIntervalSeconds = probeIntervalSeconds,
             MaxConcurrentHealthProbes = maxConcurrentHealthProbes
         })));
