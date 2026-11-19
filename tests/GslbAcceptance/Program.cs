@@ -477,6 +477,18 @@ using (var fixtureReader = new MaxMind.Db.Reader(asnFixture))
     geoClock.RollbackWallClock(TimeSpan.FromHours(12));
     if (expiringRoutes.RegionForEcs(clientAddress, 24) is not null)
         throw new Exception("FAIL: wall-clock rollback resurrected expired GeoIP data");
+
+    var jumpClock = new GeoIpTestClock(build.AddHours(23));
+    using var jumpDatabase = new GeoIpEcsDatabase(null, asnFixture, 1, jumpClock);
+    var jumpRoutes = jumpDatabase.CreateTable(null, [new GeoAsnRoute(15169, "mumbai")]);
+    if (jumpRoutes.RegionForEcs(clientAddress, 24) is null)
+        throw new Exception("FAIL: valid GeoIP data unavailable before wall-clock jump");
+    jumpClock.AdvanceWallClock(TimeSpan.FromHours(1));
+    if (jumpRoutes.RegionForEcs(clientAddress, 24) is not null)
+        throw new Exception("FAIL: forward clock correction allowed expired GeoIP steering");
+    jumpClock.RollbackWallClock(TimeSpan.FromHours(2));
+    if (jumpRoutes.RegionForEcs(clientAddress, 24) is not null)
+        throw new Exception("FAIL: rollback resurrected wall-clock-expired GeoIP data");
 }
 Console.WriteLine("PASS: runtime GeoIP expiry and monotonic fallback");
 var staleGeoDatabaseRejected = false;
@@ -1573,5 +1585,6 @@ sealed class GeoIpTestClock(DateTimeOffset current) : TimeProvider
     public override long GetTimestamp() => tick;
     public override long TimestampFrequency => TimeSpan.TicksPerSecond;
     public void Advance(TimeSpan time) { utc += time; tick += time.Ticks; }
+    public void AdvanceWallClock(TimeSpan time) => utc += time;
     public void RollbackWallClock(TimeSpan time) => utc -= time;
 }
