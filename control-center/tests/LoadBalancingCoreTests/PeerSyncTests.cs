@@ -272,6 +272,26 @@ public static class PeerSyncTests
         var (nonce,sig)=auth.Sign("node-a",t,bytes);
         Check(auth.Verify("node-a","node-a",t,nonce,sig,bytes,t),"valid signed frame accepted");
         Check(!auth.Verify("node-a","node-a",t,nonce,sig,bytes,t),"replayed nonce rejected");
+
+        var clockFence = new PeerSignedMessages(secret);
+        var (expiredNonce, expiredSig) = clockFence.Sign("node-a", t, bytes);
+        Check(clockFence.Verify("node-a", "node-a", t, expiredNonce, expiredSig, bytes, t),
+            "nonce clock-fence fixture accepts initial authenticated frame");
+        var (newNonce, newSig) = clockFence.Sign("node-a", t + 61, bytes);
+        Check(clockFence.Verify("node-a", "node-a", t + 61, newNonce, newSig, bytes, t + 61),
+            "authenticated forward clock observation collects expired nonce window");
+        Check(!clockFence.Verify("node-a", "node-a", t, expiredNonce, expiredSig, bytes, t),
+            "clock rollback cannot replay a nonce after collection");
+        var (freshNonce, freshSig) = clockFence.Sign("node-a", t, bytes);
+        Check(!clockFence.Verify("node-a", "node-a", t, freshNonce, freshSig, bytes, t),
+            "clock rollback cannot reopen a previously closed timestamp window");
+        var (recoveryNonce, recoverySig) = clockFence.Sign("node-a", t + 62, bytes);
+        Check(clockFence.Verify("node-a", "node-a", t + 62, recoveryNonce, recoverySig, bytes, t + 62),
+            "fresh authenticated peer frames recover when wall clock catches up");
+        var unauthenticatedFence = new PeerSignedMessages(secret);
+        Check(!unauthenticatedFence.Verify("node-a", "node-a", t + 1000, newNonce, newSig, bytes, t + 1000) &&
+              unauthenticatedFence.Verify("node-a", "node-a", t, expiredNonce, expiredSig, bytes, t),
+            "forged future frame cannot advance the authenticated time fence");
         var (nonce2,sig2)=auth.Sign("node-a",t,bytes);
         Check(!auth.Verify("node-a","node-b",t,nonce2,sig2,bytes,t),
             "wrong peer identity rejected");
