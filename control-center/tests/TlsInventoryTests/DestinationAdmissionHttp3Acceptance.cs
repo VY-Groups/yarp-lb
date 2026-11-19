@@ -165,6 +165,12 @@ internal static class DestinationAdmissionHttp3Acceptance
         start.Environment["ASPNETCORE_URLS"] = $"http://127.0.0.1:{httpPort}";
         start.Environment["BACKEND_A_HOST"] = "ec2-54-10-20-30.ap-south-1.compute.amazonaws.com";
         start.Environment["BACKEND_B_HOST"] = "ec2-52-20-30-40.ap-south-1.compute.amazonaws.com";
+        // Keep listener diagnostics in the runner log. This acceptance exercises
+        // the production certificate loader and isolated Kestrel endpoints; TLS
+        // failures before HTTP dispatch otherwise surface only as client EOFs.
+        start.Environment["Logging__LogLevel__Microsoft.AspNetCore.Server.Kestrel"] = "Debug";
+        start.Environment["Logging__LogLevel__Microsoft.AspNetCore.Server.Kestrel.Https"] = "Trace";
+        start.Environment["Logging__LogLevel__Microsoft.AspNetCore.Hosting.Diagnostics"] = "Debug";
         using var appProcess = Process.Start(start) ?? throw new Exception("Could not start real GatewayCore YARP process");
         var expectedStop = false;
         try
