@@ -55,3 +55,7 @@ Choose **Clusters → Load balancing → PrimaryBackup**, enable **Active health
 The pure core checks the 80:20 weight band, invalid input rejection, lack of primaries, and default role behavior. The disposable real L7 HTTP lab starts two backends, verifies exclusive primary routing, takes the primary down, verifies exclusive backup routing, takes the backup down as well, verifies fail-closed behavior, then restores both and verifies the primary is preferred. This is not a production certificate, physical-host test, or a HAProxy native binary protocol.
 
 Reference: [HAProxy 3.4 configuration manual](https://docs.haproxy.org/3.4/configuration.html), server `backup` selection rules and `rise`/`fall` active check settings.
+
+### Exact HTTP/3 failover acceptance
+
+The real-process QUIC fixture runs two distinct local Kestrel TLS origins under PrimaryBackup with exact outbound HTTP/3 and active health probes. The primary deliberately aborts a received non-idempotent POST and changes readiness to unhealthy. The test requires exactly one primary attempt and no backup replay; after idempotent GETs observe backup selection, a distinct POST must reach the backup over HTTP/3. Restoring primary readiness must restore primary selection without replay. The origins allow TCP protocols for health checks but assert HTTP/3 for application requests. This is a real transport abort and active-health convergence test, not a physical host power failure, passive-only ejection test, or production HA acceptance.
