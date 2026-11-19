@@ -41,6 +41,12 @@ using (var privacyActivity = new System.Diagnostics.Activity("privacy-contract")
     privacyActivity.SetTag("url.query", "id=secret");
     privacyActivity.SetTag("http.request.header.authorization", "Bearer secret");
     privacyActivity.SetTag("gateway.route.id", "public_route");
+    privacyActivity.SetTag("http.request.header.x-api-key", "custom-header-secret");
+    privacyActivity.SetTag("http.request.header.x-customer-id", new[] { "customer-secret" });
+    privacyActivity.SetTag("custom.enrichment", "arbitrary-secret");
+    privacyActivity.SetTag("gateway.cluster.id", "invalid/id");
+    privacyActivity.SetTag("http.response.status_code", 503);
+    privacyActivity.SetTag("network.protocol.version", "2");
     privacyActivity.Start();
     new GatewayTelemetryPrivacyProcessor().OnEnd(privacyActivity);
     Must(privacyActivity.GetTagItem("client.address") is null &&
@@ -50,8 +56,15 @@ using (var privacyActivity = new System.Diagnostics.Activity("privacy-contract")
          privacyActivity.GetTagItem("url.query") is null &&
          privacyActivity.GetTagItem("http.request.header.authorization") is null,
         "OTLP privacy processor removes client address, raw URL and secret attributes");
-    Must((string?)privacyActivity.GetTagItem("gateway.route.id") == "public_route",
-        "OTLP privacy processor preserves bounded route attribution");
+    Must((string?)privacyActivity.GetTagItem("gateway.route.id") == "public_route" &&
+         privacyActivity.GetTagItem("http.response.status_code") is 503 &&
+         (string?)privacyActivity.GetTagItem("network.protocol.version") == "2",
+        "OTLP privacy processor preserves bounded route, status and protocol attribution");
+    Must(privacyActivity.GetTagItem("http.request.header.x-api-key") is null &&
+         privacyActivity.GetTagItem("http.request.header.x-customer-id") is null &&
+         privacyActivity.GetTagItem("custom.enrichment") is null &&
+         privacyActivity.GetTagItem("gateway.cluster.id") is null,
+        "OTLP span attribute allowlist rejects unknown header arrays, custom data and invalid attribution");
 }
 await GatewayOtlpExporterAcceptance.RunAsync();
 await GatewayOtlpExporterAcceptance.RunWithoutCollectorAsync();

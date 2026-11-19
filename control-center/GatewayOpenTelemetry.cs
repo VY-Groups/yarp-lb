@@ -162,20 +162,37 @@ public static class GatewayOpenTelemetry
 /// <summary>Keep client identifiers, request paths and secrets out of OTLP spans.</summary>
 internal sealed class GatewayTelemetryPrivacyProcessor : BaseProcessor<Activity>
 {
-    private static readonly string[] SensitiveTags =
-    [
-        "client.address", "client.port", "network.peer.address", "network.peer.port",
-        "url.full", "url.path", "url.query", "user_agent.original",
-        "http.url", "http.target", "http.request.url",
-        "http.request.header.authorization", "http.request.header.cookie"
-    ];
-
+    // Deny by default: instrumentation upgrades and custom enrichment may
+    // introduce additional request headers, tenant identifiers or raw URLs.
+    // Preserve only explicit, bounded operational attributes.
     public override void OnEnd(Activity data)
     {
-        foreach (var tag in SensitiveTags) data.SetTag(tag, null);
+        foreach (var tag in data.TagObjects.ToArray())
+            if (!IsAllowed(tag.Key, tag.Value))
+                data.SetTag(tag.Key, null);
         NormalizeAspNetCoreDisplayName(data);
         base.OnEnd(data);
     }
+
+    private static bool IsAllowed(string key, object? value) => key switch
+    {
+        "gateway.route.id" or "gateway.cluster.id" or "gateway.destination.id" =>
+            value is string id && id.Length is > 0 and <= 80 &&
+            id.All(c => char.IsAsciiLetterOrDigit(c) || c is '_' or '-'),
+        "http.request.method" => value is string method && IsKnownMethod(method),
+        "http.response.status_code" => value is int status && status is >= 100 and <= 599
+            || value is long longStatus && longStatus is >= 100 and <= 599,
+        "http.route" => value is string route && IsSafeRouteTemplate(route),
+        "url.scheme" => value is "http" or "https",
+        "network.protocol.version" => value is "1.0" or "1.1" or "2" or "2.0" or "3" or "3.0",
+        "error.type" => value is string error && error.Length is > 0 and <= 80 &&
+            error.All(c => char.IsAsciiLetterOrDigit(c) || c is '_' or '.'),
+        _ => false
+    };
+
+    private static bool IsKnownMethod(string method) => method is
+        "GET" or "HEAD" or "POST" or "PUT" or "DELETE" or "CONNECT" or
+        "OPTIONS" or "TRACE" or "PATCH" or "_OTHER";
 
     private static void NormalizeAspNetCoreDisplayName(Activity activity)
     {
@@ -183,11 +200,8 @@ internal sealed class GatewayTelemetryPrivacyProcessor : BaseProcessor<Activity>
             return;
 
         var method = activity.GetTagItem("http.request.method") as string;
-        if (method is not { Length: > 0 and <= 16 } ||
-            method.Any(static character => !char.IsAsciiLetter(character)))
+        if (method is null || !IsKnownMethod(method) || method == "_OTHER")
             method = null;
-        else
-            method = method.ToUpperInvariant();
 
         var route = activity.GetTagItem("http.route") as string;
         if (IsSafeRouteTemplate(route))
