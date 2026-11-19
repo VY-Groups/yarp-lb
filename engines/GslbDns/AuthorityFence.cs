@@ -44,7 +44,7 @@ internal sealed class AuthorityFenceStore : IDisposable
     private readonly HashSet<string> targetKeys;
     private readonly ECDsa localSigner;
     private readonly ECDsa peerVerifier;
-    private readonly object sequenceGate = new();
+    private readonly object verifierGate = new();
     private readonly FileStream epochLock;
     private readonly FileStream replayLock;
     private readonly long localEpoch;
@@ -119,20 +119,23 @@ internal sealed class AuthorityFenceStore : IDisposable
         lock (gate)
             if (!CheckDurableState(nowTick, force: true))
                 throw new InvalidDataException("Authority durable state fault; operator recovery required");
-        long sequence;
-        lock (sequenceGate)
-        {
-            if (localSequence == long.MaxValue)
-                throw new InvalidDataException("Authority sequence exhausted; restart with a new epoch");
-            sequence = ++localSequence;
-        }
-        var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        // Local evidence callbacks can perform I/O or take the agent-state
+        // lock. Do not hold the authority gate while evaluating them.
         var decisions = targets.Select(target => new AuthorityFenceDecision(
             CanonicalZone(target.Zone), target.SiteId, target.LocalEligible(nowTick))).ToArray();
-        var unsigned = new AuthorityFenceSnapshot(AuthorityFenceContract.CurrentVersion,
-            config.NodeId, config.Peer.NodeId, configFingerprint, localEpoch, sequence, now,
-            config.LeaseSeconds, decisions, string.Empty);
-        return unsigned with { Signature = AuthorityFenceContract.Sign(unsigned, localSigner) };
+        lock (gate)
+        {
+            // A concurrent read or incoming report may have latched a fault
+            // while decisions were computed. Never sign after that point.
+            if (!CheckDurableState(nowTick, force: true))
+                throw new InvalidDataException("Authority durable state fault before signing");
+            if (localSequence == long.MaxValue)
+                throw new InvalidDataException("Authority sequence exhausted; restart with a new epoch");
+            var unsigned = new AuthorityFenceSnapshot(AuthorityFenceContract.CurrentVersion,
+                config.NodeId, config.Peer.NodeId, configFingerprint, localEpoch, ++localSequence,
+                DateTimeOffset.UtcNow.ToUnixTimeSeconds(), config.LeaseSeconds, decisions, string.Empty);
+            return unsigned with { Signature = AuthorityFenceContract.Sign(unsigned, localSigner) };
+        }
     }
 
     public bool IsPeerEligible(string zone, string siteId, long nowTick)
@@ -152,7 +155,7 @@ internal sealed class AuthorityFenceStore : IDisposable
     {
         lock (gate)
         {
-            if (!CheckDurableState(receivedAtTick)) return;
+            if (!CheckDurableState(receivedAtTick, force: true)) return;
             var deadline = checked(sentAtTick + config.LeaseSeconds * 1000L);
             if (receivedAtTick >= sentAtTick && receivedAtTick < deadline)
                 outboundAcknowledgedUntilTick = Math.Max(outboundAcknowledgedUntilTick ?? long.MinValue, deadline);
@@ -181,7 +184,7 @@ internal sealed class AuthorityFenceStore : IDisposable
             snapshot.IssuedAtUnixSeconds + snapshot.LeaseSeconds <= now.ToUnixTimeSeconds() ||
             snapshot.IssuedAtUnixSeconds < now.ToUnixTimeSeconds() - snapshot.LeaseSeconds ||
             snapshot.Decisions is null || snapshot.Decisions.Length != targetKeys.Count ||
-            !AuthorityFenceContract.Verify(snapshot, peerVerifier))
+            !VerifyPeerSignature(snapshot))
             return false;
 
         var decisions = new Dictionary<string, bool>(StringComparer.Ordinal);
@@ -216,6 +219,19 @@ internal sealed class AuthorityFenceStore : IDisposable
             live = new LiveSnapshot(decisions, checked(nowTick + leaseSeconds * 1000L));
             return true;
         }
+    }
+
+    private bool VerifyPeerSignature(AuthorityFenceSnapshot snapshot)
+    {
+        // The runtime permits concurrent HTTPS receivers. Do not assume the
+        // shared platform ECDsa implementation supports concurrent use.
+        lock (verifierGate)
+            return AuthorityFenceContract.Verify(snapshot, peerVerifier);
+    }
+
+    internal bool CanPublish(long nowTick)
+    {
+        lock (gate) return CheckDurableState(nowTick, force: true);
     }
 
     // Only under gate. Verify the same durable replay/epoch contents as
@@ -624,6 +640,10 @@ internal sealed class AuthorityFenceRuntime : IAsyncDisposable
                     throw new InvalidDataException("Authority fence snapshot exceeds 128 KiB bound");
                 using var content = new ByteArrayContent(payload);
                 content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
+                // Last local disk check before handing this request to the
+                // transport. An in-flight snapshot cannot be recalled.
+                if (!store.CanPublish(Environment.TickCount64))
+                    throw new InvalidDataException("Authority durable state fault before publication");
                 using var response = await client!.PostAsync(config.Peer.Endpoint, content, token);
                 if (response.StatusCode == HttpStatusCode.NoContent)
                     store.RecordPeerAcknowledgement(sentAtTick, Environment.TickCount64);
