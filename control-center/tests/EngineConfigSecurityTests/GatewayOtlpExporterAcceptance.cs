@@ -31,7 +31,7 @@ public static class GatewayOtlpExporterAcceptance
             services.AddLogging();
             if (!GatewayOpenTelemetry.Configure(services, "otlp-outage-acceptance"))
                 throw new Exception("Unavailable-collector configuration was unexpectedly disabled");
-            using var provider = services.BuildServiceProvider();
+            var provider = services.BuildServiceProvider();
             var started = Stopwatch.GetTimestamp();
             using (var activity = GatewayOpenTelemetry.ActivitySource.StartActivity(
                        "gateway.proxy.request", ActivityKind.Internal))
@@ -47,6 +47,12 @@ public static class GatewayOtlpExporterAcceptance
             _ = tracerProvider.ForceFlush(6000);
             _ = meterProvider.ForceFlush(6000);
             _ = loggerProvider.ForceFlush(6000);
+            var shutdown = Stopwatch.StartNew();
+            provider.Dispose();
+            shutdown.Stop();
+            if (shutdown.Elapsed > TimeSpan.FromSeconds(15))
+                throw new Exception($"OTLP provider shutdown exceeded its 15-second bound with an absent collector ({shutdown.Elapsed.TotalSeconds:F1}s)");
+            Console.WriteLine($"PASS: OTLP providers shut down in {shutdown.Elapsed.TotalMilliseconds:F0}ms with an unreachable collector");
             Console.WriteLine("PASS: request telemetry recording stayed below 250ms with an unreachable collector");
             return Task.CompletedTask;
         }
