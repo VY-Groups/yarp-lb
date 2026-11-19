@@ -3,18 +3,19 @@
 ## Current continuation update (2026-11-19)
 
 This update supersedes the historical 2026-11-16 snapshot below where they
-conflict. Live GitHub was checked after PR #202 merged:
+conflict. Live GitHub was checked after PR #206 merged on 2026-11-19:
 
-- Product-code baseline before this handoff-only update:
-  `87adb8ba62c65f76bdb1492822226b1107944771`. All seven Actions workflows
-  triggered by its merge completed successfully. There are
-  **zero open PRs** and **13 open issues**: #34, #36, #37, #38, #48, #49, #50,
-  #51, #52, #53, #100, #101 and #109.
+- Product-code baseline: `25cb9f5f0838225110810051b464ad8178fe7c93`. All six
+  Actions workflows triggered by this merge completed successfully. At the
+  check time there were **zero open PRs** and **13 open issues**: #34, #36,
+  #37, #38, #48, #49, #50, #51, #52, #53, #100, #101 and #109.
 - Recent merged increments include #184 (opt-in HTTP/3), #188 (two-authority
   GSLB fencing), #189 (manual DNSSEC key overlap), #190 (application pools and
   DR routing), #198 (paired allocation profiling), #199 (failover alert), #201
-  (opt-in NSEC3) and #202 (YARP per-request INFO log filtering). These do not
-  blanket-close their associated issues.
+  (opt-in NSEC3), #202 (YARP per-request INFO log filtering), #204 (low-priority
+  log-drop metric/dashboard), #205 (typed peer-state schema and expiry), and
+  #206 (HTTP/2 multiplexed admission acceptance). These do not blanket-close
+  their associated issues.
 - PR #108 is **closed, not merged**; its observed-latency routing is not part of
   `main` unless separately implemented elsewhere.
 - PR #202 passed all exact-head checks, including three paired 75-VU profile
@@ -23,6 +24,19 @@ conflict. Live GitHub was checked after PR #202 merged:
   rounds had zero request errors, with no statistically clear latency or
   throughput regression. Candidate extra allocation remained about 7,664
   bytes/request, so #34 remains open.
+- PR #204 passed 35/35 exact-head checks; `/gateway/metrics` and both Grafana
+  dashboards now expose low-priority drops. #50 remains open for deployed
+  retention/alert routing, full telemetry, production-path overhead and
+  deployment evidence.
+- PR #205 passed exact-head Windows/Linux checks; its expiry path clears the
+  monotonic freshness timestamp but preserves epoch/minute/sequence replay
+  high-water marks. WSL Ubuntu `LoadBalancingCoreTests` also passed. #101 remains
+  open for deltas/backfill, queues, operator metrics/UI, partition/restart
+  coverage and the physical 60-minute soak.
+- PR #206 passed 30/30 exact-head checks. The real-process E2E exercises TLS
+  HTTP/2 multiplexing, bounded local overload rejection, FIFO permit release and
+  response-body lease lifetime. #100 remains open for other protocol/traffic
+  characterization and physical capacity acceptance.
 - A 60-minute synthetic GitHub-hosted workload passed previously. It is not
   #36's required on-prem VRRP/ECMP test with one-hour solo capacity runs on each
   surviving physical gateway, real faults, zero operational loss, live alerts
