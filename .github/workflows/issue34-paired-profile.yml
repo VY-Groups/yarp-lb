@@ -1,0 +1,124 @@
+name: Issue 34 - paired allocation profile
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/issue34-paired-profile.yml"
+      - "tests/L7/GatewayLab/**"
+      - "tests/L7/BackendLab/**"
+      - "tests/L7/performance/**"
+      - "src/TrafficPolicies/**"
+      - "control-center/GatewayLoggingConfiguration.cs"
+      - "control-center/NonBlockingConsoleLogging.cs"
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: issue34-paired-profile-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  paired-profile:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - name: Checkout candidate revision
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          path: source/candidate
+          persist-credentials: false
+      - name: Checkout pinned allocation baseline
+        uses: actions/checkout@v4
+        with:
+          ref: d2b135f760e92fb2646ec5542d89a7dc309eb88c
+          path: source/baseline
+          persist-credentials: false
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install pinned allocation trace tool
+        run: dotnet tool install --tool-path "$RUNNER_TEMP/dotnet-tools" dotnet-trace --version 10.0.750501
+      - name: Pull pinned k6 runner image before timed samples
+        run: docker pull grafana/k6:0.55.0
+      - name: Verify deterministic report and instrumentation tests
+        run: python3 -m unittest discover -s source/candidate/tests/L7/performance/issue34 -p 'test_*.py' -v
+      - name: Apply identical test-only GC pause instrumentation
+        run: |
+          python3 source/candidate/tests/L7/performance/issue34/instrument_lab_stats.py \
+            source/baseline source/candidate
+      - name: Build pinned baseline lab
+        run: |
+          dotnet build source/baseline/tests/L7/GatewayLab/GatewayLab.csproj -c Release
+          dotnet build source/baseline/tests/L7/BackendLab/BackendLab.csproj -c Release
+      - name: Build candidate lab
+        run: |
+          dotnet build source/candidate/tests/L7/GatewayLab/GatewayLab.csproj -c Release
+          dotnet build source/candidate/tests/L7/BackendLab/BackendLab.csproj -c Release
+      - name: Run three alternating before/after pairs and bounded allocation traces
+        id: paired_profile
+        env:
+          BASELINE_COMMIT: d2b135f760e92fb2646ec5542d89a7dc309eb88c
+          CANDIDATE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          python3 source/candidate/tests/L7/performance/issue34/run_paired_profile.py \
+            --baseline-dir source/baseline \
+            --candidate-dir source/candidate \
+            --workspace "$GITHUB_WORKSPACE" \
+            --load-script "$GITHUB_WORKSPACE/source/candidate/tests/L7/performance/load.js" \
+            --output "$GITHUB_WORKSPACE/artifacts/issue34" \
+            --baseline-commit "$BASELINE_COMMIT" \
+            --candidate-commit "$CANDIDATE_COMMIT" \
+            --dotnet-trace "$RUNNER_TEMP/dotnet-tools/dotnet-trace" \
+            --rounds 3 --vus 75 --duration 45s --warmup 10s \
+            --trace-seconds 25 --payload-bytes 0
+      - name: Add paired measurement summary
+        if: always()
+        run: |
+          if [[ "${{ steps.paired_profile.outcome }}" != "success" ]]; then
+            {
+              echo "## Issue 34 profile incomplete"
+              echo "Trace collection or another required step failed; no complete evidence was produced."
+            } >> "$GITHUB_STEP_SUMMARY"
+            if [[ -f artifacts/issue34/paired-report.json ]]; then
+              python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          report = json.loads(Path('artifacts/issue34/paired-report.json').read_text())
+          delta = report['paired_extra_allocation_delta']
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as out:
+              print(f"Interim allocation delta only: {delta['mean']} B/request "
+                    f"(95% CI {delta['ci95_low']} to {delta['ci95_high']}); "
+                    "this does not satisfy the paired profile acceptance.")
+          PY
+            fi
+            exit 0
+          fi
+          if [[ ! -s artifacts/issue34/paired-report.json || \
+                ! -s artifacts/issue34/trace-index.json || \
+                ! -s artifacts/issue34/traces/before-gc-verbose.nettrace || \
+                ! -s artifacts/issue34/traces/after-gc-verbose.nettrace ]]; then
+            echo "## Issue 34 profile incomplete: report or required trace is missing." >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          if [[ -f artifacts/issue34/paired-report.json ]]; then
+            python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          r = json.loads(Path('artifacts/issue34/paired-report.json').read_text())
+          s = r['paired_extra_allocation_delta']
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as out:
+              print(f"## Paired allocation evidence complete\n"
+                    f"Allocation delta: {s['mean']} B/request "
+                    f"(95% CI {s['ci95_low']} to {s['ci95_high']}); {s['interpretation']}")
+          PY
+          fi
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: issue34-paired-profile
+          path: artifacts/issue34/
+          retention-days: 7
