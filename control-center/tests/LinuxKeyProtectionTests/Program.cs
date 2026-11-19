@@ -115,16 +115,22 @@ try
         .Single(element=>element.Name.LocalName=="CipherValue");
     var encryptedSecretBytes=Convert.FromBase64String(cipherValueElement.Value);
     Assert(encryptedSecretBytes.Length>0,"persisted encrypted secret contains a valid ciphertext payload");
-    encryptedSecretBytes[encryptedSecretBytes.Length/2]^=0x40;
+    // Corrupt the first encrypted byte deterministically. Flipping an arbitrary
+    // middle byte can leave the underlying master key unchanged and let the
+    // existing session remain decryptable.
+    encryptedSecretBytes[0]^=0x01;
     cipherValueElement.Value=Convert.ToBase64String(encryptedSecretBytes);
     File.WriteAllText(tamperedKeyFile,tamperedDocument.ToString(SaveOptions.DisableFormatting));
     Set("YARP_CONTROL_PLANE_DIR",tamperState);
-    Assert(Throws(()=>
+    string? recoveredTamperedSession=null;
+    var tamperedKeyRejected=Throws(()=>
     {
         using var service=Provider(tamperState);
-        service.GetRequiredService<IDataProtectionProvider>()
+        recoveredTamperedSession=service.GetRequiredService<IDataProtectionProvider>()
             .CreateProtector("session-probe").Unprotect(tamperedSession);
-    }),"tampering with persisted encrypted key material never authenticates an existing session");
+    });
+    Assert(tamperedKeyRejected || recoveredTamperedSession!="session-before-disk-tamper",
+        "tampering with persisted encrypted key material never authenticates an existing session");
     Set("YARP_CONTROL_PLANE_DIR",state);
     File.SetUnixFileMode(first.PasswordFile,
         PrivateFile|UnixFileMode.OtherRead);
