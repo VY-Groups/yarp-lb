@@ -244,16 +244,16 @@ public static class AgentLabCaTlsAcceptance
                 await RequireDenied(tooOld,url,"CA-signed expired certificate denied");
                 // JSON configuration reload must be sufficient for two-cert overlap,
                 // with existing TCP listener PID unchanged.
-                SetPins([old.Thumbprint,newer.Thumbprint]);
+                SetPins([old.Thumbprint,Sha256Pin(newer)]);
                 await Task.Delay(1800);
                 await RequireStatus(a,url,HttpStatusCode.OK,"old pin survives overlap");
                 await RequireStatus(b,url,HttpStatusCode.OK,"new pin admitted without listener restart");
-                SetPins([newer.Thumbprint]);
+                SetPins([Sha256Pin(newer)]);
                 await Task.Delay(1800);
                 await RequireStatus(a,url,HttpStatusCode.Forbidden,
                     "removed old pin denied without process restart");
                 await RequireStatus(b,url,HttpStatusCode.OK,"new pin survives old pin removal");
-                SetPins([newer.Thumbprint],[newer.Thumbprint]);
+                SetPins([Sha256Pin(newer)],[Sha256Pin(newer)]);
                 await Task.Delay(1800);
                 await RequireStatus(b,url,HttpStatusCode.Forbidden,
                     "emergency revoked thumbprint denied on live CA-signed TLS");
@@ -313,6 +313,9 @@ public static class AgentLabCaTlsAcceptance
         return new X509Certificate2(combined.Export(X509ContentType.Pfx,"test-pfx"),
             "test-pfx",flags);
     }
+
+    private static string Sha256Pin(X509Certificate2 certificate) =>
+        "SHA256:" + Convert.ToHexString(SHA256.HashData(certificate.RawData));
 
     private static HttpClient Client(X509Certificate2 server,X509Certificate2 cert)
     {

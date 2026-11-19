@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Configuration;
+using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 
 /// <summary>
@@ -8,20 +9,52 @@ using System.Security.Cryptography.X509Certificates;
 /// </summary>
 public static class AgentClientCertificatePolicy
 {
+    private const string Sha1Prefix = "SHA1:";
+    private const string Sha256Prefix = "SHA256:";
+
+    /// <summary>
+    /// Parse certificate identity pins. Unprefixed 40-character values remain
+    /// supported as legacy X.509 SHA-1 thumbprints; new pins must use the
+    /// explicit SHA256:<64 hex characters> form. A SHA-256 pin is never
+    /// retried as SHA-1, so malformed or mismatched modern pins cannot downgrade.
+    /// </summary>
     public static IReadOnlySet<string> ParsePinnedThumbprints(IEnumerable<string> configured)
+        => ParsePins(configured, 1, 8, "controller certificate pin");
+
+    private static IReadOnlySet<string> ParsePins(IEnumerable<string> configured,
+        int minCount, int maxCount, string description)
     {
         var pins = new HashSet<string>(StringComparer.Ordinal);
         foreach (var pin in configured)
         {
             if (string.IsNullOrWhiteSpace(pin))
-                throw new InvalidOperationException("Empty client certificate thumbprint");
-            var normalized = pin.Replace(" ", "").ToUpperInvariant();
-            if (normalized.Length != 40 || normalized.Any(c => !Uri.IsHexDigit(c)) ||
-                !pins.Add(normalized))
-                throw new InvalidOperationException("Invalid or duplicate SHA-1 certificate thumbprint");
+                throw new InvalidOperationException($"Empty {description}");
+
+            var value = pin.Replace(" ", "").ToUpperInvariant();
+            string algorithm;
+            string hex;
+            if (value.StartsWith(Sha256Prefix, StringComparison.Ordinal))
+            {
+                algorithm = Sha256Prefix;
+                hex = value[Sha256Prefix.Length..];
+                if (hex.Length != 64 || hex.Any(c => !Uri.IsHexDigit(c)))
+                    throw new InvalidOperationException($"Invalid SHA-256 {description}");
+            }
+            else
+            {
+                if (value.StartsWith(Sha1Prefix, StringComparison.Ordinal))
+                    value = value[Sha1Prefix.Length..];
+                algorithm = Sha1Prefix;
+                hex = value;
+                if (hex.Length != 40 || hex.Any(c => !Uri.IsHexDigit(c)))
+                    throw new InvalidOperationException($"Invalid SHA-1 {description}");
+            }
+
+            if (!pins.Add(algorithm + hex))
+                throw new InvalidOperationException($"Duplicate {description}");
         }
-        if (pins.Count is < 1 or > 8)
-            throw new InvalidOperationException("Require 1..8 pinned controller certificate thumbprints");
+        if (pins.Count < minCount || pins.Count > maxCount)
+            throw new InvalidOperationException($"Require {minCount}..{maxCount} {description}s");
         return pins;
     }
 
@@ -33,9 +66,27 @@ public static class AgentClientCertificatePolicy
     {
         if (!context.Request.IsHttps) return false;
         X509Certificate2? cert = context.Connection.ClientCertificate;
-        var hash = cert?.Thumbprint;
-        return !string.IsNullOrEmpty(hash) && ValidTime(cert!,DateTimeOffset.UtcNow) &&
-            pins.Contains(hash.ToUpperInvariant());
+        if (cert is null || !ValidTime(cert, DateTimeOffset.UtcNow)) return false;
+
+        var sha1 = Convert.FromHexString(cert.Thumbprint);
+        var sha256 = SHA256.HashData(cert.RawData);
+        var matched = false;
+        foreach (var pin in pins)
+        {
+            var separator = pin.IndexOf(':');
+            if (separator < 0) continue; // Reject non-canonical entries defensively.
+            var algorithm = pin[..(separator + 1)];
+            var expected = Convert.FromHexString(pin[(separator + 1)..]);
+            var actual = algorithm switch
+            {
+                Sha1Prefix => sha1,
+                Sha256Prefix => sha256,
+                _ => Array.Empty<byte>()
+            };
+            if (actual.Length == expected.Length)
+                matched |= CryptographicOperations.FixedTimeEquals(actual, expected);
+        }
+        return matched;
     }
 
     /// <summary>
@@ -56,17 +107,10 @@ public static class AgentClientCertificatePolicy
             pinSetRevisionObserved?.Invoke(AgentPinSetRevisionAudit.Fingerprint(pins));
             var deny = config.GetSection("Agent:RevokedClientThumbprints").Get<string[]>() ?? [];
             if (deny.Length > 128) return false;
-            var revoked = new HashSet<string>(StringComparer.Ordinal);
-            foreach (var item in deny)
-            {
-                if (string.IsNullOrWhiteSpace(item)) return false;
-                var normalized = item.Replace(" ", "").ToUpperInvariant();
-                if (normalized.Length != 40 ||
-                    normalized.Any(c => !Uri.IsHexDigit(c)) ||
-                    !revoked.Add(normalized)) return false;
-            }
-            var hash = context.Connection.ClientCertificate.Thumbprint.ToUpperInvariant();
-            return !revoked.Contains(hash) && IsAuthorized(context,pins);
+            var revoked = deny.Length == 0
+                ? new HashSet<string>(StringComparer.Ordinal)
+                : ParsePins(deny, 1, 128, "revoked client certificate pin");
+            return !IsAuthorized(context, revoked) && IsAuthorized(context, pins);
         }
         catch (Exception ex) when (ex is InvalidOperationException or ArgumentException)
         {

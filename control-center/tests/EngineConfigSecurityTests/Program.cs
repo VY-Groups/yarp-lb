@@ -300,7 +300,11 @@ var allowed = new DefaultHttpContext();
 allowed.Request.Scheme = "https";
 allowed.Connection.ClientCertificate = clientCert;
 Must(AgentClientCertificatePolicy.IsAuthorized(allowed,pinned),
-    "pinned certificate authorized only on HTTPS");
+    "legacy SHA-1 pinned certificate authorized only on HTTPS");
+var sha256Pin = "SHA256:" + Convert.ToHexString(SHA256.HashData(clientCert.RawData));
+var sha256Pinned = AgentClientCertificatePolicy.ParsePinnedThumbprints(new[]{sha256Pin});
+Must(AgentClientCertificatePolicy.IsAuthorized(allowed,sha256Pinned),
+    "SHA-256 certificate pin authorizes the exact DER certificate");
 allowed.Request.Scheme = "http";
 Must(!AgentClientCertificatePolicy.IsAuthorized(allowed,pinned),
     "plaintext request never authorizes with pinned cert");
@@ -313,6 +317,11 @@ var otherReq = new CertificateRequest("CN=untrusted",otherCertKey,
     HashAlgorithmName.SHA256,RSASignaturePadding.Pkcs1);
 using var otherCert = otherReq.CreateSelfSigned(DateTimeOffset.UtcNow.AddMinutes(-5),
     DateTimeOffset.UtcNow.AddHours(1));
+allowed.Connection.ClientCertificate = clientCert;
+var wrongSha256Pin = AgentClientCertificatePolicy.ParsePinnedThumbprints(new[]{
+    "SHA256:" + Convert.ToHexString(SHA256.HashData(otherCert.RawData)) });
+Must(!AgentClientCertificatePolicy.IsAuthorized(allowed,wrongSha256Pin),
+    "SHA-256 pin for a different certificate is rejected without SHA-1 downgrade");
 allowed.Connection.ClientCertificate = otherCert;
 Must(!AgentClientCertificatePolicy.IsAuthorized(allowed,pinned),
     "untrusted client certificate denied");
@@ -327,6 +336,10 @@ var invalidPins=false;
 try { AgentClientCertificatePolicy.ParsePinnedThumbprints(new[]{"not-a-thumbprint"}); }
 catch (InvalidOperationException) { invalidPins=true; }
 Must(invalidPins, "invalid configured controller thumbprint rejects startup");
+var malformedSha256Pins=false;
+try { AgentClientCertificatePolicy.ParsePinnedThumbprints(new[]{"SHA256:"+new string('A',40)}); }
+catch (InvalidOperationException) { malformedSha256Pins=true; }
+Must(malformedSha256Pins, "malformed explicit SHA-256 pin is rejected without legacy fallback");
 await AgentTlsNegativeAcceptance.RunAsync();
 GslbAgentReportStatusParserTests.Run();
 await AgentLabCaTlsAcceptance.RunAsync();
