@@ -45,13 +45,15 @@ public static class AgentClientCertificatePolicy
     /// agent process restart. Malformed/empty replacement configuration fails
     /// closed; it never restores an older trusted set.
     /// </summary>
-    public static bool IsAuthorizedLive(HttpContext context, IConfiguration config)
+    public static bool IsAuthorizedLive(HttpContext context, IConfiguration config,
+        Action<string>? pinSetRevisionObserved = null)
     {
         if (!context.Request.IsHttps || context.Connection.ClientCertificate is null) return false;
         try
         {
             var pins = ParsePinnedThumbprints(
                 config.GetSection("Agent:TrustedClientThumbprints").Get<string[]>() ?? []);
+            pinSetRevisionObserved?.Invoke(AgentPinSetRevisionAudit.Fingerprint(pins));
             var deny = config.GetSection("Agent:RevokedClientThumbprints").Get<string[]>() ?? [];
             if (deny.Length > 128) return false;
             var revoked = new HashSet<string>(StringComparer.Ordinal);

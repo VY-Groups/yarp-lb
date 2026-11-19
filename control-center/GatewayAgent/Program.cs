@@ -185,6 +185,7 @@ builder.WebHost.ConfigureKestrel(server =>
 var app = builder.Build();
 clientCertificateLogger = app.Services.GetRequiredService<ILoggerFactory>()
     .CreateLogger("GatewayAgent.ClientCertificate");
+var pinSetRevisionAudit = new AgentPinSetRevisionAudit(clientCertificateLogger);
 if (labRoot is not null)
     clientCertificateLogger.LogInformation(
         "Loopback lab client CA configured; online revocation checks enabled {RevocationEnabled}",
@@ -193,7 +194,8 @@ if (labRoot is not null)
 app.Use(async (ctx, next) =>
 {
     // Kestrel performs TLS chain validation. This additionally pins controller identities.
-    if (!AgentClientCertificatePolicy.IsAuthorizedLive(ctx, builder.Configuration))
+    if (!AgentClientCertificatePolicy.IsAuthorizedLive(ctx, builder.Configuration,
+        pinSetRevisionAudit.RecordRevision))
     { ctx.Response.StatusCode = StatusCodes.Status403Forbidden; return; }
     ctx.Response.Headers.CacheControl = "no-store";
     await next();

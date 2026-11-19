@@ -29,6 +29,8 @@ public static class AgentFleetRotationAcceptance
         var stdoutTasks = new List<Task<string>>();
         var stderrTasks = new List<Task<string>>();
         var serverCertificates = new List<X509Certificate2>();
+        var pfxPasswords = new List<string>();
+        var expectedPinRevisions = Array.Empty<string>();
         try
         {
             using var caKey = RSA.Create(2048);
@@ -44,6 +46,12 @@ public static class AgentFleetRotationAcceptance
             using var oldController = Issue(ca, "old-controller");
             using var newController = Issue(ca, "new-controller");
             using var wrongController = Issue(ca, "wrong-controller");
+            expectedPinRevisions = [
+                PinSetRevision(oldController.Thumbprint),
+                PinSetRevision(oldController.Thumbprint, newController.Thumbprint),
+                PinSetRevision(newController.Thumbprint)
+            ];
+            Console.WriteLine("NOTICE: Gateway Agent does not emit a dedicated certificate-pin rotation audit event; this acceptance harness logs certificate fingerprints and outcomes.");
             var nodes = new List<Node>();
             for (var i = 0; i < 2; i++)
             {
@@ -51,6 +59,7 @@ public static class AgentFleetRotationAcceptance
                 Directory.CreateDirectory(nodeDirectory);
                 var port = ReservePort();
                 var password = Convert.ToHexString(RandomNumberGenerator.GetBytes(24));
+                pfxPasswords.Add(password);
                 var server = IssueServer(ca, "node-" + (i + 1));
                 serverCertificates.Add(server);
                 var serverPfx = Path.Combine(nodeDirectory, "https-listener.pfx");
@@ -85,8 +94,10 @@ public static class AgentFleetRotationAcceptance
             {
                 await RequireStatus(node, oldController, HttpStatusCode.OK,
                     $"old controller is initially authorized on node {node.Index}");
+                LogRotationOutcome(node.Index, "initial", oldController, "accepted");
                 await RequireStatus(node, newController, HttpStatusCode.Forbidden,
                     $"new controller is rejected before rotation on node {node.Index}");
+                LogRotationOutcome(node.Index, "initial", newController, "denied");
             }
 
             // A deliberately incomplete fleet rollout must keep the established
@@ -101,16 +112,32 @@ public static class AgentFleetRotationAcceptance
                 WritePins(nodes[1].ConfigPath, caPemPath, [oldController.Thumbprint, wrongController.Thumbprint]);
                 await RequireEventually(nodes[0], newController, HttpStatusCode.OK,
                     "node 1 accepts candidate new identity during partial rollout");
+                LogRotationOutcome(nodes[0].Index, "partial-rollout", newController, "accepted");
                 await RequireStatus(nodes[1], newController, HttpStatusCode.Forbidden,
                     "node 2 rejects candidate identity after bad pin delivery");
+                LogRotationOutcome(nodes[1].Index, "partial-rollout", newController, "denied");
 
                 var rollbackStarted = Stopwatch.StartNew();
                 foreach (var node in nodes)
                     WriteConfigAtomically(node.ConfigPath, lastKnownGoodConfigs[node.Index]);
                 await RequireEventually(nodes[0], newController, HttpStatusCode.Forbidden,
                     "rollback removes candidate identity on node 1");
+                LogRotationOutcome(nodes[0].Index, "rollback", newController, "denied");
                 await RequireEventually(nodes[1], oldController, HttpStatusCode.OK,
                     "rollback preserves established identity on node 2");
+                LogRotationOutcome(nodes[1].Index, "rollback", oldController, "accepted");
+                await RequireStatus(nodes[0], oldController, HttpStatusCode.OK,
+                    "rollback preserves established identity on node 1");
+                LogRotationOutcome(nodes[0].Index, "rollback", oldController, "accepted");
+                await RequireStatus(nodes[1], wrongController, HttpStatusCode.Forbidden,
+                    "rollback removes incorrectly delivered pin from node 2");
+                LogRotationOutcome(nodes[1].Index, "rollback", wrongController, "denied");
+                await RequireStatus(nodes[0], newController, HttpStatusCode.Forbidden,
+                    "rollback removes candidate pin from node 1");
+                LogRotationOutcome(nodes[0].Index, "rollback", newController, "denied");
+                await RequireStatus(nodes[1], newController, HttpStatusCode.Forbidden,
+                    "rollback keeps candidate pin absent from node 2");
+                LogRotationOutcome(nodes[1].Index, "rollback", newController, "denied");
                 if (rollbackStarted.Elapsed > RollbackTimeout)
                     throw new Exception($"FAIL: fleet rollback exceeded {RollbackTimeout.TotalSeconds:0}s");
                 Console.WriteLine("PASS: incomplete rollout detected and both nodes rolled back within 5 seconds");
@@ -133,8 +160,12 @@ public static class AgentFleetRotationAcceptance
                 await RequireEventually(node, newController, HttpStatusCode.OK,
                     $"new controller is accepted on node {node.Index} before old pin retirement");
             foreach (var node in nodes)
+                LogRotationOutcome(node.Index, "overlap", newController, "accepted");
+            foreach (var node in nodes)
                 await RequireStatus(node, oldController, HttpStatusCode.OK,
                     $"old controller remains accepted during overlap on node {node.Index}");
+            foreach (var node in nodes)
+                LogRotationOutcome(node.Index, "overlap", oldController, "accepted");
 
             var rotationProbes = StartContinuousProbes(nodes, _ => oldController);
             try
@@ -143,12 +174,14 @@ public static class AgentFleetRotationAcceptance
                 {
                     // Move the live management probe to the already-authorized
                     // new identity before removing the old pin on this node.
-                    rotationProbes.SetCertificate(node.Index, newController);
+                    await rotationProbes.SetCertificateAsync(node.Index, newController);
                     WritePins(node.ConfigPath, caPemPath, [newController.Thumbprint]);
                     await RequireEventually(node, newController, HttpStatusCode.OK,
                         $"new controller remains accepted after old pin retirement on node {node.Index}");
+                    LogRotationOutcome(node.Index, "new-pin-active", newController, "accepted");
                     await RequireEventually(node, oldController, HttpStatusCode.Forbidden,
                         $"retired old controller is denied on node {node.Index}");
+                    LogRotationOutcome(node.Index, "old-pin-retired", oldController, "denied");
                 }
             }
             finally
@@ -177,14 +210,34 @@ public static class AgentFleetRotationAcceptance
                 catch (InvalidOperationException) { }
                 process.Dispose();
             }
-            foreach (var task in stdoutTasks.Concat(stderrTasks))
+            var capturedAgentOutput = new System.Text.StringBuilder();
+            var capturedOutputByNode = new List<string>();
+            for (var i = 0; i < processes.Count; i++)
             {
-                try { _ = await task; } catch (IOException) { }
+                var nodeOutput = new System.Text.StringBuilder();
+                try { nodeOutput.AppendLine(await stdoutTasks[i]); } catch (IOException) { }
+                try { nodeOutput.AppendLine(await stderrTasks[i]); } catch (IOException) { }
+                capturedOutputByNode.Add(nodeOutput.ToString());
+                capturedAgentOutput.AppendLine(nodeOutput.ToString());
             }
+            var agentOutput = capturedAgentOutput.ToString();
+            if (pfxPasswords.Any(password => agentOutput.Contains(password, StringComparison.Ordinal)) ||
+                agentOutput.Contains("PRIVATE KEY-----", StringComparison.Ordinal))
+                throw new Exception("FAIL: captured Gateway Agent output contains a PFX password or private-key marker");
+            Console.WriteLine("PASS: captured Gateway Agent output contains no PFX password or private-key material");
+            foreach (var (nodeOutput, index) in capturedOutputByNode.Select((output, index) => (output, index)))
+            {
+                if (expectedPinRevisions.Any(revision => !nodeOutput.Contains(revision, StringComparison.Ordinal)) ||
+                    !nodeOutput.Contains("Controller mTLS pin-set revision changed", StringComparison.Ordinal))
+                    throw new Exception($"FAIL: agent node {index + 1} did not log initial, overlap, and final pin-set revisions");
+            }
+            Console.WriteLine("PASS: each agent logged SHA-256 pin-set revision changes for the overlap and final rotation states");
             // Listener certificates hold only disposable test keys and stay
             // alive until all clients and child processes have stopped.
             foreach (var certificate in serverCertificates) certificate.Dispose();
-            try { Directory.Delete(root, recursive: true); } catch (IOException) { }
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+            if (Directory.Exists(root)) throw new Exception("FAIL: temporary rotation PKI directory was not removed");
+            Console.WriteLine("PASS: disposable rotation PKI and PFX files were removed");
         }
     }
 
@@ -266,6 +319,20 @@ public static class AgentFleetRotationAcceptance
         return new HttpClient(handler) { Timeout = RequestTimeout };
     }
 
+    private static void LogRotationOutcome(int nodeIndex, string phase,
+        X509Certificate2 certificate, string status)
+    {
+        var fingerprint = Convert.ToHexString(SHA256.HashData(certificate.RawData));
+        Console.WriteLine($"ROTATION_TEST node={nodeIndex} phase={phase} sha256={fingerprint} status={status}");
+    }
+
+    private static string PinSetRevision(params string[] thumbprints)
+    {
+        var canonical = string.Join("\n", thumbprints.Select(pin => pin.Replace(" ", "").ToUpperInvariant())
+            .OrderBy(pin => pin, StringComparer.Ordinal));
+        return Convert.ToHexString(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(canonical)));
+    }
+
     private static async Task WaitUntilReady(Node node, X509Certificate2 oldController,
         Task<string> stdout, Task<string> stderr)
     {
@@ -327,7 +394,7 @@ public static class AgentFleetRotationAcceptance
         Func<Node, X509Certificate2> certForNode)
     {
         var probe = new ContinuousProbe();
-        foreach (var node in nodes) probe.SetCertificate(node.Index, certForNode(node));
+        foreach (var node in nodes) probe.InitializeCertificate(node.Index, certForNode(node));
         probe.Completion = Task.Run(async () =>
         {
             while (!probe.Cancellation.IsCancellationRequested)
@@ -335,6 +402,7 @@ public static class AgentFleetRotationAcceptance
                 foreach (var node in nodes)
                 {
                     if (probe.Cancellation.IsCancellationRequested) break;
+                    await probe.probeGate.WaitAsync(probe.Cancellation.Token);
                     try
                     {
                         await RequireStatus(node, probe.CertificateFor(node), HttpStatusCode.OK, "continuous established identity");
@@ -344,6 +412,7 @@ public static class AgentFleetRotationAcceptance
                     {
                         lock (probe.Failures) probe.Failures.Add($"node {node.Index}: {error.Message}");
                     }
+                    finally { probe.probeGate.Release(); }
                 }
                 try { await Task.Delay(50, probe.Cancellation.Token); }
                 catch (OperationCanceledException) when (probe.Cancellation.IsCancellationRequested) { }
@@ -362,7 +431,14 @@ public static class AgentFleetRotationAcceptance
         public int SuccessCount;
         public int Successes => Volatile.Read(ref SuccessCount);
         private readonly System.Collections.Concurrent.ConcurrentDictionary<int, X509Certificate2> certificates = new();
-        public void SetCertificate(int nodeIndex, X509Certificate2 certificate) => certificates[nodeIndex] = certificate;
+        public readonly SemaphoreSlim probeGate = new(1, 1);
+        public void InitializeCertificate(int nodeIndex, X509Certificate2 certificate) => certificates[nodeIndex] = certificate;
+        public async Task SetCertificateAsync(int nodeIndex, X509Certificate2 certificate)
+        {
+            await probeGate.WaitAsync();
+            try { certificates[nodeIndex] = certificate; }
+            finally { probeGate.Release(); }
+        }
         public X509Certificate2 CertificateFor(Node node) => certificates[node.Index];
         public void Cancel() => Cancellation.Cancel();
     }
