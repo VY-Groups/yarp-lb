@@ -1,9 +1,24 @@
 using System.Text.Json;
 using GatewayConfigPlan;
 
+if (args.Length == 2 && args[0] == "validate")
+{
+    try
+    {
+        var result = PlanEngine.Validate(await File.ReadAllTextAsync(args[1]));
+        Console.WriteLine(JsonSerializer.Serialize(result, new JsonSerializerOptions { WriteIndented = true }));
+        return 0;
+    }
+    catch (Exception ex) when (ex is ArgumentException or IOException)
+    {
+        Console.Error.WriteLine(ex.Message);
+        return 1;
+    }
+}
+
 if (args.Length != 3 || args[0] != "plan")
 {
-    Console.Error.WriteLine("Usage: GatewayConfigPlan plan <current.json> <desired.json>");
+    Console.Error.WriteLine("Usage: GatewayConfigPlan validate <desired.json> | plan <current.json> <desired.json>");
     return 2;
 }
 

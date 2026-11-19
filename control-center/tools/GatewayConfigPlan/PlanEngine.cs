@@ -6,6 +6,8 @@ namespace GatewayConfigPlan;
 
 public sealed record PlanChange(string Kind, string Id);
 public sealed record ConfigPlan(string Status, IReadOnlyList<PlanChange> Changes, IReadOnlyList<string> Warnings);
+public sealed record ConfigValidation(string Status, int SchemaVersion, int RouteCount, int ClusterCount,
+    int DestinationCount, IReadOnlyList<string> Warnings);
 
 /// <summary>Offline, read-only planner for the supported YARP routes/clusters subset. It never applies configuration.</summary>
 public static class PlanEngine
@@ -23,6 +25,15 @@ public static class PlanEngine
         changes.Sort((a, b) => StringComparer.Ordinal.Compare($"{a.Kind}/{a.Id}", $"{b.Kind}/{b.Id}"));
         return new ConfigPlan("valid", changes,
             ["Plan is read-only; it does not write appsettings, approve changes, or deploy a gateway."]);
+    }
+
+    /// <summary>Validates one desired document without requiring access to live state.</summary>
+    public static ConfigValidation Validate(string desiredJson)
+    {
+        var desired = Parse(desiredJson, "desired");
+        return new ConfigValidation("valid", 1, desired.Routes.Count, desired.Clusters.Count,
+            desired.Clusters.Sum(cluster => ((JsonObject)cluster.Value!["Destinations"]!).Count),
+            ["Validation is offline and read-only; it does not apply configuration or verify runtime health."]);
     }
 
     private static DesiredConfig Parse(string json, string label)
