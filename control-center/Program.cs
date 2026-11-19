@@ -57,6 +57,16 @@ if (acmeChallengeSetting is not null && !bool.TryParse(acmeChallengeSetting, out
 var acmeHttp01PublicEntrypointEnabled = string.Equals(acmeChallengeSetting, "true", StringComparison.OrdinalIgnoreCase);
 if (acmeHttp01PublicEntrypointEnabled && isolatedListeners is null)
     throw new InvalidOperationException("ACME HTTP-01 requires the explicitly configured isolated traffic listener");
+var acmeConfigurationPath = Environment.GetEnvironmentVariable("YARP_ACME_CONFIG_FILE");
+AcmeRenewalSettings? acmeRenewalSettings = null;
+if (!string.IsNullOrWhiteSpace(acmeConfigurationPath))
+{
+    if (ec2Lab || !acmeHttp01PublicEntrypointEnabled || isolatedListeners is null)
+        throw new InvalidOperationException("ACME renewal requires production data protection and an explicitly enabled isolated public HTTP-01 listener.");
+    acmeRenewalSettings = AcmeRenewalSettings.Load(acmeConfigurationPath,
+        isolatedListeners.Config.TrafficPfxPath, isolatedListeners.Config.TrafficPfxPasswordFile,
+        isolatedListeners.Config.TrafficCertificateDnsNames);
+}
 builder.Services.AddSingleton<AcmeHttp01ChallengeStore>();
 isolatedListeners?.Configure(builder.WebHost);
 if (isolatedListeners is not null)
@@ -76,6 +86,21 @@ else if (ec2Lab)
     Console.Error.WriteLine("WARNING: CI-only EC2 lab uses temporary, unencrypted local Data Protection keys. Never use in production.");
 else
     throw new PlatformNotSupportedException("Unsupported OS Data Protection mode");
+if (acmeRenewalSettings is { } renewalSettings)
+{
+    var accountKeyPath = Path.Combine(privateDir, "acme-account.encrypted");
+    builder.Services.AddSingleton<IAcmeCertificateIssuer>(services => new CertesAcmeCertificateIssuer(
+        new AcmeAccountKeyStore(accountKeyPath,
+            services.GetRequiredService<IDataProtectionProvider>().CreateProtector("GatewayCore.AcmeAccountKeyProtector.v1")),
+        renewalSettings.AgreeToTermsOfService));
+    builder.Services.AddSingleton<AcmeRenewalCoordinator>(services => new AcmeRenewalCoordinator(
+        services.GetRequiredService<IAcmeCertificateIssuer>(),
+        services.GetRequiredService<AcmeHttp01ChallengeStore>(),
+        isCertificateActive: isolatedListeners.IsTrafficCertificateActive));
+    builder.Services.AddHostedService(services => new AcmeRenewalBackgroundService(renewalSettings,
+        services.GetRequiredService<AcmeRenewalCoordinator>(), null,
+        services.GetRequiredService<ILogger<AcmeRenewalBackgroundService>>()));
+}
 // Keep executable/static assets read-only under /opt on hardened Linux.
 // Management may atomically update ONLY a private state-directory config.
 var runtimeConfig = Environment.GetEnvironmentVariable("YARP_RUNTIME_CONFIG_PATH");

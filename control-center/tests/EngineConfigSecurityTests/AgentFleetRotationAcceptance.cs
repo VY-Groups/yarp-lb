@@ -66,9 +66,9 @@ public static class AgentFleetRotationAcceptance
             using var newController = Issue(ca, "new-controller");
             using var wrongController = Issue(ca, "wrong-controller");
             expectedPinRevisions = [
-                PinSetRevision(oldController.Thumbprint),
-                PinSetRevision(oldController.Thumbprint, newController.Thumbprint),
-                PinSetRevision(newController.Thumbprint)
+                PinSetRevision(LegacyPin(oldController)),
+                PinSetRevision(LegacyPin(oldController), Sha256Pin(newController)),
+                PinSetRevision(Sha256Pin(newController))
             ];
             Console.WriteLine("NOTICE: pin-set changes are recorded in local agent logs; this is not immutable centralized audit evidence.");
             var nodes = new List<Node>();
@@ -84,7 +84,7 @@ public static class AgentFleetRotationAcceptance
                 var serverPfx = Path.Combine(nodeDirectory, "https-listener.pfx");
                 File.WriteAllBytes(serverPfx, server.Export(X509ContentType.Pfx, password));
                 var configPath = Path.Combine(nodeDirectory, "appsettings.json");
-                WritePins(configPath, caPemPath, [oldController.Thumbprint]);
+                WritePins(configPath, caPemPath, [LegacyPin(oldController)]);
 
                 var start = new ProcessStartInfo("dotnet")
                 {
@@ -127,8 +127,8 @@ public static class AgentFleetRotationAcceptance
             var uninterruptedOldProbes = StartContinuousProbes(nodes, _ => oldController);
             try
             {
-                WritePins(nodes[0].ConfigPath, caPemPath, [oldController.Thumbprint, newController.Thumbprint]);
-                WritePins(nodes[1].ConfigPath, caPemPath, [oldController.Thumbprint, wrongController.Thumbprint]);
+                WritePins(nodes[0].ConfigPath, caPemPath, [LegacyPin(oldController), Sha256Pin(newController)]);
+                WritePins(nodes[1].ConfigPath, caPemPath, [LegacyPin(oldController), Sha256Pin(wrongController)]);
                 await RequireEventually(nodes[0], newController, HttpStatusCode.OK,
                     "node 1 accepts candidate new identity during partial rollout");
                 LogRotationOutcome(nodes[0].Index, "partial-rollout", newController, "accepted");
@@ -174,7 +174,7 @@ public static class AgentFleetRotationAcceptance
             // Successful fleet rollout: overlap remains active until both nodes
             // prove acceptance of the new cert; only then is the old pin retired.
             foreach (var node in nodes)
-                WritePins(node.ConfigPath, caPemPath, [oldController.Thumbprint, newController.Thumbprint]);
+                WritePins(node.ConfigPath, caPemPath, [LegacyPin(oldController), Sha256Pin(newController)]);
             foreach (var node in nodes)
                 await RequireEventually(node, newController, HttpStatusCode.OK,
                     $"new controller is accepted on node {node.Index} before old pin retirement");
@@ -194,7 +194,7 @@ public static class AgentFleetRotationAcceptance
                     // Move the live management probe to the already-authorized
                     // new identity before removing the old pin on this node.
                     await rotationProbes.SetCertificateAsync(node.Index, newController);
-                    WritePins(node.ConfigPath, caPemPath, [newController.Thumbprint]);
+                    WritePins(node.ConfigPath, caPemPath, [Sha256Pin(newController)]);
                     await RequireEventually(node, newController, HttpStatusCode.OK,
                         $"new controller remains accepted after old pin retirement on node {node.Index}");
                     LogRotationOutcome(node.Index, "new-pin-active", newController, "accepted");
@@ -407,12 +407,21 @@ public static class AgentFleetRotationAcceptance
         Console.WriteLine($"ROTATION_TEST node={nodeIndex} phase={phase} sha256={fingerprint} status={status}");
     }
 
-    private static string PinSetRevision(params string[] thumbprints)
+    private static string PinSetRevision(params string[] pins)
     {
-        var canonical = string.Join("\n", thumbprints.Select(pin => pin.Replace(" ", "").ToUpperInvariant())
+        var canonical = string.Join("\n", pins.Select(pin =>
+                pin.StartsWith("SHA256:", StringComparison.OrdinalIgnoreCase)
+                    ? pin.Replace(" ", "").ToUpperInvariant()
+                    : "SHA1:" + pin.Replace(" ", "").Replace("SHA1:", "", StringComparison.OrdinalIgnoreCase)
+                        .ToUpperInvariant())
             .OrderBy(pin => pin, StringComparer.Ordinal));
         return Convert.ToHexString(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(canonical)));
     }
+
+    private static string LegacyPin(X509Certificate2 certificate) => certificate.Thumbprint;
+
+    private static string Sha256Pin(X509Certificate2 certificate) =>
+        "SHA256:" + Convert.ToHexString(SHA256.HashData(certificate.RawData));
 
     private static async Task WaitUntilReady(Node node, X509Certificate2 oldController,
         Task<string> stdout, Task<string> stderr)
