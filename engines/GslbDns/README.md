@@ -627,8 +627,9 @@ configuration; this is not a live management API. The default is `false`.
 ## Child-zone delegations
 
 An authoritative zone may declare up to 256 `Delegations`. Each cut must be a
-strict child of the configured zone and has 1–4 unique name-server names with
-IPv4 or IPv6 addresses. The parent returns a non-authoritative referral for the
+strict child of the configured zone and has 1–4 unique name-server names. Each
+name may have one IPv4 and one IPv6 address (up to eight address rows per cut);
+duplicate addresses of the same family fail startup. The parent returns a non-authoritative referral for the
 cut and all names below it; it does not answer those names from the parent
 GSLB site pool. In-bailiwick name servers receive additional-section glue;
 out-of-bailiwick name servers never receive glue from the parent. Referral TTLs

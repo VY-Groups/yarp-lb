@@ -179,9 +179,14 @@ internal static class DnsWireProtocol
             else if (delegation is not null)
             {
                 authoritativeAnswer = false;
+                var delegatedNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                 foreach (var server in delegation.NameServers)
                 {
-                    authority.Add(new DnsResource(delegation.Name, Ns, (uint)zone.Ttl, WireName(server.Host)));
+                    // An NS RR is per hostname, but a single in-domain server
+                    // can have both A and AAAA glue. Keep one NS value while
+                    // returning every configured address RRset for that name.
+                    if (delegatedNames.Add(server.Host))
+                        authority.Add(new DnsResource(delegation.Name, Ns, (uint)zone.Ttl, WireName(server.Host)));
                     if (server.Host.Equals(delegation.Name, StringComparison.OrdinalIgnoreCase) ||
                         server.Host.EndsWith("." + delegation.Name, StringComparison.OrdinalIgnoreCase))
                         extra.Add(new DnsResource(server.Host, server.RecordType, (uint)zone.Ttl,

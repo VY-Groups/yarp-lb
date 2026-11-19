@@ -4,6 +4,7 @@ using System.Net;
 using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Security.AccessControl;
@@ -628,6 +629,7 @@ File.WriteAllText(configuration,JsonSerializer.Serialize(new {
         new {Name="child.delegated.integration.test",
         NameServers=new[]{
           new {Host="ns.child.delegated.integration.test",Address="127.0.0.61"},
+          new {Host="ns.child.delegated.integration.test",Address="2001:db8::61"},
           new {Host="ns.other.example.net",Address="192.0.2.53"}}}},
       RoutingPolicy="Failover",FailureThreshold=1,SuccessThreshold=1,
       FailClosedWhenAllSitesDown=true},
@@ -704,6 +706,44 @@ File.WriteAllText(configuration,JsonSerializer.Serialize(new {
    FailClosedWhenAllSitesDown=true }
  }
 }));
+foreach (var duplicateHost in new[]
+         {
+             "ns.child.delegated.integration.test",
+             "NS.CHILD.DELEGATED.INTEGRATION.TEST."
+         })
+{
+    var invalidConfig = JsonNode.Parse(File.ReadAllText(configuration))!.AsObject();
+    var delegatedZone = invalidConfig["Zones"]!.AsArray().Single(zone =>
+        string.Equals((string?)zone?["Name"], "delegated.integration.test", StringComparison.Ordinal))
+        ?? throw new InvalidDataException("Delegation negative-test zone fixture is absent");
+    var childCut = delegatedZone["Delegations"]!.AsArray().Single(cut =>
+        string.Equals((string?)cut?["Name"], "child.delegated.integration.test", StringComparison.Ordinal))
+        ?? throw new InvalidDataException("Delegation negative-test cut fixture is absent");
+    childCut["NameServers"]!.AsArray().Add(new JsonObject
+    {
+        ["Host"] = duplicateHost,
+        ["Address"] = "192.0.2.62"
+    });
+    var invalidPath = Path.Combine(temp, "duplicate-glue-" + Guid.NewGuid().ToString("N") + ".json");
+    await File.WriteAllTextAsync(invalidPath, invalidConfig.ToJsonString());
+    var invalidInfo = new ProcessStartInfo("dotnet")
+    {
+        UseShellExecute = false, CreateNoWindow = true,
+        WorkingDirectory = Path.GetDirectoryName(dll)!,
+        RedirectStandardOutput = true, RedirectStandardError = true
+    };
+    invalidInfo.ArgumentList.Add(dll);
+    invalidInfo.ArgumentList.Add(invalidPath);
+    using var invalidDns = Process.Start(invalidInfo) ?? throw new Exception("Invalid DNS fixture did not start");
+    var invalidStdout = invalidDns.StandardOutput.ReadToEndAsync();
+    var invalidStderr = invalidDns.StandardError.ReadToEndAsync();
+    using var invalidDeadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+    await invalidDns.WaitForExitAsync(invalidDeadline.Token);
+    var invalidOutput = (await invalidStdout) + (await invalidStderr);
+    Must(invalidDns.ExitCode != 0 && invalidOutput.Contains("Duplicate delegated name-server address family", StringComparison.Ordinal),
+        "duplicate same-family glue rejects startup, including case/trailing-dot normalized hostnames");
+    File.Delete(invalidPath);
+}
 var info=new ProcessStartInfo("dotnet"){ UseShellExecute=false,CreateNoWindow=true,
  WorkingDirectory=Path.GetDirectoryName(dll)!,RedirectStandardOutput=true,RedirectStandardError=true };
 info.ArgumentList.Add(dll);info.ArgumentList.Add(configuration);
@@ -756,15 +796,18 @@ try
     Must(fullyQuarantined.Status == 2 && fullyQuarantined.Address is null,
         "availability-first fallback never selects an administratively quarantined site");
     Console.WriteLine("PASS: operator quarantine keeps a healthy primary out of DNS failover selection");
-    var delegatedNs = await TcpQuery(DnsRequest("child.delegated.integration.test", 2));
-    Must((Dns16(delegatedNs, 2) & 0x0400) == 0 && (Dns16(delegatedNs, 2) & 0x000f) == 0 &&
-         Dns16(delegatedNs, 6) == 0 && Dns16(delegatedNs, 8) == 2 && Dns16(delegatedNs, 10) == 1 &&
-         DnsRecordTypes(delegatedNs, 1).SequenceEqual(new ushort[] { 2, 2 }) &&
-         DnsRecordTypes(delegatedNs, 2).SequenceEqual(new ushort[] { 1 }),
-         "delegation apex returns non-authoritative NS referral and in-bailiwick glue only");
+    var (delegatedNsRequest, delegatedNsUdp) = await QueryWire("child.delegated.integration.test", 2,
+        ednsVersion: 0, udpPayloadSize: 1232);
+    var delegatedNsTcp = await TcpQuery(delegatedNsRequest);
+    foreach (var delegatedNs in new[] { delegatedNsUdp, delegatedNsTcp })
+        Must((Dns16(delegatedNs, 2) & 0x0400) == 0 && (Dns16(delegatedNs, 2) & 0x000f) == 0 &&
+             Dns16(delegatedNs, 6) == 0 && Dns16(delegatedNs, 8) == 2 && Dns16(delegatedNs, 10) == 3 &&
+             DnsRecordTypes(delegatedNs, 1).SequenceEqual(new ushort[] { 2, 2 }) &&
+             DnsRecordTypes(delegatedNs, 2).SequenceEqual(new ushort[] { 1, 28, 41 }),
+             "UDP and TCP delegation referrals return one NS per hostname and all in-bailiwick A/AAAA glue only");
     var delegatedChild = await TcpQuery(DnsRequest("www.child.delegated.integration.test", 1));
     Must((Dns16(delegatedChild, 2) & 0x0400) == 0 && Dns16(delegatedChild, 6) == 0 &&
-         Dns16(delegatedChild, 8) == 2 && Dns16(delegatedChild, 10) == 1,
+         Dns16(delegatedChild, 8) == 2 && Dns16(delegatedChild, 10) == 2,
          "names beneath a delegation receive the nearest referral instead of parent-zone answers");
     var delegatedDs = await TcpQuery(DnsRequest("child.delegated.integration.test", 43));
     Must((Dns16(delegatedDs, 2) & 0x0400) != 0 && (Dns16(delegatedDs, 2) & 0x000f) == 0 &&
