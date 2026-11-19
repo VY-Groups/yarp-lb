@@ -28,6 +28,11 @@ public sealed class PrimaryBackupPolicy : ILoadBalancingPolicy
         {
             var candidate = availableDestinations[i];
             if (TrafficLifecycle.IsDraining(candidate)) continue;
+            // YARP's HealthyAndUnknown policy intentionally leaves bootstrap
+            // destinations available. Standby promotion is stricter: until an
+            // active readiness check has succeeded, an Unknown backup is not safe.
+            if (!PrimaryBackupCore.HasSuccessfulActiveCheck(candidate.Health.Active.ToString()))
+                continue;
             var metadata = candidate.Model.Config.Metadata;
             var raw = metadata is not null && metadata.TryGetValue("TrafficRole", out var role)
                 ? role : null;

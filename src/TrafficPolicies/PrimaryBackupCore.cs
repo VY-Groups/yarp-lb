@@ -4,6 +4,9 @@
 /// </summary>
 public static class PrimaryBackupCore
 {
+    public static bool HasSuccessfulActiveCheck(string? activeHealthState) =>
+        string.Equals(activeHealthState, "Healthy", StringComparison.Ordinal);
+
     public static bool TryBackupRole(string? value, out bool backup)
     {
         backup = false;

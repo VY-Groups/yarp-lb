@@ -78,6 +78,74 @@ test('browser: bootstrap, navigation, onboarding, websites, route edit, users an
     await expect(page.locator('#modal')).toBeHidden();
   });
 
+  await test.step('application builder creates separate pools and guards restricted services',async()=>{
+    await page.locator('[data-action="setup-add-esign-pools"]').click();
+    await expect(page.locator('#modal-title')).toContainText('Application public and private API pools');
+    await expect(page.locator('#modal-help')).toContainText('Private host matching does not isolate network access');
+    await page.locator('#f-id').fill('esign-browser');
+    await page.locator('#f-mode').selectOption('primary-backup');
+    await page.locator('#f-health').selectOption('passive-only');
+    await page.locator('#confirm').click();
+    await expect(page.locator('#modal')).toBeVisible();
+    await expect(page.locator('#notice')).toContainText('Primary/DR standby requires active readiness checks');
+    await page.locator('#f-health').selectOption('active');
+    await page.locator('#f-publicHost').fill('esign.example.invalid');
+    await page.locator('#f-privateHost').fill('esign.internal.example.invalid');
+    await page.locator('#f-publicApp1').fill('https://esign-public-01.example.invalid/');
+    await page.locator('#f-publicApp2').fill('https://esign-public-02.example.invalid/');
+    await page.locator('#f-privateApp1').fill('https://esign-private-01.example.invalid/');
+    await page.locator('#f-privateApp2').fill('https://esign-private-02.example.invalid/');
+    await page.locator('#confirm').click();
+    await expect(page.locator('#modal')).toBeHidden();
+    await expect(page.locator('#notice')).toContainText('Added public and private eSign route and backend pool');
+    await page.locator('button.nav[data-view="routes"]').click();
+    await expect(page.locator('#content')).toContainText('esign-browser-public-route');
+    await expect(page.locator('#content')).toContainText('esign-browser-private-route');
+    await expect(page.locator('#content')).toContainText('esign-browser-public-pool');
+    await expect(page.locator('#content')).toContainText('esign-browser-private-pool');
+    await page.locator('button.nav[data-view="clusters"]').click();
+    await expect(page.locator('#content')).toContainText('PrimaryBackup');
+    await expect(page.locator('#content')).toContainText('Active');
+    await page.locator('button.nav[data-view="backends"]').click();
+    await expect(page.locator('#content')).toContainText('A host match separates routes');
+    await expect(page.locator('#content')).toContainText('Inspect live health');
+    await page.locator('[data-action="dest-drain"]').first().click();
+    await expect(page.locator('#content')).toContainText('Draining');
+    await expect(page.locator('#notice')).toContainText('unsaved draft');
+
+    await page.locator('button.nav[data-view="setup"]').click();
+    await page.locator('[data-action="setup-add-esign-pools"]').click();
+    await page.locator('#f-id').fill('ra-browser');
+    await page.locator('#f-service').selectOption('RA');
+    await page.locator('#f-scope').selectOption('public-and-private');
+    await page.locator('#confirm').click();
+    await expect(page.locator('#modal')).toBeVisible();
+    await expect(page.locator('#notice')).toContainText('RA must use the private-only pool scope');
+    await page.locator('#f-scope').selectOption('private-only');
+    await page.locator('#f-privateHost').fill('ra.internal.example.invalid');
+    await page.locator('#f-privateApp1').fill('https://ra-01.example.invalid/');
+    await page.locator('#f-privateApp2').fill('https://ra-02.example.invalid/');
+    await page.locator('#confirm').click();
+    await page.locator('button.nav[data-view="routes"]').click();
+    await expect(page.locator('#content')).toContainText('ra-browser-private-route');
+    await expect(page.locator('#content')).not.toContainText('ra-browser-public-route');
+
+    await page.locator('button.nav[data-view="setup"]').click();
+    await page.locator('[data-action="setup-add-esign-pools"]').click();
+    await page.locator('#f-id').fill('ocsp-passive');
+    await page.locator('#f-service').selectOption('OCSP');
+    await page.locator('#f-scope').selectOption('public-only');
+    await page.locator('#f-health').selectOption('passive-only');
+    await page.locator('#f-publicHost').fill('ocsp.example.invalid');
+    await page.locator('#f-publicApp1').fill('https://ocsp-01.example.invalid/');
+    await page.locator('#f-publicApp2').fill('https://ocsp-02.example.invalid/');
+    await expect(page.locator('#modal-help')).toContainText('bounded transport-failure ejection');
+    await page.locator('#confirm').click();
+    await expect(page.locator('#notice')).toContainText('two consecutive failures');
+    await page.locator('button.nav[data-view="clusters"]').click();
+    await expect(page.locator('#content')).toContainText('Passive only');
+  });
+
   await test.step('Edit Route allows optional hostname and a visible Cancel',async()=>{
     await page.locator('button.nav[data-view="routes"]').click();
     await expect(page.locator('#content')).toContainText('Routes');
@@ -88,7 +156,7 @@ test('browser: bootstrap, navigation, onboarding, websites, route edit, users an
     await page.locator('#editor button[value="cancel"]').click();
     await expect(page.locator('#modal')).toBeHidden();
     await page.locator('#page-back').click();
-    await expect(page.locator('#page-title')).toContainText('Setup Center');
+    await expect(page.locator('#page-title')).toContainText('Backend clusters');
   });
 
   await test.step('Create account and Reset Password submit real API requests',async()=>{

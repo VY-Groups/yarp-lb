@@ -101,7 +101,7 @@ async Task<int> InFlight(string url)
     return json.RootElement.GetProperty("count").GetInt32();
 }
 
-void Configure(string policy, int aWeight, int bWeight, bool drainA = false, int slowStartA = 0, bool drainKillA = false, bool riseFall = false, bool backupB = false)
+void Configure(string policy, int aWeight, int bWeight, bool drainA = false, int slowStartA = 0, bool drainKillA = false, bool riseFall = false, bool backupB = false, bool activeHealth = true, bool passiveHealth = false)
 {
     var config = new {
         ReverseProxy = new {
@@ -115,14 +115,18 @@ void Configure(string policy, int aWeight, int bWeight, bool drainA = false, int
                     HealthCheck = new {
                         AvailableDestinationsPolicy = "HealthyAndUnknown",
                         Active = new {
-                            Enabled = true, Interval = "00:00:01", Timeout = "00:00:01",
+                            Enabled = activeHealth, Interval = "00:00:01", Timeout = "00:00:01",
                             Policy = riseFall ? "RiseFall" : "ConsecutiveFailures", Path = "/health/ready"
-                        }
+                        },
+                        Passive = new { Enabled = passiveHealth, Policy = "BoundedTransportFailure", ReactivationPeriod = "00:00:15" }
                     },
                     Metadata = new Dictionary<string,string> {
                         ["ConsecutiveFailuresHealthPolicy.Threshold"] = "1",
                         ["RiseFall.Rise"] = "2",
-                        ["RiseFall.Fall"] = "3"
+                        ["RiseFall.Fall"] = "3",
+                        ["BoundedTransportFailure.MaxEjectedPercent"] = "50",
+                        ["BoundedTransportFailure.MinHealthyRemaining"] = "1",
+                        ["BoundedTransportFailure.ConsecutiveFailures"] = "2"
                     },
                     Destinations = new Dictionary<string, object> {
                         ["A"] = new { Address = aUrl + "/", Metadata = new Dictionary<string,string> { ["Weight"] = aWeight.ToString(), ["TrafficState"] = drainA ? "draining" : "active", ["SlowStartSeconds"] = slowStartA.ToString() } },
@@ -274,13 +278,22 @@ try
         await Task.Delay(TimeSpan.FromMinutes(holdMinutes));
         return 0;
     }
-    Configure("WeightedRandom", 80, 20);
+    // HealthyAndUnknown intentionally exposes bootstrap candidates. The
+    // PrimaryBackup selector must still fail closed until an active check has
+    // succeeded, even when both HTTP backends are already reachable.
+    Configure("PrimaryBackup", 80, 20, backupB: true, activeHealth: false);
     var backendA = Start(backDll, "backend-A", "18081", "A");
     _ = Start(backDll, "backend-B", "18082", "B");
     await WaitFor("backend A", () => IsStatus(aUrl + "/health/ready", HttpStatusCode.OK));
     await WaitFor("backend B", () => IsStatus(bUrl + "/health/ready", HttpStatusCode.OK));
     _ = Start(gateDll, "gateway");
     await WaitFor("gateway", () => IsStatus(proxy + "/lab/ping", HttpStatusCode.OK));
+    await WaitFor("unknown active health fails closed", () =>
+        IsStatus(proxy + "/api/identity", HttpStatusCode.ServiceUnavailable));
+    Record("primary-backup-unknown-fails-closed", new { status = 503, activeChecks = false });
+    Configure("WeightedRandom", 80, 20);
+    await WaitFor("initial weighted route recovers after active checks enable",
+        () => IsStatus(proxy + "/api/identity", HttpStatusCode.OK));
     await VerifySharedProductLogger();
     // Acceptance trusts only a loopback ephemeral certificate. This is NOT
     // production chain validation and is deliberately confined to the lab.
@@ -407,6 +420,11 @@ try
     Configure("PrimaryBackup", 80, 20, backupB: true);
     await WaitFor("primary selected while healthy", () => RoutesOnly("A"), 25);
     Record("primary-backup-primary", new { policy = "PrimaryBackup", primary = "A", backup = "B" });
+    Configure("PrimaryBackup", 80, 20, drainA: true, backupB: true);
+    await WaitFor("drained primary excluded and healthy standby selected", () => RoutesOnly("B"), 25);
+    Record("primary-backup-drain", new { drainedPrimary = "A", selectedBackup = "B" });
+    Configure("PrimaryBackup", 80, 20, backupB: true);
+    await WaitFor("restored primary preferred before failure", () => RoutesOnly("A"), 25);
     await SetReady(aUrl, false);
     await WaitFor("primary unhealthy triggers standby", () => RoutesOnly("B"), 30);
     var standbyTraffic = await Sample(120);
@@ -431,6 +449,7 @@ try
     await SetReady(bUrl, true);
     await WaitFor("both recovered", async () => (await Sample(100)).Nodes.Count == 2);
 
+    Configure("WeightedRandom", 80, 20, activeHealth: false, passiveHealth: true);
     var slow = client.GetAsync(proxy + "/kill/slow");
     await WaitFor("slow request started", async () => await InFlight(aUrl) > 0, 10);
     backendA.Kill(entireProcessTree: true);
@@ -440,11 +459,12 @@ try
     catch (Exception e) when (e is HttpRequestException or TaskCanceledException or IOException) { }
     Require(!falselySucceeded, "interrupted mid-request transaction did not report success");
     await WaitFor("backend B serves after process loss", () => RoutesOnly("B"));
+    Record("bounded-passive-transport-failover", new { backup = "B", activeChecksEnabled = false, consecutiveFailures = 2, maxEjectedPercent = 50, minHealthyRemaining = 1, automaticRetries = 0 });
     Record("mid-request-backend-death", new { interrupted = true });
     _ = Start(backDll, "backend-A-restarted", "18081", "A");
     await WaitFor("A restarted", () => IsStatus(aUrl + "/health/ready", HttpStatusCode.OK));
     await WaitFor("A returned to YARP pool", async () => (await Sample(100)).Nodes.ContainsKey("A"));
-    Record("backend-process-recovery", new { recovered = true });
+    Record("backend-process-recovery", new { recovered = true, passiveReactivationSeconds = 15 });
     passed = true;
     Console.WriteLine("ALL L7 ACCEPTANCE TESTS PASSED");
 }
