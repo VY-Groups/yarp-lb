@@ -18,7 +18,7 @@ RUN set -eu; \
         if [ "$mirror" = primary ]; then \
             sed -i 's|http://archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g; s|http://security.ubuntu.com/ubuntu|https://security.ubuntu.com/ubuntu|g' "$sources"; \
         else \
-            sed -i -E "s|https?://(archive|security)\\.ubuntu\\.com/ubuntu|https://$mirror/ubuntu|g" "$sources"; \
+            sed -i -E "s#https?://(archive|security)\\.ubuntu\\.com/ubuntu#https://$mirror/ubuntu#g" "$sources"; \
         fi; \
         rm -rf /var/lib/apt/lists/*; \
         echo "GatewayCore lab dependency mirror: $mirror"; \
