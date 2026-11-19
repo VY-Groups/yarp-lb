@@ -307,7 +307,7 @@ async Task SendOtp(string recipient, string code)
         $"Your one-time sign-in code is {code}. It expires in 5 minutes. Do not share this code.");
 }
 var configPath = applicationConfigPath;
-var auditPath = Path.Combine(privateDir, "admin-audit.jsonl");
+var localAudit = new LocalAdminAudit(Path.Combine(privateDir, "admin-audit.jsonl"));
 var gate = new SemaphoreSlim(1, 1);
 // MANAGEMENT IS LOOPBACK-ONLY IN THIS RELEASE. Never bind management to the public VIP.
 app.Use(async (ctx, next) =>
@@ -703,11 +703,8 @@ void WriteUsers(List<AdminUser> users)
     File.WriteAllText(tmp, JsonSerializer.Serialize(users));
     File.Move(tmp, usersPath, true);
 }
-async Task Audit(string actor, string action, object? details = null)
-{
-    await File.AppendAllTextAsync(auditPath,
-        JsonSerializer.Serialize(new { utc = DateTimeOffset.UtcNow, actor, action, details }) + Environment.NewLine);
-}
+Task Audit(string actor, string action, object? details = null) =>
+    localAudit.AppendAsync(actor, action, details);
 IResult SignInResult(AdminUser user, HttpContext ctx)
 {
     return Results.Ok(new { authenticated = true, username = user.Username, role = user.Role });
@@ -1136,12 +1133,8 @@ app.MapGet("/admin/api/state", () =>
         mode = "Authenticated local management", telemetry = "Local HTTP counters only; no backend or fleet metrics", revision = Convert.ToHexString(SHA256.HashData(snapshot)) });
 }).RequireAuthorization();
 
-app.MapGet("/admin/api/audit", () =>
-{
-    if (!File.Exists(auditPath)) return Results.Ok(Array.Empty<object>());
-    var entries = File.ReadLines(auditPath).TakeLast(80).Reverse().Select(x => JsonNode.Parse(x)).ToArray();
-    return Results.Ok(entries);
-}).RequireAuthorization();
+app.MapGet("/admin/api/audit", async () =>
+    Results.Ok(await localAudit.ReadRecentAsync())).RequireAuthorization();
 
 // Explicit, on-demand connectivity probes: these are not YARP's own destination health states.
 app.MapPost("/admin/api/probe", async (IHttpClientFactory factory) =>
