@@ -115,6 +115,18 @@
         {
           "refId": "A",
           "expr": "yarp_logging_dropped_total"
+        },
+        {
+          "refId": "B",
+          "expr": "yarp_logging_dropped_low_priority_total"
+        },
+        {
+          "refId": "C",
+          "expr": "yarp_logging_dropped_high_priority_total"
+        },
+        {
+          "refId": "D",
+          "expr": "yarp_logging_write_errors_total"
         }
       ]
     }
