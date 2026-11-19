@@ -78,7 +78,22 @@ jobs:
         run: python ../tests/E2E/peer_delta_http.py --root .
       - name: Verify EC2 request caps and read-only harness without network access
         run: python -m unittest discover -s ../tests/EC2Functional -p 'test_*.py' -v
-      - name: Test TLS certificate inventory status logic
+      - name: Install Microsoft MsQuic for mandatory Linux HTTP/3 acceptance
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! apt-cache show libmsquic >/dev/null 2>&1; then
+            curl --fail --silent --show-error --location --retry 3 \
+              https://packages.microsoft.com/config/ubuntu/24.04/packages-microsoft-prod.deb \
+              --output "$RUNNER_TEMP/packages-microsoft-prod.deb"
+            sudo dpkg -i "$RUNNER_TEMP/packages-microsoft-prod.deb"
+          fi
+          sudo apt-get update
+          sudo apt-get install --yes libmsquic
+      - name: Test TLS inventory and exact HTTP/2 and HTTP/3 gRPC transport
+        env:
+          GATEWAYCORE_REQUIRE_HTTP3_ACCEPTANCE: ${{ runner.os == 'Linux' && '1' || '0' }}
         run: dotnet run --project tests/TlsInventoryTests/TlsInventoryTests.csproj --configuration Release
       - name: Check frontend compile reproducibility
         shell: bash

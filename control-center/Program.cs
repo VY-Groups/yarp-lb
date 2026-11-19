@@ -1099,7 +1099,7 @@ app.MapHttp01Challenge(acmeHttp01PublicEntrypointEnabled,
     ctx => isolatedListeners?.OnTrafficHttp(ctx) == true);
 // Readiness is on the DATA listener only in isolated mode; unknown/empty backends fail closed.
 app.MapGet("/gateway/health/ready", (IProxyStateLookup proxy) =>
-    GatewayListenerIsolation.AnyDestinationHealthy(proxy)
+    !app.Lifetime.ApplicationStopping.IsCancellationRequested && GatewayListenerIsolation.AnyDestinationHealthy(proxy)
         ? Results.Ok(new { ready = true })
         : Results.StatusCode(503));
 
@@ -1107,7 +1107,7 @@ app.MapGet("/gateway/health/ready", (IProxyStateLookup proxy) =>
 // to make the dashboard poll the public readiness endpoint.
 app.MapGet("/admin/api/gateway-readiness", (IProxyStateLookup proxy) =>
     Results.Ok(new {
-        ready = GatewayListenerIsolation.AnyDestinationHealthy(proxy),
+        ready = !app.Lifetime.ApplicationStopping.IsCancellationRequested && GatewayListenerIsolation.AnyDestinationHealthy(proxy),
         scope = "Local active destination health",
         collectedUtc = DateTimeOffset.UtcNow
     })).RequireAuthorization();
@@ -1795,6 +1795,19 @@ app.MapOrganizationProfile(privateDir);
 app.MapTlsInventory();
 app.MapReverseProxy(proxyPipeline =>
 {
+    // Fence new proxy work as soon as the host starts graceful shutdown.
+    // Existing forwarded streams are not linked to ApplicationStopping.
+    var stopping = app.Lifetime.ApplicationStopping;
+    proxyPipeline.Use(async (context, next) =>
+    {
+        if (stopping.IsCancellationRequested)
+        {
+            context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+            context.Response.Headers["X-GatewayCore-Rejection"] = "gateway_shutdown";
+            return;
+        }
+        await next();
+    });
     if (peerStateJournal is not null)
         proxyPipeline.Use(async (context,next) => {
             // Telemetry only. Never use eventual peer counters for strict admission.
@@ -2027,6 +2040,19 @@ app.MapReverseProxy(proxyPipeline =>
             await next();
         }
         }
+    });
+    // A request might have passed the first fence before shutdown while
+    // queued or during selection. Recheck immediately before forwarding,
+    // including destinations without an admission policy.
+    proxyPipeline.Use(async (context, next) =>
+    {
+        if (stopping.IsCancellationRequested)
+        {
+            context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+            context.Response.Headers["X-GatewayCore-Rejection"] = "gateway_shutdown";
+            return;
+        }
+        await next();
     });
     proxyPipeline.UsePassiveHealthChecks();
 }).RequireRateLimiting("proxy-concurrency");

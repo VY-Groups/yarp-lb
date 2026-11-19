@@ -203,17 +203,33 @@ internal static class DestinationAdmissionHttp3Acceptance
             };
             using var managementClient = new HttpClient(managementHandler) { Timeout = Timeout.InfiniteTimeSpan };
             var endpoint = new Uri($"https://127.0.0.1:{tlsPort}/admit/slow");
-            using (var discoveryWarmup = new HttpRequestMessage(HttpMethod.Get,
-                $"https://127.0.0.1:{tlsPort}/gateway/health")
-            { Version = HttpVersion.Version11, VersionPolicy = HttpVersionPolicy.RequestVersionExact })
             using (var discoveryTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(12)))
-            using (var discoveryResponse = await client.SendAsync(discoveryWarmup, discoveryTimeout.Token))
             {
-                Check(discoveryResponse.IsSuccessStatusCode && discoveryResponse.Version == HttpVersion.Version11,
-                    "real GatewayCore HTTPS listener is ready over HTTP/1.1 before HTTP/3 admission traffic");
-                Check(discoveryResponse.Headers.TryGetValues("Alt-Svc", out var altSvc) &&
-                    altSvc.Any(value => value.Contains("h3=", StringComparison.OrdinalIgnoreCase)),
-                    "HTTP/1.1 readiness response advertises the listener's HTTP/3 endpoint");
+                // Process.Start does not mean Kestrel has bound the HTTPS port.
+                // Retry only the idempotent readiness GET, never a test POST.
+                while (true)
+                {
+                    if (appProcess.HasExited)
+                        throw new Exception($"GatewayCore exited before HTTP/3 discovery with code {appProcess.ExitCode}");
+                    try
+                    {
+                        using var discoveryWarmup = new HttpRequestMessage(HttpMethod.Get,
+                            $"https://127.0.0.1:{tlsPort}/gateway/health")
+                        { Version = HttpVersion.Version11, VersionPolicy = HttpVersionPolicy.RequestVersionExact };
+                        using var discoveryResponse = await client.SendAsync(discoveryWarmup, discoveryTimeout.Token);
+                        if (discoveryResponse.IsSuccessStatusCode)
+                        {
+                            Check(discoveryResponse.Version == HttpVersion.Version11,
+                                "real GatewayCore HTTPS listener is ready over HTTP/1.1 before HTTP/3 admission traffic");
+                            Check(discoveryResponse.Headers.TryGetValues("Alt-Svc", out var altSvc) &&
+                                altSvc.Any(value => value.Contains("h3=", StringComparison.OrdinalIgnoreCase)),
+                                "HTTP/1.1 readiness response advertises the listener's HTTP/3 endpoint");
+                            break;
+                        }
+                    }
+                    catch (HttpRequestException) { }
+                    await Task.Delay(100, discoveryTimeout.Token);
+                }
             }
 
             using (var readinessTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(15)))
