@@ -145,6 +145,21 @@ def scrape_metrics(metrics_port):
         return response.read().decode("utf-8")
 
 
+def wait_for_metrics(metrics_port, required_lines, timeout=6):
+    """Wait for asynchronous observer evidence before asserting its DNS effect."""
+    deadline = time.monotonic() + timeout
+    last_metrics = ""
+    while time.monotonic() < deadline:
+        last_metrics = scrape_metrics(metrics_port)
+        if all(line in last_metrics for line in required_lines):
+            return last_metrics
+        time.sleep(.1)
+    missing = [line for line in required_lines if line not in last_metrics]
+    raise AssertionError(
+        f"timed out waiting for report metrics on port {metrics_port}; "
+        f"missing={missing!r}\nlast scrape:\n{last_metrics}")
+
+
 def scrape_agent_status(metrics_port):
     with urllib.request.urlopen(f"http://127.0.0.1:{metrics_port}/agent-report-status", timeout=2) as response:
         return json.loads(response.read().decode("utf-8"))
@@ -668,13 +683,31 @@ def main():
         # One independent observer reports a real failure while the DNS node's
         # local readiness endpoint stays healthy; the quorum must withdraw it.
         agents[0]["upstream"].verdict = 503
+        negative_lines = [
+            'gatewaycore_gslb_agent_evidence_reports{state="unhealthy"} 1',
+            'gatewaycore_gslb_agent_quorum_targets{state="quorum"} 0',
+            'gatewaycore_gslb_agent_quorum_targets{state="below_quorum"} 1',
+        ]
+        # Reports are emitted asynchronously. Wait until each independent
+        # authority has accepted the 503 verdict before attributing DNS
+        # withdrawal to agent evidence (SERVFAIL can also be caused by fencing).
+        for authority in (authority_a, authority_b):
+            wait_for_metrics(authority["metrics_port"], negative_lines)
         for authority in (authority_a, authority_b):
             expect_dns(authority["dns"], authority["dns_port"], 2,
                        log_paths=[authority["dns_log"], *authority["agent_logs"]])
         negative_metrics = scrape_metrics(authority_a["metrics_port"])
-        assert 'gatewaycore_gslb_agent_evidence_reports{state="unhealthy"} 1' in negative_metrics
+        assert all(line in negative_metrics for line in negative_lines), \
+            f"negative report evidence/quorum changed before verification:\n{negative_metrics}"
         print("PASS: signed negative evidence withdraws the site without changing local probe health")
         agents[0]["upstream"].verdict = 200
+        recovery_lines = [
+            'gatewaycore_gslb_agent_evidence_reports{state="unhealthy"} 0',
+            'gatewaycore_gslb_agent_quorum_targets{state="quorum"} 1',
+            'gatewaycore_gslb_agent_quorum_targets{state="below_quorum"} 0',
+        ]
+        for authority in (authority_a, authority_b):
+            wait_for_metrics(authority["metrics_port"], recovery_lines)
         for authority in (authority_a, authority_b):
             expect_dns(authority["dns"], authority["dns_port"], 0, "192.0.2.17",
                        log_paths=[authority["dns_log"], *authority["agent_logs"]])
