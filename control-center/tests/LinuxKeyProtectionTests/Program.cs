@@ -107,9 +107,16 @@ try
     var tamperedDocument=XDocument.Load(tamperedKeyFile);
     var encryptedSecretElement=tamperedDocument.Descendants()
         .Single(element=>element.Name.LocalName=="encryptedSecret");
-    var encryptedSecretBytes=Convert.FromBase64String(encryptedSecretElement.Value);
+    var encryptedDataElement=encryptedSecretElement.Elements()
+        .Single(element=>element.Name.LocalName=="EncryptedData");
+    var cipherDataElement=encryptedDataElement.Elements()
+        .Single(element=>element.Name.LocalName=="CipherData");
+    var cipherValueElement=cipherDataElement.Elements()
+        .Single(element=>element.Name.LocalName=="CipherValue");
+    var encryptedSecretBytes=Convert.FromBase64String(cipherValueElement.Value);
+    Assert(encryptedSecretBytes.Length>0,"persisted encrypted secret contains a valid ciphertext payload");
     encryptedSecretBytes[encryptedSecretBytes.Length/2]^=0x40;
-    encryptedSecretElement.Value=Convert.ToBase64String(encryptedSecretBytes);
+    cipherValueElement.Value=Convert.ToBase64String(encryptedSecretBytes);
     File.WriteAllText(tamperedKeyFile,tamperedDocument.ToString(SaveOptions.DisableFormatting));
     Set("YARP_CONTROL_PLANE_DIR",tamperState);
     Assert(Throws(()=>
