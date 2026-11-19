@@ -9,6 +9,7 @@ internal static class AuthorityFenceTests
 {
     public static void Run()
     {
+        ProtocolMutationTests.Run();
         var root = Path.Combine(Path.GetTempPath(), "gslb-authority-fence-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(root);
         if (!OperatingSystem.IsWindows())

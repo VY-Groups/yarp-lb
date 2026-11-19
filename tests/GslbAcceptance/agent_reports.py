@@ -179,6 +179,38 @@ def reject_malformed_agent_report(authority, agent, ca_path):
         raise AssertionError("malformed signed report was accepted")
 
 
+def reject_agent_report_frame(authority, agent, ca_path, body, expected_status, label):
+    context = ssl.create_default_context(cafile=str(ca_path))
+    context.load_cert_chain(str(agent["cert"]), str(agent["key"]))
+    request = urllib.request.Request(
+        f"https://127.0.0.1:{authority['report_port']}/agent-health/v1/reports",
+        data=body, headers={"Content-Type": "application/json"}, method="POST")
+    try:
+        response = urllib.request.urlopen(request, context=context, timeout=3)
+    except urllib.error.HTTPError as error:
+        assert error.code == expected_status, \
+            f"{label} returned {error.code}, expected {expected_status}"
+    else:
+        response.close()
+        raise AssertionError(f"{label} was accepted")
+
+
+def reject_authority_fence_frame(target_port, client_identity, ca_path, body, expected_status, label):
+    context = ssl.create_default_context(cafile=str(ca_path))
+    context.load_cert_chain(str(client_identity["cert"]), str(client_identity["key"]))
+    request = urllib.request.Request(
+        f"https://127.0.0.1:{target_port}/authority-fence/v1/snapshot",
+        data=body, headers={"Content-Type": "application/json"}, method="POST")
+    try:
+        response = urllib.request.urlopen(request, context=context, timeout=3)
+    except urllib.error.HTTPError as error:
+        assert error.code == expected_status, \
+            f"{label} returned {error.code}, expected {expected_status}"
+    else:
+        response.close()
+        raise AssertionError(f"{label} was accepted")
+
+
 def dns_query(dns_port):
     labels = b"".join(bytes([len(label)]) + label for label in (b"lab", b"example", b"test")) + b"\0"
     packet = b"\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00" + labels + b"\x00\x01\x00\x01"
@@ -579,6 +611,21 @@ def main():
         print("PASS: two independent DNS authorities each admit a site with fresh mTLS observer quorum")
         authority_a = authorities["a"]
         authority_b = authorities["b"]
+
+        reject_agent_report_frame(authority_a, agents[0], root / "ca.pem",
+                                  b'{"AgentId":"untrusted","AgentId":"agent-1"}', 400,
+                                  "conflicting duplicate agent identity field")
+        reject_agent_report_frame(authority_a, agents[0], root / "ca.pem",
+                                  b" " * (8192 + 1), 413,
+                                  "oversized agent report body")
+        reject_authority_fence_frame(authority_fence_ports["b"], authorities_identity["a"],
+                                     root / "ca.pem",
+                                     b'{"Version":1,"Sequence":1,"Sequence":2}', 409,
+                                     "duplicate authority snapshot field")
+        reject_authority_fence_frame(authority_fence_ports["b"], authorities_identity["a"],
+                                     root / "ca.pem", b" " * (131072 + 1), 413,
+                                     "oversized authority snapshot body")
+        print("PASS: real mTLS ingress rejects duplicate fields and oversized report/snapshot frames")
 
         # Both authorities have the same local and peer-positive decision before
         # the peer transport is partitioned; DNS remains reachable throughout.
