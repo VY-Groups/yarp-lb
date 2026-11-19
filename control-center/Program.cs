@@ -1977,19 +1977,19 @@ app.MapOrganizationProfile(privateDir);
 app.MapTlsInventory();
 app.MapReverseProxy(proxyPipeline =>
 {
+    GatewayOpenTelemetry.UseProxyTelemetry(proxyPipeline, (context, elapsedMs) =>
+    {
+        var feature = context.Features.Get<Yarp.ReverseProxy.Model.IReverseProxyFeature>();
+        if (feature?.ProxiedDestination is { } destination)
+        {
+            var id = feature.Cluster.Config.ClusterId + "/" + destination.DestinationId;
+            destinationTelemetry.Record(id, context.Response.StatusCode, elapsedMs);
+        }
+    });
     // Fence new proxy work as soon as the host starts graceful shutdown.
     // Existing forwarded streams are not linked to ApplicationStopping.
     var stopping = app.Lifetime.ApplicationStopping;
-    proxyPipeline.Use(async (context, next) =>
-    {
-        if (stopping.IsCancellationRequested)
-        {
-            context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
-            context.Response.Headers["X-GatewayCore-Rejection"] = "gateway_shutdown";
-            return;
-        }
-        await next();
-    });
+    GatewayOpenTelemetry.UseShutdownFence(proxyPipeline, stopping);
     if (peerStateJournal is not null)
         proxyPipeline.Use(async (context,next) => {
             // Telemetry only. Never use eventual peer counters for strict admission.
@@ -2049,35 +2049,6 @@ app.MapReverseProxy(proxyPipeline =>
                 .Where(d => !TrafficLifecycle.IsDraining(d)).ToArray();
         await next();
     });
-    proxyPipeline.Use(async (context, next) =>
-    {
-        var clock = System.Diagnostics.Stopwatch.GetTimestamp();
-        var activity = GatewayOpenTelemetry.StartProxyActivity(context);
-        try
-        {
-            await next();
-        }
-        catch (Exception ex)
-        {
-            GatewayOpenTelemetry.RecordProxyException(activity, ex);
-            throw;
-        }
-        finally
-        {
-            var elapsedMs = (System.Diagnostics.Stopwatch.GetTimestamp() - clock) * 1000.0 /
-                System.Diagnostics.Stopwatch.Frequency;
-            var feature = context.GetReverseProxyFeature();
-            var destination = feature.ProxiedDestination;
-            GatewayOpenTelemetry.CompleteProxyActivity(activity, context, destination?.DestinationId);
-            GatewayOpenTelemetry.RecordProxyResult(context, elapsedMs,
-                feature.Route.Config.RouteId, feature.Cluster.Config.ClusterId, destination?.DestinationId);
-            if (destination != null)
-            {
-                var id = feature.Cluster.Config.ClusterId + "/" + destination.DestinationId;
-                destinationTelemetry.Record(id, context.Response.StatusCode, elapsedMs);
-            }
-        }
-    });
     proxyPipeline.UseSessionAffinity();
     proxyPipeline.UseLoadBalancing();
     // The selected destination is already fixed. Holding this lease around the
@@ -2102,7 +2073,7 @@ app.MapReverseProxy(proxyPipeline =>
             if (admissionEnabled)
             {
                 context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
-                context.Response.Headers["X-GatewayCore-Rejection"] = "admission_destination_unresolved";
+                GatewayOpenTelemetry.MarkLocalRejection(context, "admission_destination_unresolved");
                 return;
             }
             await next();
@@ -2119,14 +2090,14 @@ app.MapReverseProxy(proxyPipeline =>
             if (policyConflict)
             {
                 context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
-                context.Response.Headers["X-GatewayCore-Rejection"] = "admission_policy_conflict";
+                GatewayOpenTelemetry.MarkLocalRejection(context, "admission_policy_conflict");
                 return;
             }
             if (!DestinationAdmissionPolicy.TryParse(
                     selected.Model.Config.Metadata, out var selectedPolicy, out var policyError))
             {
                 context.Response.StatusCode = StatusCodes.Status500InternalServerError;
-                context.Response.Headers["X-GatewayCore-Rejection"] = "invalid_admission_config";
+                GatewayOpenTelemetry.MarkLocalRejection(context, "invalid_admission_config");
                 await context.Response.WriteAsync("Invalid destination admission configuration.");
                 return;
             }
@@ -2135,7 +2106,7 @@ app.MapReverseProxy(proxyPipeline =>
             // the manager returns its current gate before consulting this snapshot.
             if (!selectedPolicy.Enabled) { await next(); return; }
             context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
-            context.Response.Headers["X-GatewayCore-Rejection"] = "admission_configuration_unavailable";
+            GatewayOpenTelemetry.MarkLocalRejection(context, "admission_configuration_unavailable");
             return;
         }
         using (registryHandle)
@@ -2162,20 +2133,20 @@ app.MapReverseProxy(proxyPipeline =>
             if (context.RequestServices.GetRequiredService<IHostApplicationLifetime>().ApplicationStopping.IsCancellationRequested)
             {
                 context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
-                context.Response.Headers["X-GatewayCore-Rejection"] = "gateway_shutdown";
+                GatewayOpenTelemetry.MarkLocalRejection(context, "gateway_shutdown");
             }
             else
             {
                 state.RecordTimeout();
                 context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
-                context.Response.Headers["X-GatewayCore-Rejection"] = "destination_queue_timeout";
+                GatewayOpenTelemetry.MarkLocalRejection(context, "destination_queue_timeout");
             }
             return;
         }
         if (lease is null)
         {
             context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
-            context.Response.Headers["X-GatewayCore-Rejection"] = "destination_queue_full";
+            GatewayOpenTelemetry.MarkLocalRejection(context, "destination_queue_full");
             return;
         }
 
@@ -2199,11 +2170,11 @@ app.MapReverseProxy(proxyPipeline =>
             {
                 context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
                 if (failureAfterGrant == DestinationAdmissionFailure.ServiceStopping)
-                    context.Response.Headers["X-GatewayCore-Rejection"] = "gateway_shutdown";
+                    GatewayOpenTelemetry.MarkLocalRejection(context, "gateway_shutdown");
                 else
                 {
                     state.RecordTimeout();
-                    context.Response.Headers["X-GatewayCore-Rejection"] = "destination_queue_timeout";
+                    GatewayOpenTelemetry.MarkLocalRejection(context, "destination_queue_timeout");
                 }
                 return;
             }
@@ -2218,7 +2189,7 @@ app.MapReverseProxy(proxyPipeline =>
                         ReferenceEquals(destination.Model.Config, selectedConfig)))
             {
                 context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
-                context.Response.Headers["X-GatewayCore-Rejection"] = "destination_unavailable_after_queue";
+                GatewayOpenTelemetry.MarkLocalRejection(context, "destination_unavailable_after_queue");
                 return;
             }
             await next();
@@ -2233,7 +2204,7 @@ app.MapReverseProxy(proxyPipeline =>
         if (stopping.IsCancellationRequested)
         {
             context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
-            context.Response.Headers["X-GatewayCore-Rejection"] = "gateway_shutdown";
+            GatewayOpenTelemetry.MarkLocalRejection(context, "gateway_shutdown");
             return;
         }
         await next();
