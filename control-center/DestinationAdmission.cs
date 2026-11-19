@@ -84,7 +84,7 @@ public enum DestinationAdmissionFailure
 
 public readonly record struct DestinationAdmissionSnapshot(
     int InFlight, int Queued, long Rejected, long TimedOut, long Canceled,
-    long WaitDurationCount, double WaitDurationSecondsSum);
+    long WaitDurationCount, double WaitDurationSecondsSum, long[] WaitDurationBucketCounts);
 
 public readonly record struct DestinationAdmissionConfiguration(
     string Cluster, string Destination, DestinationAdmissionPolicy Policy);
@@ -98,6 +98,20 @@ public readonly record struct DestinationAdmissionReconcileResult(
 /// </summary>
 public sealed class DestinationAdmissionState
 {
+    // Fixed queue-wait buckets keep metric cardinality and storage bounded while
+    // making p95/p99 estimates possible from the Prometheus histogram.
+    public static IReadOnlyList<int> QueueWaitBucketUpperBoundsMilliseconds { get; } =
+        Array.AsReadOnly(new[] { 1, 5, 10, 25, 50, 100, 250, 500, 1_000, 2_500, 5_000, 10_000, 30_000, 60_000 });
+
+    internal static int QueueWaitBucketIndex(double milliseconds)
+    {
+        if (!double.IsFinite(milliseconds) || milliseconds < 0)
+            throw new ArgumentOutOfRangeException(nameof(milliseconds));
+        for (var index = 0; index < QueueWaitBucketUpperBoundsMilliseconds.Count; index++)
+            if (milliseconds <= QueueWaitBucketUpperBoundsMilliseconds[index]) return index;
+        return -1; // above all finite bounds; represented by the implicit +Inf bucket.
+    }
+
     private sealed class Waiter(CancellationToken cancellationToken, Action? releasePending)
     {
         internal readonly TaskCompletionSource<DestinationAdmissionLease> Completion =
@@ -130,6 +144,7 @@ public sealed class DestinationAdmissionState
     private long _canceled;
     private long _waitDurationCount;
     private long _waitDurationTicks;
+    private readonly long[] _waitDurationBuckets = new long[14];
     private readonly Func<bool>? _reservePending;
     private readonly Action? _releasePending;
 
@@ -148,8 +163,9 @@ public sealed class DestinationAdmissionState
             lock (_sync)
                 return new(_inFlight, _waiters.Count,
                     Interlocked.Read(ref _rejected), Interlocked.Read(ref _timedOut),
-                    Interlocked.Read(ref _canceled), Interlocked.Read(ref _waitDurationCount),
-                    Interlocked.Read(ref _waitDurationTicks) / (double)System.Diagnostics.Stopwatch.Frequency);
+                    Interlocked.Read(ref _canceled), _waitDurationCount,
+                    _waitDurationTicks / (double)System.Diagnostics.Stopwatch.Frequency,
+                    (long[])_waitDurationBuckets.Clone());
         }
     }
 
@@ -259,8 +275,16 @@ public sealed class DestinationAdmissionState
     private void RecordWaitDuration(Waiter waiter)
     {
         var elapsed = System.Diagnostics.Stopwatch.GetTimestamp() - waiter.CreatedTimestamp;
-        Interlocked.Add(ref _waitDurationTicks, Math.Max(0, elapsed));
-        Interlocked.Increment(ref _waitDurationCount);
+        elapsed = Math.Max(0, elapsed);
+        lock (_sync)
+        {
+            _waitDurationTicks += elapsed;
+            _waitDurationCount++;
+            var milliseconds = elapsed * 1000d / System.Diagnostics.Stopwatch.Frequency;
+            var bucketIndex = QueueWaitBucketIndex(milliseconds);
+            if (bucketIndex >= 0) _waitDurationBuckets[bucketIndex]++;
+            // The caller exposes the implicit +Inf bucket from WaitDurationCount.
+        }
     }
 
     private static async ValueTask<DestinationAdmissionLease?> AwaitWaiter(Waiter waiter)
@@ -386,8 +410,11 @@ public sealed class DestinationAdmissionManager
     }
     private readonly Dictionary<(string Cluster, string Destination), Entry> _states = new();
     private int _pending;
+    private int _untrackedConfiguredDestinations;
     private long _lastConfigurationRevision;
     public int PendingCount => Volatile.Read(ref _pending);
+    /// <summary>Enabled destinations omitted from per-destination metrics because the fixed registry cap is full.</summary>
+    public int UntrackedConfiguredDestinationCount => Volatile.Read(ref _untrackedConfiguredDestinations);
     public int TrackedDestinationCount { get { lock (_sync) return _states.Count; } }
 
     public bool TryAcquireHandle(string clusterId, string destinationId,
@@ -454,6 +481,7 @@ public sealed class DestinationAdmissionManager
                 if (!isConfigured && pair.Value.References == 0 && pair.Value.State.IsIdle)
                     _states.Remove(pair.Key);
             }
+            Volatile.Write(ref _untrackedConfiguredDestinations, capacityExceeded);
             _lastConfigurationRevision = revision;
             return new(true, policyConflicts, capacityExceeded);
         }

@@ -14,6 +14,7 @@ yarp_control_destination_admission_queue_wait_seconds
 yarp_control_destination_admission_queued_requests
 yarp_control_destination_admission_rejected_total
 yarp_control_destination_admission_waiter_canceled_total
+yarp_control_destination_admission_untracked_destinations
 yarp_control_destination_inflight_requests
 yarp_control_destination_requests_total
 yarp_control_destination_telemetry_untracked_requests_total
@@ -58,6 +59,8 @@ yarp_peer_sync_publish_in_flight
 - `yarp_control_destination_admission_rejected_total`
 - `yarp_control_destination_admission_queue_timeouts_total`
 - `yarp_control_destination_admission_waiter_canceled_total`
+- `yarp_control_destination_admission_untracked_destinations`
+- `yarp_control_destination_admission_queue_wait_seconds_bucket`
 - `yarp_control_destination_admission_queue_wait_seconds_sum`
 - `yarp_control_destination_admission_queue_wait_seconds_count`
 - `yarp_logging_dropped_total`
@@ -101,6 +104,15 @@ Per-destination request counters have a process-local cap of 4,096 distinct
 IDs. Requests for additional IDs increment
 `yarp_control_destination_telemetry_untracked_requests_total`, a single
 unlabelled aggregate; no overflow destination IDs become Prometheus labels.
+
+Per-destination admission state uses the same fixed 4,096-entry registry cap.
+Its queue-wait histogram exports cumulative fixed bounds from 1 ms through
+60 seconds plus `+Inf`, with the existing sum and count. This supports
+bucket-derived tail-latency estimates while keeping memory and series count
+bounded. `yarp_control_destination_admission_untracked_destinations` is a
+single unlabeled gauge for enabled policies omitted when the admission registry
+is full; those destinations fail closed rather than forwarding without their
+configured limit.
 
 ### Explicit external-exporter series
 - `up`

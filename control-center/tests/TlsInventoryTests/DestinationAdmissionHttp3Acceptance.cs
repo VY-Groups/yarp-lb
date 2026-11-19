@@ -20,6 +20,8 @@ using Microsoft.Extensions.DependencyInjection;
 
 internal static class DestinationAdmissionHttp3Acceptance
 {
+    private static readonly int[] QueueWaitBucketUpperBoundsMilliseconds =
+        [1, 5, 10, 25, 50, 100, 250, 500, 1_000, 2_500, 5_000, 10_000, 30_000, 60_000];
     public static async Task RunAsync()
     {
         var supportsHttp3 = QuicConnection.IsSupported;
@@ -159,6 +161,7 @@ internal static class DestinationAdmissionHttp3Acceptance
             HttpVersion = supportsHttp3 ? "3" : "1.1"
         };
         WritePrivate(listenerConfig, JsonSerializer.Serialize(listeners));
+        Console.WriteLine($"EC2_LAB_LISTENER_PORTS http={httpPort} https={tlsPort} admin={adminPort} metrics={metricsPort} http3={supportsHttp3}");
         var appSettings = new
         {
             ReverseProxy = new
@@ -264,6 +267,29 @@ internal static class DestinationAdmissionHttp3Acceptance
                     {
                         await Task.Delay(100, discoveryTimeout.Token);
                     }
+                    catch (HttpRequestException ex)
+                    {
+                        // If an HTTPS probe fails after TCP connected, identify a listener
+                        // that is accidentally speaking plaintext on the configured TLS port.
+                        using var plaintextHandler = new SocketsHttpHandler { UseProxy = false };
+                        using var plaintextClient = new HttpClient(plaintextHandler)
+                        { Timeout = TimeSpan.FromSeconds(1) };
+                        string diagnostic;
+                        try
+                        {
+                            using var plaintext = await plaintextClient.GetAsync(
+                                $"http://127.0.0.1:{tlsPort}/gateway/health");
+                            diagnostic = $"plaintext probe returned HTTP {(int)plaintext.StatusCode} " +
+                                $"{plaintext.Version} on the configured HTTPS port";
+                        }
+                        catch (Exception probeError) when (probeError is HttpRequestException or TaskCanceledException)
+                        {
+                            diagnostic = "plaintext probe did not reach an HTTP listener";
+                        }
+                        throw new InvalidOperationException(
+                            $"HTTPS readiness failed on configured TLS port {tlsPort}; {diagnostic}. " +
+                            $"Listener config: HTTP {httpPort}, HTTPS {tlsPort}, admin {adminPort}, metrics {metricsPort}.", ex);
+                    }
                 }
             }
 
@@ -284,9 +310,54 @@ internal static class DestinationAdmissionHttp3Acceptance
                         return line is not null && int.TryParse(line[(line.LastIndexOf(' ') + 1)..], out var value)
                             ? value : null;
                     }
+                    static bool HasValidQueueWaitHistogram(string body)
+                    {
+                        if (!body.Contains("# TYPE yarp_control_destination_admission_queue_wait_seconds histogram", StringComparison.Ordinal))
+                            return false;
+                        var lines = body.Split('\n').Where(line => line.StartsWith(
+                            "yarp_control_destination_admission_queue_wait_seconds_bucket{destination=\"admission/only\",le=\"",
+                            StringComparison.Ordinal)).ToArray();
+                        var expectedFiniteBuckets = QueueWaitBucketUpperBoundsMilliseconds.Length;
+                        if (lines.Length != expectedFiniteBuckets + 1) return false;
+                        long previous = 0;
+                        long infinite = -1;
+                        for (var index = 0; index < lines.Length; index++)
+                        {
+                            var line = lines[index];
+                            var marker = "le=\"";
+                            var boundStart = line.IndexOf(marker, StringComparison.Ordinal) + marker.Length;
+                            var boundEnd = line.IndexOf('"', boundStart);
+                            var countStart = line.LastIndexOf(' ') + 1;
+                            if (boundStart < marker.Length || boundEnd < boundStart ||
+                                !long.TryParse(line[countStart..], out var count) || count < previous)
+                                return false;
+                            var bound = line[boundStart..boundEnd];
+                            if (bound == "+Inf")
+                            {
+                                if (index != lines.Length - 1) return false;
+                                infinite = count;
+                            }
+                            else
+                            {
+                                var expectedSeconds = (QueueWaitBucketUpperBoundsMilliseconds[index] / 1000d)
+                                    .ToString("0.###", System.Globalization.CultureInfo.InvariantCulture);
+                                if (!string.Equals(bound, expectedSeconds, StringComparison.Ordinal)) return false;
+                            }
+                            previous = count;
+                        }
+                        var sampleCount = Value(body, "yarp_control_destination_admission_queue_wait_seconds_count");
+                        var sampleSum = body.Split('\n').FirstOrDefault(line => line.StartsWith(
+                            "yarp_control_destination_admission_queue_wait_seconds_sum{destination=\"admission/only\"} ",
+                            StringComparison.Ordinal));
+                        return sampleCount is not null && infinite == sampleCount && sampleSum is not null &&
+                            double.TryParse(sampleSum[(sampleSum.LastIndexOf(' ') + 1)..],
+                                System.Globalization.NumberStyles.Float,
+                                System.Globalization.CultureInfo.InvariantCulture, out var sum) && sum >= 0;
+                    }
                     if (response.IsSuccessStatusCode &&
                         Value(body, "yarp_control_destination_admission_inflight_requests") == inFlight &&
-                        Value(body, "yarp_control_destination_admission_queued_requests") == queued)
+                        Value(body, "yarp_control_destination_admission_queued_requests") == queued &&
+                        HasValidQueueWaitHistogram(body))
                         return;
                     await Task.Delay(25, timeout.Token);
                 }

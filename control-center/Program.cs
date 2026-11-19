@@ -691,9 +691,13 @@ app.MapGet("/gateway/metrics", (HttpContext ctx) =>
     output.AppendLine("# TYPE yarp_control_destination_admission_queue_timeouts_total counter");
     output.AppendLine("# HELP yarp_control_destination_admission_waiter_canceled_total Waiters removed after their cancellation token is signaled (includes request abort, shutdown, and queue timeout)");
     output.AppendLine("# TYPE yarp_control_destination_admission_waiter_canceled_total counter");
-    output.AppendLine("# HELP yarp_control_destination_admission_queue_wait_seconds Time spent by requests waiting for a per-destination slot");
-    output.AppendLine("# TYPE yarp_control_destination_admission_queue_wait_seconds summary");
+    output.AppendLine("# HELP yarp_control_destination_admission_untracked_destinations Enabled destinations omitted from per-destination admission metrics because the bounded registry is full");
+    output.AppendLine("# TYPE yarp_control_destination_admission_untracked_destinations gauge");
     var admission = ctx.RequestServices.GetRequiredService<DestinationAdmissionManager>();
+    output.Append("yarp_control_destination_admission_untracked_destinations ")
+        .Append(admission.UntrackedConfiguredDestinationCount).Append('\n');
+    output.AppendLine("# HELP yarp_control_destination_admission_queue_wait_seconds Time spent by requests waiting for a per-destination slot; fixed buckets support tail-latency estimates");
+    output.AppendLine("# TYPE yarp_control_destination_admission_queue_wait_seconds histogram");
     foreach (var cluster in runtime.GetClusters())
     foreach (var destination in cluster.Destinations.Values)
     {
@@ -705,6 +709,18 @@ app.MapGet("/gateway/metrics", (HttpContext ctx) =>
         output.Append("yarp_control_destination_admission_rejected_total{destination=\"").Append(label).Append("\"} ").Append(snapshot.Rejected).Append('\n');
         output.Append("yarp_control_destination_admission_queue_timeouts_total{destination=\"").Append(label).Append("\"} ").Append(snapshot.TimedOut).Append('\n');
         output.Append("yarp_control_destination_admission_waiter_canceled_total{destination=\"").Append(label).Append("\"} ").Append(snapshot.Canceled).Append('\n');
+        long cumulativeWaits = 0;
+        for (var bucketIndex = 0; bucketIndex < DestinationAdmissionState.QueueWaitBucketUpperBoundsMilliseconds.Count; bucketIndex++)
+        {
+            cumulativeWaits += snapshot.WaitDurationBucketCounts[bucketIndex];
+            var upperBoundSeconds = DestinationAdmissionState.QueueWaitBucketUpperBoundsMilliseconds[bucketIndex] / 1000d;
+            output.Append("yarp_control_destination_admission_queue_wait_seconds_bucket{destination=\"")
+                .Append(label).Append("\",le=\"")
+                .Append(upperBoundSeconds.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture))
+                .Append("\"} ").Append(cumulativeWaits).Append('\n');
+        }
+        output.Append("yarp_control_destination_admission_queue_wait_seconds_bucket{destination=\"")
+            .Append(label).Append("\",le=\"+Inf\"} ").Append(snapshot.WaitDurationCount).Append('\n');
         output.Append("yarp_control_destination_admission_queue_wait_seconds_sum{destination=\"").Append(label).Append("\"} ").Append(snapshot.WaitDurationSecondsSum.ToString("R", System.Globalization.CultureInfo.InvariantCulture)).Append('\n');
         output.Append("yarp_control_destination_admission_queue_wait_seconds_count{destination=\"").Append(label).Append("\"} ").Append(snapshot.WaitDurationCount).Append('\n');
     }

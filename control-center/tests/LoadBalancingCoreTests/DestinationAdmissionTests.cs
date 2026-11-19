@@ -45,6 +45,11 @@ public static class DestinationAdmissionTests
         Check(!DestinationAdmissionPolicy.TryParse(incomplete, out _, out _),
             "queue settings cannot enable a partial policy");
 
+        Check(DestinationAdmissionState.QueueWaitBucketIndex(6) == 2 &&
+              DestinationAdmissionState.QueueWaitBucketUpperBoundsMilliseconds[2] == 10 &&
+              DestinationAdmissionState.QueueWaitBucketIndex(60_001) == -1,
+            "known 6 ms wait maps to the 10 ms finite bucket and values above 60 s map to +Inf");
+
         var single = new DestinationAdmissionState(new DestinationAdmissionPolicy(1, 2, 5000));
         using var first = await single.AcquireAsync(CancellationToken.None) ??
             throw new Exception("FAIL: first destination permit should be acquired");
@@ -62,7 +67,11 @@ public static class DestinationAdmissionTests
         using var third = await fifo2.WaitAsync(TimeSpan.FromSeconds(2)) ??
             throw new Exception("FAIL: second FIFO waiter should receive the next permit");
         third.Dispose();
-        Check(single.Snapshot is { InFlight: 0, Queued: 0, WaitDurationCount: 2 }, "permit accounting and queue wait timing return to zero after FIFO drain");
+        var fifoSnapshot = single.Snapshot;
+        Check(fifoSnapshot is { InFlight: 0, Queued: 0, WaitDurationCount: 2 } &&
+              fifoSnapshot.WaitDurationBucketCounts.Length == DestinationAdmissionState.QueueWaitBucketUpperBoundsMilliseconds.Count &&
+              fifoSnapshot.WaitDurationBucketCounts.Sum() == fifoSnapshot.WaitDurationCount,
+            "FIFO drain records every wait in exactly one bounded histogram bucket");
 
         var canceledGate = new DestinationAdmissionState(new DestinationAdmissionPolicy(1, 2, 5000));
         using var held = await canceledGate.AcquireAsync(CancellationToken.None) ??
@@ -416,6 +425,23 @@ public static class DestinationAdmissionTests
         }
         Check(churnSucceeded && churnManager.TrackedDestinationCount == 0,
             "4097 destination replacements are reclaimed without exceeding the registry cap");
+
+        var overflowManager = new DestinationAdmissionManager();
+        var overflowConfiguration = Enumerable.Range(0, DestinationAdmissionManager.MaximumTrackedDestinations + 1)
+            .Select(index => Config("overflow", "destination-" + index, new(1, 0, 5000))).ToArray();
+        var overflowResult = overflowManager.ReconcileConfiguredDestinations(1, overflowConfiguration);
+        var tracked = 0;
+        for (var index = 0; index < overflowConfiguration.Length; index++)
+            if (overflowManager.TryAcquireHandle("overflow", "destination-" + index, out var overflowHandle, out _) &&
+                overflowHandle is not null)
+            {
+                tracked++;
+                overflowHandle.Dispose();
+            }
+        Check(overflowResult is { Applied: true, CapacityExceeded: 1 } &&
+              tracked == DestinationAdmissionManager.MaximumTrackedDestinations &&
+              overflowManager.UntrackedConfiguredDestinationCount == 1,
+            "per-destination metric labels stay capped and a single aggregate reports overflow");
     }
 
     private readonly record struct AdmissionDestination(string Id, bool IsDraining, string Address = "");
