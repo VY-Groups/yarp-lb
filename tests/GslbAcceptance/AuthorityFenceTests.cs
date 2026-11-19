@@ -101,6 +101,27 @@ internal static class AuthorityFenceTests
             Check(baselineDigest != AuthorityFenceFingerprint.Compute([fingerprintZone], null, 2, 1) &&
                   baselineDigest != AuthorityFenceFingerprint.Compute([fingerprintZone], null, 1, 2),
                 "authority fingerprint binds probe interval and concurrency policy");
+            Check(baselineDigest != AuthorityFenceFingerprint.Compute(
+                    [fingerprintZone with { SoaContact = "ops.fence.example.test" }], null),
+                "authority fingerprint binds SOA contact");
+            Check(baselineDigest == AuthorityFenceFingerprint.Compute(
+                    [fingerprintZone with { SoaContact = "HOSTMASTER.FENCE.EXAMPLE.TEST." }], null),
+                "explicit and implicit canonical SOA contact have equal fingerprints");
+            var delegation = new DnsDelegationConfig("child.fence.example.test",
+                [new DnsNameServerConfig("ns.child.fence.example.test", "192.0.2.53"),
+                 new DnsNameServerConfig("ns2.child.fence.example.test", "192.0.2.54")]);
+            var delegatedZone = fingerprintZone with { Delegations = [delegation] };
+            var delegatedDigest = AuthorityFenceFingerprint.Compute([delegatedZone], null);
+            Check(delegatedDigest != baselineDigest &&
+                  delegatedDigest != AuthorityFenceFingerprint.Compute(
+                    [delegatedZone with { Delegations = [delegation with {
+                        NameServers = [new DnsNameServerConfig("ns.child.fence.example.test", "192.0.2.55"),
+                                       delegation.NameServers[1]] }] }], null),
+                "authority fingerprint binds delegation membership and glue");
+            Check(delegatedDigest == AuthorityFenceFingerprint.Compute(
+                    [delegatedZone with { Delegations = [delegation with {
+                        NameServers = delegation.NameServers.Reverse().ToArray() }] }], null),
+                "equivalent delegation ordering has equal fingerprints");
             AgentReportServerConfig TrustPolicy(string vantage) => new("127.0.0.1", 16660, false,
                 certA, keyA, Path.Combine(root, "trust-replay.json"), 10, 10, 2, 100, [],
                 [new AgentTrust("observer-a", vantage, [pinA], [publicAPath]),
@@ -164,9 +185,13 @@ internal static class AuthorityFenceTests
             {
                 Check(deletionReceiver.TryAccept(deletionSource.CreateSnapshot(400), tlsA, now, 400),
                     "replay state initializes once for a new authority pair");
+                Check(deletionReceiver.IsPeerEligible("fence.example.test", "primary", 400),
+                    "valid lease initially authorizes a target before durable state loss");
                 File.Delete(deletionConfig.ReplayStatePath);
                 Check(!deletionReceiver.TryAccept(deletionSource.CreateSnapshot(401), tlsA, now, 401),
                     "missing replay high-water state fails closed while authority is running");
+                Check(!deletionReceiver.IsPeerEligible("fence.example.test", "primary", 402),
+                    "detected durable state loss withdraws an existing positive lease immediately");
             }
             File.Delete(deletionConfig.ReplayStatePath + ".lock");
             Check(ThrowsInvalid(() => new AuthorityFenceStore(deletionConfig, fingerprint, [target])),
