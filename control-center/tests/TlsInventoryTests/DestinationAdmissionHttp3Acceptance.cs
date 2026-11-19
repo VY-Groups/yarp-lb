@@ -267,6 +267,31 @@ internal static class DestinationAdmissionHttp3Acceptance
                 }
             }
 
+            async Task WaitForAdmissionSnapshot(int inFlight, int queued)
+            {
+                using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+                var metricsEndpoint = new Uri($"https://127.0.0.2:{metricsPort}/gateway/metrics");
+                while (true)
+                {
+                    using var request = new HttpRequestMessage(HttpMethod.Get, metricsEndpoint)
+                    { Version = HttpVersion.Version11, VersionPolicy = HttpVersionPolicy.RequestVersionExact };
+                    using var response = await managementClient.SendAsync(request, timeout.Token);
+                    var body = await response.Content.ReadAsStringAsync(timeout.Token);
+                    static int? Value(string body, string metric)
+                    {
+                        var line = body.Split('\n').FirstOrDefault(line =>
+                            line.StartsWith(metric + "{destination=\"admission/only\"} ", StringComparison.Ordinal));
+                        return line is not null && int.TryParse(line[(line.LastIndexOf(' ') + 1)..], out var value)
+                            ? value : null;
+                    }
+                    if (response.IsSuccessStatusCode &&
+                        Value(body, "yarp_control_destination_admission_inflight_requests") == inFlight &&
+                        Value(body, "yarp_control_destination_admission_queued_requests") == queued)
+                        return;
+                    await Task.Delay(25, timeout.Token);
+                }
+            }
+
             if (supportsHttp3)
             {
                 using (var readinessTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(15)))
@@ -400,7 +425,7 @@ internal static class DestinationAdmissionHttp3Acceptance
             using var activeWebSocket = await ConnectWebSocket("ws-active");
             using var queuedWebSocketTaskTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(12));
             var queuedWebSocketTask = ConnectWebSocket("ws-queued");
-            await Task.Delay(150);
+            await WaitForAdmissionSnapshot(1, 1);
             Check(!queuedWebSocketTask.IsCompleted && backendWebSocketAttempts.Count == 1 &&
                 Volatile.Read(ref backendWebSocketsInFlight) == 1,
                 "an open WebSocket holds its destination slot while a second handshake queues");
@@ -425,6 +450,7 @@ internal static class DestinationAdmissionHttp3Acceptance
             using (var activeCloseTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(5)))
                 await activeWebSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "release admission slot", activeCloseTimeout.Token);
             using var queuedWebSocket = await queuedWebSocketTask.WaitAsync(queuedWebSocketTaskTimeout.Token);
+            await WaitForAdmissionSnapshot(1, 0);
             Check(queuedWebSocket.State == WebSocketState.Open && backendWebSocketAttempts.Count == 2,
                 "closing the active WebSocket releases its permit and admits the queued handshake");
             var echo = System.Text.Encoding.UTF8.GetBytes("websocket-admitted");
@@ -443,9 +469,20 @@ internal static class DestinationAdmissionHttp3Acceptance
             using (var drainTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(5)))
                 while (Volatile.Read(ref backendWebSocketsInFlight) != 0)
                     await Task.Delay(10, drainTimeout.Token);
+            await WaitForAdmissionSnapshot(0, 0);
             Check(Volatile.Read(ref backendWebSocketsInFlight) == 0 &&
                 backendWebSocketAttempts.Order(StringComparer.Ordinal).SequenceEqual(new[] { "ws-active", "ws-queued" }),
-                "WebSocket drain releases all destination permits without admitting the overflow session");
+                "WebSocket drain releases the active and queued destination permits without admitting overflow");
+
+            using var afterDrainTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(12));
+            using var afterDrain = await ConnectWebSocket("ws-after-drain");
+            Check(afterDrain.State == WebSocketState.Open && backendWebSocketAttempts.Count == 3,
+                "a fresh WebSocket is admitted after both earlier sessions close");
+            await afterDrain.CloseAsync(WebSocketCloseStatus.NormalClosure, "complete", afterDrainTimeout.Token);
+            using (var finalDrainTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(5)))
+                while (Volatile.Read(ref backendWebSocketsInFlight) != 0)
+                    await Task.Delay(10, finalDrainTimeout.Token);
+            await WaitForAdmissionSnapshot(0, 0);
             Console.WriteLine("PASS: real WebSocket session lifecycle exercised GatewayCore per-destination admission");
         }
         finally
@@ -518,3 +555,4 @@ internal static class DestinationAdmissionHttp3Acceptance
         }
     }
 }
+
