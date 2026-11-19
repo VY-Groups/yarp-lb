@@ -138,10 +138,15 @@ try:
     for key in ("rx_dropped","tx_dropped","process_cpu_seconds"):
         values=[float(x[key]) for x in rows]
         if any(not math.isfinite(x) or x<0 for x in values):raise ValueError("invalid "+key)
-        if values[-1]>values[0] and key in ("rx_dropped","tx_dropped"):
+        # Cumulative counters must never roll back within a single evidence
+        # interval. Checking only endpoints could hide a drop followed by reset.
+        if any(b<a for a,b in zip(values,values[1:])):
+            errors.append(f"counter decreased/reset: {key}")
+        if key in ("rx_dropped","tx_dropped") and any(b>a for a,b in zip(values,values[1:])):
             errors.append(f"NIC drops increased: {key}")
     for key in ("rss_bytes","threads"):
-        if any(float(x[key])<=0 for x in rows):raise ValueError("missing "+key)
+        values=[float(x[key]) for x in rows]
+        if any(not math.isfinite(x) or x<=0 for x in values):raise ValueError("invalid "+key)
     for metric in ("yarp_logging_dropped_total","yarp_logging_dropped_high_priority_total","yarp_logging_write_errors_total"):
         values=[]
         for row in rows:
