@@ -52,9 +52,10 @@ assert 'Windows Service hosting and installation are not implemented' in support
 assert 'No production GatewayCore container image' in support_doc
 assert 'LocalMachine\\My' in support_doc
 assert 'not a service installer' in support_doc
-assert 'not installed or exercised by current CI' in support_doc
+assert 'temporary service derived from the Linux unit template' in support_doc
+assert 'not a production installation' in support_doc
 assert 'not supported by this release' in support_doc
-assert '`ops/systemd/gatewaycore-yarp.service`' in support_doc
+assert 'shipped unit template' in support_doc
 assert 'User=gateway-gateway' in support_service and 'UMask=0077' in support_service
 assert 'IMPORTANT: staging/local-only installation' in support_installer
 assert all(policy in support_doc for policy in (
