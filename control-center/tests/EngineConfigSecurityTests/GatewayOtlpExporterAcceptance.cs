@@ -95,7 +95,8 @@ public static class GatewayOtlpExporterAcceptance
             }
             var response = new DefaultHttpContext();
             response.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
-            GatewayOpenTelemetry.RecordProxyResult(response, 17.5);
+            GatewayOpenTelemetry.RecordProxyResult(response, 17.5,
+                "container_acceptance_route", "container_acceptance_cluster", "container_target_a");
             EmitAccessLog(provider);
             EmitRestrictedLogs(provider);
             if (!tracerProvider.ForceFlush(10000) || !meterProvider.ForceFlush(10000) || !loggerProvider.ForceFlush(10000))
@@ -176,7 +177,8 @@ public static class GatewayOtlpExporterAcceptance
 
             var response = new Microsoft.AspNetCore.Http.DefaultHttpContext();
             response.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
-            GatewayOpenTelemetry.RecordProxyResult(response, 12.5);
+            GatewayOpenTelemetry.RecordProxyResult(response, 12.5,
+                "acceptance_route", "acceptance_cluster", "target_a");
             EmitAccessLog(provider);
             EmitRestrictedLogs(provider);
             if (!tracerProvider.ForceFlush(10000) || !meterProvider.ForceFlush(10000) || !loggerProvider.ForceFlush(10000))
@@ -211,7 +213,12 @@ public static class GatewayOtlpExporterAcceptance
                 throw new Exception("Unmatched ASP.NET span did not fall back to a method-only name");
 
             var metricPayload = Encoding.Latin1.GetString(metrics.SelectMany(x => x.Body).ToArray());
-            foreach (var expected in new[] { "gateway.proxy.requests", "gateway.proxy.request.duration", "5xx" })
+            foreach (var expected in new[]
+                     {
+                         "gateway.proxy.requests", "gateway.proxy.request.duration", "5xx",
+                         "gateway.route.id", "acceptance_route", "gateway.cluster.id", "acceptance_cluster",
+                         "gateway.destination.id", "target_a"
+                     })
                 if (!metricPayload.Contains(expected, StringComparison.Ordinal))
                     throw new Exception($"Expected bounded proxy metric was absent: {expected}");
             var metricValues = ReadOtlpMetricValues(metrics.SelectMany(x => x.Body).ToArray());

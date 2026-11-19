@@ -2052,7 +2052,8 @@ app.MapReverseProxy(proxyPipeline =>
             var feature = context.GetReverseProxyFeature();
             var destination = feature.ProxiedDestination;
             GatewayOpenTelemetry.CompleteProxyActivity(activity, context, destination?.DestinationId);
-            GatewayOpenTelemetry.RecordProxyResult(context, elapsedMs);
+            GatewayOpenTelemetry.RecordProxyResult(context, elapsedMs,
+                feature.Route.Config.RouteId, feature.Cluster.Config.ClusterId, destination?.DestinationId);
             if (destination != null)
             {
                 var id = feature.Cluster.Config.ClusterId + "/" + destination.DestinationId;
