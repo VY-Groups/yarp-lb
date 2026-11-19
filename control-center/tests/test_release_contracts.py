@@ -7,6 +7,13 @@ ts=(root/'wwwroot/app.ts').read_text()
 html=(root/'wwwroot/index.html').read_text()
 installer=(root/'INSTALL.ps1').read_text()
 precheck=(root/'PRECHECK.ps1').read_text()
+support_doc=(root/'docs/DATA_PROTECTION_PLATFORM_SUPPORT.md').read_text(encoding='utf-8')
+linux_keys=(root/'LinuxKeyProtection.cs').read_text(encoding='utf-8')
+support_project=(root/'GatewayCoreYarp.csproj').read_text(encoding='utf-8')
+support_program=program
+support_installer=installer
+support_service=(root/'ops/systemd/gatewaycore-yarp.service').read_text(encoding='utf-8')
+global_sdk=(root.parent/'global.json').read_text(encoding='utf-8')
 assert 'app.MapSetupCenter(privateDir)' in program
 assert 'SetupCenter.ReadFreeze(privateDir).Frozen' in program
 for path in ['/admin/api/setup/version','/admin/api/setup/overview','/admin/api/setup/freeze','/admin/api/runtime/destinations']:
@@ -30,7 +37,31 @@ assert "edit();show('Application added to unsaved draft" in ts
 assert 'MapPost("/admin/api/apply"' not in program
 assert 'app.MapReverseProxy' in program
 assert not re.search(r'\bstyle\s*=\s*["\']',ts)
+assert '"version": "10.0.100"' in global_sdk
+assert '<TargetFramework>net10.0</TargetFramework>' in support_project
+assert 'ProtectKeysWithDpapi(protectToLocalMachine: true)' in support_program
+assert 'LinuxKeyProtection.Configure(dataProtection, privateDir)' in support_program
+assert 'ProtectKeysWithCertificate(current)' in linux_keys
+assert 'UnprotectKeysWithAnyCertificate(current, previous)' in linux_keys
+assert 'YARP_LINUX_DP_OLD_CERT_PFX_PATH' in support_doc
+assert 'not automatically rewrapped' in support_doc
+assert 'Key expiry alone is not sufficient' in support_doc
+assert 'Windows Server 2022' in support_doc and 'Ubuntu 24.04' in support_doc
+assert 'RHEL-family Linux' in support_doc and 'Not qualified for deployment' in support_doc
+assert 'Windows Service hosting and installation are not implemented' in support_doc
+assert 'No production GatewayCore container image' in support_doc
+assert 'LocalMachine\\My' in support_doc
+assert 'not a service installer' in support_doc
+assert 'not installed or exercised by current CI' in support_doc
+assert 'not supported by this release' in support_doc
+assert '`ops/systemd/gatewaycore-yarp.service`' in support_doc
+assert 'User=gateway-gateway' in support_service and 'UMask=0077' in support_service
+assert 'IMPORTANT: staging/local-only installation' in support_installer
+assert all(policy in support_doc for policy in (
+    '`RoundRobin`', '`PowerOfTwoChoices`', '`LeastRequests`', '`Random`',
+    '`FirstAlphabetical`', '`WeightedRandom`', '`SourceIpHash`', '`PrimaryBackup`'
+))
 # Ensure major CI files are present.
 for fn in ['README.md','SetupCenter.cs','Onboarding.cs','DirectoryAuth.cs','Program.cs','PRECHECK.ps1','INSTALL.ps1','VERIFY-SETUP.ps1','docs/API_CONTRACT.md','docs/RELEASE_GATES.md']:
     assert (root/fn).exists(),fn
-print('PASS: 0.1 release/API/RBAC/freeze/onboarding/installer/static security contracts')
+print('PASS: 0.1 release/API/RBAC/freeze/onboarding/installer/platform support/static security contracts')
