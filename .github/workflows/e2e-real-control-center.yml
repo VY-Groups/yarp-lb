@@ -71,7 +71,7 @@ jobs:
                   pgrep -x dpkg >/dev/null || pgrep -f '[u]nattended-upgrade' >/dev/null; do
               if (( SECONDS >= deadline )); then
                 echo "::error::Timed out waiting for the runner's APT/dpkg operation to finish"
-                ps -eo pid,comm,args | grep -E 'apt|dpkg|unattended-upgrade' || true
+                pgrep -af 'apt|dpkg|unattended-upgrade' || true
                 return 1
               fi
               echo "::notice::Runner package manager is busy; waiting for its lock"
