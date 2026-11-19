@@ -33,6 +33,7 @@ internal sealed record AuthorityFenceTarget(string Zone, string SiteId, Func<lon
 internal sealed class AuthorityFenceStore : IDisposable
 {
     private sealed record PersistedReplay(int Version, long Epoch, long Sequence);
+    private sealed record PersistedEpoch(int Version, long Epoch, bool ReplayInitialized);
     private static readonly byte[] ReplayLockMarker = System.Text.Encoding.ASCII.GetBytes(
         "GatewayCore.AuthorityFence.ReplayState.v1\n");
     private sealed record LiveSnapshot(Dictionary<string, bool> Decisions, long ExpiresAtTick);
@@ -87,8 +88,10 @@ internal sealed class AuthorityFenceStore : IDisposable
         catch { epochLock.Dispose(); throw; }
         try
         {
+            if (!File.Exists(epochStatePath) && (File.Exists(replayStatePath) || replayLock.Length != 0))
+                throw new InvalidDataException("Authority epoch state is missing while replay state exists");
             localEpoch = StartNewEpoch(epochStatePath);
-            replay = InitializeReplayState(replayStatePath, replayLock);
+            replay = InitializeReplayState(replayStatePath, replayLock, epochStatePath, localEpoch);
             localSigner = ECDsa.Create();
             localSigner.ImportFromPem(PrivateKeyFileSecurity.ReadPrivateKeyPem(
                 config.SigningPrivateKeyPem, "Authority decision signing key"));
@@ -165,7 +168,7 @@ internal sealed class AuthorityFenceStore : IDisposable
 
         lock (gate)
         {
-            if (!ReplayStateIntact(replayStatePath, replayLock, replay))
+            if (!ReplayStateIntact(replayStatePath, replayLock, replay, epochStatePath, localEpoch))
                 return false;
             if (snapshot.Epoch < replay.Epoch ||
                 (snapshot.Epoch == replay.Epoch && snapshot.Sequence <= replay.Sequence))
@@ -299,28 +302,30 @@ internal sealed class AuthorityFenceStore : IDisposable
     private static long StartNewEpoch(string path)
     {
         var previous = ReadEpoch(path);
-        if (previous == long.MaxValue) throw new InvalidDataException("Authority epoch exhausted");
-        var next = previous + 1;
-        WriteState(path, JsonSerializer.SerializeToUtf8Bytes(new { Version = 1, Epoch = next }));
+        if (previous.Epoch == long.MaxValue) throw new InvalidDataException("Authority epoch exhausted");
+        var next = previous.Epoch + 1;
+        WriteState(path, JsonSerializer.SerializeToUtf8Bytes(previous with { Epoch = next }));
         return next;
     }
 
-    private static long ReadEpoch(string path)
+    private static PersistedEpoch ReadEpoch(string path)
     {
-        if (!File.Exists(path)) return 0;
+        if (!File.Exists(path)) return new PersistedEpoch(1, 0, false);
         EnsureNotLink(path, "authority epoch state");
         if (OperatingSystem.IsWindows()) EnsurePrivateWindowsAcl(path, isDirectory: false);
         if (new FileInfo(path).Length > 1024) throw new InvalidDataException("Authority epoch state exceeds bound");
-        using var document = JsonDocument.Parse(File.ReadAllBytes(path));
-        var root = document.RootElement;
-        if (!root.TryGetProperty("Version", out var version) || version.GetInt32() != 1 ||
-            !root.TryGetProperty("Epoch", out var epoch) || epoch.GetInt64() < 0)
+        var state = JsonSerializer.Deserialize<PersistedEpoch>(File.ReadAllBytes(path));
+        if (state is null || state.Version != 1 || state.Epoch < 0)
             throw new InvalidDataException("Invalid authority epoch state");
-        return epoch.GetInt64();
+        return state;
     }
 
-    private static PersistedReplay InitializeReplayState(string path, FileStream marker)
+    private static PersistedReplay InitializeReplayState(string path, FileStream marker,
+        string epochPath, long currentEpoch)
     {
+        var epoch = ReadEpoch(epochPath);
+        if (epoch.Epoch != currentEpoch)
+            throw new InvalidDataException("Authority epoch changed during replay initialization");
         marker.Position = 0;
         if (marker.Length > ReplayLockMarker.Length)
             throw new InvalidDataException("Invalid authority replay-state lock marker");
@@ -329,6 +334,8 @@ internal sealed class AuthorityFenceStore : IDisposable
         if (markerBytes.Length != 0 && !markerBytes.AsSpan().SequenceEqual(ReplayLockMarker))
             throw new InvalidDataException("Invalid authority replay-state lock marker");
         var hasMarker = markerBytes.Length != 0;
+        if (epoch.ReplayInitialized && (!hasMarker || !File.Exists(path)))
+            throw new InvalidDataException("Authority replay high-water state or marker is missing; refusing unsafe reinitialization");
         if (!File.Exists(path))
         {
             if (hasMarker)
@@ -343,10 +350,13 @@ internal sealed class AuthorityFenceStore : IDisposable
             marker.Write(ReplayLockMarker);
             marker.Flush(flushToDisk: true);
         }
+        if (!epoch.ReplayInitialized)
+            WriteState(epochPath, JsonSerializer.SerializeToUtf8Bytes(epoch with { ReplayInitialized = true }));
         return replay;
     }
 
-    private static bool ReplayStateIntact(string path, FileStream marker, PersistedReplay expected)
+    private static bool ReplayStateIntact(string path, FileStream marker, PersistedReplay expected,
+        string epochPath, long currentEpoch)
     {
         try
         {
@@ -355,6 +365,8 @@ internal sealed class AuthorityFenceStore : IDisposable
             var markerBytes = new byte[ReplayLockMarker.Length];
             if (marker.Read(markerBytes, 0, markerBytes.Length) != markerBytes.Length ||
                 !markerBytes.AsSpan().SequenceEqual(ReplayLockMarker) || !File.Exists(path)) return false;
+            var epoch = ReadEpoch(epochPath);
+            if (epoch.Epoch != currentEpoch || !epoch.ReplayInitialized) return false;
             var persisted = ReadReplay(path);
             return persisted == expected;
         }

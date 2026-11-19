@@ -92,6 +92,9 @@ internal static class AuthorityFenceTests
                   baselineDigest != AuthorityFenceFingerprint.Compute(
                     [fingerprintZone with { SuccessThreshold = 2 }], null),
                 "authority fingerprint binds local health failure and recovery thresholds");
+            Check(baselineDigest != AuthorityFenceFingerprint.Compute([fingerprintZone], null, 2, 1) &&
+                  baselineDigest != AuthorityFenceFingerprint.Compute([fingerprintZone], null, 1, 2),
+                "authority fingerprint binds probe interval and concurrency policy");
             AgentReportServerConfig TrustPolicy(string vantage) => new("127.0.0.1", 16660, false,
                 certA, keyA, Path.Combine(root, "trust-replay.json"), 10, 10, 2, 100, [],
                 [new AgentTrust("observer-a", vantage, [pinA], [publicAPath]),
@@ -139,7 +142,11 @@ internal static class AuthorityFenceTests
             using (var source = new AuthorityFenceStore(configA, fingerprint, [target]))
                 Check(!mismatched.TryAccept(source.CreateSnapshot(300), tlsA, now, 300),
                     "different routing configuration fingerprint cannot form agreement");
-            var deletionConfig = configB with { ReplayStatePath = Path.Combine(root, "deletion-replay.json") };
+            var deletionConfig = configB with
+            {
+                EpochStatePath = Path.Combine(root, "deletion-epoch.json"),
+                ReplayStatePath = Path.Combine(root, "deletion-replay.json")
+            };
             using (var deletionReceiver = new AuthorityFenceStore(deletionConfig, fingerprint, [target]))
             using (var deletionSource = new AuthorityFenceStore(configA, fingerprint, [target]))
             {
@@ -149,8 +156,9 @@ internal static class AuthorityFenceTests
                 Check(!deletionReceiver.TryAccept(deletionSource.CreateSnapshot(401), tlsA, now, 401),
                     "missing replay high-water state fails closed while authority is running");
             }
+            File.Delete(deletionConfig.ReplayStatePath + ".lock");
             Check(ThrowsInvalid(() => new AuthorityFenceStore(deletionConfig, fingerprint, [target])),
-                "missing replay high-water state fails closed after restart");
+                "deleting replay file and lock marker still fails closed after restart");
             Console.WriteLine("PASS: authority 2-of-2 fence signature, membership, config, lease, replay and restart contracts");
         }
         finally { Directory.Delete(root, recursive: true); }

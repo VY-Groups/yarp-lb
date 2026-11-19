@@ -4,7 +4,8 @@ using System.Text.Json;
 /// <summary>Canonical digest over routing, health and external-observer trust policy shared by both authorities.</summary>
 internal static class AuthorityFenceFingerprint
 {
-    public static string Compute(DnsZone[] zones, AgentReportServerConfig? agentReports)
+    public static string Compute(DnsZone[] zones, AgentReportServerConfig? agentReports,
+        int probeIntervalSeconds = 1, int maxConcurrentHealthProbes = 1)
     {
         var trustPolicy = agentReports is null ? null : new
         {
@@ -67,7 +68,9 @@ internal static class AuthorityFenceFingerprint
         return Convert.ToHexString(SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(new
         {
             Zones = canonical,
-            AgentTrustPolicy = trustPolicy
+            AgentTrustPolicy = trustPolicy,
+            ProbeIntervalSeconds = probeIntervalSeconds,
+            MaxConcurrentHealthProbes = maxConcurrentHealthProbes
         })));
     }
 }

@@ -232,7 +232,8 @@ var authorityTargets = config.AuthorityFence is null ? [] : groups.SelectMany(zo
         (site.RequiredAgentIds.Length == 0 ||
          (reportStore?.IsHealthy(zone.Key, site.AgentSiteId!, nowTick) ?? false))))).ToArray();
 var authorityFenceStore = config.AuthorityFence is null ? null : new AuthorityFenceStore(
-    config.AuthorityFence, AuthorityFenceFingerprint.Compute(config.Zones, config.AgentReports), authorityTargets);
+    config.AuthorityFence, AuthorityFenceFingerprint.Compute(config.Zones, config.AgentReports,
+        config.ProbeIntervalSeconds, config.MaxConcurrentHealthProbes), authorityTargets);
 using var authorityFenceStoreLifetime = authorityFenceStore;
 await using var authorityFenceRuntime = authorityFenceStore is null || config.AuthorityFence is null
     ? null : new AuthorityFenceRuntime(config.AuthorityFence, authorityFenceStore);
