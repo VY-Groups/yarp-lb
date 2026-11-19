@@ -1,6 +1,6 @@
 # Standalone TCP / UDP engine — experimental 0.1
 
-This is a separate .NET 10 process, **not YARP middleware**. It binds explicit TCP and UDP listeners; TCP forwards bidirectional streams with half-close propagation, health-probed connect-time fallback, explicit per-backend admission drain, configurable idle timeout, and opt-in PROXY protocol v1; UDP uses per-client source IP/port sessions with backend replies routed to their original client. Both use round-robin across configured backends. It limits UDP sessions to 1,024 per listener and expires idle sessions after approximately 30 seconds of inactivity (when new packets arrive).
+This is a separate .NET 10 process, **not YARP middleware**. It binds explicit TCP and UDP listeners; TCP forwards bidirectional streams with half-close propagation, health-probed connect-time fallback, explicit per-backend admission drain, configurable idle timeout, and opt-in PROXY protocol v1; UDP uses per-client source IP/port sessions with backend replies routed to their original client. Both use round-robin across configured backends. It limits UDP sessions to 1,024 per listener and expires idle sessions after 30 seconds of inbound inactivity by default, with a one-second periodic sweep even when no datagrams arrive.
 
 The Windows/Linux socket acceptance includes a TCP half-close case: after the client sends its request and shuts down only its send direction, the backend must observe EOF, produce a complete response, and close its send direction; the client must receive that response through EOF. This verifies bidirectional FIN propagation in the loopback lab only. It does not demonstrate packet-loss behavior or WAN reliability.
 
@@ -21,6 +21,10 @@ Listener addresses default to loopback-only; **non-loopback binding requires** `
 - Backend `DrainNewConnections` (default false): prevents *new* streams from using that target, without interrupting already established streams. This is static config at process startup in version 0.1; a coordinated, zero-loss live drain API is NOT implemented.
 
 Checks are TCP-connect-only, NOT application readiness, TLS or real traffic SLOs. UDP still has no corresponding active health checks.
+
+## UDP listener fields
+
+- `UdpIdleTimeoutSeconds` (default 30, permitted 1–3600): monotonic idle timeout refreshed by inbound datagrams. The periodic sweep retires unused upstream sockets without waiting for another packet; a new datagram after expiry establishes a new round-robin relay. Expired or failed datagrams are not replayed. New sessions exclude draining backends; all-drained listeners drop new datagrams. The signed engine configuration validator enforces the same timeout range as the engine.
 
 ## Boundaries
 
