@@ -217,6 +217,14 @@ try
             throw new Exception("FAIL: authenticated per-agent request budget is not bounded");
         if (reports.IsHealthy("lab.example.test", "mumbai", 100))
             throw new Exception("FAIL: missing multi-vantage evidence admitted a target");
+        if (reports.IsHealthy("lab.example.test", "missing", 100) ||
+            reports.IsHealthy("unknown.example.test", "mumbai", 100))
+            throw new Exception("FAIL: unknown report target incorrectly admitted");
+        var wrongCase = Report("agent-1", 99, "healthy", 1000, 12, signing1) with
+            { SiteId = "MUMBAI" };
+        wrongCase = wrongCase with { Signature = AgentHealthReportContract.Sign(wrongCase, signing1) };
+        if (reports.TryAccept(wrongCase, client1, DateTimeOffset.FromUnixTimeSeconds(observed), 100))
+            throw new Exception("FAIL: signed case-alias site bypassed exact target identity");
         if (reports.TryAccept(Report("agent-1", 1, "healthy", 1000, 12, signing1,
                     observedAt: observed + 3), client1,
                 DateTimeOffset.FromUnixTimeSeconds(observed), 100))
@@ -230,6 +238,9 @@ try
                 DateTimeOffset.FromUnixTimeSeconds(observed), 100) ||
             !reports.IsHealthy("lab.example.test", "mumbai", 101))
             throw new Exception("FAIL: two fresh independent reports did not satisfy 2-of-3 policy");
+        if (!reports.IsHealthy("LAB.EXAMPLE.TEST.", "mumbai", 101) ||
+            reports.IsHealthy("lab.example.test", "MUMBAI", 101))
+            throw new Exception("FAIL: DNS canonicalization must not alias opaque site identity");
         var unknown = Report("agent-3", 1, "unknown", 0, null, signing3);
         if (!reports.TryAccept(unknown, client3, DateTimeOffset.FromUnixTimeSeconds(observed), 100) ||
             !reports.IsHealthy("lab.example.test", "mumbai", 101))
