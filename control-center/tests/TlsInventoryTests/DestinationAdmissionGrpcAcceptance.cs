@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Net;
 using System.Net.Http;
+using System.Net.Quic;
 using System.Net.Security;
 using System.Net.Sockets;
 using System.Security.Authentication;
@@ -19,6 +20,20 @@ using Microsoft.Extensions.DependencyInjection;
 internal static class DestinationAdmissionGrpcAcceptance
 {
     public static async Task RunAsync()
+    {
+        await RunProtocolAsync(useHttp3: false);
+        if (!QuicConnection.IsSupported)
+        {
+            if (Environment.GetEnvironmentVariable("GITHUB_ACTIONS") == "true" &&
+                Environment.GetEnvironmentVariable("GATEWAYCORE_REQUIRE_HTTP3_ACCEPTANCE") == "1")
+                throw new InvalidOperationException("Required HTTP/3 gRPC acceptance cannot run without MsQuic");
+            Console.WriteLine("SKIP: HTTP/3 gRPC acceptance requires a QUIC-capable runtime");
+            return;
+        }
+        await RunProtocolAsync(useHttp3: true);
+    }
+
+    private static async Task RunProtocolAsync(bool useHttp3)
     {
         if (Environment.GetEnvironmentVariable("GITHUB_ACTIONS") != "true" ||
             Environment.GetEnvironmentVariable("CI") != "true")
@@ -44,20 +59,29 @@ internal static class DestinationAdmissionGrpcAcceptance
         if (!File.Exists(gatewayDll))
             throw new FileNotFoundException("Build the shipping GatewayCoreYarp app before gRPC admission acceptance", gatewayDll);
 
+        var version = useHttp3 ? HttpVersion.Version30 : HttpVersion.Version20;
+        var protocol = useHttp3 ? "HTTP/3" : "HTTP/2";
+        var versionSetting = useHttp3 ? "3" : "2";
         // An empty protobuf message is a valid five-byte gRPC frame.
-        // Exercise the actual HTTP/2 framing and trailers without adding a
-        // NuGet dependency or substituting an ordinary HTTP/1 origin.
+        // Require the same negotiated protocol on both transport legs.
         byte[] frame = [0, 0, 0, 0, 0];
         var releaseActive = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var backendAttempts = new ConcurrentQueue<string>();
+        // Trust a unique disposable CA only in the CI account's root store.
+        // Never disable shipping outbound certificate validation.
+        using var originTrust = useHttp3 ? new OriginTrust() : null;
+        var backendPort = useHttp3 ? GetDualTransportPort() : 0;
         var backendBuilder = WebApplication.CreateBuilder();
-        backendBuilder.WebHost.ConfigureKestrel(options => options.Listen(IPAddress.Loopback, 0,
-            listen => listen.Protocols = HttpProtocols.Http2));
+        backendBuilder.WebHost.ConfigureKestrel(options => options.Listen(IPAddress.Loopback, backendPort, listen =>
+        {
+            listen.Protocols = useHttp3 ? HttpProtocols.Http3 : HttpProtocols.Http2;
+            if (originTrust is not null) listen.UseHttps(originTrust.ServerCertificate);
+        }));
         await using var backend = backendBuilder.Build();
         backend.MapPost("/lab.Stream/Watch", async (HttpContext context) =>
         {
-            Check(context.Request.Protocol == "HTTP/2" &&
-                context.Request.ContentType == "application/grpc", "real HTTP/2 gRPC origin receives the request");
+            Check(context.Request.Protocol == protocol &&
+                context.Request.ContentType == "application/grpc", $"real {protocol} gRPC origin receives the request");
             var id = context.Request.Query["id"].ToString();
             backendAttempts.Enqueue(id);
             var received = new byte[5];
@@ -72,8 +96,8 @@ internal static class DestinationAdmissionGrpcAcceptance
             context.Response.AppendTrailer("grpc-status", "0");
         });
         await backend.StartAsync();
-        var backendAddress = backend.Services.GetRequiredService<IServer>()
-            .Features.Get<IServerAddressesFeature>()!.Addresses.Single();
+        var backendAddress = useHttp3 ? $"https://127.0.0.1:{backendPort}" :
+            backend.Services.GetRequiredService<IServer>().Features.Get<IServerAddressesFeature>()!.Addresses.Single();
 
         var root = Path.Combine(Path.GetTempPath(), "gatewaycore-admission-grpc-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(root);
@@ -102,11 +126,13 @@ internal static class DestinationAdmissionGrpcAcceptance
         using var managementClientCert = X509CertificateLoader.LoadPkcs12FromFile(
             managementPfx, password, managementClientKeyFlags);
 
-        var tlsPort = GetTcpPort();
+        var tlsPort = useHttp3 ? GetDualTransportPort() : GetTcpPort();
+        while (useHttp3 && tlsPort == backendPort) tlsPort = GetDualTransportPort();
         var httpPort = GetTcpPort();
         var adminPort = GetTcpPort();
         var metricsPort = GetTcpPort();
-        while (new[] { httpPort, adminPort, metricsPort, tlsPort }.Distinct().Count() != 4)
+        while (new[] { httpPort, adminPort, metricsPort, tlsPort }.Distinct().Count() != 4 ||
+            (useHttp3 && new[] { httpPort, adminPort, metricsPort, tlsPort }.Contains(backendPort)))
         {
             httpPort = GetTcpPort(); adminPort = GetTcpPort(); metricsPort = GetTcpPort();
         }
@@ -119,7 +145,7 @@ internal static class DestinationAdmissionGrpcAcceptance
             TrafficPfxPath = trafficPfx, TrafficPfxPasswordFile = trafficPassword,
             ManagementPfxPath = managementPfx, ManagementPfxPasswordFile = managementPassword,
             ClientCaPemPath = caPem, ClientThumbprints = new[] { managementCert.Thumbprint },
-            AllowedAdminCidrs = new[] { "127.0.0.0/8" }, MaxConcurrentConnections = 64L, HttpVersion = "2"
+            AllowedAdminCidrs = new[] { "127.0.0.0/8" }, MaxConcurrentConnections = 64L, HttpVersion = versionSetting
         };
         WritePrivate(listenerConfig, JsonSerializer.Serialize(listeners));
         var appSettings = new
@@ -136,7 +162,7 @@ internal static class DestinationAdmissionGrpcAcceptance
                     ["admission"] = new
                     {
                         LoadBalancingPolicy = "RoundRobin",
-                        HttpRequest = new { Version = "2", VersionPolicy = "RequestVersionExact" },
+                        HttpRequest = new { Version = versionSetting, VersionPolicy = "RequestVersionExact" },
                         Destinations = new Dictionary<string, object>
                         {
                             ["only"] = new { Address = backendAddress, Metadata = new Dictionary<string, string>
@@ -201,6 +227,23 @@ internal static class DestinationAdmissionGrpcAcceptance
             using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(45));
             var ct = deadline.Token;
             var endpoint = $"https://127.0.0.1:{tlsPort}/admit/lab.Stream/Watch";
+            // Warm the TCP endpoint before exact QUIC requests, as in the existing H3 fixture.
+            if (useHttp3)
+            {
+                while (true)
+                {
+                    if (appProcess.HasExited) throw new Exception($"GatewayCore exited before QUIC readiness: {appProcess.ExitCode}");
+                    try
+                    {
+                        using var warmup = new HttpRequestMessage(HttpMethod.Get, $"https://127.0.0.1:{tlsPort}/gateway/health")
+                        { Version = HttpVersion.Version11, VersionPolicy = HttpVersionPolicy.RequestVersionExact };
+                        using var response = await client.SendAsync(warmup, ct);
+                        if (response.IsSuccessStatusCode) break;
+                    }
+                    catch (HttpRequestException) { }
+                    await Task.Delay(100, ct);
+                }
+            }
             while (true)
             {
                 if (appProcess.HasExited)
@@ -209,9 +252,9 @@ internal static class DestinationAdmissionGrpcAcceptance
                 {
                     using var request = new HttpRequestMessage(HttpMethod.Get,
                         $"https://127.0.0.1:{tlsPort}/gateway/health")
-                    { Version = HttpVersion.Version20, VersionPolicy = HttpVersionPolicy.RequestVersionExact };
+                    { Version = version, VersionPolicy = HttpVersionPolicy.RequestVersionExact };
                     using var response = await client.SendAsync(request, ct);
-                    if (response.IsSuccessStatusCode && response.Version == HttpVersion.Version20) break;
+                    if (response.IsSuccessStatusCode && response.Version == version) break;
                 }
                 catch (HttpRequestException) { }
                 await Task.Delay(100, ct);
@@ -220,7 +263,7 @@ internal static class DestinationAdmissionGrpcAcceptance
             {
                 using var request = new HttpRequestMessage(HttpMethod.Post, endpoint + "?id=" + id)
                 {
-                    Version = HttpVersion.Version20,
+                    Version = version,
                     VersionPolicy = HttpVersionPolicy.RequestVersionExact,
                     Content = new ByteArrayContent(frame)
                 };
@@ -258,9 +301,9 @@ internal static class DestinationAdmissionGrpcAcceptance
             }
             await WaitMetric("inflight_requests", 0);
             using var active = await Send("active");
-            Check(active.IsSuccessStatusCode && active.Version == HttpVersion.Version20 &&
+            Check(active.IsSuccessStatusCode && active.Version == version &&
                 active.Content.Headers.ContentType?.MediaType == "application/grpc",
-                "real gateway negotiates HTTP/2 and preserves gRPC content type");
+                $"real gateway negotiates {protocol} and preserves gRPC content type");
             await using var activeStream = await active.Content.ReadAsStreamAsync(ct);
             await ReadFrame(activeStream);
             await WaitMetric("inflight_requests", 1);
@@ -269,14 +312,14 @@ internal static class DestinationAdmissionGrpcAcceptance
             Check(!queued.IsCompleted && backendAttempts.SequenceEqual(new[] { "active" }),
                 "active gRPC response retains destination permit before trailers");
             using (var overflow = await Send("overflow"))
-                Check(overflow.StatusCode == HttpStatusCode.ServiceUnavailable &&
+                Check(overflow.Version == version && overflow.StatusCode == HttpStatusCode.ServiceUnavailable &&
                     overflow.Headers.TryGetValues("X-GatewayCore-Rejection", out var rejection) &&
                     rejection.Single() == "destination_queue_full",
                     "concurrent gRPC overload fails locally rather than forwarding a non-idempotent POST");
             releaseActive.TrySetResult();
             await Finish(active, activeStream);
             using var next = await queued;
-            Check(next.IsSuccessStatusCode && next.Version == HttpVersion.Version20, "queued gRPC call receives released permit");
+            Check(next.IsSuccessStatusCode && next.Version == version, "queued gRPC call receives released permit");
             await using var nextStream = await next.Content.ReadAsStreamAsync(ct);
             await ReadFrame(nextStream);
             await Finish(next, nextStream);
@@ -284,7 +327,7 @@ internal static class DestinationAdmissionGrpcAcceptance
             await WaitMetric("queued_requests", 0);
             Check(backendAttempts.SequenceEqual(new[] { "active", "queued" }),
                 "only accepted gRPC POSTs reach the real backend exactly once");
-            Console.WriteLine("PASS: real HTTP/2 gRPC framing, trailers, admission saturation and release");
+            Console.WriteLine($"PASS: real {protocol} gRPC framing, trailers, admission saturation and release");
         }
         finally
         {
@@ -326,6 +369,65 @@ internal static class DestinationAdmissionGrpcAcceptance
         }
 
 
+    }
+
+    private static int GetDualTransportPort() => TrafficHttp3Acceptance.SelectDualTransportPort(() =>
+    {
+        var udp = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+        udp.Bind(new IPEndPoint(IPAddress.Loopback, 0));
+        return (((IPEndPoint)udp.LocalEndPoint!).Port, udp);
+    }, port =>
+    {
+        using var tcp = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+        tcp.Bind(new IPEndPoint(IPAddress.Loopback, port));
+    });
+
+    private sealed class OriginTrust : IDisposable
+    {
+        private readonly X509Certificate2 root;
+        public X509Certificate2 ServerCertificate { get; }
+
+        public OriginTrust()
+        {
+            using var caKey = RSA.Create(2048);
+            var ca = new CertificateRequest("CN=GatewayCore CI gRPC " + Guid.NewGuid().ToString("N"),
+                caKey, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+            ca.CertificateExtensions.Add(new X509BasicConstraintsExtension(true, true, 0, true));
+            ca.CertificateExtensions.Add(new X509KeyUsageExtension(X509KeyUsageFlags.KeyCertSign | X509KeyUsageFlags.CrlSign, true));
+            using var issuer = ca.CreateSelfSigned(DateTimeOffset.UtcNow.AddMinutes(-5), DateTimeOffset.UtcNow.AddHours(2));
+            root = X509CertificateLoader.LoadCertificate(issuer.Export(X509ContentType.Cert));
+            using var leafKey = RSA.Create(2048);
+            var leaf = new CertificateRequest("CN=localhost", leafKey, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+            var san = new SubjectAlternativeNameBuilder();
+            san.AddDnsName("localhost"); san.AddIpAddress(IPAddress.Loopback);
+            leaf.CertificateExtensions.Add(san.Build());
+            leaf.CertificateExtensions.Add(new X509BasicConstraintsExtension(false, false, 0, true));
+            leaf.CertificateExtensions.Add(new X509KeyUsageExtension(X509KeyUsageFlags.DigitalSignature, true));
+            leaf.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension(new OidCollection { new Oid("1.3.6.1.5.5.7.3.1") }, true));
+            using var signed = leaf.Create(issuer, DateTimeOffset.UtcNow.AddMinutes(-2), DateTimeOffset.UtcNow.AddHours(1),
+                RandomNumberGenerator.GetBytes(16));
+            using var withKey = signed.CopyWithPrivateKey(leafKey);
+            ServerCertificate = X509CertificateLoader.LoadPkcs12(withKey.Export(X509ContentType.Pkcs12), null,
+                OperatingSystem.IsWindows() ? X509KeyStorageFlags.UserKeySet : X509KeyStorageFlags.EphemeralKeySet);
+            try
+            {
+                using var store = new X509Store(StoreName.Root, StoreLocation.CurrentUser);
+                store.Open(OpenFlags.ReadWrite);
+                store.Add(root);
+            }
+            catch { ServerCertificate.Dispose(); root.Dispose(); throw; }
+        }
+
+        public void Dispose()
+        {
+            try
+            {
+                using var store = new X509Store(StoreName.Root, StoreLocation.CurrentUser);
+                store.Open(OpenFlags.ReadWrite);
+                store.Remove(root);
+            }
+            finally { ServerCertificate.Dispose(); root.Dispose(); }
+        }
     }
 
     private static void WritePrivate(string path, string value) =>
