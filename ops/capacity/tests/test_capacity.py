@@ -107,6 +107,22 @@ class CapacityEvidence(unittest.TestCase):
         self.assertEqual(d["decision"],"NO-GO")
         self.assertIn("NIC drops increased: rx_dropped",d["error_reasons"])
         self.assertIn("counter decreased/reset: rx_dropped",d["error_reasons"])
+    def test_gc_metric_names_without_real_samples_fail(self):
+        for raw in ('# HELP yarp_control_gc_heap_bytes heap\n# HELP yarp_control_gc_collections_total collections',
+                    'yarp_control_gc_heap_bytes NaN\nyarp_control_gc_collections_total{generation="2"} 0',
+                    'yarp_control_gc_heap_bytes 1000\nyarp_control_gc_collections_total{generation="1"} 0',
+                    'yarp_control_gc_heap_bytes 1000\nyarp_control_gc_heap_bytes 2000\nyarp_control_gc_collections_total{generation="2"} 0'):
+            with self.subTest(raw=raw):
+                self.mutate_telemetry("gc_prometheus_raw",100,raw)
+                r,d=self.report()
+                self.assertNotEqual(r.returncode,0)
+                self.assertIn("missing/invalid/duplicate real GC",str(d["error_reasons"]))
+    def test_gc_collection_counter_reset_fails(self):
+        self.mutate_telemetry("gc_prometheus_raw",100,
+            'yarp_control_gc_heap_bytes 2000000\nyarp_control_gc_collections_total{generation="2"} 3')
+        r,d=self.report()
+        self.assertNotEqual(r.returncode,0)
+        self.assertIn("counter decreased/reset: GC generation 2 collections",d["error_reasons"])
     def test_cpu_counter_rollback_fails(self):
         self.mutate_telemetry("process_cpu_seconds", 100, 0)
         r,d=self.report()
