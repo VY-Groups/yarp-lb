@@ -159,8 +159,10 @@ internal static class DnsWireProtocol
             // non-terminal. NXDOMAIN would incorrectly deny its entire subtree
             // to caching resolvers (RFC 8020 section 3.1).
             var emptyNonTerminal = !atApex && ns is null &&
-                zone.NameServers.Any(n =>
-                    n.Host.EndsWith("." + domain, StringComparison.OrdinalIgnoreCase));
+                (zone.NameServers.Any(n =>
+                    n.Host.EndsWith("." + domain, StringComparison.OrdinalIgnoreCase)) ||
+                 zone.Delegations.Any(cut =>
+                    cut.Name.EndsWith("." + domain, StringComparison.OrdinalIgnoreCase)));
             if (delegation is not null && domain.Equals(delegation.Name, StringComparison.OrdinalIgnoreCase) && qtype == Ds)
             {
                 if (delegation.DsRecords.Length > 0)
