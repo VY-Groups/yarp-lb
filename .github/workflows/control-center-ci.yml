@@ -7,10 +7,14 @@ on:
     paths:
       - "control-center/**"
       - ".github/workflows/control-center-ci.yml"
+      - "tests/E2E/peer_delta_http.py"
+      - "tests/E2E/real_control_center.py"
   pull_request:
     paths:
       - "control-center/**"
       - ".github/workflows/control-center-ci.yml"
+      - "tests/E2E/peer_delta_http.py"
+      - "tests/E2E/real_control_center.py"
   workflow_dispatch:
 
 permissions:
@@ -67,6 +71,11 @@ jobs:
         run: dotnet run --project tests/Ec2LabSafetyTests/Ec2LabSafetyTests.csproj --configuration Release
       - name: Offline functional smoke of the real Control Center and two local backends
         run: python ../tests/EC2Functional/smoke.py --root . --dll bin/Release/net10.0/GatewayCoreYarp.dll
+      - name: Real HTTPS peer v4 delta, gap recovery and receiver restart
+        if: runner.os == 'Linux'
+        env:
+          CI: "true"
+        run: python ../tests/E2E/peer_delta_http.py --root .
       - name: Verify EC2 request caps and read-only harness without network access
         run: python -m unittest discover -s ../tests/EC2Functional -p 'test_*.py' -v
       - name: Test TLS certificate inventory status logic
