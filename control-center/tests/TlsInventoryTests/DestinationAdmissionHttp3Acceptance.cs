@@ -101,6 +101,11 @@ internal static class DestinationAdmissionHttp3Acceptance
         WritePrivate(managementPfx, managementCert.Export(X509ContentType.Pfx, password));
         WritePrivate(managementPassword, password);
         File.WriteAllText(caPem, managementCert.ExportCertificatePem());
+        var managementClientKeyFlags = OperatingSystem.IsWindows()
+            ? X509KeyStorageFlags.UserKeySet
+            : X509KeyStorageFlags.EphemeralKeySet;
+        using var managementClientCert = X509CertificateLoader.LoadPkcs12FromFile(
+            managementPfx, password, managementClientKeyFlags);
 
         var tlsPort = GetDualTransportPort();
         var httpPort = GetTcpPort();
@@ -193,7 +198,7 @@ internal static class DestinationAdmissionHttp3Acceptance
                 {
                     EnabledSslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13,
                     RemoteCertificateValidationCallback = (_, _, _, _) => true,
-                    ClientCertificates = new X509CertificateCollection { managementCert }
+                    ClientCertificates = new X509CertificateCollection { managementClientCert }
                 }
             };
             using var managementClient = new HttpClient(managementHandler) { Timeout = Timeout.InfiniteTimeSpan };
