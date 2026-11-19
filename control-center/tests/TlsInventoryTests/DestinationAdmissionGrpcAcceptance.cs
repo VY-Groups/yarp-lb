@@ -66,6 +66,7 @@ internal static class DestinationAdmissionGrpcAcceptance
         // Require the same negotiated protocol on both transport legs.
         byte[] frame = [0, 0, 0, 0, 0];
         var releaseActive = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseDrain = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var backendAttempts = new ConcurrentQueue<string>();
         // Trust a unique disposable CA only in the CI account's root store.
         // Never disable shipping outbound certificate validation.
@@ -92,6 +93,8 @@ internal static class DestinationAdmissionGrpcAcceptance
             await context.Response.Body.FlushAsync(context.RequestAborted);
             if (id == "active")
                 await releaseActive.Task.WaitAsync(TimeSpan.FromSeconds(30), context.RequestAborted);
+            if (id == "drain-active")
+                await releaseDrain.Task.WaitAsync(TimeSpan.FromSeconds(30), context.RequestAborted);
             await context.Response.Body.WriteAsync(frame, context.RequestAborted);
             context.Response.AppendTrailer("grpc-status", "0");
         });
@@ -383,10 +386,60 @@ internal static class DestinationAdmissionGrpcAcceptance
             await WaitMetric("inflight_requests", 0);
             Check(chatAttempts == 1, "bidirectional gRPC POST reaches upstream exactly once");
             Console.WriteLine($"PASS: real {protocol} bidirectional gRPC streaming and half-close");
+
+            if (useHttp3 && OperatingSystem.IsLinux())
+            {
+                // Real OS SIGTERM, not Kill() or a fake shutdown endpoint.
+                using var draining = await Send("drain-active");
+                Check(draining.IsSuccessStatusCode && draining.Version == version,
+                    "HTTP/3 active call starts before SIGTERM");
+                await using var drainingStream = await draining.Content.ReadAsStreamAsync(ct);
+                await ReadFrame(drainingStream);
+                await WaitMetric("inflight_requests", 1);
+                var drainQueued = Send("drain-queued");
+                await WaitMetric("queued_requests", 1);
+                using var signal = Process.Start(new ProcessStartInfo("kill")
+                {
+                    UseShellExecute = false,
+                    ArgumentList = { "-TERM", appProcess.Id.ToString(System.Globalization.CultureInfo.InvariantCulture) }
+                }) ?? throw new Exception("Unable to send SIGTERM");
+                await signal.WaitForExitAsync(ct);
+                Check(signal.ExitCode == 0, "sent SIGTERM to shipping gateway");
+                // The queued call must be refused, either by the gateway's
+                // shutdown fence or QUIC shutdown. Never accept a successful POST.
+                async Task AssertRefused(Task<HttpResponseMessage> task)
+                {
+                    try
+                    {
+                        using var response = await task.WaitAsync(TimeSpan.FromSeconds(8), ct);
+                        Check(response.StatusCode == HttpStatusCode.ServiceUnavailable &&
+                            response.Headers.TryGetValues("X-GatewayCore-Rejection", out var reason) &&
+                            reason.Single() == "gateway_shutdown",
+                            "shutdown refused pending/new work explicitly");
+                    }
+                    catch (HttpRequestException)
+                    {
+                        Console.WriteLine("PASS: shutdown refused pending/new QUIC work at transport");
+                    }
+                }
+                await AssertRefused(drainQueued);
+                await AssertRefused(Send("drain-new"));
+                Check(!appProcess.HasExited, "gateway remains alive while accepted HTTP/3 response is held");
+                releaseDrain.TrySetResult();
+                await Finish(draining, drainingStream);
+                await appProcess.WaitForExitAsync(ct);
+                Check(appProcess.ExitCode == 0, "gateway exits cleanly after accepted stream completes");
+                Check(backendAttempts.SequenceEqual(new[] { "active", "queued", "drain-active" }),
+                    "queued and new shutdown POSTs are never forwarded or replayed");
+                Console.WriteLine("PASS: real HTTP/3 graceful SIGTERM drain, accepted trailers, no new POSTs");
+            }
+            else if (useHttp3)
+                Console.WriteLine("SKIP: POSIX SIGTERM graceful shutdown scenario is Linux-only");
         }
         finally
         {
             releaseActive.TrySetResult();
+            releaseDrain.TrySetResult();
             if (!appProcess.HasExited)
             {
                 expectedStop = true;
