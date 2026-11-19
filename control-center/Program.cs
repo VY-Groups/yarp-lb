@@ -36,6 +36,13 @@ if (!OperatingSystem.IsLinux() || ec2Lab)
 var keyDir = Path.Combine(privateDir, "data-protection-keys");
 if (!OperatingSystem.IsLinux() || ec2Lab)
     Directory.CreateDirectory(keyDir);
+var oidcPolicy = EnterpriseOidcPolicy.FromFile(Environment.GetEnvironmentVariable("GATEWAY_OIDC_CONFIG_FILE"));
+var localAudit = new LocalAdminAudit(Path.Combine(privateDir, "admin-audit.jsonl"));
+using var externalAuditIntent = ExternalAuditIntent.FromEnvironment(
+    Environment.GetEnvironmentVariable("GATEWAY_AUDIT_INTENT_URL"),
+    Environment.GetEnvironmentVariable("GATEWAY_AUDIT_NODE_ID"),
+    Environment.GetEnvironmentVariable("GATEWAY_AUDIT_SENDER_KEY_FILE"),
+    Environment.GetEnvironmentVariable("GATEWAY_AUDIT_COLLECTOR_PUBLIC_KEY_FILE"));
 var builder = WebApplication.CreateBuilder(args);
 GatewayOpenTelemetry.Configure(builder.Services);
 // Explicit v0.1 multi-socket mode; legacy loopback remains CI migration-only.
@@ -100,13 +107,13 @@ builder.Services.AddHostedService<AutonomousRecoveryObserver>();
 // Opt-in by cluster.HealthCheck.Passive.Policy only. No request replay.
 builder.Services.AddSingleton<IPassiveHealthCheckPolicy, BoundedTransportFailureHealthPolicy>();
 builder.Services.AddSingleton<IActiveHealthCheckPolicy, RiseFallActiveHealthPolicy>();
-builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme)
+var adminAuthentication = builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme)
     .AddCookie(options =>
     {
         options.Cookie.Name = "GatewayCoreYarpAdmin";
         options.Cookie.HttpOnly = true;
         options.Cookie.SameSite = SameSiteMode.Strict;
-        options.Cookie.SecurePolicy = CookieSecurePolicy.SameAsRequest; // local HTTP TEST only; mandate HTTPS for remote administration
+        options.Cookie.SecurePolicy = oidcPolicy is null ? CookieSecurePolicy.SameAsRequest : CookieSecurePolicy.Always; // OIDC never permits HTTP
         // Inactivity timeout for interactive local administration. Renew only on
         // authenticated user requests (never via background polling).
         options.ExpireTimeSpan = TimeSpan.FromMinutes(30);
@@ -122,6 +129,19 @@ builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationSc
                 if (active is null || !active.Enabled || active.Role != role ||
                     active.SecurityStamp != ctx.Principal?.FindFirst("stamp")?.Value)
                 { ctx.RejectPrincipal(); await ctx.HttpContext.SignOutAsync(CookieAuthenticationDefaults.AuthenticationScheme); return; }
+                var principal = ctx.Principal!;
+                var oidcSubject = principal.FindFirst(EnterpriseOidcPolicy.SubjectClaim)?.Value;
+                if (oidcPolicy is not null)
+                {
+                    var allowed = active.Provider == "Local" && (oidcSubject is not null
+                        ? oidcPolicy.SessionValid(principal, active.Username, active.Role, DateTimeOffset.UtcNow)
+                        : active.Role == "Administrator" && oidcPolicy.IsBreakGlass(active.Username) &&
+                          principal.FindFirst(EnterpriseOidcPolicy.RecoveryClaim)?.Value == oidcPolicy.Fingerprint);
+                    if (!allowed)
+                    { ctx.RejectPrincipal(); await ctx.HttpContext.SignOutAsync(CookieAuthenticationDefaults.AuthenticationScheme); return; }
+                }
+                else if (oidcSubject is not null || principal.HasClaim(c => c.Type == EnterpriseOidcPolicy.RecoveryClaim))
+                { ctx.RejectPrincipal(); await ctx.HttpContext.SignOutAsync(CookieAuthenticationDefaults.AuthenticationScheme); return; }
                 // Fail closed if the AD account is disabled, its group membership changes, or LDAPS is unreachable.
                 if (active.Provider == "AD" && !ctx.HttpContext.RequestServices.GetRequiredService<DirectoryAuthService>()
                     .StillAuthorized(active.Username, active.DistinguishedName, role ?? ""))
@@ -132,6 +152,9 @@ builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationSc
         options.Events.OnRedirectToLogin = ctx => { ctx.Response.StatusCode = 401; return Task.CompletedTask; };
         options.Events.OnRedirectToAccessDenied = ctx => { ctx.Response.StatusCode = 403; return Task.CompletedTask; };
     });
+if (oidcPolicy is not null)
+    EnterpriseOidcAuthentication.Configure(adminAuthentication, oidcPolicy,
+        Path.Combine(privateDir, "admin-users.json"), localAudit);
 builder.Services.AddAuthorization();
 builder.Services.AddSingleton<DirectoryAuthService>(sp =>
     new DirectoryAuthService(sp.GetRequiredService<IDataProtectionProvider>(), privateDir));
@@ -307,7 +330,6 @@ async Task SendOtp(string recipient, string code)
         $"Your one-time sign-in code is {code}. It expires in 5 minutes. Do not share this code.");
 }
 var configPath = applicationConfigPath;
-var localAudit = new LocalAdminAudit(Path.Combine(privateDir, "admin-audit.jsonl"));
 var gate = new SemaphoreSlim(1, 1);
 // MANAGEMENT IS LOOPBACK-ONLY IN THIS RELEASE. Never bind management to the public VIP.
 app.Use(async (ctx, next) =>
@@ -320,6 +342,8 @@ app.Use(async (ctx, next) =>
     }
     if (adminPath)
     {
+        if (oidcPolicy is not null && !oidcPolicy.MatchesOrigin(ctx.Request.Scheme, ctx.Request.Host.Value))
+        { ctx.Response.StatusCode = 403; return; }
         if (isolatedListeners is null && (ctx.Connection.RemoteIpAddress is null || !IPAddress.IsLoopback(ctx.Connection.RemoteIpAddress)))
         {
             ctx.Response.StatusCode = 403; return;
@@ -669,7 +693,19 @@ app.Use(async (ctx, next) =>
         if (string.IsNullOrWhiteSpace(token) ||
             !CryptographicOperations.FixedTimeEquals(Encoding.UTF8.GetBytes(token), Encoding.UTF8.GetBytes(provided)))
         { ctx.Response.StatusCode = 403; return; }
-        if (ctx.User.IsInRole("Viewer")) { ctx.Response.StatusCode = 403; return; }
+        if (ctx.Request.Path != "/admin/api/logout" && ctx.User.IsInRole("Viewer")) { ctx.Response.StatusCode = 403; return; }
+        // All authenticated administrative mutations require recent verified IdP
+        // authentication in enterprise mode, except the explicitly named recovery account.
+        // The recovery account must have signed in with local password + delivered OTP.
+        if (oidcPolicy is not null && ctx.Request.Path != "/admin/api/logout" &&
+            !oidcPolicy.IsBreakGlass(ctx.User.Identity?.Name) &&
+            !oidcPolicy.SessionValid(ctx.User, ctx.User.Identity?.Name ?? "",
+                ctx.User.FindFirst(ClaimTypes.Role)?.Value ?? "", DateTimeOffset.UtcNow, stepUp: true))
+        {
+            ctx.Response.StatusCode = 403;
+            await ctx.Response.WriteAsJsonAsync(new { error = "Fresh phishing-resistant sign-in required. Sign in again using Enterprise SSO.", signIn = "/admin/oidc/start" });
+            return;
+        }
         if (ctx.Request.Path.StartsWithSegments("/admin/api/restore") && !ctx.User.IsInRole("Administrator"))
         { ctx.Response.StatusCode = 403; return; }
     }
@@ -711,14 +747,24 @@ IResult SignInResult(AdminUser user, HttpContext ctx)
 }
 async Task SignIn(AdminUser user, HttpContext ctx)
 {
-    var claims = new[] {
+    var claims = new List<Claim> {
         new Claim(ClaimTypes.Name, user.Username),
         new Claim(ClaimTypes.Role, user.Role),
         new Claim("csrf", Convert.ToHexString(RandomNumberGenerator.GetBytes(32))),
         new Claim("stamp", user.SecurityStamp)
     };
+    var properties = new AuthenticationProperties();
+    if (oidcPolicy is not null)
+    {
+        if (!oidcPolicy.IsBreakGlass(user.Username) || user.Provider != "Local" ||
+            user.Role != "Administrator" || !ReadMail().Enabled)
+            throw new InvalidOperationException("Only approved recovery account may use local sign-in in enterprise mode");
+        claims.Add(new Claim(EnterpriseOidcPolicy.RecoveryClaim, oidcPolicy.Fingerprint));
+        properties.AllowRefresh = false;
+        properties.ExpiresUtc = DateTimeOffset.UtcNow.AddMinutes(10);
+    }
     await ctx.SignInAsync(CookieAuthenticationDefaults.AuthenticationScheme,
-        new ClaimsPrincipal(new ClaimsIdentity(claims, CookieAuthenticationDefaults.AuthenticationScheme)));
+        new ClaimsPrincipal(new ClaimsIdentity(claims, CookieAuthenticationDefaults.AuthenticationScheme)), properties);
 }
 
 app.MapGet("/admin/api/session", (HttpContext ctx) => Results.Ok(new {
@@ -732,6 +778,8 @@ app.MapGet("/admin/api/session", (HttpContext ctx) => Results.Ok(new {
 
 app.MapPost("/admin/api/bootstrap", async (HttpContext ctx, LoginInput input) =>
 {
+    if (oidcPolicy is not null)
+        return Results.Json(new { error = "Provision local recovery and mapped accounts before enabling enterprise SSO" }, statusCode: 403);
     await loginGate.WaitAsync();
     try
     {
@@ -748,13 +796,30 @@ app.MapPost("/admin/api/bootstrap", async (HttpContext ctx, LoginInput input) =>
 }).RequireRateLimiting("login");
 
 app.MapGet("/admin/api/auth-methods", () => Results.Ok(new {
-    local = true, activeDirectory = directoryAuth.Read().Enabled,
-    mailOtp = ReadMail().Enabled,
-    info = "AD sign-in requires LDAPS, mapped groups and email OTP"
+    local = true, activeDirectory = oidcPolicy is null && directoryAuth.Read().Enabled,
+    mailOtp = ReadMail().Enabled, enterpriseOidc = oidcPolicy is not null,
+    info = oidcPolicy is not null ? "Enterprise SSO with phishing-resistant MFA; local sign-in reserved for recovery" :
+        "AD sign-in requires LDAPS, mapped groups and email OTP"
 }));
+
+app.MapGet("/admin/oidc/start", (HttpContext ctx) =>
+{
+    if (oidcPolicy is null) return Results.NotFound();
+    return Results.Challenge(new AuthenticationProperties { RedirectUri = "/dashboard" },
+        [EnterpriseOidcPolicy.Scheme]);
+}).RequireRateLimiting("login");
+app.MapGet("/admin/oidc/error", () => Results.Text(
+    "Enterprise sign-in was denied. Check your identity provider, account mapping, MFA policy or contact an administrator. Return to /dashboard.", statusCode: 403));
 
 app.MapPost("/admin/api/login", async (HttpContext ctx, LoginInput input) =>
 {
+    if (oidcPolicy is not null &&
+        (!oidcPolicy.IsBreakGlass(input.Username) || !string.Equals(input.Provider, "local", StringComparison.OrdinalIgnoreCase) ||
+         !ReadMail().Enabled))
+    {
+        await Audit("recovery:unknown", "ENTERPRISE_LOCAL_LOGIN_DENIED");
+        return Results.Json(new { error = "Enterprise SSO required; local login is restricted to the configured OTP recovery account" }, statusCode: 403);
+    }
     AdminUser? user;
     if (string.Equals(input.Provider, "directory", StringComparison.OrdinalIgnoreCase))
     {
@@ -805,7 +870,11 @@ app.MapPost("/admin/api/login", async (HttpContext ctx, LoginInput input) =>
         await Audit(input.Username ?? "unknown", "LOGIN_DENIED");
         return Results.Json(new { error = "Invalid credentials" }, statusCode: 401);
     }
+    if (oidcPolicy is not null && (user.Provider != "Local" || user.Role != "Administrator"))
+        return Results.Json(new { error = "Recovery account not authorized" }, statusCode: 403);
     var mail = ReadMail();
+    if (oidcPolicy is not null && !mail.Enabled)
+        return Results.Json(new { error = "Recovery OTP unavailable" }, statusCode: 503);
     if (mail.Enabled)
     {
         if (!ValidEmail(user.Email)) return Results.Json(new { error = "Account has no verified email. Contact administrator." }, statusCode: 403);
@@ -840,6 +909,10 @@ app.MapPost("/admin/api/login/verify", async (HttpContext ctx, VerifyOtpInput in
     pendingOtp.TryRemove(input.ChallengeId, out _);
     var user = ReadUsers().FirstOrDefault(x => x.Username.Equals(challenge.Username, StringComparison.OrdinalIgnoreCase));
     if (user is null || !user.Enabled) return Results.Json(new { error = "Account disabled" }, statusCode: 403);
+    if (oidcPolicy is not null &&
+        (!oidcPolicy.IsBreakGlass(user.Username) || user.Provider != "Local" ||
+         user.Role != "Administrator" || !ReadMail().Enabled))
+        return Results.Json(new { error = "Recovery session not authorized" }, statusCode: 403);
     if (user.Provider == "AD")
     {
         try { if (!directoryAuth.StillAuthorized(user.Username, user.DistinguishedName, user.Role))
@@ -1292,13 +1365,23 @@ async Task<IResult> CommitReviewedChange(HttpContext ctx, JsonObject submitted)
         proxy["Clusters"] = clusters.DeepClone();
         proxy["AdminDisabledDestinations"] = disabled.DeepClone();
         doc["ReverseProxy"] = proxy;
+        var newConfig = doc.ToJsonString(new JsonSerializerOptions { WriteIndented = true });
+        if (externalAuditIntent is not null)
+        {
+            if (!await externalAuditIntent.ConfirmAsync(Actor(ctx), "CONFIG_APPLY_INTENT", currentRevision,
+                    Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(newConfig))), ctx.RequestAborted) ||
+                ctx.RequestAborted.IsCancellationRequested)
+                return Results.Json(new { error = "External audit receipt unavailable; configuration unchanged" }, statusCode: 503);
+            if (!File.ReadAllBytes(configPath).AsSpan().SequenceEqual(snapshot))
+                return Results.Conflict(new { error = "Configuration changed during external audit confirmation" });
+        }
         Directory.CreateDirectory(backupFolder);
         var stamp = DateTimeOffset.UtcNow.ToString("yyyyMMddTHHmmssfffffffZ");
         var backup = Path.Combine(backupFolder, $"appsettings-{stamp}.json");
         using (var backupStream = new FileStream(backup, FileMode.CreateNew, FileAccess.Write, FileShare.None))
             await backupStream.WriteAsync(snapshot);
         var temp = configPath + ".tmp";
-        await File.WriteAllTextAsync(temp, doc.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+        await File.WriteAllTextAsync(temp, newConfig);
         File.Move(temp, configPath, overwrite: true);
         await Audit(Actor(ctx), "CONFIG_APPLIED", new { routes = routes.Count, clusters = clusters.Count, backup = Path.GetFileName(backup) });
         return Results.Ok(new { saved = true, backup = Path.GetFileName(backup), message = "Saved to appsettings.json; YARP config reload typically occurs automatically. Verify gateway logs." });
@@ -1465,6 +1548,17 @@ app.MapPost("/admin/api/restore/{name}", async (HttpContext ctx, string name) =>
     {
         var json = await File.ReadAllTextAsync(path);
         if (JsonNode.Parse(json)?["ReverseProxy"] is null) return Results.BadRequest(new { error = "Backup lacks ReverseProxy configuration" });
+        if (externalAuditIntent is not null)
+        {
+            var restoreSnapshot = File.ReadAllBytes(configPath);
+            if (!await externalAuditIntent.ConfirmAsync(Actor(ctx), "CONFIG_RESTORE_INTENT",
+                    Convert.ToHexString(SHA256.HashData(restoreSnapshot)),
+                    Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(json))), ctx.RequestAborted) ||
+                ctx.RequestAborted.IsCancellationRequested)
+                return Results.Json(new { error = "External audit receipt unavailable; configuration unchanged" }, statusCode: 503);
+            if (!File.ReadAllBytes(configPath).AsSpan().SequenceEqual(restoreSnapshot))
+                return Results.Conflict(new { error = "Configuration changed during external audit confirmation" });
+        }
         var safety = Path.Combine(backupFolder, $"appsettings-{DateTimeOffset.UtcNow:yyyyMMddTHHmmssfffffff}Z.json");
         File.Copy(configPath, safety);
         await File.WriteAllTextAsync(configPath + ".tmp", json);
@@ -1927,7 +2021,9 @@ app.MapReverseProxy(proxyPipeline =>
         }
 
         var selected = candidates[0];
-        var clusterId = feature.Cluster.Config.ClusterId;
+        var selectedConfig = selected.Model.Config;
+        var selectedClusterConfig = feature.Cluster.Config;
+        var clusterId = selectedClusterConfig.ClusterId;
         var manager = context.RequestServices.GetRequiredService<DestinationAdmissionManager>();
         if (!manager.TryAcquireHandle(clusterId, selected.DestinationId, out var registryHandle, out var policyConflict) || registryHandle is null)
         {
@@ -1958,14 +2054,15 @@ app.MapReverseProxy(proxyPipeline =>
         var state = registryHandle.State;
         var policy = state.Policy;
 
+        var applicationStopping = context.RequestServices.GetRequiredService<IHostApplicationLifetime>().ApplicationStopping;
         using var waitCancellation = CancellationTokenSource.CreateLinkedTokenSource(
             context.RequestAborted,
-            context.RequestServices.GetRequiredService<IHostApplicationLifetime>().ApplicationStopping);
-        waitCancellation.CancelAfter(policy.QueueTimeoutMs);
+            applicationStopping);
         DestinationAdmissionState.DestinationAdmissionLease? lease;
         try
         {
-            lease = await state.AcquireAsync(waitCancellation.Token);
+            lease = await state.AcquireAsync(waitCancellation.Token,
+                TimeSpan.FromMilliseconds(policy.QueueTimeoutMs));
         }
         catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested)
         {
@@ -1998,13 +2095,38 @@ app.MapReverseProxy(proxyPipeline =>
             // Do not transfer the request to a different backend. If a queued
             // destination was removed, drained or made unhealthy, fail locally.
             var lookup = context.RequestServices.GetRequiredService<IProxyStateLookup>();
-            if (context.RequestAborted.IsCancellationRequested) return;
+            // Atomically fence the queue deadline before forwarding. Stopping
+            // the timer and checking its token alone would miss a timer whose
+            // callback had not run by the time the permit continuation resumed.
+            var failureAfterGrant = DestinationAdmissionForwarding.CompleteQueueWait(
+                lease.WasQueued,
+                context.RequestAborted,
+                applicationStopping,
+                lease.QueueStartedTimestamp,
+                lease.QueueGrantedTimestamp,
+                TimeSpan.FromMilliseconds(policy.QueueTimeoutMs));
+            if (failureAfterGrant == DestinationAdmissionFailure.ClientAborted) return;
+            if (failureAfterGrant != DestinationAdmissionFailure.None)
+            {
+                context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+                if (failureAfterGrant == DestinationAdmissionFailure.ServiceStopping)
+                    context.Response.Headers["X-GatewayCore-Rejection"] = "gateway_shutdown";
+                else
+                {
+                    state.RecordTimeout();
+                    context.Response.Headers["X-GatewayCore-Rejection"] = "destination_queue_timeout";
+                }
+                return;
+            }
             if (!lookup.TryGetCluster(clusterId, out var currentCluster) ||
+                !ReferenceEquals(currentCluster.Model.Config, selectedClusterConfig) ||
                 !DestinationAdmissionForwarding.IsStillEligibleAfterWait(
                     selected.DestinationId,
                     currentCluster.DestinationsState.AvailableDestinations,
                     static destination => destination.DestinationId,
-                    TrafficLifecycle.IsDraining))
+                    TrafficLifecycle.IsDraining,
+                    destination => ReferenceEquals(destination, selected) &&
+                        ReferenceEquals(destination.Model.Config, selectedConfig)))
             {
                 context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
                 context.Response.Headers["X-GatewayCore-Rejection"] = "destination_unavailable_after_queue";

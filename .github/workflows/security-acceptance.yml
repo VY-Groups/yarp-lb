@@ -5,6 +5,7 @@ on:
       - "control-center/**"
       - "tests/E2E/real_control_center.py"
       - "tests/E2E/real_smtp_otp.py"
+      - "tests/E2E/enterprise_oidc.py"
       - ".github/workflows/security-acceptance.yml"
   push:
     branches: [main]
@@ -12,6 +13,7 @@ on:
       - "control-center/**"
       - "tests/E2E/real_control_center.py"
       - "tests/E2E/real_smtp_otp.py"
+      - "tests/E2E/enterprise_oidc.py"
       - ".github/workflows/security-acceptance.yml"
   workflow_dispatch:
 permissions:
@@ -60,3 +62,6 @@ jobs:
         run: dotnet build control-center/GatewayCoreYarp.csproj --configuration Release
       - name: Exercise real authenticated administrative HTTP API and security gates
         run: python tests/E2E/real_control_center.py --root control-center
+
+      - name: Exercise real HTTPS OIDC callback and negative token cases
+        run: python tests/E2E/enterprise_oidc.py --root control-center
