@@ -63,6 +63,21 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # Runner image provisioning can still be finishing APT work when this
+          # job starts. Wait for the package manager instead of racing its lock.
+          wait_for_package_manager() {
+            local deadline=$((SECONDS + 300))
+            while pgrep -x apt-get >/dev/null || pgrep -x apt >/dev/null || \
+                  pgrep -x dpkg >/dev/null || pgrep -f '[u]nattended-upgrade' >/dev/null; do
+              if (( SECONDS >= deadline )); then
+                echo "::error::Timed out waiting for the runner's APT/dpkg operation to finish"
+                ps -eo pid,comm,args | grep -E 'apt|dpkg|unattended-upgrade' || true
+                return 1
+              fi
+              echo "::notice::Runner package manager is busy; waiting for its lock"
+              sleep 5
+            done
+          }
           # Bound retries of transient Ubuntu mirror and browser CDN failures.
           # Keep Playwright's full dependency installation and signed APT indexes.
           sudo tee /etc/apt/apt.conf.d/99-gatewaycore-ci-retry >/dev/null <<'EOF'
@@ -72,6 +87,7 @@ jobs:
           APT::Update::Error-Mode "any";
           EOF
           for attempt in 1 2 3; do
+            wait_for_package_manager
             if timeout --kill-after=15s 240s npx playwright install --with-deps chromium; then
               exit 0
             fi
@@ -79,7 +95,6 @@ jobs:
             if [ "$attempt" -eq 3 ]; then
               exit 1
             fi
-            sudo rm -rf /var/lib/apt/lists/*
             sleep "$((attempt * 10))"
           done
       - name: Browser acceptance on real localhost GatewayCore Kestrel
@@ -92,3 +107,4 @@ jobs:
           path: tests/E2E/test-results/
           retention-days: 7
           if-no-files-found: ignore
+
