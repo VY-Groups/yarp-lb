@@ -252,15 +252,76 @@ internal static class AuthorityFenceTests
                 deletionReceiver.RecordPeerAcknowledgement(400, 400);
                 Check(deletionReceiver.IsPeerEligible("fence.example.test", "primary", 400),
                     "valid lease initially authorizes a target before durable state loss");
+                var savedReplay = File.ReadAllBytes(deletionConfig.ReplayStatePath);
                 File.Delete(deletionConfig.ReplayStatePath);
-                Check(!deletionReceiver.TryAccept(deletionSource.CreateSnapshot(401), tlsA, now, 401),
-                    "missing replay high-water state fails closed while authority is running");
-                Check(!deletionReceiver.IsPeerEligible("fence.example.test", "primary", 402),
-                    "detected durable state loss withdraws an existing positive lease immediately");
+                Check(!deletionReceiver.IsPeerEligible("fence.example.test", "primary", 1400),
+                    "DNS read detects durable state loss without another incoming snapshot, before lease expiry");
+                Check(ThrowsInvalid(() => deletionReceiver.CreateSnapshot(1401)),
+                    "faulted authority cannot publish a new positive decision");
+                File.WriteAllBytes(deletionConfig.ReplayStatePath, savedReplay);
+                if (!OperatingSystem.IsWindows())
+                    File.SetUnixFileMode(deletionConfig.ReplayStatePath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+                deletionReceiver.RecordPeerAcknowledgement(1402, 1402);
+                Check(!deletionReceiver.TryAccept(deletionSource.CreateSnapshot(1402), tlsA, now, 1402) &&
+                      !deletionReceiver.IsPeerEligible("fence.example.test", "primary", 1403) &&
+                      ThrowsInvalid(() => deletionReceiver.CreateSnapshot(1403)),
+                    "restored state cannot clear a latched runtime authority fault");
+                File.Delete(deletionConfig.ReplayStatePath);
             }
             File.Delete(deletionConfig.ReplayStatePath + ".lock");
             Check(ThrowsInvalid(() => new AuthorityFenceStore(deletionConfig, fingerprint, [target])),
                 "deleting replay file and lock marker still fails closed after restart");
+            // Simulate loss exactly while the snapshot is evaluating local
+            // eligibility: the initial durable check has already completed.
+            var signingConfig = configB with
+            {
+                EpochStatePath = Path.Combine(root, "signing-epoch.json"),
+                ReplayStatePath = Path.Combine(root, "signing-replay.json")
+            };
+            var loseDuringEvaluation = false;
+            var signingTarget = new AuthorityFenceTarget("fence.example.test", "primary", _ =>
+            {
+                if (loseDuringEvaluation) File.Delete(signingConfig.ReplayStatePath);
+                return true;
+            });
+            using (var signingStore = new AuthorityFenceStore(signingConfig, fingerprint, [signingTarget]))
+            {
+                Check(signingStore.CreateSnapshot(1500).Decisions.Single().Eligible,
+                    "authority signs eligible decision with intact durable state");
+                loseDuringEvaluation = true;
+                Check(ThrowsInvalid(() => signingStore.CreateSnapshot(1501)),
+                    "state loss during local evidence evaluation prevents signing a positive snapshot");
+                Check(!signingStore.CanPublish(1501),
+                    "fault detected during evaluation blocks publication");
+            }
+            // A snapshot can be signed while state is intact but not yet handed
+            // to HTTPS. That separate race must fail closed at publication.
+            var sendConfig = configB with
+            {
+                EpochStatePath = Path.Combine(root, "send-epoch.json"),
+                ReplayStatePath = Path.Combine(root, "send-replay.json")
+            };
+            using (var sendStore = new AuthorityFenceStore(sendConfig, fingerprint, [target]))
+            using (var sendSource = new AuthorityFenceStore(configA, fingerprint, [target]))
+            {
+                Check(sendStore.TryAccept(sendSource.CreateSnapshot(1600), tlsA, now, 1600),
+                    "publication fixture receives a valid inbound lease");
+                Check(sendStore.CreateSnapshot(1600).Decisions.Single().Eligible && sendStore.CanPublish(1600),
+                    "intact state permits prepared publication");
+                var replayBytes = File.ReadAllBytes(sendConfig.ReplayStatePath);
+                File.Delete(sendConfig.ReplayStatePath);
+                sendStore.RecordPeerAcknowledgement(1600, 1601);
+                Check(!sendStore.IsPeerEligible("fence.example.test", "primary", 1601),
+                    "acknowledgement rechecks durable state even inside cached read interval");
+                Check(!sendStore.CanPublish(1601),
+                    "durable loss after preparation prevents transmission");
+                File.WriteAllBytes(sendConfig.ReplayStatePath, replayBytes);
+                if (!OperatingSystem.IsWindows())
+                    File.SetUnixFileMode(sendConfig.ReplayStatePath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+                Check(!sendStore.CanPublish(1602) &&
+                      ThrowsInvalid(() => sendStore.CreateSnapshot(1602)),
+                    "restoring replay file cannot reopen a faulted publication gate");
+            }
             Console.WriteLine("PASS: authority 2-of-2 fence signature, membership, config, lease, replay and restart contracts");
         }
         finally { Directory.Delete(root, recursive: true); }
