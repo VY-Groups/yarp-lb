@@ -181,6 +181,18 @@ internal static class DestinationAdmissionHttp3Acceptance
             };
             using var client = new HttpClient(handler) { Timeout = Timeout.InfiniteTimeSpan };
             var endpoint = new Uri($"https://127.0.0.1:{tlsPort}/admit/slow");
+            using (var h2Warmup = new HttpRequestMessage(HttpMethod.Get,
+                $"https://127.0.0.1:{tlsPort}/gateway/health")
+            { Version = HttpVersion.Version20, VersionPolicy = HttpVersionPolicy.RequestVersionExact })
+            using (var h2Timeout = new CancellationTokenSource(TimeSpan.FromSeconds(12)))
+            using (var h2Response = await client.SendAsync(h2Warmup, h2Timeout.Token))
+            {
+                Check(h2Response.IsSuccessStatusCode && h2Response.Version == HttpVersion.Version20,
+                    "real GatewayCore HTTPS listener is ready over HTTP/2 before HTTP/3 admission traffic");
+                Check(h2Response.Headers.TryGetValues("Alt-Svc", out var altSvc) &&
+                    altSvc.Any(value => value.Contains("h3=", StringComparison.OrdinalIgnoreCase)),
+                    "HTTP/2 readiness response advertises the listener's HTTP/3 endpoint");
+            }
 
             using (var readinessTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(15)))
             {
