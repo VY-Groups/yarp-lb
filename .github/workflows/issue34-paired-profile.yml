@@ -57,12 +57,11 @@ jobs:
           dotnet build source/candidate/tests/L7/GatewayLab/GatewayLab.csproj -c Release
           dotnet build source/candidate/tests/L7/BackendLab/BackendLab.csproj -c Release
       - name: Run three alternating before/after pairs and bounded allocation traces
+        id: paired_profile
         env:
           BASELINE_COMMIT: d2b135f760e92fb2646ec5542d89a7dc309eb88c
           CANDIDATE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
-          # RLIMIT_FSIZE bounds each trace/artifact-producing child to 256 MiB.
-          ulimit -f 262144
           python3 source/candidate/tests/L7/performance/issue34/run_paired_profile.py \
             --baseline-dir source/baseline \
             --candidate-dir source/candidate \
@@ -77,6 +76,33 @@ jobs:
       - name: Add paired measurement summary
         if: always()
         run: |
+          if [[ "${{ steps.paired_profile.outcome }}" != "success" ]]; then
+            {
+              echo "## Issue 34 profile incomplete"
+              echo "Trace collection or another required step failed; no complete evidence was produced."
+            } >> "$GITHUB_STEP_SUMMARY"
+            if [[ -f artifacts/issue34/paired-report.json ]]; then
+              python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          report = json.loads(Path('artifacts/issue34/paired-report.json').read_text())
+          delta = report['paired_extra_allocation_delta']
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as out:
+              print(f"Interim allocation delta only: {delta['mean']} B/request "
+                    f"(95% CI {delta['ci95_low']} to {delta['ci95_high']}); "
+                    "this does not satisfy the paired profile acceptance.")
+          PY
+            fi
+            exit 0
+          fi
+          if [[ ! -s artifacts/issue34/paired-report.json || \
+                ! -s artifacts/issue34/trace-index.json || \
+                ! -s artifacts/issue34/traces/before-gc-verbose.nettrace || \
+                ! -s artifacts/issue34/traces/after-gc-verbose.nettrace ]]; then
+            echo "## Issue 34 profile incomplete: report or required trace is missing." >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
           if [[ -f artifacts/issue34/paired-report.json ]]; then
             python3 - <<'PY'
           import json
@@ -85,7 +111,8 @@ jobs:
           r = json.loads(Path('artifacts/issue34/paired-report.json').read_text())
           s = r['paired_extra_allocation_delta']
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as out:
-              print(f"Paired allocation delta: {s['mean']} B/request "
+              print(f"## Paired allocation evidence complete\n"
+                    f"Allocation delta: {s['mean']} B/request "
                     f"(95% CI {s['ci95_low']} to {s['ci95_high']}); {s['interpretation']}")
           PY
           fi

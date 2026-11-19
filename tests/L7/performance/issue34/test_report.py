@@ -1,12 +1,18 @@
 import unittest
 from io import BytesIO
+import os
 from pathlib import Path
+import subprocess
+import sys
 from tempfile import TemporaryDirectory
 
 from instrument_lab_stats import ADDITION, ANCHOR, instrument
 from report import build_report
 from run_paired_profile import (_drain_bounded_log, measurement as parse_measurement,
                                format_early_trace_exit, resolve_checkout)
+
+
+ISSUE34_DIR = Path(__file__).resolve().parent
 
 
 def measurement(alloc, *, rps=100.0, p95=30.0, p99=50.0, errors=0):
@@ -209,6 +215,19 @@ class ReportTests(unittest.TestCase):
         self.assertIn("exit 17", message)
         self.assertIn("target pid 1234", message)
         self.assertIn("diagnostic socket denied", message)
+
+    @unittest.skipUnless(os.name == "posix", "RLIMIT_FSIZE is a POSIX runner feature")
+    def test_trace_size_limit_applies_only_to_its_exec_child(self):
+        with TemporaryDirectory() as tmp:
+            output = Path(tmp) / "oversized.bin"
+            writer = ("from pathlib import Path; import sys; "
+                      "Path(sys.argv[1]).write_bytes(b'x' * (2 * 1024 * 1024))")
+            result = subprocess.run(
+                [sys.executable, str(ISSUE34_DIR / "trace_exec.py"), str(1024 * 1024),
+                 sys.executable, "-c", writer, str(output)],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(output.stat().st_size, 1024 * 1024)
 
 
 if __name__ == "__main__":

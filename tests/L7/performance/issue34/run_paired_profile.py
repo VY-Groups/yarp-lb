@@ -286,9 +286,13 @@ def trace_revision(source: Path, workspace: Path, output: Path, load_script: Pat
         command = [dotnet_trace, "collect", "--process-id", str(pid), "--profile", "gc-verbose",
                    "--buffersize", "64", "--duration", f"00:00:00:{trace_seconds:02d}",
                    "--output", str(trace_path)]
+        # Apply RLIMIT_FSIZE only to dotnet-trace. A workflow-wide shell limit
+        # is inherited by every child (including the tool's startup/preflight).
+        launcher = Path(__file__).with_name("trace_exec.py")
+        bounded_command = [sys.executable, str(launcher), str(MAX_TRACE_BYTES), *command]
         early_exit_code = None
         with trace_log.open("a", encoding="utf-8") as log:
-            trace = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT, text=True)
+            trace = subprocess.Popen(bounded_command, stdout=log, stderr=subprocess.STDOUT, text=True)
             time.sleep(3)
             early_exit_code = trace.poll()
             if early_exit_code is None:
