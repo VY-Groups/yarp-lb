@@ -7,3 +7,5 @@ The GitHub Actions `performance-soak` job creates an ephemeral HTTPS listener on
 A later production benchmark must use separate hosts for load generator, ingress, gateway and backends; trusted TLS chains, real mTLS, payload/connection reuse variants, multiple sustained concurrency levels (500–5000) and multi-hour soak/GC pause statistics. Those features are **not demonstrated** by this lab.
 
 TLS no-reuse comparison includes a new handshake on each client connection. The JSON report includes observed TLS-negotiated response counts and average TLS handshake and TCP connection setup time. Because these four tests are run sequentially on a shared host, differences are indicative only. These tests do not validate certificate trust or backend mTLS.
+
+For the stricter remaining issue #34 allocation question, see [`issue34/README.md`](issue34/README.md). That workflow runs paired baseline/candidate samples serially on the same hosted runner and collects bounded `dotnet-trace` allocation evidence. It remains isolated CI evidence, not a production-scale claim or an issue-completion result.
