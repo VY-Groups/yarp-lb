@@ -8,6 +8,20 @@ ASCII and rejects IP literals, private-use names, wildcard names and HTTP-01
 without an explicit challenge-entrypoint flag. It does not resolve DNS or
 prove that an address is publicly reachable.
 
+An opt-in HTTP-01 response primitive now serves an exact
+`/.well-known/acme-challenge/{token}` GET from a bounded, process-local table.
+It validates the RFC 8555 token/key-authorization binding, limits entries and
+lifetimes, expires challenges, disables caching, and returns 404 for unknown or
+expired tokens. It has no remote write API or disk persistence. The route is
+disabled by default and requires
+`YARP_ACME_HTTP01_PUBLIC_ENTRYPOINT=true` plus the explicit isolated listener
+configuration; the route checks the configured traffic IP and HTTP port and
+rejects HTTPS and every other local socket, including management sockets.
+The operator must make the HTTP-01 public port reachable on TCP/80 (directly or
+through a verified port mapping). The current application has no issuer that
+publishes tokens, so enabling the route alone still returns 404 until a future
+ACME adapter is added. It must not be treated as issuance or renewal support.
+
 The test suite covers this input policy on Windows and Ubuntu. Opt-in isolated
 traffic listeners can also hot-reload a PFX when an operator or future issuer
 atomically replaces the configured file and supplies explicit DNS names in the
@@ -28,17 +42,16 @@ ephemeral key loading. The existing static-certificate behavior remains when
 need to be restricted to the service identity by deployment; the application
 does not change those ACLs.
 
-There is still no ACME account/key persistence, challenge route, issuance flow,
-renewal scheduler, backoff/jitter, OCSP/CRL check specifically at activation,
-revocation workflow, or failure alerting. The HTTP-01 flag is not a challenge
-listener and must not be interpreted as one. This is a partial runtime
-certificate-rotation increment for issue #37; it does not satisfy the issue or
-make automatic TLS deployment safe.
+There is still no ACME account/key persistence, issuer/client, order/authorization
+flow, token publisher, renewal scheduler, backoff/jitter, OCSP/CRL check
+specifically at activation, revocation workflow, or failure alerting. This is a
+partial challenge-response and runtime certificate-rotation increment for issue
+#37; it does not satisfy the issue or make automatic TLS deployment safe.
 
 A real lifecycle still needs an independently reviewed issuer adapter that
-writes validated candidates atomically, and integration tests with a
-deterministic ACME CA (such as Pebble) that exercise the production challenge
-handler, persisted account identity, renewal scheduling, failure alarms and
-revocation. Public staging validation also requires an operator-supplied
+publishes tokens, persists account identity securely, writes validated
+candidates atomically, and integration tests with a deterministic ACME CA (such
+as Pebble) that exercise the challenge handler, renewal scheduling, failure
+alarms and revocation. Public staging validation also requires an operator-supplied
 eligible domain and reachable challenge entrypoint; CI has neither. No
 production CA or DNS credentials belong in CI.

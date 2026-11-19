@@ -40,6 +40,13 @@ var builder = WebApplication.CreateBuilder(args);
 GatewayOpenTelemetry.Configure(builder.Services);
 // Explicit v0.1 multi-socket mode; legacy loopback remains CI migration-only.
 var isolatedListeners = GatewayListenerIsolation.FromEnvironment();
+var acmeChallengeSetting = Environment.GetEnvironmentVariable("YARP_ACME_HTTP01_PUBLIC_ENTRYPOINT");
+if (acmeChallengeSetting is not null && !bool.TryParse(acmeChallengeSetting, out _))
+    throw new InvalidOperationException("YARP_ACME_HTTP01_PUBLIC_ENTRYPOINT must be true or false");
+var acmeHttp01PublicEntrypointEnabled = string.Equals(acmeChallengeSetting, "true", StringComparison.OrdinalIgnoreCase);
+if (acmeHttp01PublicEntrypointEnabled && isolatedListeners is null)
+    throw new InvalidOperationException("ACME HTTP-01 requires the explicitly configured isolated traffic listener");
+builder.Services.AddSingleton<AcmeHttp01ChallengeStore>();
 isolatedListeners?.Configure(builder.WebHost);
 if (isolatedListeners is not null)
     // Register through a factory so the host owns and disposes the listener's
@@ -1088,6 +1095,8 @@ app.MapGet("/dashboard", () => Results.File(Path.Combine(root, "wwwroot", "index
 app.MapGet("/dashboard/app.js", () => Results.File(Path.Combine(root, "wwwroot", "app.js"), "text/javascript; charset=utf-8"));
 app.MapGet("/dashboard/style.css", () => Results.File(Path.Combine(root, "wwwroot", "style.css"), "text/css; charset=utf-8"));
 app.MapGet("/gateway/health", () => Results.Ok(new { status = "healthy", gateway = Environment.MachineName, utc = DateTimeOffset.UtcNow }));
+app.MapHttp01Challenge(acmeHttp01PublicEntrypointEnabled,
+    ctx => isolatedListeners?.OnTrafficHttp(ctx) == true);
 // Readiness is on the DATA listener only in isolated mode; unknown/empty backends fail closed.
 app.MapGet("/gateway/health/ready", (IProxyStateLookup proxy) =>
     GatewayListenerIsolation.AnyDestinationHealthy(proxy)
