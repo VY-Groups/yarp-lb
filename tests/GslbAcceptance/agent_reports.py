@@ -668,11 +668,29 @@ def main():
         # One independent observer reports a real failure while the DNS node's
         # local readiness endpoint stays healthy; the quorum must withdraw it.
         agents[0]["upstream"].verdict = 503
+        # Peer fencing can withdraw A before its own asynchronous report
+        # arrives. Observe the negative evidence locally at BOTH authorities
+        # before attributing their SERVFAIL replies to the signed veto.
+        negative_line = 'gatewaycore_gslb_agent_evidence_reports{state="unhealthy"} 1'
+        deadline = time.monotonic() + 12
+        while True:
+            negative_metrics = {
+                name: scrape_metrics(authority["metrics_port"])
+                for name, authority in (("a", authority_a), ("b", authority_b))
+            }
+            if all(negative_line in metrics.splitlines() for metrics in negative_metrics.values()):
+                break
+            assert time.monotonic() < deadline, (
+                "both authorities did not expose one fresh negative observer report: "
+                + repr({name: [line for line in metrics.splitlines()
+                               if line.startswith("gatewaycore_gslb_agent_evidence_reports{")]
+                        for name, metrics in negative_metrics.items()}))
+            time.sleep(.1)
         for authority in (authority_a, authority_b):
             expect_dns(authority["dns"], authority["dns_port"], 2,
                        log_paths=[authority["dns_log"], *authority["agent_logs"]])
-        negative_metrics = scrape_metrics(authority_a["metrics_port"])
-        assert 'gatewaycore_gslb_agent_evidence_reports{state="unhealthy"} 1' in negative_metrics
+            assert negative_line in scrape_metrics(authority["metrics_port"]).splitlines(), \
+                "DNS withdrawal was not accompanied by fresh local negative evidence"
         print("PASS: signed negative evidence withdraws the site without changing local probe health")
         agents[0]["upstream"].verdict = 200
         for authority in (authority_a, authority_b):
