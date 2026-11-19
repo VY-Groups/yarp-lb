@@ -51,7 +51,7 @@ public static class AgentFleetRotationAcceptance
                 PinSetRevision(oldController.Thumbprint, newController.Thumbprint),
                 PinSetRevision(newController.Thumbprint)
             ];
-            Console.WriteLine("NOTICE: Gateway Agent does not emit a dedicated certificate-pin rotation audit event; this acceptance harness logs certificate fingerprints and outcomes.");
+            Console.WriteLine("NOTICE: pin-set changes are recorded in local agent logs; this is not immutable centralized audit evidence.");
             var nodes = new List<Node>();
             for (var i = 0; i < 2; i++)
             {
@@ -227,9 +227,16 @@ public static class AgentFleetRotationAcceptance
             Console.WriteLine("PASS: captured Gateway Agent output contains no PFX password or private-key material");
             foreach (var (nodeOutput, index) in capturedOutputByNode.Select((output, index) => (output, index)))
             {
-                if (expectedPinRevisions.Any(revision => !nodeOutput.Contains(revision, StringComparison.Ordinal)) ||
-                    !nodeOutput.Contains("Controller mTLS pin-set revision changed", StringComparison.Ordinal))
-                    throw new Exception($"FAIL: agent node {index + 1} did not log initial, overlap, and final pin-set revisions");
+                var initialRevisionLoaded = nodeOutput.Contains(
+                    $"Controller mTLS pin-set revision loaded: {expectedPinRevisions[0]}", StringComparison.Ordinal);
+                var overlapRevisionObserved = nodeOutput.Contains(
+                    $"Controller mTLS pin-set revision changed: {expectedPinRevisions[0]} -> {expectedPinRevisions[1]}",
+                    StringComparison.Ordinal);
+                var finalRevisionObserved = nodeOutput.Contains(
+                    $"Controller mTLS pin-set revision changed: {expectedPinRevisions[1]} -> {expectedPinRevisions[2]}",
+                    StringComparison.Ordinal);
+                if (!initialRevisionLoaded || !overlapRevisionObserved || !finalRevisionObserved)
+                    throw new Exception($"FAIL: agent node {index + 1} did not log expected old/overlap/final pin-set revision transitions");
             }
             Console.WriteLine("PASS: each agent logged SHA-256 pin-set revision changes for the overlap and final rotation states");
             // Listener certificates hold only disposable test keys and stay
