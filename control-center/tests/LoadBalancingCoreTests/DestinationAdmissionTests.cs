@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Text.Json.Nodes;
 
 public static class DestinationAdmissionTests
@@ -80,6 +81,111 @@ public static class DestinationAdmissionTests
             throw new Exception("FAIL: next waiter should receive the released permit");
         next.Dispose();
 
+        var grantRaceGate = new DestinationAdmissionState(new DestinationAdmissionPolicy(1, 1, 5000));
+        using (var raceHeld = await grantRaceGate.AcquireAsync(CancellationToken.None) ??
+            throw new Exception("FAIL: grant/cancellation race fixture"))
+        using (var raceAbort = new CancellationTokenSource())
+        using (var raceShutdown = new CancellationTokenSource())
+        using (var raceTimeout = CancellationTokenSource.CreateLinkedTokenSource(raceAbort.Token, raceShutdown.Token))
+        {
+            var raceWaiter = grantRaceGate.AcquireAsync(raceTimeout.Token).AsTask();
+            raceHeld.Dispose();
+            using (var granted = await raceWaiter.WaitAsync(TimeSpan.FromSeconds(2)) ??
+                throw new Exception("FAIL: race waiter must receive a permit"))
+            {
+                Check(DestinationAdmissionForwarding.FailureAfterGrant(raceAbort.Token,
+                    raceShutdown.Token, raceTimeout.Token) == DestinationAdmissionFailure.None,
+                    "uncanceled granted request remains eligible");
+                raceTimeout.Cancel();
+                Check(DestinationAdmissionForwarding.FailureAfterGrant(raceAbort.Token,
+                    raceShutdown.Token, raceTimeout.Token) == DestinationAdmissionFailure.QueueTimeout,
+                    "queue timeout after grant fences forwarding");
+                raceShutdown.Cancel();
+                Check(DestinationAdmissionForwarding.FailureAfterGrant(raceAbort.Token,
+                    raceShutdown.Token, raceTimeout.Token) == DestinationAdmissionFailure.ServiceStopping,
+                    "shutdown wins over queue timeout after grant");
+                raceAbort.Cancel();
+                Check(DestinationAdmissionForwarding.FailureAfterGrant(raceAbort.Token,
+                    raceShutdown.Token, raceTimeout.Token) == DestinationAdmissionFailure.ClientAborted,
+                    "client abort wins over other rejection causes");
+            }
+            Check(grantRaceGate.Snapshot is { InFlight: 0, Queued: 0 },
+                "post-grant cancellation rejection releases the lease and queue slot");
+        }
+
+        var immediateGate = new DestinationAdmissionState(new DestinationAdmissionPolicy(1, 0, 1));
+        using (var immediate = await immediateGate.AcquireAsync(CancellationToken.None, TimeSpan.FromMilliseconds(1)) ??
+            throw new Exception("FAIL: immediate permit should not require queue capacity"))
+        {
+            await Task.Delay(25);
+            Check(!immediate.WasQueued && DestinationAdmissionForwarding.CompleteQueueWait(
+                    immediate.WasQueued, CancellationToken.None,
+                    CancellationToken.None, immediate.QueueStartedTimestamp,
+                    immediate.QueueGrantedTimestamp,
+                    TimeSpan.FromMilliseconds(1)) == DestinationAdmissionFailure.None,
+                "an immediate permit remains valid after exceeding the queue timeout");
+        }
+
+        var completedQueueGate = new DestinationAdmissionState(new DestinationAdmissionPolicy(1, 1, 30000));
+        using (var occupied = await completedQueueGate.AcquireAsync(CancellationToken.None) ??
+            throw new Exception("FAIL: queue-timer fixture permit"))
+        {
+            var queuedAcquire = completedQueueGate.AcquireAsync(CancellationToken.None,
+                TimeSpan.FromSeconds(30)).AsTask();
+            occupied.Dispose();
+            using var granted = await queuedAcquire.WaitAsync(TimeSpan.FromSeconds(2)) ??
+                throw new Exception("FAIL: queued request should be granted");
+            Check(granted.WasQueued && !granted.QueueWaitToken.IsCancellationRequested &&
+                  DestinationAdmissionForwarding.CompleteQueueWait(granted.WasQueued,
+                      CancellationToken.None, CancellationToken.None,
+                      granted.QueueStartedTimestamp, granted.QueueGrantedTimestamp,
+                      TimeSpan.FromSeconds(30)) == DestinationAdmissionFailure.None,
+                "a timely queued grant disarms its deadline before forwarding");
+        }
+        {
+            // The continuation is delayed beyond the deadline, but the gate granted
+            // the permit before the deadline. Queue timeout ends at grant, not resume.
+            var startedBeforeTimeout = Stopwatch.GetTimestamp() -
+                (long)Math.Ceiling(Stopwatch.Frequency * 2d);
+            var grantedBeforeTimeout = startedBeforeTimeout + Stopwatch.Frequency;
+            Check(DestinationAdmissionForwarding.CompleteQueueWait(true,
+                    CancellationToken.None, CancellationToken.None, startedBeforeTimeout,
+                    grantedBeforeTimeout, TimeSpan.FromSeconds(1.5)) == DestinationAdmissionFailure.None,
+                "delayed continuation does not time out a request granted before its queue deadline");
+        }
+        {
+            // Model a release racing a late timer callback: record the grant after
+            // the deadline even though the cancellation token callback has not run.
+            var startedBeforeTimeout = Stopwatch.GetTimestamp() -
+                (long)Math.Ceiling(Stopwatch.Frequency * 2d);
+            var grantedAfterTimeout = Stopwatch.GetTimestamp();
+            Check(DestinationAdmissionForwarding.CompleteQueueWait(true,
+                    CancellationToken.None, CancellationToken.None, startedBeforeTimeout,
+                    grantedAfterTimeout, TimeSpan.FromSeconds(1)) == DestinationAdmissionFailure.QueueTimeout,
+                "grant after monotonic deadline is fenced even before timer callback cancels");
+        }
+        using (var canceledRequest = new CancellationTokenSource())
+        {
+            canceledRequest.Cancel();
+            Check(DestinationAdmissionForwarding.CompleteQueueWait(true,
+                    canceledRequest.Token, CancellationToken.None, Stopwatch.GetTimestamp(),
+                    Stopwatch.GetTimestamp(),
+                    TimeSpan.FromSeconds(30)) == DestinationAdmissionFailure.ClientAborted,
+                "client abort remains fenced after a permit grant");
+        }
+        var timedQueueGate = new DestinationAdmissionState(new DestinationAdmissionPolicy(1, 1, 10));
+        using (var heldForTimeout = await timedQueueGate.AcquireAsync(CancellationToken.None) ??
+            throw new Exception("FAIL: timed queue fixture permit"))
+        {
+            var expiredAcquire = timedQueueGate.AcquireAsync(CancellationToken.None,
+                TimeSpan.FromMilliseconds(10)).AsTask();
+            var timedOut = false;
+            try { await expiredAcquire.WaitAsync(TimeSpan.FromSeconds(2)); }
+            catch (OperationCanceledException) { timedOut = true; }
+            Check(timedOut && timedQueueGate.Snapshot is { InFlight: 1, Queued: 0 },
+                "a queued request expires at its own bounded deadline without releasing another request's permit");
+        }
+
         var drainGate = new DestinationAdmissionState(new DestinationAdmissionPolicy(1, 1, 5000));
         using var activeOnEast = await drainGate.AcquireAsync(CancellationToken.None) ??
             throw new Exception("FAIL: selected destination permit should be acquired");
@@ -101,6 +207,16 @@ public static class DestinationAdmissionTests
         Check(DestinationAdmissionForwarding.IsStillEligibleAfterWait("east", stillEligible,
                   static destination => destination.Id, static destination => destination.IsDraining),
             "queued request can continue when its original backend remains available and ready");
+        var original = new AdmissionDestination("east", IsDraining: false, Address: "https://192.0.2.1/");
+        var replaced = new[] { new AdmissionDestination("east", IsDraining: false, Address: "https://192.0.2.2/") };
+        Check(!DestinationAdmissionForwarding.IsStillEligibleAfterWait("east", replaced,
+                  static destination => destination.Id, static destination => destination.IsDraining,
+                  destination => destination == original),
+            "reusing destination ID with a different endpoint cannot redirect a queued POST");
+        Check(DestinationAdmissionForwarding.IsStillEligibleAfterWait("east", new[] { original },
+                  static destination => destination.Id, static destination => destination.IsDraining,
+                  destination => destination == original),
+            "unchanged original selection remains eligible after grant");
         grantedForEast.Dispose();
         Check(drainGate.Snapshot is { InFlight: 0, Queued: 0 },
             "post-queue rejection path releases the granted backend permit");
@@ -302,5 +418,5 @@ public static class DestinationAdmissionTests
             "4097 destination replacements are reclaimed without exceeding the registry cap");
     }
 
-    private readonly record struct AdmissionDestination(string Id, bool IsDraining);
+    private readonly record struct AdmissionDestination(string Id, bool IsDraining, string Address = "");
 }
