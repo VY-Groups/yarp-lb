@@ -57,6 +57,15 @@ internal static class EnterpriseOidcPolicyTests
             "multiple subjects cannot share local account");
         Check(Reject(() => new EnterpriseOidcPolicy(settings with { BreakGlassUsername = "alice" })),
             "recovery account cannot overlap federated mapping");
+        Check(EnterpriseOidcPolicy.HasUniqueJsonPropertyNames(
+                  "{\"RequiredAcr\":\"urn:secure\",\"Accounts\":[{\"Subject\":\"a\"},{\"Subject\":\"b\"}]}"u8),
+              "distinct nested OIDC account objects may reuse property names");
+        Check(!EnterpriseOidcPolicy.HasUniqueJsonPropertyNames(
+                  "{\"RequiredAcr\":\"urn:weak\",\"RequiredAcr\":\"urn:secure\"}"u8),
+              "duplicate top-level OIDC policy properties are rejected before deserialization");
+        Check(!EnterpriseOidcPolicy.HasUniqueJsonPropertyNames(
+                  "{\"Accounts\":[{\"Subject\":\"operator-a\",\"Role\":\"Viewer\",\"role\":\"Administrator\"}]}"u8),
+              "case-aliased duplicate nested account properties are rejected");
         Check(policy.MatchesOrigin("https", "gateway.example.invalid:9443") &&
               !policy.MatchesOrigin("http", "gateway.example.invalid:9443") &&
               !policy.MatchesOrigin("https", "gateway.example.invalid:9444") &&

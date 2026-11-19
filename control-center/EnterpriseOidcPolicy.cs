@@ -63,10 +63,40 @@ internal sealed class EnterpriseOidcPolicy
     internal static EnterpriseOidcPolicy? FromFile(string? path)
     {
         if (path is null) return null;
-        var settings = JsonSerializer.Deserialize<OidcSettings>(ReadPrivate(path, 262144),
+        var bytes = ReadPrivate(path, 262144);
+        if (!HasUniqueJsonPropertyNames(bytes))
+            throw new InvalidDataException("OIDC configuration contains duplicate property names");
+        var settings = JsonSerializer.Deserialize<OidcSettings>(bytes,
             new JsonSerializerOptions { UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow })
             ?? throw new InvalidDataException("OIDC settings missing");
         return new EnterpriseOidcPolicy(settings);
+    }
+
+    // Reject ambiguous configuration at every nesting level before the
+    // serializer's last-value-wins behavior can change a security policy or
+    // a subject-to-role binding without making that ambiguity visible.
+    internal static bool HasUniqueJsonPropertyNames(ReadOnlySpan<byte> json)
+    {
+        using var document = JsonDocument.Parse(json.ToArray(), new JsonDocumentOptions { MaxDepth = 32 });
+        return HasUniqueJsonPropertyNames(document.RootElement);
+    }
+
+    private static bool HasUniqueJsonPropertyNames(JsonElement element)
+    {
+        if (element.ValueKind == JsonValueKind.Object)
+        {
+            var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var property in element.EnumerateObject())
+                if (!names.Add(property.Name) || !HasUniqueJsonPropertyNames(property.Value))
+                    return false;
+        }
+        else if (element.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in element.EnumerateArray())
+                if (!HasUniqueJsonPropertyNames(item))
+                    return false;
+        }
+        return true;
     }
 
     internal string ReadClientSecret()
