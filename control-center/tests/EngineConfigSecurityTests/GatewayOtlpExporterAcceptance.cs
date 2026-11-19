@@ -5,6 +5,7 @@ using System.Net;
 using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
+using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -179,6 +180,44 @@ public static class GatewayOtlpExporterAcceptance
             response.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
             GatewayOpenTelemetry.RecordProxyResult(response, 12.5,
                 "acceptance_route", "acceptance_cluster", "target_a");
+            var rejectionReasons = new[]
+            {
+                "admission_destination_unresolved", "admission_policy_conflict",
+                "invalid_admission_config", "admission_configuration_unavailable", "destination_queue_timeout",
+                "destination_queue_full", "destination_unavailable_after_queue"
+            };
+            foreach (var reason in rejectionReasons)
+            {
+                var rejected = new DefaultHttpContext();
+                GatewayOpenTelemetry.MarkLocalRejection(rejected, reason);
+                GatewayOpenTelemetry.RecordProxyResult(rejected, 1.0);
+            }
+            using var stopping = new CancellationTokenSource();
+            stopping.Cancel();
+            var proxy = new ApplicationBuilder(provider);
+            GatewayOpenTelemetry.UseProxyTelemetry(proxy);
+            GatewayOpenTelemetry.UseShutdownFence(proxy, stopping.Token);
+            proxy.Run(_ => throw new Exception("A request crossed the already-cancelled shutdown fence"));
+            var earlyShutdownResponse = new DefaultHttpContext { RequestServices = provider };
+            await proxy.Build()(earlyShutdownResponse);
+            if (earlyShutdownResponse.Response.StatusCode != StatusCodes.Status503ServiceUnavailable ||
+                !earlyShutdownResponse.Response.Headers.TryGetValue("X-GatewayCore-Rejection", out var shutdownReason) ||
+                shutdownReason != "gateway_shutdown")
+                throw new Exception("Real proxy middleware pipeline did not reject early shutdown with HTTP 503");
+            var upstreamHeader = new DefaultHttpContext();
+            upstreamHeader.Response.Headers["X-GatewayCore-Rejection"] = "destination_queue_full";
+            GatewayOpenTelemetry.RecordProxyResult(upstreamHeader, 1.0);
+            var unknownInternalReason = new DefaultHttpContext();
+            GatewayOpenTelemetry.MarkLocalRejection(unknownInternalReason,
+                "path=/private?token=otlp-rejection-secret-canary");
+            GatewayOpenTelemetry.RecordProxyResult(unknownInternalReason, 1.0);
+            foreach (var untrustedReason in new[]
+                     { "path=/private?token=otlp-rejection-secret-canary", "backend=customer-123" })
+            {
+                var rejected = new DefaultHttpContext();
+                rejected.Response.Headers["X-GatewayCore-Rejection"] = untrustedReason;
+                GatewayOpenTelemetry.RecordProxyResult(rejected, 1.0);
+            }
             EmitAccessLog(provider);
             EmitRestrictedLogs(provider);
             if (!tracerProvider.ForceFlush(10000) || !meterProvider.ForceFlush(10000) || !loggerProvider.ForceFlush(10000))
@@ -217,10 +256,28 @@ public static class GatewayOtlpExporterAcceptance
                      {
                          "gateway.proxy.requests", "gateway.proxy.request.duration", "5xx",
                          "gateway.route.id", "acceptance_route", "gateway.cluster.id", "acceptance_cluster",
-                         "gateway.destination.id", "target_a"
+                         "gateway.destination.id", "target_a", "gateway.proxy.local_rejections",
+                         "gateway.proxy.rejection.reason"
                      })
                 if (!metricPayload.Contains(expected, StringComparison.Ordinal))
                     throw new Exception($"Expected bounded proxy metric was absent: {expected}");
+            if (metricPayload.Contains("otlp-rejection-secret-canary", StringComparison.Ordinal) ||
+                metricPayload.Contains("customer-123", StringComparison.Ordinal) ||
+                metricPayload.Contains("/private", StringComparison.Ordinal))
+                throw new Exception("Untrusted rejection header content was present in OTLP metrics");
+            var rejectionCounts = ReadOtlpStringAttributeSums(
+                metrics.SelectMany(x => x.Body).ToArray(), "gateway.proxy.local_rejections",
+                "gateway.proxy.rejection.reason");
+            var expectedRejectionLabels = rejectionReasons.Append("gateway_shutdown").Append("other")
+                .ToHashSet(StringComparer.Ordinal);
+            if (!rejectionCounts.Keys.ToHashSet(StringComparer.Ordinal).SetEquals(expectedRejectionLabels) ||
+                rejectionCounts.Count > 9)
+                throw new Exception($"Local rejection metric labels were not the fixed allowlist plus other: [{string.Join(",", rejectionCounts.Keys)}]");
+            if (!rejectionCounts.TryGetValue("gateway_shutdown", out var shutdownCount) || shutdownCount != 1)
+                throw new Exception($"Early pipeline shutdown was not recorded exactly once (observed {shutdownCount})");
+            foreach (var reason in expectedRejectionLabels)
+                if (!rejectionCounts.TryGetValue(reason, out var reasonCount) || reasonCount != 1)
+                    throw new Exception($"Local rejection reason '{reason}' was not counted exactly once (observed {reasonCount})");
             var metricValues = ReadOtlpMetricValues(metrics.SelectMany(x => x.Body).ToArray());
             foreach (var expected in new[]
                      {
@@ -448,6 +505,38 @@ public static class GatewayOtlpExporterAcceptance
             }
         }
         return result.ToDictionary(pair => pair.Key, pair => pair.Value.ToArray(), StringComparer.Ordinal);
+    }
+
+    private static Dictionary<string, long> ReadOtlpStringAttributeSums(byte[] payload, string metricName, string attributeName)
+    {
+        var values = new Dictionary<string, long>(StringComparer.Ordinal);
+        foreach (var resource in ReadFields(payload).Where(field => field.Number == 1 && field.Wire == 2))
+        foreach (var scope in ReadFields(resource.Bytes!).Where(field => field.Number == 2 && field.Wire == 2))
+        foreach (var metric in ReadFields(scope.Bytes!).Where(field => field.Number == 2 && field.Wire == 2))
+        {
+            var metricFields = ReadFields(metric.Bytes!);
+            if (metricFields.FirstOrDefault(field => field.Number == 1 && field.Wire == 2).Text != metricName)
+                continue;
+            var sum = metricFields.FirstOrDefault(field => field.Number == 7 && field.Wire == 2);
+            if (sum.Bytes is null) continue;
+            foreach (var point in ReadFields(sum.Bytes).Where(field => field.Number == 1 && field.Wire == 2))
+            foreach (var attribute in ReadFields(point.Bytes!).Where(field => field.Number == 7 && field.Wire == 2))
+            {
+                var keyValue = ReadFields(attribute.Bytes!);
+                if (keyValue.FirstOrDefault(field => field.Number == 1 && field.Wire == 2).Text != attributeName)
+                    continue;
+                var anyValue = keyValue.FirstOrDefault(field => field.Number == 2 && field.Wire == 2);
+                if (anyValue.Bytes is null) continue;
+                var textValue = ReadFields(anyValue.Bytes).FirstOrDefault(field => field.Number == 1 && field.Wire == 2).Text;
+                var countField = ReadFields(point.Bytes!).FirstOrDefault(field => field.Number == 6 && field.Wire == 1);
+                if (textValue is not null && countField.Bytes is not null)
+                {
+                    var count = BinaryPrimitives.ReadInt64LittleEndian(countField.Bytes);
+                    values[textValue] = values.GetValueOrDefault(textValue) + count;
+                }
+            }
+        }
+        return values;
     }
 
     private readonly record struct ProtoField(int Number, int Wire, ulong Varint, byte[]? Bytes, string? Text);

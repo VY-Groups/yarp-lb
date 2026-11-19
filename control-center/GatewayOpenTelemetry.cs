@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Diagnostics.Metrics;
 using System.Collections.Concurrent;
 using System.Text.RegularExpressions;
+using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.Routing;
@@ -26,7 +27,53 @@ public static class GatewayOpenTelemetry
     private static readonly Meter Meter = new(ActivitySourceName, "0.1");
     private static readonly Counter<long> ProxyRequests = Meter.CreateCounter<long>("gateway.proxy.requests");
     private static readonly Histogram<double> ProxyDuration = Meter.CreateHistogram<double>("gateway.proxy.request.duration", "ms");
+    private static readonly Counter<long> LocalProxyRejections = Meter.CreateCounter<long>("gateway.proxy.local_rejections");
     private static readonly GatewayTelemetryDimensionBudget DimensionBudget = new();
+    private static readonly object LocalRejectionItemKey = new();
+
+    internal static void UseProxyTelemetry(IApplicationBuilder pipeline, Action<HttpContext, double>? afterRequest = null)
+    {
+        pipeline.Use(async (context, next) =>
+        {
+            var started = Stopwatch.GetTimestamp();
+            var activity = StartProxyActivity(context);
+            try
+            {
+                await next();
+            }
+            catch (Exception exception)
+            {
+                RecordProxyException(activity, exception);
+                throw;
+            }
+            finally
+            {
+                var elapsedMs = Stopwatch.GetElapsedTime(started).TotalMilliseconds;
+                var feature = context.Features.Get<IReverseProxyFeature>();
+                var destination = feature?.ProxiedDestination;
+                CompleteProxyActivity(activity, context, destination?.DestinationId);
+                RecordProxyResult(context, elapsedMs,
+                    feature?.Route.Config.RouteId,
+                    feature?.Cluster.Config.ClusterId,
+                    destination?.DestinationId);
+                afterRequest?.Invoke(context, elapsedMs);
+            }
+        });
+    }
+
+    internal static void UseShutdownFence(IApplicationBuilder pipeline, CancellationToken stopping)
+    {
+        pipeline.Use(async (context, next) =>
+        {
+            if (stopping.IsCancellationRequested)
+            {
+                context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+                MarkLocalRejection(context, "gateway_shutdown");
+                return;
+            }
+            await next();
+        });
+    }
 
     public static bool Configure(IServiceCollection services, string? machineName = null)
     {
@@ -135,6 +182,50 @@ public static class GatewayOpenTelemetry
         var tags = DimensionBudget.CreateTags(routeId, clusterId, destinationId, statusClass);
         ProxyRequests.Add(1, tags);
         ProxyDuration.Record(elapsedMs, tags);
+
+        // The private context marker is written by GatewayCore's local rejection
+        // middleware. Do not derive metric labels from response headers: an upstream
+        // application can return arbitrary headers.
+        if (context.Items.TryGetValue(LocalRejectionItemKey, out var markedReason))
+        {
+            context.Items.Remove(LocalRejectionItemKey);
+            if (markedReason is string rejectionValue &&
+                TryGetLocalRejectionReason(rejectionValue, out var rejectionReason))
+                LocalProxyRejections.Add(1, new TagList
+                {
+                    { "gateway.proxy.rejection.reason", rejectionReason }
+                });
+        }
+    }
+
+    internal static void MarkLocalRejection(HttpContext context, string reason)
+    {
+        _ = TryGetLocalRejectionReason(reason, out var boundedReason);
+        context.Items[LocalRejectionItemKey] = boundedReason;
+        context.Response.Headers["X-GatewayCore-Rejection"] = boundedReason;
+    }
+
+    internal static bool TryGetLocalRejectionReason(string? value, out string reason)
+    {
+        if (value is null)
+        {
+            reason = string.Empty;
+            return false;
+        }
+
+        reason = value switch
+        {
+            "gateway_shutdown" => "gateway_shutdown",
+            "admission_destination_unresolved" => "admission_destination_unresolved",
+            "admission_policy_conflict" => "admission_policy_conflict",
+            "invalid_admission_config" => "invalid_admission_config",
+            "admission_configuration_unavailable" => "admission_configuration_unavailable",
+            "destination_queue_timeout" => "destination_queue_timeout",
+            "destination_queue_full" => "destination_queue_full",
+            "destination_unavailable_after_queue" => "destination_unavailable_after_queue",
+            _ => "other"
+        };
+        return true;
     }
 
     public static void RecordProxyException(Activity? activity, Exception exception)
