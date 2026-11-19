@@ -61,6 +61,21 @@ assert all(policy in support_doc for policy in (
     '`RoundRobin`', '`PowerOfTwoChoices`', '`LeastRequests`', '`Random`',
     '`FirstAlphabetical`', '`WeightedRandom`', '`SourceIpHash`', '`PrimaryBackup`'
 ))
+for feature in ('HTTP/1.1', 'HTTP/2', 'HTTP/3', 'HTTPS', 'L4 TCP/UDP', 'DNS/GSLB', 'WAF'):
+    assert f'| {feature} |' in support_doc
+assert 'Opt-in and Windows-CI-tested only' in support_doc
+assert 'Ubuntu wire behavior is unqualified' in support_doc
+assert 'not integrated into GatewayCore Control Center lifecycle' in support_doc
+assert 'No built-in GatewayCore WAF' in support_doc
+for evidence_path in (
+    'tests/L7/Acceptance/Program.cs', '.github/workflows/l7-acceptance.yml',
+    'control-center/tests/TlsInventoryTests/TrafficHttp3Acceptance.cs',
+    '.github/workflows/control-center-ci.yml',
+    'tests/L4Acceptance/Program.cs', '.github/workflows/l4-acceptance.yml',
+    'tests/GslbAcceptance/Program.cs', '.github/workflows/gslb-acceptance.yml',
+    'tests/WafCrs/verify.sh', '.github/workflows/waf-crs-acceptance.yml'
+):
+    assert evidence_path in support_doc
 # Ensure major CI files are present.
 for fn in ['README.md','SetupCenter.cs','Onboarding.cs','DirectoryAuth.cs','Program.cs','PRECHECK.ps1','INSTALL.ps1','VERIFY-SETUP.ps1','docs/API_CONTRACT.md','docs/RELEASE_GATES.md']:
     assert (root/fn).exists(),fn

@@ -19,6 +19,22 @@ runtime bundle.
 | HTTP load-balancing policy behavior | The application exposes YARP `RoundRobin`, `PowerOfTwoChoices`, `LeastRequests`, `Random`, and `FirstAlphabetical`, plus GatewayCore `WeightedRandom`, `SourceIpHash`, and `PrimaryBackup`. These are HTTP destination policies, not OS-specific behavior. | Selected policies and failure behavior have Windows and Ubuntu L7 Actions acceptance. | The list does not certify every policy, protocol, or capacity on every host OS. It does not add L4, DNS/GSLB, or WAF support to the Control Center process. |
 | Product containers | The repository has Docker-based CI/acceptance fixtures for selected integrations. | Disposable test containers only. | No production GatewayCore container image, entrypoint, key-volume lifecycle, or container-host support matrix is published. Do not deploy an acceptance image as a product image. |
 
+## HTTP protocol and optional-engine support boundary
+
+“CI tested” means the named isolated runner exercised the stated code path. It
+does not mean externally deployed or production-qualified. HTTP/3 is opt-in;
+the application does not turn it on by default.
+
+| Protocol / engine | CI-tested behavior | Current support status and boundary |
+| --- | --- | --- |
+| HTTP/1.1 | Real L7 HTTP requests run on Windows Server 2022 and Ubuntu 24.04 Actions in `tests/L7/Acceptance/Program.cs`, via `.github/workflows/l7-acceptance.yml`. The TLS listener test also checks HTTP/1.1 when its protocol test can run. | CI-tested for the lab paths. Customer listener, firewall, TLS, streaming and capacity qualification remain open. |
+| HTTP/2 | `control-center/tests/TlsInventoryTests/TrafficHttp3Acceptance.cs` explicitly requests HTTP/2; `.github/workflows/control-center-ci.yml` runs the test on Windows and Ubuntu. The test performs wire checks when MsQuic is available; Windows does so, Ubuntu exits after configuration assertions when MsQuic is absent. | Windows CI-tested; Ubuntu wire behavior is unqualified by current Actions. No customer protocol, gRPC or long-lived stream qualification. |
+| HTTP/3 | `control-center/tests/TlsInventoryTests/TrafficHttp3Acceptance.cs` performs an actual TLS 1.3/QUIC request and verifies protocol negotiation on the Windows runner from `.github/workflows/control-center-ci.yml`. Ubuntu reports `SKIP` because MsQuic is unavailable. | Opt-in and Windows-CI-tested only. Ubuntu wire behavior and every physical/cloud firewall path are unqualified. Requires .NET 10 runtime with MsQuic and TCP+UDP reachability to the HTTPS port. |
+| HTTPS | `tests/L7/Acceptance/Program.cs` sends a real HTTPS request through an isolated TLS listener with a disposable localhost certificate, via `.github/workflows/l7-acceptance.yml` on Windows and Ubuntu. | Lab-tested on Windows and Ubuntu; this does not qualify customer CA chains, public certificate lifecycle, external TLS termination, or deployed listener hardening. |
+| L4 TCP/UDP | `tests/L4Acceptance/Program.cs` tests real sockets on Windows and Ubuntu via `.github/workflows/l4-acceptance.yml`. | Isolated external engine, CI-lab-tested only; not integrated into GatewayCore Control Center lifecycle and not supported as a production product deployment. |
+| DNS/GSLB | `tests/GslbAcceptance/Program.cs` covers selected authoritative DNS and failover paths on Windows and Ubuntu. `.github/workflows/gslb-acceptance.yml` also runs two-node validators, signed agent reports, DNSSEC signing/independent validation, and IPv6 interop in Linux CI. | Experimental standalone engine. DNSSEC test-chain behavior is CI-tested; production key storage/rollover, licensed GeoIP/ECS operations, public delegation, multi-network authoritative conformance, and physical authority acceptance remain unqualified; see issue #52. |
+| WAF | `tests/WafCrs/verify.sh` exercises selected benign and blocking traffic through ModSecurity/OWASP CRS via `.github/workflows/waf-crs-acceptance.yml`. | Optional external lab integration only. No built-in GatewayCore WAF, production ruleset operations, false-positive qualification, or supported production WAF deployment is claimed; see issue #51. |
+
 On Windows, protect the ProgramData state tree with an explicit ACL granting
 access only to the intended service identity and administrators. The current
 application does not create or validate that service identity or ACL, and there
