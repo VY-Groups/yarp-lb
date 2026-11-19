@@ -53,7 +53,28 @@ var info=new ProcessStartInfo("dotnet") { WorkingDirectory=Path.GetDirectoryName
     RedirectStandardOutput=true, RedirectStandardError=true };
 info.ArgumentList.Add(dll); info.ArgumentList.Add(configFile);
 using var proxy=Process.Start(info) ?? throw new Exception("Unable to start L4 process");
-var stdout=proxy.StandardOutput.ReadToEndAsync();
+var udpReady = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+var stdout=ReadProxyOutput();
+async Task<string> ReadProxyOutput()
+{
+    var output = new StringBuilder();
+    var expected = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "L4_UDP_READY udp-echo 127.0.0.1:19021",
+        "L4_UDP_READY udp-drain 127.0.0.1:19022",
+        "L4_UDP_READY udp-all-drained 127.0.0.1:19023"
+    };
+    while (await proxy.StandardOutput.ReadLineAsync() is { } line)
+    {
+        output.AppendLine(line);
+        expected.Remove(line);
+        if (expected.Count == 0) udpReady.TrySetResult();
+    }
+    if (expected.Count != 0)
+        udpReady.TrySetException(new InvalidOperationException(
+            "L4 exited before binding UDP listeners: " + string.Join(", ", expected)));
+    return output.ToString();
+}
 var stderr=proxy.StandardError.ReadToEndAsync();
 try
 {
@@ -61,6 +82,10 @@ try
     {
         try { return (await TcpRoundTrip("ready")).Length > 0; } catch { return false; }
     });
+    // TCP can accept connections before the UDP sockets are bound. Windows
+    // reports an early ICMP Port Unreachable as WSAECONNRESET (10054).
+    // Wait for every actual UDP bind; never hide dropped test datagrams by retry.
+    await udpReady.Task.WaitAsync(TimeSpan.FromSeconds(10));
     var tcpNodes=new Dictionary<string,int> {["A"]=0,["B"]=0};
     for (var i=0;i<24;i++)
     {
