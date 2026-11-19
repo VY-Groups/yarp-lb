@@ -64,6 +64,7 @@ internal sealed class AuditLedger : IDisposable
     private readonly RSA signer;
     private readonly IAuditRetention? retention;
     private readonly FileStream? pending;
+    private readonly string? pendingPath;
     private byte[]? lastRecord;
     private readonly HashSet<string> seen = new(StringComparer.Ordinal);
     private string head = Genesis;
@@ -77,6 +78,7 @@ internal sealed class AuditLedger : IDisposable
         this.path = path;
         this.signer = signer;
         this.retention = retention;
+        this.pendingPath = pendingPath;
         if ((retention is null) != (pendingPath is null))
             throw new InvalidDataException("Retention and pre-provisioned pending file must be paired");
         stream = new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.Read);
@@ -143,6 +145,13 @@ internal sealed class AuditLedger : IDisposable
         var bytes = new byte[(int)pending.Length];
         pending.Position = 0;
         pending.ReadExactly(bytes);
+        using (var current = new FileStream(pendingPath!, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+        {
+            if (current.Length != bytes.Length) throw new IOException("Pending record path changed");
+            var observed = new byte[bytes.Length];
+            current.ReadExactly(observed);
+            if (!bytes.AsSpan().SequenceEqual(observed)) throw new IOException("Pending record path changed");
+        }
         if (bytes[^1] != (byte)'\n') throw new InvalidDataException("Partial pending audit record");
         var entry = JsonSerializer.Deserialize<Entry>(bytes) ?? throw new InvalidDataException("Missing pending record");
         var body = Convert.FromBase64String(entry.Body);
@@ -178,7 +187,11 @@ internal sealed class AuditLedger : IDisposable
 
     private bool DrainPending()
     {
-        if (pending is null || pending.Length == 0) return true;
+        if (pending is null) return true;
+        if (!File.Exists(pendingPath) || (File.GetAttributes(pendingPath!) & FileAttributes.ReparsePoint) != 0 ||
+            new FileInfo(pendingPath!).Length != pending.Length)
+            throw new IOException("Pending audit record path lost or replaced");
+        if (pending.Length == 0) return true;
         CheckLocal();
         var record = ReadPending();
         var required = retention!.RequiredUntil(record.Intent.Utc.UtcDateTime);
@@ -186,6 +199,9 @@ internal sealed class AuditLedger : IDisposable
         // Dedicated collector only; the gateway proxy never enters this lock.
         if (!retention.ConfirmAsync(record.Entry.Sequence, record.Bytes, required, deadline.Token)
                 .GetAwaiter().GetResult()) return false;
+        if (!File.Exists(pendingPath) || (File.GetAttributes(pendingPath!) & FileAttributes.ReparsePoint) != 0 ||
+            !ReadPending().Bytes.AsSpan().SequenceEqual(record.Bytes))
+            throw new IOException("Pending record changed before commit");
         if (record.Entry.Sequence == seen.Count + 1L)
             Commit(record.Entry, record.Bytes, record.Intent.EventId);
         pending.Position = 0;
