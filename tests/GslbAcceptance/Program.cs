@@ -517,7 +517,10 @@ File.WriteAllText(configuration,JsonSerializer.Serialize(new {
  new {Name="delegated.integration.test",TtlSeconds=10,
       Sites=new[]{new {Address="127.0.0.21",HealthUrl="http://127.0.0.1:19711/ready",Weight=1,Priority=0,HealthCheckType="Http",TcpPort=0}},
       NameServers=new[]{new {Host="ns1.delegated.integration.test",Address="127.0.0.31"}},
-      Delegations=new[]{new {Name="child.delegated.integration.test",
+      Delegations=new[]{new {Name="deep.branch.delegated.integration.test",
+        NameServers=new[]{
+          new {Host="ns.deep.branch.delegated.integration.test",Address="127.0.0.62"}}},
+        new {Name="child.delegated.integration.test",
         NameServers=new[]{
           new {Host="ns.child.delegated.integration.test",Address="127.0.0.61"},
           new {Host="ns.other.example.net",Address="192.0.2.53"}}}},
@@ -663,6 +666,18 @@ try
          Dns16(delegatedDs, 6) == 0 && Dns16(delegatedDs, 8) == 1 &&
          DnsRecordTypes(delegatedDs, 1).SequenceEqual(new ushort[] { 6 }),
          "unsigned-parent DS absence returns authoritative negative SOA instead of referral");
+    foreach (var type in new ushort[] { 1, 28, 2 })
+    {
+        var (request, udp) = await QueryWire("branch.delegated.integration.test", type);
+        var tcp = await TcpQuery(request);
+        foreach (var reply in new[] { udp, tcp })
+            Must((Dns16(reply, 2) & 0x0400) != 0 && (Dns16(reply, 2) & 0xf) == 0 &&
+                 Dns16(reply, 6) == 0 && DnsRecordTypes(reply, 1).SequenceEqual(new ushort[] { 6 }),
+                "empty ancestor of a delegation is authoritative NODATA, not NXDOMAIN");
+    }
+    var deepReferral = await TcpQuery(DnsRequest("www.deep.branch.delegated.integration.test", 1));
+    Must((Dns16(deepReferral, 2) & 0x0400) == 0 && Dns16(deepReferral, 8) == 1 &&
+         Dns16(deepReferral, 10) == 1, "deep delegation still returns referral and glue");
     Console.WriteLine("PASS: DNS child-zone referrals, authority flags, in-bailiwick glue and DS absence");
     Console.WriteLine("PASS: loopback GSLB runtime metrics, transport counters and low-cardinality privacy contract");
     // The policy deliberately falls back to weighted while samples accumulate.
