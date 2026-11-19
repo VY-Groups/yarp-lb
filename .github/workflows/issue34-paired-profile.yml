@@ -95,7 +95,7 @@ jobs:
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as out:
               print(f"Interim allocation delta only: {delta['mean']} B/request "
                     f"(95% CI {delta['ci95_low']} to {delta['ci95_high']}); "
-                    "this does not satisfy the paired profile acceptance.")
+                    "this does not satisfy the paired profile acceptance.", file=out)
           PY
             fi
             exit 0
@@ -117,7 +117,7 @@ jobs:
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as out:
               print(f"## Paired allocation evidence complete\n"
                     f"Allocation delta: {s['mean']} B/request "
-                    f"(95% CI {s['ci95_low']} to {s['ci95_high']}); {s['interpretation']}")
+                    f"(95% CI {s['ci95_low']} to {s['ci95_high']}); {s['interpretation']}", file=out)
           PY
           fi
       - if: always()
@@ -126,3 +126,4 @@ jobs:
           name: issue34-paired-profile
           path: artifacts/issue34/
           retention-days: 7
+
