@@ -437,6 +437,24 @@ using (var geoDatabase = new GeoIpEcsDatabase(countryFixture, asnFixture, 0))
         throw new Exception("FAIL: conflicting country/ASN routes did not fail closed or single-source route failed");
 }
 Console.WriteLine("PASS: MaxMind MMDB route mapping, privacy-boundary fallback, and unknown-country handling");
+// Use the fixture's own build timestamp, not today's wall clock.
+using (var fixtureReader = new MaxMind.Db.Reader(asnFixture))
+{
+    var build = new DateTimeOffset(fixtureReader.Metadata.BuildDate.ToUniversalTime());
+    var geoClock = new GeoIpTestClock(build.AddHours(23));
+    using var expiring = new GeoIpEcsDatabase(null, asnFixture, 1, geoClock);
+    var expiringRoutes = expiring.CreateTable(null, [new GeoAsnRoute(15169, "mumbai")]);
+    var clientAddress = IPAddress.Parse("1.0.0.1");
+    if (expiringRoutes.RegionForEcs(clientAddress, 24) is null)
+        throw new Exception("FAIL: valid unexpired GeoIP database did not route");
+    geoClock.Advance(TimeSpan.FromHours(1));
+    if (expiringRoutes.RegionForEcs(clientAddress, 24) is not null)
+        throw new Exception("FAIL: long-running GeoIP table used expired data");
+    geoClock.RollbackWallClock(TimeSpan.FromHours(12));
+    if (expiringRoutes.RegionForEcs(clientAddress, 24) is not null)
+        throw new Exception("FAIL: wall-clock rollback resurrected expired GeoIP data");
+}
+Console.WriteLine("PASS: runtime GeoIP expiry and monotonic fallback");
 var staleGeoDatabaseRejected = false;
 try { using var _ = new GeoIpEcsDatabase(countryFixture, null, 1); }
 catch (InvalidDataException) { staleGeoDatabaseRejected = true; }
@@ -1522,3 +1540,14 @@ static async Task ProbeTcpServer(TcpListener server,CancellationToken ct)
 }
 
 sealed class ProbeState {public volatile int Healthy=1;public int DelayMs;}
+
+sealed class GeoIpTestClock(DateTimeOffset current) : TimeProvider
+{
+    private DateTimeOffset utc = current;
+    private long tick;
+    public override DateTimeOffset GetUtcNow() => utc;
+    public override long GetTimestamp() => tick;
+    public override long TimestampFrequency => TimeSpan.TicksPerSecond;
+    public void Advance(TimeSpan time) { utc += time; tick += time.Ticks; }
+    public void RollbackWallClock(TimeSpan time) => utc -= time;
+}

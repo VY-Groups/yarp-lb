@@ -9,19 +9,25 @@ internal sealed class GeoIpEcsDatabase : IDisposable
     private readonly Reader? country;
     private readonly Reader? asn;
 
-    public GeoIpEcsDatabase(string? countryPath, string? asnPath, int maxAgeDays)
+    private readonly int maxAgeDays;
+    private readonly TimeProvider clock;
+
+    public GeoIpEcsDatabase(string? countryPath, string? asnPath, int maxAgeDays,
+        TimeProvider? clock = null)
     {
+        this.clock = clock ?? TimeProvider.System;
+        this.maxAgeDays = maxAgeDays;
         if (maxAgeDays is < 0 or > 3650)
             throw new InvalidDataException("GeoIP maximum database age must be 0..3650 days (0 disables age enforcement)");
-        country = Open(countryPath, "Country", maxAgeDays);
-        try { asn = Open(asnPath, "ASN", maxAgeDays); }
+        country = Open(countryPath, "Country", maxAgeDays, this.clock);
+        try { asn = Open(asnPath, "ASN", maxAgeDays, this.clock); }
         catch { country?.Dispose(); throw; }
     }
 
     public GeoIpEcsRegionTable CreateTable(
         IEnumerable<GeoCountryRoute>? countryRoutes,
         IEnumerable<GeoAsnRoute>? asnRoutes) =>
-        new(country, asn, countryRoutes ?? [], asnRoutes ?? []);
+        new(country, asn, countryRoutes ?? [], asnRoutes ?? [], maxAgeDays, clock);
 
     public void Dispose()
     {
@@ -29,7 +35,7 @@ internal sealed class GeoIpEcsDatabase : IDisposable
         asn?.Dispose();
     }
 
-    private static Reader? Open(string? path, string expected, int maxAgeDays)
+    private static Reader? Open(string? path, string expected, int maxAgeDays, TimeProvider clock)
     {
         if (string.IsNullOrWhiteSpace(path)) return null;
         if (!Path.IsPathFullyQualified(path) || !File.Exists(path))
@@ -43,7 +49,7 @@ internal sealed class GeoIpEcsDatabase : IDisposable
                 : type.Contains("ASN", StringComparison.OrdinalIgnoreCase);
             if (!validType)
                 throw new InvalidDataException($"GeoIP {expected} database has unexpected MMDB type '{type}'");
-            var age = DateTime.UtcNow - reader.Metadata.BuildDate;
+            var age = clock.GetUtcNow().UtcDateTime - reader.Metadata.BuildDate;
             if (age < TimeSpan.FromDays(-1) || maxAgeDays > 0 && age > TimeSpan.FromDays(maxAgeDays))
                 throw new InvalidDataException($"GeoIP {expected} database build date is outside the configured age window");
             Console.WriteLine($"GSLB_GEOIP database={expected} type={type} build_date={reader.Metadata.BuildDate:yyyy-MM-dd} age_days={Math.Max(0, (int)age.TotalDays)}");
@@ -82,9 +88,16 @@ internal sealed class GeoIpEcsRegionTable
     private readonly Dictionary<string, string> countries;
     private readonly Dictionary<long, string> autonomousSystems;
 
+    private readonly TimeProvider clock;
+    private readonly long openedAt;
+    private readonly TimeSpan? remainingLifetime;
+
     public GeoIpEcsRegionTable(Reader? country, Reader? asn,
-        IEnumerable<GeoCountryRoute> countryRoutes, IEnumerable<GeoAsnRoute> asnRoutes)
+        IEnumerable<GeoCountryRoute> countryRoutes, IEnumerable<GeoAsnRoute> asnRoutes,
+        int maxAgeDays = 0, TimeProvider? clock = null)
     {
+        this.clock = clock ?? TimeProvider.System;
+        openedAt = this.clock.GetTimestamp();
         this.country = country;
         this.asn = asn;
         var countryRows = countryRoutes.ToArray();
@@ -101,6 +114,20 @@ internal sealed class GeoIpEcsRegionTable
         autonomousSystems = asnRows.ToDictionary(row => row.Asn, row => row.Region);
         if (countries.Count > 0 && country is null || autonomousSystems.Count > 0 && asn is null)
             throw new InvalidDataException("GeoIP route maps require the matching country/ASN MMDB path");
+
+        if (maxAgeDays > 0)
+        {
+            // Use the earliest configured database expiry. A monotonic
+            // deadline prevents a wall-clock rollback resurrecting stale data.
+            var now = this.clock.GetUtcNow().UtcDateTime;
+            foreach (var reader in new[] { country, asn })
+            {
+                if (reader is null) continue;
+                var remaining = reader.Metadata.BuildDate.AddDays(maxAgeDays) - now;
+                if (remainingLifetime is null || remaining < remainingLifetime.Value)
+                    remainingLifetime = remaining;
+            }
+        }
     }
 
     public IReadOnlyCollection<string> Regions => countries.Values.Concat(autonomousSystems.Values)
@@ -109,6 +136,9 @@ internal sealed class GeoIpEcsRegionTable
     public (string Region, int PrefixLength)? RegionForEcs(IPAddress address, int sourcePrefixLength)
     {
         ArgumentNullException.ThrowIfNull(address);
+        if (remainingLifetime is { } lifetime &&
+            clock.GetElapsedTime(openedAt) >= lifetime)
+            return null; // Expired geography is unknown; normal healthy-site fallback applies.
         var maxPrefix = address.GetAddressBytes().Length * 8;
         if (sourcePrefixLength < 0 || sourcePrefixLength > maxPrefix ||
             address.IsIPv4MappedToIPv6 || address.AddressFamily is not
