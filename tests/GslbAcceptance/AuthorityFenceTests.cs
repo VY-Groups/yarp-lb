@@ -3,12 +3,16 @@ using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Security.AccessControl;
 using System.Security.Principal;
+using System.Net.Http;
+using System.Text;
+using System.Text.Json;
 using GatewayCore.Gslb.Contracts;
 
 internal static class AuthorityFenceTests
 {
     public static void Run()
     {
+        ProtocolMutationTests.Run();
         var root = Path.Combine(Path.GetTempPath(), "gslb-authority-fence-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(root);
         if (!OperatingSystem.IsWindows())
@@ -34,8 +38,8 @@ internal static class AuthorityFenceTests
         }
         try
         {
-            using var tlsAKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
-            using var tlsBKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+            using var tlsAKey = RSA.Create(2048);
+            using var tlsBKey = RSA.Create(2048);
             using var tlsA = CreateCertificate("authority-a", tlsAKey);
             using var tlsB = CreateCertificate("authority-b", tlsBKey);
             using var signerA = ECDsa.Create(ECCurve.NamedCurves.nistP256);
@@ -322,13 +326,15 @@ internal static class AuthorityFenceTests
                       ThrowsInvalid(() => sendStore.CreateSnapshot(1602)),
                     "restoring replay file cannot reopen a faulted publication gate");
             }
+            VerifyHttpsIngress(configA, configB, fingerprint, target, tlsA, pinB);
             Console.WriteLine("PASS: authority 2-of-2 fence signature, membership, config, lease, replay and restart contracts");
         }
         finally { Directory.Delete(root, recursive: true); }
 
-        static X509Certificate2 CreateCertificate(string commonName, ECDsa key)
+        static X509Certificate2 CreateCertificate(string commonName, RSA key)
         {
-            var request = new CertificateRequest("CN=" + commonName, key, HashAlgorithmName.SHA256);
+            var request = new CertificateRequest("CN=" + commonName, key, HashAlgorithmName.SHA256,
+                RSASignaturePadding.Pkcs1);
             request.CertificateExtensions.Add(new X509BasicConstraintsExtension(false, false, 0, true));
             request.CertificateExtensions.Add(new X509KeyUsageExtension(X509KeyUsageFlags.DigitalSignature, true));
             request.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension(new OidCollection
@@ -351,6 +357,68 @@ internal static class AuthorityFenceTests
         {
             try { action(); return false; }
             catch (InvalidDataException) { return true; }
+        }
+
+        static void VerifyHttpsIngress(AuthorityFenceConfig sourceConfig, AuthorityFenceConfig receiverConfig,
+            string digest, AuthorityFenceTarget target, X509Certificate2 clientCertificate, string receiverPin)
+        {
+            using var probe = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
+            probe.Start();
+            var port = ((IPEndPoint)probe.LocalEndpoint).Port;
+            probe.Stop();
+            var liveConfig = receiverConfig with { ListenPort = port };
+            using var receiver = new AuthorityFenceStore(liveConfig, digest, [target]);
+            using var source = new AuthorityFenceStore(sourceConfig, digest, [target]);
+            using var cancellation = new CancellationTokenSource();
+            var runtime = new AuthorityFenceRuntime(liveConfig, receiver);
+            runtime.StartAsync(cancellation.Token).GetAwaiter().GetResult();
+            try
+            {
+                using var sslClientCertificate = X509CertificateLoader.LoadPkcs12(
+                    clientCertificate.Export(X509ContentType.Pkcs12), null,
+                    X509KeyStorageFlags.Exportable | X509KeyStorageFlags.PersistKeySet);
+                using var handler = new HttpClientHandler { UseProxy = false };
+                handler.ClientCertificates.Add(sslClientCertificate);
+                handler.ServerCertificateCustomValidationCallback = (_, certificate, _, _) =>
+                    AuthorityFenceStore.IsPinnedCertificate(certificate, [receiverPin], "1.3.6.1.5.5.7.3.1");
+                using var client = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(3) };
+                var endpoint = new Uri($"https://127.0.0.1:{port}/authority-fence/v1/snapshot");
+                var sequence = Math.Max(Environment.TickCount64, 10_000_000);
+                var signed = source.CreateSnapshot(sequence);
+                var json = JsonSerializer.Serialize(signed);
+                var propertyStart = json.IndexOf("\"sequence\":", StringComparison.OrdinalIgnoreCase);
+                var propertyEnd = propertyStart < 0 ? -1 : json.IndexOf(',', propertyStart);
+                if (propertyEnd < 0) propertyEnd = json.IndexOf('}', propertyStart);
+                Check(propertyStart >= 0 && propertyEnd > propertyStart,
+                    "signed HTTPS fixture contains sequence property");
+                var marker = json[propertyStart..propertyEnd];
+                var signedSequence = long.Parse(marker[(marker.IndexOf(':') + 1)..],
+                    System.Globalization.CultureInfo.InvariantCulture);
+                var conflictingBefore = json.Replace(marker,
+                    $"\"Sequence\":{signedSequence + 1},{marker}", StringComparison.Ordinal);
+                var duplicateAfter = json.Replace(marker,
+                    $"{marker},\"Sequence\":{signedSequence}", StringComparison.Ordinal);
+
+                int Post(string payload)
+                {
+                    using var content = new StringContent(payload, Encoding.UTF8, "application/json");
+                    using var response = client.PostAsync(endpoint, content).GetAwaiter().GetResult();
+                    return (int)response.StatusCode;
+                }
+
+                Check(Post(conflictingBefore) == 400,
+                    "mTLS authority ingress rejects valid signed snapshot with conflicting case-alias before signed property");
+                Check(Post(duplicateAfter) == 400,
+                    "mTLS authority ingress rejects valid signed snapshot with duplicate property after signed value");
+                Check(Post(json) == 204,
+                    "mTLS authority ingress accepts clean signed snapshot after duplicate frames without advancing replay state");
+                Check(Post(json) == 409, "mTLS authority ingress rejects replay of accepted signed snapshot");
+            }
+            finally
+            {
+                cancellation.Cancel();
+                runtime.DisposeAsync().AsTask().GetAwaiter().GetResult();
+            }
         }
     }
 }
