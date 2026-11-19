@@ -69,6 +69,7 @@ internal static class AcmeRenewalAcceptance
 
         using var activeLeaf = CreateLeaf(DnsName, DateTimeOffset.UtcNow.AddDays(5));
         using var replacementLeaf = CreateLeaf(DnsName, DateTimeOffset.UtcNow.AddDays(90));
+        using var nextLeaf = CreateLeaf(DnsName, DateTimeOffset.UtcNow.AddDays(180));
         using var wrongNameLeaf = CreateLeaf("other.example.com", DateTimeOffset.UtcNow.AddDays(90));
         await File.WriteAllBytesAsync(activePfxPath, ToPfx(activeLeaf));
         SetPrivate(activePfxPath);
@@ -177,9 +178,40 @@ internal static class AcmeRenewalAcceptance
             Check(!notDue.Renewed && fakeCa.IssuanceCount == callsBeforeNotDue,
                 "a certificate outside its renewal window does not create another ACME order");
 
+            clock.Advance(TimeSpan.FromDays(61));
+            var beforeIssuerFailure = await File.ReadAllBytesAsync(activePfxPath);
+            var timestampBeforeIssuerFailure = File.GetLastWriteTimeUtc(activePfxPath);
+            var unavailableIssuer = new ThrowingIssuer();
+            var unavailableCoordinator = new AcmeRenewalCoordinator(unavailableIssuer, challengeStore, clock, chainPolicy);
+            var issuerFailureRejected = false;
+            try
+            {
+                await unavailableCoordinator.RenewIfDueAsync(DirectoryUrl, DnsName, "admin@example.com", true,
+                    activePfxPath, passwordPath, TimeSpan.FromDays(30), CancellationToken.None);
+            }
+            catch (HttpRequestException) { issuerFailureRejected = true; }
+            Check(issuerFailureRejected &&
+                  (await File.ReadAllBytesAsync(activePfxPath)).SequenceEqual(beforeIssuerFailure) &&
+                  File.GetLastWriteTimeUtc(activePfxPath) == timestampBeforeIssuerFailure,
+                "an issuer failure before certificate replacement leaves active PFX bytes and file metadata untouched");
+
+            var beforeActivationFailure = await File.ReadAllBytesAsync(activePfxPath);
+            fakeCa.NextPfx = ToPfx(nextLeaf);
+            var activationFailureCoordinator = new AcmeRenewalCoordinator(fakeCa, challengeStore, clock, chainPolicy,
+                _ => throw new InvalidOperationException("simulated listener activation failure"));
+            var activationFailureRejected = false;
+            try
+            {
+                await activationFailureCoordinator.RenewIfDueAsync(DirectoryUrl, DnsName, "admin@example.com", true,
+                    activePfxPath, passwordPath, TimeSpan.FromDays(30), CancellationToken.None);
+            }
+            catch (InvalidOperationException) { activationFailureRejected = true; }
+            Check(activationFailureRejected &&
+                  (await File.ReadAllBytesAsync(activePfxPath)).SequenceEqual(beforeActivationFailure),
+                "a post-replacement listener activation failure restores the last-good PFX");
+
             var activeBytesBeforeReject = await File.ReadAllBytesAsync(activePfxPath);
             fakeCa.NextPfx = ToPfx(wrongNameLeaf);
-            clock.Advance(TimeSpan.FromDays(61));
             var rejected = false;
             try
             {
@@ -214,6 +246,14 @@ internal static class AcmeRenewalAcceptance
     private static void SetPrivate(string path)
     {
         if (OperatingSystem.IsLinux()) File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+    }
+
+    private sealed class ThrowingIssuer : IAcmeCertificateIssuer
+    {
+        public Task<AcmeIssuedCertificate> IssueHttp01Async(string directoryUrl, string dnsName,
+            string contactEmail, string pfxPassword, AcmeHttp01ChallengeStore challenges,
+            CancellationToken cancellationToken) =>
+            throw new HttpRequestException("simulated ACME service unavailable");
     }
 
     private sealed class ManualTimeProvider(DateTimeOffset utcNow) : TimeProvider

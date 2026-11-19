@@ -204,6 +204,7 @@ public sealed class AcmeRenewalCoordinator(IAcmeCertificateIssuer issuer,
         string? stagePath = null;
         string? rollbackPath = null;
         byte[]? activePfxBackup = null;
+        var activePfxReplaced = false;
         try
         {
             var activeInfo = new FileInfo(activePfxPath);
@@ -241,6 +242,7 @@ public sealed class AcmeRenewalCoordinator(IAcmeCertificateIssuer issuer,
                     throw new CryptographicException("ACME renewal returned the currently active certificate.");
                 File.Move(stagePath, activePfxPath, overwrite: true);
                 stagePath = null;
+                activePfxReplaced = true;
                 if (activeCertificateCheck is not null)
                 {
                     using var activationTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(10), clock);
@@ -257,7 +259,7 @@ public sealed class AcmeRenewalCoordinator(IAcmeCertificateIssuer issuer,
         {
             // If runtime activation is wired and failed after the atomic swap, put the
             // last-good encrypted PFX back and let the same watcher restore it.
-            if (stagePath is null && activePfxBackup is not null && File.Exists(activePfxPath))
+            if (activePfxReplaced && activePfxBackup is not null && File.Exists(activePfxPath))
             {
                 var directory = Path.GetDirectoryName(Path.GetFullPath(activePfxPath))!;
                 rollbackPath = Path.Combine(directory, ".gatewaycore-acme-rollback-" + Guid.NewGuid().ToString("N") + ".pfx");
