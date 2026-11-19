@@ -5,15 +5,36 @@ using System.Text.Json.Serialization;
 
 /// <summary>Bounded, eventually consistent two-node telemetry; never a strict
 /// global rate limiter. The Redis atomic quota remains the admission authority.</summary>
+public static class PeerStateTableContract
+{
+    public const string TableId = "hashed-client-minute-request-count";
+    public const int TableVersion = 1;
+    public const int EntryTtlSeconds = 60;
+    public const int MaxEntries = 2048;
+    public const int MaxCountPerEntry = 1_000_000;
+
+    public static bool IsSupported(string? tableId, int tableVersion, int entryTtlSeconds) =>
+        tableId == TableId && tableVersion == TableVersion && entryTtlSeconds == EntryTtlSeconds;
+}
+
 public sealed record PeerStateFrame(string NodeId, long Minute, long Sequence,
     Dictionary<string,int> Counters)
 {
     // The receiver deliberately accepts only the protocol version it knows.
     // This is a compatibility fence: rollout must keep both peers on the same
     // version until an explicit negotiation/upgrade protocol is introduced.
-    public const int CurrentProtocolVersion = 1;
+    public const int CurrentProtocolVersion = 2;
     [JsonRequired]
     public int ProtocolVersion { get; init; } = CurrentProtocolVersion;
+
+    // Versioned table metadata prevents future peer state from being silently
+    // interpreted using this request-counter schema.
+    [JsonRequired]
+    public string TableId { get; init; } = PeerStateTableContract.TableId;
+    [JsonRequired]
+    public int TableVersion { get; init; } = PeerStateTableContract.TableVersion;
+    [JsonRequired]
+    public int EntryTtlSeconds { get; init; } = PeerStateTableContract.EntryTtlSeconds;
 
     // Boot epoch allows full resynchronization when a peer process restarts.
     public long SourceEpoch { get; init; }
@@ -48,7 +69,7 @@ public sealed class PeerStateJournal
         if (string.IsNullOrWhiteSpace(localId) || string.IsNullOrWhiteSpace(remoteId) ||
             localId == remoteId || localId.Length > 48 || remoteId.Length > 48)
             throw new ArgumentException("Two distinct nonempty node IDs of at most 48 characters required");
-        if (secret.Length < 32 || capacity is < 1 or > 2048)
+        if (secret.Length < 32 || capacity is < 1 or > PeerStateTableContract.MaxEntries)
             throw new ArgumentException("Peer secret and bounded capacity required");
         this.localId = localId;
         this.remoteId = remoteId;
@@ -78,9 +99,7 @@ public sealed class PeerStateJournal
         {
             if (minute != localMinute)
             {
-                localMinute = minute;
-                sequence = 0;
-                local.Clear();
+                ExpireLocalOutsideMinute(minute);
             }
             if (!local.ContainsKey(key) && local.Count >= maxIdentities) return;
             local[key] = local.TryGetValue(key, out var count) ? Math.Min(1_000_000, count + 1) : 1;
@@ -93,9 +112,7 @@ public sealed class PeerStateJournal
         {
             if (minute != localMinute)
             {
-                localMinute = minute;
-                local.Clear();
-                sequence = 0;
+                ExpireLocalOutsideMinute(minute);
             }
             sequence++;
             return new PeerStateFrame(localId, minute, sequence,
@@ -106,11 +123,12 @@ public sealed class PeerStateJournal
     public bool Apply(PeerStateFrame? frame, long currentMinute)
     {
         if (frame is null || frame.ProtocolVersion != PeerStateFrame.CurrentProtocolVersion ||
+            !PeerStateTableContract.IsSupported(frame.TableId, frame.TableVersion, frame.EntryTtlSeconds) ||
             frame.NodeId != remoteId ||
             frame.Minute != currentMinute || frame.Sequence <= 0 || frame.SourceEpoch <= 0 ||
             frame.Counters is null || frame.Counters.Count > maxIdentities ||
             frame.Counters.Any(p => p.Key.Length != 64 ||
-                !p.Key.All(Uri.IsHexDigit) || p.Value is < 1 or > 1_000_000))
+                !p.Key.All(Uri.IsHexDigit) || p.Value is < 1 or > PeerStateTableContract.MaxCountPerEntry))
             return false;
         lock (gate)
         {
@@ -143,15 +161,26 @@ public sealed class PeerStateJournal
     // preserves replay/sequence fencing so an older snapshot cannot resurrect.
     private bool RemoteFresh(long minute)
     {
-        if (receivedMinute != minute || lastAcceptedTimestamp is null) return false;
+        if (receivedMinute != minute || lastAcceptedTimestamp is null)
+        {
+            remote.Clear();
+            lastAcceptedTimestamp = null;
+            return false;
+        }
         var age = timeProvider.GetElapsedTime(lastAcceptedTimestamp.Value);
-        return age >= TimeSpan.Zero && age <= remoteFreshness;
+        if (age >= TimeSpan.Zero && age <= remoteFreshness) return true;
+        // Keep sequence/epoch high-water marks after collection so replayed
+        // snapshots cannot repopulate an expired table.
+        remote.Clear();
+        lastAcceptedTimestamp = null;
+        return false;
     }
 
     public PeerSyncStatus Status(long minute)
     {
         lock (gate)
         {
+            if (localMinute != minute) ExpireLocalOutsideMinute(minute);
             var validLocal = localMinute == minute;
             var validRemote = RemoteFresh(minute);
             return new PeerSyncStatus(true, localId, remoteId,
@@ -168,6 +197,23 @@ public sealed class PeerStateJournal
     {
         lock (gate)
             return RemoteFresh(minute) ? (remote.Count, remote.Values.Sum(x => (long)x)) : (0, 0);
+    }
+
+    internal int RetainedLocalEntries
+    {
+        get { lock (gate) return local.Count; }
+    }
+
+    internal int RetainedRemoteEntries
+    {
+        get { lock (gate) return remote.Count; }
+    }
+
+    private void ExpireLocalOutsideMinute(long minute)
+    {
+        localMinute = minute;
+        sequence = 0;
+        local.Clear();
     }
 }
 
