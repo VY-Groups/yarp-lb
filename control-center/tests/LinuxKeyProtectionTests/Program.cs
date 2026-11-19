@@ -115,7 +115,8 @@ try
         .Single(element=>element.Name.LocalName=="CipherValue");
     var encryptedSecretBytes=Convert.FromBase64String(cipherValueElement.Value);
     Assert(encryptedSecretBytes.Length>0,"persisted encrypted secret contains a valid ciphertext payload");
-    encryptedSecretBytes[encryptedSecretBytes.Length/2]^=0x40;
+    // Corrupt the first encrypted byte so the wrapped key cannot be recovered.
+    encryptedSecretBytes[0]^=0x01;
     cipherValueElement.Value=Convert.ToBase64String(encryptedSecretBytes);
     File.WriteAllText(tamperedKeyFile,tamperedDocument.ToString(SaveOptions.DisableFormatting));
     Set("YARP_CONTROL_PLANE_DIR",tamperState);
