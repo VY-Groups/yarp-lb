@@ -580,6 +580,9 @@ app.MapGet("/gateway/metrics", (HttpContext ctx) =>
     output.AppendLine("# HELP yarp_logging_dropped_total Low/high priority nonblocking console messages dropped");
     output.AppendLine("# TYPE yarp_logging_dropped_total counter");
     output.Append("yarp_logging_dropped_total ").Append(boundedConsole.DroppedMessages).Append('\n');
+    output.AppendLine("# HELP yarp_logging_dropped_low_priority_total Debug/Information console messages dropped");
+    output.AppendLine("# TYPE yarp_logging_dropped_low_priority_total counter");
+    output.Append("yarp_logging_dropped_low_priority_total ").Append(boundedConsole.DroppedLowPriorityMessages).Append('\n');
     output.AppendLine("# HELP yarp_logging_dropped_high_priority_total Warning/Error console messages dropped");
     output.AppendLine("# TYPE yarp_logging_dropped_high_priority_total counter");
     output.Append("yarp_logging_dropped_high_priority_total ").Append(boundedConsole.DroppedHighPriorityMessages).Append('\n');
