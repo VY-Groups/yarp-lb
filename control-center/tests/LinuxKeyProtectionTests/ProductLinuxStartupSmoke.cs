@@ -71,6 +71,59 @@ public static class ProductLinuxStartupSmoke
         info.Environment["YARP_LINUX_DP_CERT_PFX_PATH"]=pfx;
         info.Environment["YARP_LINUX_DP_CERT_PASSWORD_FILE"]=passwordFile;
         info.Environment.Remove("YARP_EC2_LAB_MODE");
+
+        async Task RequireProductionStartupFailureAsync(string name, Action<ProcessStartInfo> configure)
+        {
+            var failureInfo=new ProcessStartInfo("dotnet") {
+                WorkingDirectory=Directory.GetCurrentDirectory(),
+                UseShellExecute=false,RedirectStandardOutput=true,
+                RedirectStandardError=true,CreateNoWindow=true
+            };
+            failureInfo.ArgumentList.Add(dll);
+            failureInfo.Environment["ASPNETCORE_ENVIRONMENT"]="Production";
+            failureInfo.Environment["ASPNETCORE_URLS"]="http://127.0.0.1:"+port;
+            failureInfo.Environment["YARP_CONTROL_PLANE_DIR"]=state;
+            failureInfo.Environment["YARP_RUNTIME_CONFIG_PATH"]=configPath;
+            failureInfo.Environment["YARP_LINUX_DP_CERT_PFX_PATH"]=pfx;
+            failureInfo.Environment["YARP_LINUX_DP_CERT_PASSWORD_FILE"]=passwordFile;
+            failureInfo.Environment.Remove("YARP_EC2_LAB_MODE");
+            configure(failureInfo);
+            using var failed=Process.Start(failureInfo) ??
+                throw new Exception("Could not launch Control Center negative startup case: "+name);
+            var failureStdout=failed.StandardOutput.ReadToEndAsync();
+            var failureStderr=failed.StandardError.ReadToEndAsync();
+            using var timeout=new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            try { await failed.WaitForExitAsync(timeout.Token); }
+            catch (OperationCanceledException)
+            {
+                failed.Kill(entireProcessTree:true);
+                await failed.WaitForExitAsync();
+                _=await failureStdout;
+                _=await failureStderr;
+                throw new Exception("Production Control Center stayed running with invalid Linux Data Protection configuration: "+name);
+            }
+            var error=await failureStderr;
+            _=await failureStdout;
+            if(failed.ExitCode==0 || string.IsNullOrWhiteSpace(error))
+                throw new Exception("Production Control Center did not fail closed for Linux Data Protection case: "+name);
+            Console.WriteLine("PASS: real Production Control Center fails closed for "+name);
+        }
+
+        await RequireProductionStartupFailureAsync("missing Linux protection certificate",
+            failedInfo=>failedInfo.Environment.Remove("YARP_LINUX_DP_CERT_PFX_PATH"));
+        await RequireProductionStartupFailureAsync("missing Linux protection certificate password file",
+            failedInfo=>failedInfo.Environment["YARP_LINUX_DP_CERT_PASSWORD_FILE"]=Path.Combine(root,"missing-password"));
+        var invalidPfx=Path.Combine(root,"invalid.pfx");
+        await File.WriteAllTextAsync(invalidPfx,"not a PKCS#12 certificate");
+        File.SetUnixFileMode(invalidPfx,secret);
+        await RequireProductionStartupFailureAsync("invalid Linux protection certificate",
+            failedInfo=>failedInfo.Environment["YARP_LINUX_DP_CERT_PFX_PATH"]=invalidPfx);
+        var invalidPassword=Path.Combine(root,"invalid-password");
+        await File.WriteAllTextAsync(invalidPassword,"incorrect-password");
+        File.SetUnixFileMode(invalidPassword,secret);
+        await RequireProductionStartupFailureAsync("incorrect Linux protection certificate password",
+            failedInfo=>failedInfo.Environment["YARP_LINUX_DP_CERT_PASSWORD_FILE"]=invalidPassword);
+
         proc=Process.Start(info) ??
             throw new Exception("Could not start real Control Center in Linux production mode");
         stdout=proc.StandardOutput.ReadToEndAsync();
