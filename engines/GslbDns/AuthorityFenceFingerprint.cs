@@ -5,8 +5,26 @@ using System.Text.Json;
 internal static class AuthorityFenceFingerprint
 {
     public static string Compute(DnsZone[] zones, AgentReportServerConfig? agentReports,
-        int probeIntervalSeconds = 1, int maxConcurrentHealthProbes = 1)
+        int probeIntervalSeconds = 1, int maxConcurrentHealthProbes = 1,
+        IReadOnlyDictionary<string, DnssecZoneSigner>? loadedSigners = null)
     {
+        // Fingerprint the signer actually serving this zone, not a second
+        // read of mutable PEM paths. DS material is public and binds keys
+        // and rollover roles without exposing private key bytes.
+        string[] DnssecKeys(DnsZone zone)
+        {
+            var name = zone.Name.TrimEnd('.').ToLowerInvariant();
+            var enabled = !string.IsNullOrWhiteSpace(zone.DnssecPrivateKeyPath);
+            if (loadedSigners is not null && loadedSigners.TryGetValue(name, out var signer))
+            {
+                if (!enabled) throw new InvalidDataException("Unexpected loaded DNSSEC signer");
+                return signer.ParentDsMaterial.Select(key =>
+                    key.Phase + ":" + Convert.ToHexString(key.Ds.Rdata))
+                    .Order(StringComparer.Ordinal).ToArray();
+            }
+            if (enabled) throw new InvalidDataException("Authority fingerprint requires the loaded DNSSEC signer");
+            return [];
+        }
         var trustPolicy = agentReports is null ? null : new
         {
             agentReports.MaxTtlSeconds,
@@ -36,6 +54,11 @@ internal static class AuthorityFenceFingerprint
                 zone.FailureThreshold,
                 zone.SuccessThreshold,
                 zone.SoaSerial,
+                SoaPrimary = zone.NameServers?.FirstOrDefault()?.Host.TrimEnd('.').ToLowerInvariant(),
+                DnssecKeys = DnssecKeys(zone),
+                DnssecDenialMode = (zone.DnssecDenialMode ?? "Nsec").ToUpperInvariant(),
+                DnssecNsec3SaltHex = zone.DnssecNsec3SaltHex?.ToUpperInvariant(),
+                DnssecNsec3Iterations = zone.DnssecNsec3Iterations ?? 0,
                 SoaContact = (zone.SoaContact ?? ("hostmaster." + zone.Name.TrimEnd('.')))
                     .TrimEnd('.').ToLowerInvariant(),
                 zone.RoutingPolicy,
