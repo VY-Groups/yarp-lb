@@ -1115,17 +1115,25 @@ app.MapGet("/admin/api/gateway-readiness", (IProxyStateLookup proxy) =>
         collectedUtc = DateTimeOffset.UtcNow
     })).RequireAuthorization();
 
-JsonObject ReadConfig() => JsonNode.Parse(File.ReadAllText(configPath))!.AsObject();
+// Parse and hash one immutable file snapshot. Preserve the text reader's
+// BOM handling for pre-existing operator-managed configuration files.
+static JsonObject ParseConfigSnapshot(byte[] bytes)
+{
+    using var reader = new StreamReader(new MemoryStream(bytes), detectEncodingFromByteOrderMarks: true);
+    return JsonNode.Parse(reader.ReadToEnd())!.AsObject();
+}
+JsonObject ReadConfig() => ParseConfigSnapshot(File.ReadAllBytes(configPath));
 JsonObject ReadProxy() => (ReadConfig()["ReverseProxy"]?.DeepClone() as JsonObject) ?? new JsonObject();
 
 app.MapGet("/admin/api/state", () =>
 {
-    var proxy = ReadProxy();
+    var snapshot = File.ReadAllBytes(configPath);
+    var proxy = ParseConfigSnapshot(snapshot)["ReverseProxy"] as JsonObject ?? new JsonObject();
     var disabled = (proxy["AdminDisabledDestinations"] as JsonObject)?.DeepClone() as JsonObject ?? new JsonObject();
     proxy.Remove("AdminDisabledDestinations");
     return Results.Ok(new { name = "YARP Control Center", gateway = "online", time = DateTimeOffset.UtcNow,
         routes = proxy["Routes"] ?? new JsonObject(), clusters = proxy["Clusters"] ?? new JsonObject(), disabled,
-        mode = "Authenticated local management", telemetry = "Local HTTP counters only; no backend or fleet metrics", revision = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(configPath))) });
+        mode = "Authenticated local management", telemetry = "Local HTTP counters only; no backend or fleet metrics", revision = Convert.ToHexString(SHA256.HashData(snapshot)) });
 }).RequireAuthorization();
 
 app.MapGet("/admin/api/audit", () =>
@@ -1281,10 +1289,11 @@ async Task<IResult> CommitReviewedChange(HttpContext ctx, JsonObject submitted)
     await gate.WaitAsync();
     try
     {
-        var currentRevision = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(configPath)));
+        var snapshot = File.ReadAllBytes(configPath);
+        var currentRevision = Convert.ToHexString(SHA256.HashData(snapshot));
         if (!string.Equals(expectedRevision, currentRevision, StringComparison.Ordinal))
             return Results.Conflict(new { error = "Configuration changed since loading. Refresh before saving." });
-        var doc = ReadConfig();
+        var doc = ParseConfigSnapshot(snapshot);
         var proxy = (doc["ReverseProxy"] as JsonObject) ?? new JsonObject();
         proxy["Routes"] = routes.DeepClone();
         proxy["Clusters"] = clusters.DeepClone();
@@ -1293,7 +1302,8 @@ async Task<IResult> CommitReviewedChange(HttpContext ctx, JsonObject submitted)
         Directory.CreateDirectory(backupFolder);
         var stamp = DateTimeOffset.UtcNow.ToString("yyyyMMddTHHmmssfffffffZ");
         var backup = Path.Combine(backupFolder, $"appsettings-{stamp}.json");
-        File.Copy(configPath, backup, overwrite: false);
+        using (var backupStream = new FileStream(backup, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+            await backupStream.WriteAsync(snapshot);
         var temp = configPath + ".tmp";
         await File.WriteAllTextAsync(temp, doc.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
         File.Move(temp, configPath, overwrite: true);
@@ -1347,7 +1357,7 @@ app.MapPost("/admin/api/gitops/plan", async (HttpContext ctx) =>
         var currentRevision = Convert.ToHexString(SHA256.HashData(currentBytes));
         if (!string.Equals(revision, currentRevision, StringComparison.Ordinal))
             return Results.Conflict(new { error = "Configuration changed since loading. Refresh before planning." });
-        var current = JsonNode.Parse(currentBytes)?["ReverseProxy"] as JsonObject ?? new JsonObject();
+        var current = ParseConfigSnapshot(currentBytes)["ReverseProxy"] as JsonObject ?? new JsonObject();
         static object Diff(JsonObject? previous, JsonObject proposed)
         {
             previous ??= new JsonObject();
