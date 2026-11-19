@@ -158,19 +158,25 @@ def backend():
     finally: server.shutdown();server.server_close();thread.join(timeout=3)
 
 @contextmanager
-def gateway(cwd:Path, dll:Path, root:Path, listen_port:int, https_port:int):
+def gateway(cwd:Path, dll:Path, root:Path, listen_port:int, https_port:int|None=None):
     env=os.environ.copy()
     env.pop("YARP_EC2_LAB_MODE",None)
+    urls=[f"http://127.0.0.1:{listen_port}"]
+    if https_port is not None:
+        urls.append(f"https://127.0.0.1:{https_port}")
     env.update(
         ASPNETCORE_ENVIRONMENT="Production",
-        ASPNETCORE_URLS=f"http://127.0.0.1:{listen_port};https://127.0.0.1:{https_port}",
-        ASPNETCORE_Kestrel__Certificates__Default__Path=str(root/"secrets"/"dp.pfx"),
-        ASPNETCORE_Kestrel__Certificates__Default__Password="temporary-e2e-only-password",
+        ASPNETCORE_URLS=";".join(urls),
         YARP_CONTROL_PLANE_DIR=str(root/"state"),
         YARP_RUNTIME_CONFIG_PATH=str(root/"state"/"config"/"appsettings.json"),
         YARP_LINUX_DP_CERT_PFX_PATH=str(root/"secrets"/"dp.pfx"),
         YARP_LINUX_DP_CERT_PASSWORD_FILE=str(root/"secrets"/"dp-password"),
     )
+    if https_port is not None:
+        env.update(
+            ASPNETCORE_Kestrel__Certificates__Default__Path=str(root/"secrets"/"dp.pfx"),
+            ASPNETCORE_Kestrel__Certificates__Default__Password="temporary-e2e-only-password",
+        )
     logs=open(root/"gateway.log","a",encoding="utf8")
     proc=subprocess.Popen(["dotnet",str(dll)],cwd=cwd,env=env,stdout=logs,stderr=subprocess.STDOUT)
     base=f"http://127.0.0.1:{listen_port}"
