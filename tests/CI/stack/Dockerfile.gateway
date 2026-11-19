@@ -6,17 +6,32 @@ RUN dotnet publish control-center/GatewayCoreYarp.csproj -c Release -o /publishe
 
 FROM mcr.microsoft.com/dotnet/aspnet:10.0
 USER root
-# Retry transient signed-index mirror synchronization failures with fresh lists.
+# The lab image still requires real openssl, CA certificates and curl.
+# Rotate HTTPS Ubuntu archive endpoints on transport/index failures; retain
+# every configured pocket and the upstream Signed-By keyring.
 RUN set -eu; \
-    for attempt in 1 2 3 4; do \
+    sources=/etc/apt/sources.list.d/ubuntu.sources; \
+    test -f "$sources"; \
+    cp "$sources" /tmp/gatewaycore-ubuntu.sources; \
+    for mirror in primary us.archive.ubuntu.com mirrors.edge.kernel.org; do \
+        cp /tmp/gatewaycore-ubuntu.sources "$sources"; \
+        if [ "$mirror" = primary ]; then \
+            sed -i 's|http://archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g; s|http://security.ubuntu.com/ubuntu|https://security.ubuntu.com/ubuntu|g' "$sources"; \
+        else \
+            sed -i -E "s#https?://(archive|security)\\.ubuntu\\.com/ubuntu#https://$mirror/ubuntu#g" "$sources"; \
+        fi; \
         rm -rf /var/lib/apt/lists/*; \
-        if apt-get -o Acquire::Retries=3 -o APT::Update::Error-Mode=any update \
-            && apt-get -o Acquire::Retries=3 install -y --no-install-recommends openssl ca-certificates curl; then \
+        echo "GatewayCore lab dependency mirror: $mirror"; \
+        if timeout 180s apt-get -o Acquire::Retries=1 -o Acquire::https::Timeout=15 -o APT::Update::Error-Mode=any update \
+            && timeout 180s apt-get -o Acquire::Retries=1 -o Acquire::https::Timeout=15 install -y --download-only --no-install-recommends openssl ca-certificates curl; then \
+            apt-get install -y --no-download --no-install-recommends openssl ca-certificates curl; \
             break; \
         fi; \
-        test "$attempt" -lt 4 || exit 1; \
-        sleep "$((attempt * 5))"; \
+        test "$mirror" != mirrors.edge.kernel.org || exit 1; \
+        sleep 5; \
     done; \
+    cp /tmp/gatewaycore-ubuntu.sources "$sources"; \
+    rm /tmp/gatewaycore-ubuntu.sources; \
     rm -rf /var/lib/apt/lists/* \
  && useradd --uid 10001 --home-dir /state --create-home --shell /usr/sbin/nologin yarpci \
  && mkdir -p /app /state && chown -R yarpci:yarpci /state

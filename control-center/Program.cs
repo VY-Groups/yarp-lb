@@ -1691,7 +1691,18 @@ if (peerSyncSettings is not null && peerStateJournal is not null && peerSigner i
         PeerStateFrame? frame;
         try { frame = System.Text.Json.JsonSerializer.Deserialize<PeerStateFrame>(bytes); }
         catch (System.Text.Json.JsonException) { return Results.BadRequest(); }
-        if (!peerStateJournal.Apply(frame, PeerStateJournal.CurrentMinute()))
+        // Only a correctly signed, current-protocol request from the expected
+        // peer may learn this process's challenge. No old snapshot is applied.
+        if (frame is null || frame.ProtocolVersion != PeerStateFrame.CurrentProtocolVersion ||
+            frame.NodeId != peerSyncSettings.RemoteId)
+            return Results.StatusCode(409);
+        if (!peerStateJournal.MatchesReceiverEpoch(frame))
+        {
+            ctx.Response.Headers[PeerStateJournal.ReceiverEpochHeader] = peerStateJournal.ReceiverEpoch;
+            ctx.Response.Headers.CacheControl = "no-store";
+            return Results.StatusCode(409);
+        }
+        if (!peerStateJournal.ApplyBoundFrame(frame, PeerStateJournal.CurrentMinute()))
             return Results.StatusCode(409);
         return Results.NoContent();
     });
