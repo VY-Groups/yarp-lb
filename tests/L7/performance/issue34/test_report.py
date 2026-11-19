@@ -63,7 +63,9 @@ class ReportTests(unittest.TestCase):
     def test_k6_and_gateway_counter_parser_keeps_all_requested_metrics(self):
         metrics = {
             "http_reqs": {"count": 4500, "rate": 100.0},
-            "http_req_failed": {"value": 0.0, "fails": 0},
+            # k6 Rate summary `fails` counts false samples, which for
+            # http_req_failed are successful requests; it is not HTTP errors.
+            "http_req_failed": {"value": 0.0, "passes": 0, "fails": 4500},
             "checks": {"value": 1.0},
             "http_req_duration": {"p(95)": 30.0, "p(99)": 50.0},
         }
@@ -85,6 +87,25 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(parsed["working_set_delta_bytes"], 10000)
         self.assertEqual((parsed["gc0_delta"], parsed["gc1_delta"], parsed["gc2_delta"]), (2, 1, 0))
         self.assertEqual(parsed["gc_pause_ms_delta"], 4.0)
+
+    def test_http_errors_come_from_k6_failure_rate_not_rate_sample_counts(self):
+        metrics = {
+            "http_reqs": {"count": 1000, "rate": 100.0},
+            "http_req_failed": {"value": 0.002, "passes": 2, "fails": 998},
+            "checks": {"value": 1.0},
+            "http_req_duration": {"p(95)": 30.0, "p(99)": 50.0},
+        }
+        parsed = parse_measurement(metrics, 10.0, {
+            "processId": 17, "allocatedBytesTotal": 100, "processWorkingSetBytes": 100,
+            "gc0Collections": 0, "gc1Collections": 0, "gc2Collections": 0,
+            "gcPauseTimeMs": 0.0, "gcManagedHeapBytes": 0,
+        }, {
+            "processId": 17, "allocatedBytesTotal": 200, "processWorkingSetBytes": 100,
+            "gc0Collections": 0, "gc1Collections": 0, "gc2Collections": 0,
+            "gcPauseTimeMs": 0.0, "gcManagedHeapBytes": 0,
+        })
+        self.assertEqual(parsed["errors"], 2)
+        self.assertEqual(parsed["failed_rate"], 0.002)
 
     def test_three_paired_rounds_report_ci_and_nonproduction_scope(self):
         report = build_report(records(), "before-sha", "after-sha")

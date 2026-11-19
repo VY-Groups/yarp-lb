@@ -234,7 +234,10 @@ def measurement(metrics: dict, elapsed: float, before: dict, after: dict) -> dic
     record = {
         "duration_seconds": elapsed,
         "requests": requests,
-        "errors": int(failure.get("fails", round(float(failure["value"]) * requests))),
+        # For k6 Rate metrics, `passes`/`fails` count true/false samples; for
+        # http_req_failed that is inverted from the HTTP failure count. Derive
+        # request errors from the actual failure rate and request counter.
+        "errors": round(float(failure["value"]) * requests),
         "failed_rate": float(failure["value"]),
         "checks_rate": float(checks["value"]),
         "rps": float(metrics["http_reqs"]["rate"]),
