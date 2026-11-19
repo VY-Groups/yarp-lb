@@ -220,11 +220,11 @@ async Task RunUdp(L4Listener cfg, CancellationToken token)
                 if (!await tick) break;
                 var sweepNow = Environment.TickCount64;
                 var retired = 0;
-                foreach (var (key, session) in sessions.ToArray())
+                foreach (var (expiredKey, expiredSession) in sessions.ToArray())
                 {
-                    if (!Expired(session, sweepNow)) continue;
-                    sessions.Remove(key);
-                    session.Close();
+                    if (!Expired(expiredSession, sweepNow)) continue;
+                    sessions.Remove(expiredKey);
+                    expiredSession.Close();
                     retired++;
                 }
                 if (retired > 0)
