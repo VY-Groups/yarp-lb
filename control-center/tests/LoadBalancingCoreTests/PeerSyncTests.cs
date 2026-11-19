@@ -216,6 +216,33 @@ public static class PeerSyncTests
         Check(localGc.RetainedLocalEntries == 0,
             "local table is collected at the first observation boundary after its minute TTL");
 
+        var localRollback = new PeerStateJournal("node-a", "node-b", secret, 2);
+        localRollback.Observe(client, now);
+        var previousLocal = localRollback.Snapshot(now);
+        localRollback.Observe(client, now + 1);
+        localRollback.Observe(client, now + 1);
+        var currentLocal = localRollback.Snapshot(now + 1);
+        localRollback.Observe(IPAddress.Parse("10.123.4.99"), now);
+        Check(localRollback.Status(now).LocalIdentities == 0 &&
+              localRollback.Status(now).LocalRequests == 0,
+            "rollback status hides counters from the newer minute");
+        Check(localRollback.RetainedLocalEntries == 1 &&
+              localRollback.Status(now + 1).LocalRequests == 2,
+            "late observation and status cannot clear or pollute the current local minute");
+        var staleSnapshotRejected = false;
+        try { _ = localRollback.Snapshot(now); }
+        catch (InvalidOperationException) { staleSnapshotRejected = true; }
+        Check(staleSnapshotRejected,
+            "publisher cannot relabel newer counters as a regressed minute");
+        var recoveredLocal = localRollback.Snapshot(now + 1);
+        Check(recoveredLocal.Sequence == currentLocal.Sequence + 1 &&
+              recoveredLocal.Counters.Single().Value == 2 &&
+              recoveredLocal.Minute > previousLocal.Minute,
+            "local sequence and counters survive clock catch-up without rollback");
+        Check(localRollback.Snapshot(now + 2).Counters.Count == 0 &&
+              localRollback.Status(now + 2).LocalRequests == 0,
+            "normal forward minute transition still collects local telemetry");
+
         var remoteMinuteGcSource = new PeerStateJournal("node-a", "node-b", secret, 2);
         remoteMinuteGcSource.Observe(IPAddress.Parse("10.123.4.12"), now);
         var remoteMinuteGc = new PeerStateJournal("node-b", "node-a", secret, 2);
