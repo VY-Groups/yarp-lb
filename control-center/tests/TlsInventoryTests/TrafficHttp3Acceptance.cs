@@ -15,22 +15,22 @@ using Microsoft.Extensions.Logging;
 
 internal static class TrafficHttp3Acceptance
 {
-    internal static int SelectDualTransportPort(Func<(int Port, IDisposable Reservation)> reserveTcp, Action<int> bindUdp,
+    internal static int SelectDualTransportPort(Func<(int Port, IDisposable Reservation)> reserveUdp, Action<int> bindTcp,
         int maxAttempts = 32)
     {
-        ArgumentNullException.ThrowIfNull(reserveTcp);
-        ArgumentNullException.ThrowIfNull(bindUdp);
+        ArgumentNullException.ThrowIfNull(reserveUdp);
+        ArgumentNullException.ThrowIfNull(bindTcp);
         if (maxAttempts < 1) throw new ArgumentOutOfRangeException(nameof(maxAttempts));
 
         SocketException? lastFailure = null;
         for (var attempt = 0; attempt < maxAttempts; attempt++)
         {
-            var (port, reservation) = reserveTcp();
+            var (port, reservation) = reserveUdp();
             using (reservation)
             {
                 try
                 {
-                    bindUdp(port);
+                    bindTcp(port);
                     return port;
                 }
                 catch (SocketException ex) when (ex.SocketErrorCode is SocketError.AddressAlreadyInUse or SocketError.AccessDenied)
@@ -108,13 +108,13 @@ internal static class TrafficHttp3Acceptance
         {
             return SelectDualTransportPort(() =>
             {
-                var tcp = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
-                tcp.Bind(new IPEndPoint(IPAddress.Loopback, 0));
-                return (((IPEndPoint)tcp.LocalEndPoint!).Port, tcp);
+                var udp = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+                udp.Bind(new IPEndPoint(IPAddress.Loopback, 0));
+                return (((IPEndPoint)udp.LocalEndPoint!).Port, udp);
             }, port =>
             {
-                using var udp = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
-                udp.Bind(new IPEndPoint(IPAddress.Loopback, port));
+                using var tcp = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+                tcp.Bind(new IPEndPoint(IPAddress.Loopback, port));
             });
         }
 
