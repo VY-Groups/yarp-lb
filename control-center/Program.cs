@@ -41,6 +41,10 @@ GatewayOpenTelemetry.Configure(builder.Services);
 // Explicit v0.1 multi-socket mode; legacy loopback remains CI migration-only.
 var isolatedListeners = GatewayListenerIsolation.FromEnvironment();
 isolatedListeners?.Configure(builder.WebHost);
+if (isolatedListeners is not null)
+    // Register through a factory so the host owns and disposes the listener's
+    // certificate rotation watcher and its temporary persisted key material.
+    builder.Services.AddSingleton<GatewayListenerIsolation>(_ => isolatedListeners);
 // Production and the GatewayLab use the same nonblocking registration.
 var boundedConsole = GatewayLoggingConfiguration.Install(builder.Logging, Console.Out);
 var dataProtection = builder.Services.AddDataProtection()

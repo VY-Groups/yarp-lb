@@ -8,16 +8,37 @@ ASCII and rejects IP literals, private-use names, wildcard names and HTTP-01
 without an explicit challenge-entrypoint flag. It does not resolve DNS or
 prove that an address is publicly reachable.
 
-The test suite covers this input policy on Windows and Ubuntu. The application
-has no ACME account/key persistence, challenge route, issuance flow, renewal
-scheduler, backoff/jitter, TLS listener certificate swap, rollback, revocation,
-rate limiting or failure alerts. The HTTP-01 flag is not a challenge listener
-and must not be interpreted as one. This is a partial security increment for
-issue #37; it does not satisfy the issue or make automatic TLS deployment safe.
+The test suite covers this input policy on Windows and Ubuntu. Opt-in isolated
+traffic listeners can also hot-reload a PFX when an operator or future issuer
+atomically replaces the configured file and supplies explicit DNS names in the
+listener JSON's `TrafficCertificateDnsNames` array. Omit the field to preserve
+the existing startup-only certificate behavior. A renewal writer must write
+the complete encrypted PFX to a temporary file in the same directory, set
+the required private-file permissions, then atomically rename it over the
+configured PFX path. The
+rotation path checks SAN coverage, server-auth EKU, private key, validity and
+the operating-system certificate chain before it serves new handshakes. A bad
+candidate leaves the last-good certificate active. Existing TLS handshakes get
+a bounded 10-second Kestrel handshake window; retired keys are held for a
+20-second grace period, swaps are limited to one per 5 seconds, and at most 4
+retired certificate handles are retained. On Windows, imported CNG user-key
+containers are deleted by exact key name at retirement or shutdown; Linux uses
+ephemeral key loading. The existing static-certificate behavior remains when
+`TrafficCertificateDnsNames` is omitted. Windows PFX/password file ACLs still
+need to be restricted to the service identity by deployment; the application
+does not change those ACLs.
 
-A real lifecycle still needs an independently reviewed issuer adapter and
-integration tests with a deterministic ACME CA (such as Pebble) that exercise
-the production challenge handler, certificate validation, active Kestrel
-certificate selection, renewal overlap and rollback. Public staging validation
-also requires an operator-supplied eligible domain and reachable challenge
-entrypoint; CI has neither. No production CA or DNS credentials belong in CI.
+There is still no ACME account/key persistence, challenge route, issuance flow,
+renewal scheduler, backoff/jitter, OCSP/CRL check specifically at activation,
+revocation workflow, or failure alerting. The HTTP-01 flag is not a challenge
+listener and must not be interpreted as one. This is a partial runtime
+certificate-rotation increment for issue #37; it does not satisfy the issue or
+make automatic TLS deployment safe.
+
+A real lifecycle still needs an independently reviewed issuer adapter that
+writes validated candidates atomically, and integration tests with a
+deterministic ACME CA (such as Pebble) that exercise the production challenge
+handler, persisted account identity, renewal scheduling, failure alarms and
+revocation. Public staging validation also requires an operator-supplied
+eligible domain and reachable challenge entrypoint; CI has neither. No
+production CA or DNS credentials belong in CI.

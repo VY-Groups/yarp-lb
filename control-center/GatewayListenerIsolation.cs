@@ -11,7 +11,7 @@ using Yarp.ReverseProxy.Health;
 
 /// <summary>Opt-in v0.1 independent data, admin and metrics sockets. Unconfigured legacy
 /// loopback mode remains available for existing CI and migration only.</summary>
-public sealed class GatewayListenerIsolation
+public sealed class GatewayListenerIsolation : IDisposable
 {
     public sealed record Settings(
         string TrafficIp,
@@ -28,13 +28,16 @@ public sealed class GatewayListenerIsolation
         string[] ClientThumbprints,
         string[] AllowedAdminCidrs,
         long MaxConcurrentConnections,
-        string HttpVersion);
+        string HttpVersion,
+        string[]? TrafficCertificateDnsNames = null);
 
     public readonly Settings Config;
     private readonly IPAddress _traffic, _management;
     private readonly IPNetwork[] _allowed;
     private readonly HashSet<string> _pins;
-    private readonly X509Certificate2 _trafficCertificate, _managementCertificate, _clientCa;
+    private readonly X509Certificate2? _trafficCertificate;
+    private readonly TrafficCertificateRotation? _trafficCertificateRotation;
+    private readonly X509Certificate2 _managementCertificate, _clientCa;
 
     private GatewayListenerIsolation(Settings config)
     {
@@ -60,12 +63,35 @@ public sealed class GatewayListenerIsolation
         _allowed = config.AllowedAdminCidrs.Select(s =>
             IPNetwork.TryParse(s, out var network) ? network :
             throw new InvalidOperationException("Invalid management CIDR: " + s)).ToArray();
-        _trafficCertificate = LoadPfx(config.TrafficPfxPath, config.TrafficPfxPasswordFile);
-        _managementCertificate = LoadPfx(config.ManagementPfxPath, config.ManagementPfxPasswordFile);
-        CheckRegular(config.ClientCaPemPath, false);
-        _clientCa = X509CertificateLoader.LoadCertificateFromFile(config.ClientCaPemPath);
-        if (!_clientCa.Extensions.OfType<X509BasicConstraintsExtension>().Any(e => e.CertificateAuthority))
-            throw new InvalidOperationException("Management client trust anchor must be a CA certificate");
+        X509Certificate2? trafficCertificate = null;
+        TrafficCertificateRotation? trafficRotation = null;
+        X509Certificate2? managementCertificate = null;
+        X509Certificate2? clientCa = null;
+        try
+        {
+            managementCertificate = LoadPfx(config.ManagementPfxPath, config.ManagementPfxPasswordFile);
+            CheckRegular(config.ClientCaPemPath, false);
+            clientCa = X509CertificateLoader.LoadCertificateFromFile(config.ClientCaPemPath);
+            if (!clientCa.Extensions.OfType<X509BasicConstraintsExtension>().Any(e => e.CertificateAuthority))
+                throw new InvalidOperationException("Management client trust anchor must be a CA certificate");
+            if (config.TrafficCertificateDnsNames is { Length: > 0 })
+                trafficRotation = new TrafficCertificateRotation(config.TrafficPfxPath,
+                    config.TrafficPfxPasswordFile, config.TrafficCertificateDnsNames);
+            else
+                trafficCertificate = LoadPfx(config.TrafficPfxPath, config.TrafficPfxPasswordFile);
+        }
+        catch
+        {
+            trafficRotation?.Dispose();
+            trafficCertificate?.Dispose();
+            managementCertificate?.Dispose();
+            clientCa?.Dispose();
+            throw;
+        }
+        _trafficCertificate = trafficCertificate;
+        _trafficCertificateRotation = trafficRotation;
+        _managementCertificate = managementCertificate;
+        _clientCa = clientCa;
     }
 
     private static string NormalizeThumbprint(string value) => value.Replace(":", "", StringComparison.Ordinal)
@@ -144,7 +170,14 @@ public sealed class GatewayListenerIsolation
             options.Listen(_traffic, Config.TrafficHttpsPort, listen =>
             {
                 listen.Protocols = Config.HttpVersion == "2" ? HttpProtocols.Http2 : HttpProtocols.Http1;
-                listen.UseHttps(_trafficCertificate);
+                if (_trafficCertificateRotation is null)
+                    listen.UseHttps(_trafficCertificate!);
+                else
+                    listen.UseHttps(new HttpsConnectionAdapterOptions
+                    {
+                        HandshakeTimeout = TimeSpan.FromSeconds(10),
+                        ServerCertificateSelector = (_, serverName) => _trafficCertificateRotation.Select(serverName)
+                    });
             });
             void ConfigureManagement(ListenOptions listen)
             {
@@ -188,4 +221,6 @@ public sealed class GatewayListenerIsolation
     public static bool AnyDestinationHealthy(IProxyStateLookup proxy) =>
         proxy.GetClusters().Any(cluster =>
             cluster.Destinations.Values.Any(d => d.Health.Active == DestinationHealth.Healthy));
+
+    public void Dispose() => _trafficCertificateRotation?.Dispose();
 }
