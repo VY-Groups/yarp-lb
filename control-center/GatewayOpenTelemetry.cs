@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Diagnostics.Metrics;
+using System.Collections.Concurrent;
 using System.Text.RegularExpressions;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Http.Features;
@@ -25,6 +26,7 @@ public static class GatewayOpenTelemetry
     private static readonly Meter Meter = new(ActivitySourceName, "0.1");
     private static readonly Counter<long> ProxyRequests = Meter.CreateCounter<long>("gateway.proxy.requests");
     private static readonly Histogram<double> ProxyDuration = Meter.CreateHistogram<double>("gateway.proxy.request.duration", "ms");
+    private static readonly GatewayTelemetryDimensionBudget DimensionBudget = new();
 
     public static bool Configure(IServiceCollection services, string? machineName = null)
     {
@@ -119,7 +121,8 @@ public static class GatewayOpenTelemetry
             activity.SetStatus(ActivityStatusCode.Error);
     }
 
-    public static void RecordProxyResult(HttpContext context, double elapsedMs)
+    public static void RecordProxyResult(HttpContext context, double elapsedMs,
+        string? routeId = null, string? clusterId = null, string? destinationId = null)
     {
         var statusClass = context.Response.StatusCode switch
         {
@@ -129,7 +132,7 @@ public static class GatewayOpenTelemetry
             >= 500 and < 600 => "5xx",
             _ => "other"
         };
-        var tags = new TagList { { "http.response.status_class", statusClass } };
+        var tags = DimensionBudget.CreateTags(routeId, clusterId, destinationId, statusClass);
         ProxyRequests.Add(1, tags);
         ProxyDuration.Record(elapsedMs, tags);
     }
@@ -157,6 +160,68 @@ public static class GatewayOpenTelemetry
             Regex.IsMatch(value, "^[A-Za-z0-9_-]+$", RegexOptions.CultureInvariant))
             activity.SetTag(key, value);
     }
+}
+
+/// <summary>
+/// Caps distinct route/cluster/destination tuples emitted to OTLP. Configured IDs
+/// are validated before becoming metric attributes; overflow is one fixed tuple.
+/// </summary>
+internal sealed class GatewayTelemetryDimensionBudget
+{
+    public const int MaximumTotalTuples = 4096;
+    private readonly int _maximumNamedTuples;
+    private readonly ConcurrentDictionary<string, byte> _tracked = new(StringComparer.Ordinal);
+    private readonly object _registrationLock = new();
+    private volatile bool _saturated;
+
+    public GatewayTelemetryDimensionBudget(int maximumTotalTuples = MaximumTotalTuples)
+    {
+        if (maximumTotalTuples < 2 || maximumTotalTuples > MaximumTotalTuples)
+            throw new ArgumentOutOfRangeException(nameof(maximumTotalTuples));
+        // Reserve one series tuple for the fixed overflow dimensions.
+        _maximumNamedTuples = maximumTotalTuples - 1;
+    }
+
+    public int TrackedTuples => _tracked.Count;
+
+    public TagList CreateTags(string? routeId, string? clusterId, string? destinationId, string statusClass)
+    {
+        var route = SafeId(routeId) ? routeId! : "_other";
+        var cluster = SafeId(clusterId) ? clusterId! : "_other";
+        var destination = SafeId(destinationId) ? destinationId! : "_other";
+        var key = string.Concat(route, "\0", cluster, "\0", destination);
+        if (!_tracked.ContainsKey(key) && !_saturated)
+        {
+            lock (_registrationLock)
+            {
+                if (!_tracked.ContainsKey(key))
+                {
+                    if (_tracked.Count < _maximumNamedTuples)
+                        _tracked.TryAdd(key, 0);
+                    else
+                    {
+                        _saturated = true;
+                        route = cluster = destination = "_other";
+                    }
+                }
+            }
+        }
+        else if (!_tracked.ContainsKey(key))
+        {
+            route = cluster = destination = "_other";
+        }
+
+        return new TagList
+        {
+            { "http.response.status_class", statusClass },
+            { "gateway.route.id", route },
+            { "gateway.cluster.id", cluster },
+            { "gateway.destination.id", destination }
+        };
+    }
+
+    private static bool SafeId(string? value) => value is { Length: > 0 and <= 80 } &&
+        value.All(c => char.IsAsciiLetterOrDigit(c) || c is '_' or '-');
 }
 
 /// <summary>Keep client identifiers, request paths and secrets out of OTLP spans.</summary>

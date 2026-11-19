@@ -32,6 +32,28 @@ Must(RejectsOtlpEndpoint("https://user:secret@collector.example") &&
     "OTLP endpoint rejects embedded credentials, path, query and fragment");
 Must(RejectsOtlpEndpoint("not a URL") && RejectsOtlpEndpoint("ftp://collector.example"),
     "malformed and unsupported OTLP endpoints reject startup");
+var metricDimensionBudget = new GatewayTelemetryDimensionBudget(2);
+var trackedMetricTags = metricDimensionBudget.CreateTags("route_a", "cluster_a", "destination_a", "5xx");
+var overflowMetricTags = metricDimensionBudget.CreateTags("route_b", "cluster_b", "destination_b", "2xx");
+var unsafeMetricTags = metricDimensionBudget.CreateTags("route/with/path", "cluster_a", "destination_a", "4xx");
+Must(metricDimensionBudget.TrackedTuples == 1 &&
+     (string?)trackedMetricTags.First(x => x.Key == "gateway.route.id").Value == "route_a" &&
+     (string?)trackedMetricTags.First(x => x.Key == "gateway.cluster.id").Value == "cluster_a" &&
+     (string?)trackedMetricTags.First(x => x.Key == "gateway.destination.id").Value == "destination_a" &&
+     (string?)overflowMetricTags.First(x => x.Key == "gateway.route.id").Value == "_other" &&
+     (string?)overflowMetricTags.First(x => x.Key == "gateway.cluster.id").Value == "_other" &&
+     (string?)overflowMetricTags.First(x => x.Key == "gateway.destination.id").Value == "_other" &&
+     (string?)unsafeMetricTags.First(x => x.Key == "gateway.route.id").Value == "_other",
+    "OTLP proxy metrics reserve the overflow tuple within the hard cardinality cap and validate configured IDs");
+var concurrentDimensionBudget = new GatewayTelemetryDimensionBudget(16);
+var concurrentTags = new System.Collections.Concurrent.ConcurrentBag<System.Diagnostics.TagList>();
+Parallel.For(0, 256, index => concurrentTags.Add(concurrentDimensionBudget.CreateTags(
+    $"route_{index}", $"cluster_{index}", $"destination_{index}", "2xx")));
+var concurrentRouteValues = concurrentTags.Select(tags => (string?)tags.First(x => x.Key == "gateway.route.id").Value)
+    .Distinct(StringComparer.Ordinal).ToArray();
+Must(concurrentDimensionBudget.TrackedTuples <= 15 && concurrentRouteValues.Length <= 16 &&
+     concurrentRouteValues.Contains("_other", StringComparer.Ordinal),
+    "concurrent OTLP dimension registration stays inside named-plus-reserved overflow tuple budget");
 using (var privacyActivity = new System.Diagnostics.Activity("privacy-contract"))
 {
     privacyActivity.SetTag("client.address", "203.0.113.8");
