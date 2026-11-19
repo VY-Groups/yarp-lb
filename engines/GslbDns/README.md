@@ -447,7 +447,61 @@ Example shape (paths, certificate pins, keys, limits and addresses below are pla
 
 Each observer's optional report configuration includes `ReportUrl` ending in `/agent-health/v1/reports`, its `AgentId`, `Zone`, `SiteId`, a P-256 `SigningKeyPem`, a client certificate/key with clientAuth EKU, an optional `ReportServerCaPem` custom CA, a protected absolute `ReportSequenceStatePath`, `ReportIntervalSeconds` and `ReportTtlSeconds`. On Linux, the sequence-state directory and its ancestors are checked without following symlinks: ancestors must be owned by root or the service identity and must not be group/other writable, except for a trusted sticky directory such as root-owned `/tmp`; the final directory must be service-private. Existing state and lock files must be regular, link-free, and owned by root or the service identity with no group/other access. Keep this path on a local filesystem whose permissions are controlled by the service administrator. Windows ACL enforcement remains deployment-managed. The report carries the SHA-256 key ID of its signer; the receiver can trust up to four public signing keys per agent during rotation. Without `ReportServerCaPem`, normal system TLS trust and hostname checks apply. The observer increments and persists a sender epoch at each restart and persists each sequence before sending. A lost sender sequence file causes old epochs to be rejected; restore it or explicitly re-enroll with a new identity.
 
-The GitHub/Linux integration test covers disposable three-agent mTLS, two-of-three group quorum, one-agent outage tolerance, below-quorum fail-closed, negative veto, expiry, restart and recovery. Windows and Linux runs start two DNS authorities with isolated replay state; when the observer feed to one node is partitioned, that node withdraws after the 8-second report TTL while the other continues with fresh quorum, and it recovers only after two fresh vantage groups return. This is an observer-to-authority feed-partition test, **not** node-to-node consensus or fencing: each authority evaluates its own incoming reports and can disagree during a partition. The local Windows multi-process run and Linux CI acceptance both exercise this path. Predictive health, fleet trust-management UI, CA-sensitive authority validation, physical multi-network acceptance and production GO remain open.
+The GitHub/Linux integration test covers disposable three-agent mTLS, two-of-three group quorum, one-agent outage tolerance, below-quorum fail-closed, negative veto, expiry, restart and recovery. Without `AuthorityFence`, two DNS authorities evaluate their own incoming reports independently and can disagree during an observer-feed partition. The optional 2-of-2 authority fence below makes each authority require a fresh positive decision from its peer as well as its own local eligibility. Predictive health, fleet trust-management UI, CA-sensitive authority validation, physical multi-network acceptance and production GO remain open.
+
+### Opt-in two-authority agreement fence (strict 2-of-2)
+
+For deployments that prefer a fail-closed answer over DNS availability during an authority partition, configure `AuthorityFence` on **both** authoritative nodes. This is a strict pair: each node requires its own local eligible decision and a fresh positive snapshot from its one configured peer. If either peer becomes unreachable, reports a negative decision, restarts, or has a different routing/health fingerprint, both nodes stop returning protected sites after the peer lease expires; with `FailClosedWhenAllSitesDown: true`, clients receive SERVFAIL. Restoring the link is not enough by itself: both nodes must exchange newer, signed decisions before DNS recovers.
+
+The fence does not elect a leader or provide majority consensus. Membership is exactly two configured authorities and agreement is 2-of-2, so a peer or network failure sacrifices DNS availability. It is disabled when `AuthorityFence` is omitted, preserving existing behavior. Every zone must use strict all-down behavior and every site must include a stable, unique `AuthorityFenceSiteId`. The two nodes must use the same zone/site configuration; the engine computes a canonical SHA-256 fingerprint over routing policy, health failure/recovery thresholds, health-probe interval/concurrency, site eligibility and observer trust/vantage configuration. Private keys, listener addresses, metrics ports and observer replay state are not part of that shared fingerprint.
+
+The authority listener and sender use HTTPS with mutually authenticated TLS. Each peer config pins 1..4 peer server certificate leaves and 1..4 peer client certificate leaves for overlap rotation, checks certificate validity and the required EKU, and verifies an independent P-256 signature on every snapshot. TLS server-name checks remain enabled. A snapshot is a complete bounded list of at most 1,024 zone/site decisions (maximum serialized body 128 KiB); partial, duplicate, unknown, wrong-peer, mismatched-config, unsigned, expired and replayed snapshots are rejected. The receiver persists a single monotonic `(epoch, sequence)` high-water point for the configured peer before admitting a decision. The sender increments and persists its epoch at process start; sequence increases for each snapshot. Current decisions are memory-only and expire against a monotonic local clock.
+
+`LeaseSeconds` is bounded to 2..30 seconds and `PublishIntervalSeconds` to 1..10 seconds, with at least two publications fitting within a lease. Use independent persistent epoch/replay files in a protected local state directory on each DNS node and include them in secure backups. State files and lock/marker files are checked for private Linux permissions and Windows ACLs. Replay state deletion or corruption fails closed; an initialized-state bit in the separate epoch file prevents reinitialization even if both replay JSON and its lock file are deleted. Restore state from a protected backup or deliberately provision a new authority identity and re-pair both nodes. Each peer endpoint must use a literal IP and port that exactly match `Peer.AllowedAddress` and `Peer.AllowedPort`; hostnames, other destinations and ports are rejected. Restrict inbound listener TCP to the other authority's exact IP (/32 for IPv4 or /128 for IPv6); for EC2 use a security-group inbound source rule for the peer's configured public /32 only. Permit outbound TCP only to the configured peer IP/port. Pin overlap and signing-key changes require coordinated configuration rollout; any mismatch fails closed until both processes agree.
+
+Example fragment for authority A (authority B uses the same zones and reciprocal IDs, pins and keys):
+
+    {
+      "AuthorityFence": {
+        "NodeId": "dns-a",
+        "ListenAddress": "10.0.0.10",
+        "ListenPort": 15444,
+        "AllowNonLoopbackListener": true,
+        "ServerCertificatePem": "/secure/dns-a-peer.pem",
+        "ServerKeyPem": "/secure/dns-a-peer.key",
+        "ClientCertificatePem": "/secure/dns-a-peer.pem",
+        "ClientKeyPem": "/secure/dns-a-peer.key",
+        "SigningPrivateKeyPem": "/secure/dns-a-decision.key",
+        "EpochStatePath": "/var/lib/gatewaycore/authority-epoch.json",
+        "ReplayStatePath": "/var/lib/gatewaycore/authority-peer-replay.json",
+        "LeaseSeconds": 8,
+        "PublishIntervalSeconds": 1,
+        "Peer": {
+          "NodeId": "dns-b",
+          "Endpoint": "https://10.0.0.11:15444/authority-fence/v1/snapshot",
+          "AllowedAddress": "10.0.0.11",
+          "AllowedPort": 15444,
+          "ServerCertificateSha256": ["<dns-b-server-leaf-sha256>"],
+          "ClientCertificateSha256": ["<dns-b-client-leaf-sha256>"],
+          "SigningPublicKeyPem": "/secure/dns-b-decision.pub.pem"
+        }
+      },
+      "Zones": [{
+        "Name": "app.example.test",
+        "TtlSeconds": 5,
+        "FailClosedWhenAllSitesDown": true,
+        "Sites": [{
+          "Address": "192.0.2.10",
+          "HealthUrl": "https://app.example.test/ready",
+          "Weight": 1,
+          "AuthorityFenceSiteId": "primary"
+        }]
+      }]
+    }
+
+Keep each authority's private signing and TLS keys separate. A shared certificate/key may be used for both TLS roles only when it has both `serverAuth` and `clientAuth` EKUs. Inbound peer certificates are authenticated by exact pinned SHA-256 leaf identity; the signed snapshot additionally binds sender/receiver IDs, full configuration fingerprint, bounded lease, epoch, sequence, and complete target decisions. The loopback metrics endpoint exposes no site labels from this protocol yet; operators should use the DNS responses and service logs for local diagnostics.
+
+The Linux multi-process acceptance uses two DNS processes and two authenticated TLS forwarding proxies. It proves initial matching positive decisions, a bidirectional authority-link partition while DNS listeners stay live (both nodes withdraw within the 5-second lease), restoration only after fresh matching snapshots, an authority restart with a new epoch, durable stale-replay rejection, and recovery only after current healthy evidence returns. This CI test does not verify physical network independence, power failure, DNS cache expiry at clients, certificate revocation through enterprise PKI, key rollover operations, or production availability.
 ## Opt-in weighted priority groups
 
 Set `RoutingPolicy: "WeightedFailover"` to select the lowest numeric

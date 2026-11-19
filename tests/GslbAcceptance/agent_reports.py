@@ -9,6 +9,7 @@ import shutil
 import socket
 import ssl
 import subprocess
+import select
 import tempfile
 import threading
 import time
@@ -23,6 +24,91 @@ class Ready(http.server.BaseHTTPRequestHandler):
 
     def log_message(self, *_args):
         pass
+
+
+class FenceProxy:
+    """Disposable TCP hop that can partition authority TLS while DNS stays live."""
+    def __init__(self, target_port):
+        self.target_port = target_port
+        self.blocked = False
+        self.stopping = False
+        self.lock = threading.Lock()
+        self.active = set()
+        self.listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.listener.bind(("127.0.0.1", 0))
+        self.listener.listen(32)
+        self.listener.settimeout(.2)
+        self.port = self.listener.getsockname()[1]
+        self.thread = threading.Thread(target=self._accept_loop, daemon=True)
+        self.thread.start()
+
+    def _accept_loop(self):
+        while not self.stopping:
+            try:
+                client, _ = self.listener.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            if self.blocked:
+                client.close()
+                continue
+            threading.Thread(target=self._relay, args=(client,), daemon=True).start()
+
+    def _relay(self, client):
+        remote = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            remote.settimeout(2)
+            remote.connect(("127.0.0.1", self.target_port))
+            remote.settimeout(None)
+            with self.lock:
+                if self.blocked or self.stopping:
+                    return
+                self.active.update((client, remote))
+            sockets = (client, remote)
+            while not self.stopping:
+                readable, _, _ = select.select(sockets, [], [], .2)
+                if not readable:
+                    continue
+                for source in readable:
+                    data = source.recv(16384)
+                    if not data:
+                        return
+                    destination = remote if source is client else client
+                    destination.sendall(data)
+        except OSError:
+            pass
+        finally:
+            with self.lock:
+                self.active.discard(client)
+                self.active.discard(remote)
+            client.close()
+            remote.close()
+
+    def partition(self):
+        self.blocked = True
+        with self.lock:
+            active = list(self.active)
+            self.active.clear()
+        for stream in active:
+            try:
+                stream.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            stream.close()
+
+    def restore(self):
+        self.blocked = False
+
+    def close(self):
+        self.stopping = True
+        try:
+            self.listener.close()
+        except OSError:
+            pass
+        self.partition()
+        self.thread.join(timeout=2)
 
 
 def serve(stack):
@@ -95,7 +181,9 @@ def expect_dns(process, dns_port, wanted_rcode, wanted_address=None, timeout=12,
     last = None
     while time.monotonic() < deadline:
         if process.poll() is not None:
-            raise AssertionError(f"DNS process exited {process.returncode}")
+            logs = "\n".join(f"--- {path.name} ---\n{path.read_text(errors='replace')[-3000:]}"
+                              for path in log_paths if path.exists())
+            raise AssertionError(f"DNS process exited {process.returncode}\n{logs}")
         try:
             last = dns_query(dns_port)
             if last[0] == wanted_rcode and (wanted_address is None or last[1] == wanted_address):
@@ -136,6 +224,19 @@ def main():
 
         dns_cert, dns_key = issue("dns-report", "serverAuth")
         server_cert, server_key = issue("observer-server", "serverAuth")
+        authorities_identity = {}
+        for node in ("a", "b"):
+            cert, key = issue(f"authority-{node}", "serverAuth,clientAuth")
+            public_key = root / f"authority-{node}-signing.pub"
+            signer = root / f"authority-{node}-signing.key"
+            openssl("ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out", str(signer))
+            openssl("pkey", "-in", str(signer), "-pubout", "-out", str(public_key))
+            der = subprocess.run(["openssl", "x509", "-in", str(cert), "-outform", "DER"],
+                                 capture_output=True, check=True).stdout
+            authorities_identity[node] = {
+                "cert": cert, "key": key, "signer": signer, "public": public_key,
+                "pin": hashlib.sha256(der).hexdigest().upper()
+            }
         agents = []
         for agent_id, vantage_group in (("agent-1", "vantage-mumbai"),
                                         ("agent-2", "vantage-osaka"),
@@ -270,6 +371,11 @@ def main():
             agent["upstream"] = serve(stack)
 
         authorities = {}
+        authority_fence_ports = {node: port() for node in ("a", "b")}
+        fence_a_to_b = FenceProxy(authority_fence_ports["b"])
+        fence_b_to_a = FenceProxy(authority_fence_ports["a"])
+        stack.callback(fence_a_to_b.close)
+        stack.callback(fence_b_to_a.close)
         for node in ("a", "b"):
             dns_port = port()
             report_port = port()
@@ -286,15 +392,42 @@ def main():
                             "SigningPublicKeyPems": [str(a["public"])]}
                            for a in [*agents, fanout_agent]]
             }
+            peer_node = "b" if node == "a" else "a"
+            peer = authorities_identity[peer_node]
+            local_authority = authorities_identity[node]
+            fence_proxy = fence_a_to_b if node == "a" else fence_b_to_a
+            fence_config = {
+                "NodeId": f"authority-{node}",
+                "ListenAddress": "127.0.0.1", "ListenPort": authority_fence_ports[node],
+                "AllowNonLoopbackListener": False,
+                "ServerCertificatePem": str(local_authority["cert"]),
+                "ServerKeyPem": str(local_authority["key"]),
+                "ClientCertificatePem": str(local_authority["cert"]),
+                "ClientKeyPem": str(local_authority["key"]),
+                "SigningPrivateKeyPem": str(local_authority["signer"]),
+                "EpochStatePath": str(root / f"authority-{node}-epoch.json"),
+                "ReplayStatePath": str(root / f"authority-{node}-peer-replay.json"),
+                "LeaseSeconds": 5, "PublishIntervalSeconds": 1,
+                "Peer": {
+                    "NodeId": f"authority-{peer_node}",
+                    "Endpoint": f"https://127.0.0.1:{fence_proxy.port}/authority-fence/v1/snapshot",
+                    "AllowedAddress": "127.0.0.1", "AllowedPort": fence_proxy.port,
+                    "ServerCertificateSha256": [peer["pin"]],
+                    "ClientCertificateSha256": [peer["pin"]],
+                    "SigningPublicKeyPem": str(peer["public"])
+                }
+            }
             config_document = {
                 "ListenHost": "127.0.0.1", "ListenPort": dns_port,
                 "MetricsListenHost": "127.0.0.1", "MetricsListenPort": metrics_port,
                 "ProbeIntervalSeconds": 1, "AgentReports": report_config,
+                "AuthorityFence": fence_config,
                 "Zones": [{"Name": "lab.example.test", "TtlSeconds": 5,
                            "FailClosedWhenAllSitesDown": True,
                            "Sites": [{"Address": "192.0.2.17",
                                       "HealthUrl": f"http://127.0.0.1:{local.server_port}/ready",
                                       "Weight": 1, "AgentSiteId": "mumbai",
+                                      "AuthorityFenceSiteId": "primary",
                                       "RequiredAgentIds": [a["id"] for a in agents],
                                       "MinimumHealthyAgentReports": 2}]}]
             }
@@ -431,6 +564,34 @@ def main():
         print("PASS: two independent DNS authorities each admit a site with fresh mTLS observer quorum")
         authority_a = authorities["a"]
         authority_b = authorities["b"]
+
+        # Both authorities have the same local and peer-positive decision before
+        # the peer transport is partitioned; DNS remains reachable throughout.
+        fence_a_to_b.partition()
+        fence_b_to_a.partition()
+        partition_started = time.monotonic()
+        for authority_name, authority in (("authority A", authority_a), ("authority B", authority_b)):
+            expect_dns(authority["dns"], authority["dns_port"], 2, timeout=9,
+                       log_paths=[authority["dns_log"], *authority["agent_logs"]])
+            assert time.monotonic() - partition_started < 9, \
+                f"{authority_name} did not fail closed within the bounded peer lease"
+        print("PASS: inter-authority partition withdraws both DNS authorities within the peer lease")
+        fence_a_to_b.restore()
+        fence_b_to_a.restore()
+        for authority in (authority_a, authority_b):
+            expect_dns(authority["dns"], authority["dns_port"], 0, "192.0.2.17", timeout=9,
+                       log_paths=[authority["dns_log"], *authority["agent_logs"]])
+        print("PASS: both authorities recover only after fresh matching peer snapshots")
+
+        # Restart one authority while the other remains active. Its persisted
+        # epoch advances, while the peer's durable replay high-water prevents
+        # old authority decisions from being accepted after restart.
+        restarted = restart_authority(authority_b)
+        for authority in (authority_a, authority_b):
+            expect_dns(authority["dns"], authority["dns_port"], 0, "192.0.2.17", timeout=10,
+                       log_paths=[authority["dns_log"], *authority["agent_logs"]])
+        assert restarted.poll() is None
+        print("PASS: restarted authority establishes a newer authenticated epoch and fresh peer lease")
         reject_malformed_agent_report(authority_a, agents[0], root / "ca.pem")
         status = scrape_agent_status(authority_a["metrics_port"])
         assert status["type"] == "loopback-gslb-agent-report-status"
@@ -541,24 +702,26 @@ def main():
                    log_paths=[authority_a["dns_log"], *authority_a["agent_logs"]])
         print("PASS: N-of-M tolerance, below-quorum fail-closed, durable epoch restart and recovery")
 
-        # Simulate an observer-feed partition affecting only authority B. DNS
-        # authority A keeps its fresh quorum; B withdraws when its reports age
-        # out and recovers only after independent vantage evidence returns.
+        # Simulate an observer-feed partition affecting only authority B. B's
+        # local quorum failure propagates as a signed negative decision so A
+        # also withdraws under the strict two-authority fence.
         processes_b = authority_b["processes"]
         for index in range(3):
             processes_b[index].kill()
             processes_b[index].wait(timeout=5)
         expect_dns(authority_b["dns"], authority_b["dns_port"], 2, timeout=12,
                    log_paths=[authority_b["dns_log"], *authority_b["agent_logs"]])
-        expect_dns(authority_a["dns"], authority_a["dns_port"], 0, "192.0.2.17",
+        expect_dns(authority_a["dns"], authority_a["dns_port"], 2,
                    log_paths=[authority_a["dns_log"], *authority_a["agent_logs"]])
-        print("PASS: observer-feed partition withdraws only the authority without fresh quorum")
+        print("PASS: loss of observer quorum at either authority fences both DNS authorities")
         start_agent(agents[0], "b")
         expect_dns(authority_b["dns"], authority_b["dns_port"], 2,
                    log_paths=[authority_b["dns_log"], *authority_b["agent_logs"]])
         start_agent(agents[1], "b")
         expect_dns(authority_b["dns"], authority_b["dns_port"], 0, "192.0.2.17",
                    log_paths=[authority_b["dns_log"], *authority_b["agent_logs"]])
+        expect_dns(authority_a["dns"], authority_a["dns_port"], 0, "192.0.2.17",
+                   log_paths=[authority_a["dns_log"], *authority_a["agent_logs"]])
         print("PASS: authority recovery waits for a fresh multi-vantage quorum")
 
         # Emergency leaf revocation is enforced at the TLS handshake on one
@@ -573,9 +736,9 @@ def main():
         restart_agents(authority_b, "b")
         expect_dns(revoked_dns, authority_b["dns_port"], 2, timeout=12,
                    log_paths=[authority_b["dns_log"], *authority_b["agent_logs"]])
-        expect_dns(authority_a["dns"], authority_a["dns_port"], 0, "192.0.2.17",
+        expect_dns(authority_a["dns"], authority_a["dns_port"], 2,
                    log_paths=[authority_a["dns_log"], *authority_a["agent_logs"]])
-        print("PASS: revoked observer client leaves cannot re-establish the isolated authority's quorum")
+        print("PASS: one authority's revoked observer quorum fails closed at both authorities")
         b_config["AgentReports"]["RevokedCertificateSha256"] = []
         authority_b["dns_config"].write_text(json.dumps(b_config))
         restart_agents(authority_b, "b")
@@ -583,7 +746,9 @@ def main():
         restart_agents(authority_b, "b")
         expect_dns(recovered_dns, authority_b["dns_port"], 0, "192.0.2.17", timeout=12,
                    log_paths=[authority_b["dns_log"], *authority_b["agent_logs"]])
-        print("PASS: authority recovers only after revocation is removed and fresh quorum returns")
+        expect_dns(authority_a["dns"], authority_a["dns_port"], 0, "192.0.2.17", timeout=12,
+                   log_paths=[authority_a["dns_log"], *authority_a["agent_logs"]])
+        print("PASS: both authorities recover only after revocation is removed and fresh matching quorum returns")
 
 
 if __name__ == "__main__":

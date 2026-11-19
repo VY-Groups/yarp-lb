@@ -28,7 +28,8 @@ internal static class DnsWireProtocol
     }
 
     public static byte[]? Build(ReadOnlySpan<byte> query, IReadOnlyDictionary<string, SiteGroup> zones,
-        bool tcp, IPAddress? resolverIp = null, AgentHealthReportStore? agentReports = null)
+        bool tcp, IPAddress? resolverIp = null, AgentHealthReportStore? agentReports = null,
+        AuthorityFenceStore? authorityFence = null)
     {
         if (query.Length is < 17 or > 4096) return null;
         var id = BinaryPrimitives.ReadUInt16BigEndian(query);
@@ -214,7 +215,9 @@ internal static class DnsWireProtocol
                         Volatile.Read(ref s.Healthy) == 1 &&
                         (s.Validators.Length == 0 || now < Volatile.Read(ref s.ValidatorDeadline)) &&
                         (s.RequiredAgentIds.Length == 0 ||
-                         (agentReports?.IsHealthy(apex!, s.AgentSiteId!, now) ?? false))).ToArray();
+                         (agentReports?.IsHealthy(apex!, s.AgentSiteId!, now) ?? false)) &&
+                        (authorityFence is null || authorityFence.IsPeerEligible(
+                            apex!, s.AuthorityFenceSiteId!, now))).ToArray();
                     if (eligible.Length == 0)
                     {
                         if (zone.FailClosedWhenAllSitesDown) rcode = 2; // SERVFAIL

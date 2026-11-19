@@ -83,6 +83,9 @@ foreach(var zone in config.Zones)
     {
         if (site is null)
             throw new InvalidDataException("Null GSLB site");
+        if (config.AuthorityFence is not null &&
+            !AgentHealthReportContract.IsValidIdentifier(site.AuthorityFenceSiteId))
+            throw new InvalidDataException("Authority fencing requires an explicit stable site ID for every backend");
         var validHttpUrl = Uri.TryCreate(site.HealthUrl, UriKind.Absolute, out var health) &&
             (health.Scheme == Uri.UriSchemeHttp || health.Scheme == Uri.UriSchemeHttps) &&
             string.IsNullOrWhiteSpace(health.UserInfo);
@@ -111,7 +114,8 @@ foreach(var zone in config.Zones)
             throw new InvalidDataException("External validation requires strict all-down behavior");
         sites.Add(new Site(address!,site.HealthCheckType == "Http" ? health : null,
             site.Weight,site.Priority,zone.FailureThreshold,zone.SuccessThreshold,
-            site.HealthCheckType,site.TcpPort,site.Region,site.AgentSiteId,site.RequiredAgentIds ?? [])
+            site.HealthCheckType,site.TcpPort,site.Region,site.AgentSiteId,site.RequiredAgentIds ?? [],
+            site.AuthorityFenceSiteId)
             { Validators = observers, AdministrativelyQuarantined = site.AdministrativelyQuarantined });
         if (site.RequiredAgentIds is { Length: > 0 })
             reportTargets.Add(new AgentReportTarget(zone.Name.TrimEnd('.').ToLowerInvariant(),
@@ -202,6 +206,14 @@ foreach(var zone in config.Zones)
     if (groups[origin].Dnssec is { } dnssec)
         Console.WriteLine($"GSLB_DNSSEC zone={origin} algorithm=13 keyTag={dnssec.KeyTag} DS=\"{dnssec.KeyTag} 13 2 {Convert.ToHexString(dnssec.Ds.Rdata[4..])}\"");
 }
+if (config.AuthorityFence is not null)
+{
+    if (config.Zones.Any(zone => !zone.FailClosedWhenAllSitesDown))
+        throw new InvalidDataException("Authority fencing requires fail-closed DNS policy in every zone");
+    foreach (var zone in config.Zones)
+        if (zone.Sites.Select(site => site.AuthorityFenceSiteId).Distinct(StringComparer.Ordinal).Count() != zone.Sites.Length)
+            throw new InvalidDataException("Authority fence site IDs must be unique within each zone");
+}
 using var dnssecLifetime = new DnssecSignerLifetime(groups.Values);
 if ((reportTargets.Count > 0) != (config.AgentReports is not null))
     throw new InvalidDataException("Agent report listener and report-gated sites must be configured together");
@@ -209,6 +221,22 @@ using var reportStore = config.AgentReports is null ? null : new AgentHealthRepo
     config.AgentReports.Agents, reportTargets, config.AgentReports.ReplayStatePath,
     config.AgentReports.MaxTtlSeconds, config.AgentReports.MaxAgeSeconds,
     config.AgentReports.MaxClockSkewSeconds);
+if (config.AuthorityFence is { } fenceConfig &&
+    (fenceConfig.ListenPort == config.ListenPort || fenceConfig.ListenPort == config.MetricsListenPort ||
+     (config.AgentReports is { } reportSettings && fenceConfig.ListenPort == reportSettings.ListenPort)))
+    throw new InvalidDataException("Authority-fence, DNS, metrics and agent-report listeners must use distinct ports");
+var authorityTargets = config.AuthorityFence is null ? [] : groups.SelectMany(zone => zone.Value.Sites.Select(site =>
+    new AuthorityFenceTarget(zone.Key, site.AuthorityFenceSiteId!, nowTick =>
+        !site.AdministrativelyQuarantined && Volatile.Read(ref site.Healthy) == 1 &&
+        (site.Validators.Length == 0 || nowTick < Volatile.Read(ref site.ValidatorDeadline)) &&
+        (site.RequiredAgentIds.Length == 0 ||
+         (reportStore?.IsHealthy(zone.Key, site.AgentSiteId!, nowTick) ?? false))))).ToArray();
+var authorityFenceStore = config.AuthorityFence is null ? null : new AuthorityFenceStore(
+    config.AuthorityFence, AuthorityFenceFingerprint.Compute(config.Zones, config.AgentReports,
+        config.ProbeIntervalSeconds, config.MaxConcurrentHealthProbes), authorityTargets);
+using var authorityFenceStoreLifetime = authorityFenceStore;
+await using var authorityFenceRuntime = authorityFenceStore is null || config.AuthorityFence is null
+    ? null : new AuthorityFenceRuntime(config.AuthorityFence, authorityFenceStore);
 var runtimeMetrics = new DnsRuntimeMetrics();
 await using var reportServer = config.AgentReports is null || reportStore is null
     ? null : new AgentHealthReportServer(config.AgentReports, reportStore, runtimeMetrics);
@@ -287,6 +315,7 @@ async Task ProbeAll(CancellationToken ct)
         }, ct);
 }
 await ProbeAll(stop.Token);
+if (authorityFenceRuntime is not null) await authorityFenceRuntime.StartAsync(stop.Token);
 var probes=Task.Run(async()=>{
     try
     {
@@ -344,7 +373,7 @@ var tcpAccept = Task.Run(async () =>
                     runtimeMetrics.QueryReceived(tcp: true);
                     var resolverIp=(session.Client.RemoteEndPoint as IPEndPoint)?.Address;
                     var response = DnsWireProtocol.Build(packet, groups, tcp: true,
-                        resolverIp:resolverIp, agentReports:reportStore);
+                        resolverIp:resolverIp, agentReports:reportStore, authorityFence:authorityFenceStore);
                     if (response is null)
                     {
                         runtimeMetrics.RequestDropped(tcp: true);
@@ -389,7 +418,7 @@ try
             continue;
         }
         var response=DnsWireProtocol.Build(buffer.AsSpan(0,received.ReceivedBytes),groups,
-            tcp:false,resolverIp:source,agentReports:reportStore);
+            tcp:false,resolverIp:source,agentReports:reportStore,authorityFence:authorityFenceStore);
         if(response is null)
         {
             runtimeMetrics.RequestDropped(tcp: false);
@@ -426,6 +455,7 @@ sealed record DnsConfig(bool AllowNonLoopbackListeners,string ListenHost,int Lis
     public string? GeoIpAsnDatabasePath { get; init; }
     public int GeoIpMaxDatabaseAgeDays { get; init; } = 45;
     public AgentReportServerConfig? AgentReports { get; init; }
+    public AuthorityFenceConfig? AuthorityFence { get; init; }
 }
 sealed record DnsZone(string Name,int TtlSeconds,DnsSite[] Sites,
     bool FailClosedWhenAllSitesDown=false)
@@ -460,17 +490,19 @@ sealed record DnsSite(string Address,string? HealthUrl,int Weight,int Priority=0
     public string? AgentSiteId { get; init; }
     public string[]? RequiredAgentIds { get; init; }
     public int? MinimumHealthyAgentReports { get; init; }
+    public string? AuthorityFenceSiteId { get; init; }
     public bool AdministrativelyQuarantined { get; init; }
 }
 sealed class Site
 {
     public Site(IPAddress address,Uri? healthUrl,int weight,int priority,
         int failureThreshold,int successThreshold,string healthCheckType,int tcpPort,
-        string? region,string? agentSiteId,string[] requiredAgentIds)
+        string? region,string? agentSiteId,string[] requiredAgentIds,string? authorityFenceSiteId = null)
     {
         Address=address;HealthUrl=healthUrl;Weight=weight;Priority=priority;
         HealthCheckType=healthCheckType;TcpPort=tcpPort;Region=region;
         AgentSiteId=agentSiteId;RequiredAgentIds=requiredAgentIds;
+        AuthorityFenceSiteId=authorityFenceSiteId;
         Health=new DnsHealthHysteresis(failureThreshold,successThreshold);
     }
     public IPAddress Address {get;}
@@ -480,6 +512,7 @@ sealed class Site
     public string? Region {get;}
     public string? AgentSiteId { get; }
     public string[] RequiredAgentIds { get; }
+    public string? AuthorityFenceSiteId { get; }
     public int Weight {get;}
     public int Priority {get;}
     public DnsHealthHysteresis Health {get;}
