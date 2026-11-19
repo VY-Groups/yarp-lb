@@ -82,6 +82,12 @@ internal static class AuthorityFenceTests
             Check(ThrowsInvalid(() => new AuthorityFenceStore(configA with
                     { Peer = configA.Peer with { AllowedPort = 16653 } }, fingerprint, [target])),
                 "peer HTTPS destination port must match the explicitly allowlisted port");
+            Check(ThrowsInvalid(() => new AuthorityFenceStore(configA with { ListenAddress = "0.0.0.0" },
+                    fingerprint, [target])),
+                "wildcard fence listener requires explicit non-loopback binding opt-in");
+            Check(ThrowsInvalid(() => new AuthorityFenceStore(configA with { ListenAddress = "192.0.2.44" },
+                    fingerprint, [target])),
+                "specific non-loopback fence listener requires explicit opt-in");
             var fingerprintZone = new DnsZone("fence.example.test", 5,
                 [new DnsSite("192.0.2.1", "https://app.example.test/ready", 1)
                     { AuthorityFenceSiteId = "primary", AgentSiteId = "service",
@@ -109,6 +115,12 @@ internal static class AuthorityFenceTests
             {
                 initial = source.CreateSnapshot(100);
                 Check(receiver.TryAccept(initial, tlsA, now, 100), "peer accepts authenticated signed decision snapshot");
+                Check(receiver.IsAllowedPeerAddress(IPAddress.Loopback) &&
+                      receiver.IsAllowedPeerAddress(IPAddress.Parse("::ffff:127.0.0.1")),
+                    "inbound peer IP allowlist accepts the configured address and mapped IPv4 form");
+                Check(!receiver.IsAllowedPeerAddress(IPAddress.Parse("127.0.0.2")) &&
+                      !receiver.IsAllowedPeerAddress(null),
+                    "inbound peer IP allowlist rejects wrong or missing source addresses");
                 Check(receiver.IsPeerEligible("fence.example.test.", "primary", 101),
                     "fresh matching eligible peer lease opens the fence");
                 Check(!receiver.TryAccept(initial, tlsA, now, 102), "duplicate authority snapshot is replay rejected");

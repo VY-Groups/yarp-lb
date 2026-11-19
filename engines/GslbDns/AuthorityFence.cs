@@ -137,6 +137,14 @@ internal sealed class AuthorityFenceStore : IDisposable
         }
     }
 
+    public bool IsAllowedPeerAddress(IPAddress? remoteAddress)
+    {
+        if (remoteAddress is null) return false;
+        if (remoteAddress.IsIPv4MappedToIPv6) remoteAddress = remoteAddress.MapToIPv4();
+        return IPAddress.TryParse(config.Peer.AllowedAddress, out var allowedAddress) &&
+            remoteAddress.Equals(allowedAddress);
+    }
+
     public bool TryAccept(AuthorityFenceSnapshot? snapshot, X509Certificate2? clientCertificate,
         DateTimeOffset now, long nowTick)
     {
@@ -232,7 +240,7 @@ internal sealed class AuthorityFenceStore : IDisposable
             !IPAddress.TryParse(config.ListenAddress, out var address) ||
             address.AddressFamily is not (System.Net.Sockets.AddressFamily.InterNetwork or System.Net.Sockets.AddressFamily.InterNetworkV6) ||
             address.IsIPv4MappedToIPv6 ||
-            ((address.Equals(IPAddress.Any) || address.Equals(IPAddress.IPv6Any)) && !config.AllowNonLoopbackListener) ||
+            (!IPAddress.IsLoopback(address) && !config.AllowNonLoopbackListener) ||
             (IPAddress.IsLoopback(address) && config.AllowNonLoopbackListener) ||
             config.ListenPort is < 1025 or > 65535 || config.LeaseSeconds is < 2 or > 30 ||
             config.PublishIntervalSeconds is < 1 or > 10 || config.PublishIntervalSeconds * 2 >= config.LeaseSeconds ||
@@ -498,6 +506,8 @@ internal sealed class AuthorityFenceRuntime : IAsyncDisposable
         var web = builder.Build();
         web.MapPost("/authority-fence/v1/snapshot", async (HttpContext context) =>
         {
+            if (!store.IsAllowedPeerAddress(context.Connection.RemoteIpAddress))
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
             if (!await requestSlots.WaitAsync(0, context.RequestAborted))
                 return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
             try
