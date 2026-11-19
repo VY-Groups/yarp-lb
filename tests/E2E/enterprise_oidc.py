@@ -43,6 +43,7 @@ class Idp:
         self.secret=secrets.token_hex(32)
         self.client="gateway-test-client"
         self.mode="valid"
+        self.auth_override=None
         self.codes={}
         self.exchanges=0
         self.signing=root/"jwt.pem"
@@ -107,6 +108,7 @@ class Idp:
                     "iat":now,"exp":now+180,"auth_time":now,"nonce":auth["nonce"],
                     "acr":"urn:fixture:fido","amr":["pwd","fido2"],"groups":["gateway-operators"],
                     "roles":["Administrator"],"preferred_username":"recovery"}
+                if owner.auth_override is not None: token["auth_time"]=owner.auth_override
                 if mode=="issuer": token["iss"]=owner.issuer+"/wrong"
                 if mode=="audience": token["aud"]="other-client"
                 if mode=="nonce": token["nonce"]="wrong"
@@ -125,6 +127,22 @@ class Idp:
         tls.load_cert_chain(str(cert),str(tlskey))
         self.server.socket=tls.wrap_socket(self.server.socket,server_side=True)
         self.thread=threading.Thread(target=self.server.serve_forever,daemon=True)
+    def logout_notice(self, mode="valid", issued=None):
+        stamp=int(time.time()) if issued is None else issued
+        token={"iss":self.issuer,"aud":self.client,"sub":"operator-subject","iat":stamp,
+            "jti":secrets.token_urlsafe(24),"events":{"http://schemas.openid.net/event/backchannel-logout":{}}}
+        if mode=="issuer": token["iss"]=self.issuer+"/wrong"
+        if mode=="audience": token["aud"]="wrong-client"
+        if mode=="nonce": token["nonce"]="not-a-logout-token"
+        if mode=="stale": token["iat"]=stamp-600
+        if mode=="events": token["events"]={"unrelated":{}}
+        if mode=="subject": token["sub"]="unknown-account"
+        if mode=="jti": del token["jti"]
+        unsigned=b64url(json.dumps({"alg":"RS256","kid":"fixture-1","typ":"logout+jwt"}).encode())+"."+b64url(json.dumps(token).encode())
+        sig=cmd("openssl","dgst","-sha256","-sign",str(self.signing),input=unsigned.encode())
+        if mode=="signature": sig=bytes(len(sig))
+        return unsigned+"."+b64url(sig),stamp
+
     def __enter__(self):
         self.thread.start()
         return self
@@ -138,6 +156,15 @@ def browser(origin,ctx):
     client=Client(origin)
     client.opener=build_opener(ProxyHandler({}), HTTPSHandler(context=ctx),HTTPCookieProcessor(jar))
     return client,jar
+
+def backchannel(origin,ctx,token,expect):
+    req=Request(origin+"/admin/oidc/backchannel-logout",data=urlencode({"logout_token":token}).encode(),
+        headers={"Content-Type":"application/x-www-form-urlencoded"},method="POST")
+    opener=build_opener(ProxyHandler({}),HTTPSHandler(context=ctx))
+    try:
+        with opener.open(req,timeout=8) as res: status=res.status;res.read()
+    except HTTPError as e: status=e.code;e.read()
+    check(status==expect,f"back-channel logout returned expected HTTP {expect}")
 
 def main():
     parser=argparse.ArgumentParser()
@@ -206,6 +233,37 @@ def main():
                         a,_=browser(origin,ctx)
                         a.request("GET","/admin/oidc/start",expect=403)
                         check(not a.session()["authenticated"],"native OIDC rejects "+mode)
+                    idp.mode="valid"
+                    original,old_jar=browser(origin,ctx)
+                    original.request("GET","/admin/oidc/start")
+                    check(original.session()["authenticated"],"real session before provider revocation")
+                    for mode in ("issuer","audience","nonce","stale","events","subject","jti","signature"):
+                        forged,_=idp.logout_notice(mode)
+                        backchannel(origin,ctx,forged,400)
+                        check(original.session()["authenticated"],"invalid logout cannot revoke session: "+mode)
+                    notice,stamp=idp.logout_notice()
+                    backchannel(origin,ctx,notice,200)
+                    check(not original.session()["authenticated"],"valid IdP notice revokes next authenticated request")
+                    idp.auth_override=stamp
+                    stale,_=browser(origin,ctx)
+                    stale.request("GET","/admin/oidc/start",expect=403)
+                    check(not stale.session()["authenticated"],"old authentication cannot establish session after provider logout")
+                    idp.auth_override=None
+                    while int(time.time())<=stamp: time.sleep(.05)
+                    fresh,_=browser(origin,ctx)
+                    fresh.request("GET","/admin/oidc/start")
+                    check(fresh.session()["authenticated"],"fresh authentication after revocation succeeds")
+                    backchannel(origin,ctx,notice,200)
+                    check(fresh.session()["authenticated"],"replayed logout cannot revoke newer session")
+                with gateway(cwd,dll,root,hp,tlsport):
+                    check(fresh.session()["authenticated"],"new session survives process restart")
+                    backchannel(origin,ctx,notice,200)
+                    check(fresh.session()["authenticated"],"persisted cutoff fences logout replay across restart")
+                    idp.auth_override=stamp
+                    stale,_=browser(origin,ctx)
+                    stale.request("GET","/admin/oidc/start",expect=403)
+                    check(not stale.session()["authenticated"],"persisted cutoff rejects old authentication after restart")
+                    idp.auth_override=None
             print("ENTERPRISE_OIDC_HTTPS_SUCCESS",flush=True)
 
 if __name__=="__main__": main()
