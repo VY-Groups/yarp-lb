@@ -36,6 +36,11 @@ if (!OperatingSystem.IsLinux() || ec2Lab)
 var keyDir = Path.Combine(privateDir, "data-protection-keys");
 if (!OperatingSystem.IsLinux() || ec2Lab)
     Directory.CreateDirectory(keyDir);
+using var externalAuditIntent = ExternalAuditIntent.FromEnvironment(
+    Environment.GetEnvironmentVariable("GATEWAY_AUDIT_INTENT_URL"),
+    Environment.GetEnvironmentVariable("GATEWAY_AUDIT_NODE_ID"),
+    Environment.GetEnvironmentVariable("GATEWAY_AUDIT_SENDER_KEY_FILE"),
+    Environment.GetEnvironmentVariable("GATEWAY_AUDIT_COLLECTOR_PUBLIC_KEY_FILE"));
 var builder = WebApplication.CreateBuilder(args);
 GatewayOpenTelemetry.Configure(builder.Services);
 // Explicit v0.1 multi-socket mode; legacy loopback remains CI migration-only.
@@ -1271,12 +1276,17 @@ async Task<IResult> CommitReviewedChange(HttpContext ctx, JsonObject submitted)
         proxy["Clusters"] = clusters.DeepClone();
         proxy["AdminDisabledDestinations"] = disabled.DeepClone();
         doc["ReverseProxy"] = proxy;
+        var newConfig = doc.ToJsonString(new JsonSerializerOptions { WriteIndented = true });
+        if (externalAuditIntent is not null &&
+            !await externalAuditIntent.ConfirmAsync(Actor(ctx), "CONFIG_APPLY_INTENT", currentRevision,
+                Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(newConfig))), ctx.RequestAborted))
+            return Results.Json(new { error = "External audit receipt unavailable; configuration unchanged" }, statusCode: 503);
         Directory.CreateDirectory(backupFolder);
         var stamp = DateTimeOffset.UtcNow.ToString("yyyyMMddTHHmmssfffffffZ");
         var backup = Path.Combine(backupFolder, $"appsettings-{stamp}.json");
         File.Copy(configPath, backup, overwrite: false);
         var temp = configPath + ".tmp";
-        await File.WriteAllTextAsync(temp, doc.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+        await File.WriteAllTextAsync(temp, newConfig);
         File.Move(temp, configPath, overwrite: true);
         await Audit(Actor(ctx), "CONFIG_APPLIED", new { routes = routes.Count, clusters = clusters.Count, backup = Path.GetFileName(backup) });
         return Results.Ok(new { saved = true, backup = Path.GetFileName(backup), message = "Saved to appsettings.json; YARP config reload typically occurs automatically. Verify gateway logs." });
@@ -1381,6 +1391,11 @@ app.MapPost("/admin/api/restore/{name}", async (HttpContext ctx, string name) =>
     {
         var json = await File.ReadAllTextAsync(path);
         if (JsonNode.Parse(json)?["ReverseProxy"] is null) return Results.BadRequest(new { error = "Backup lacks ReverseProxy configuration" });
+        if (externalAuditIntent is not null &&
+            !await externalAuditIntent.ConfirmAsync(Actor(ctx), "CONFIG_RESTORE_INTENT",
+                Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(configPath))),
+                Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(json))), ctx.RequestAborted))
+            return Results.Json(new { error = "External audit receipt unavailable; configuration unchanged" }, statusCode: 503);
         var safety = Path.Combine(backupFolder, $"appsettings-{DateTimeOffset.UtcNow:yyyyMMddTHHmmssfffffff}Z.json");
         File.Copy(configPath, safety);
         await File.WriteAllTextAsync(configPath + ".tmp", json);
