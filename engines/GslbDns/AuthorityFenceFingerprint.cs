@@ -36,6 +36,8 @@ internal static class AuthorityFenceFingerprint
                 zone.FailureThreshold,
                 zone.SuccessThreshold,
                 zone.SoaSerial,
+                SoaContact = (zone.SoaContact ?? ("hostmaster." + zone.Name.TrimEnd('.')))
+                    .TrimEnd('.').ToLowerInvariant(),
                 zone.RoutingPolicy,
                 zone.EnableEcsGeoRouting,
                 TrustedEcsResolverCidrs = (zone.TrustedEcsResolverCidrs ?? []).Order(StringComparer.Ordinal).ToArray(),
@@ -47,6 +49,16 @@ internal static class AuthorityFenceFingerprint
                     .Select(row => new { row.Asn, Region = row.Region.ToLowerInvariant() }).ToArray(),
                 NameServers = (zone.NameServers ?? []).OrderBy(row => row.Host, StringComparer.OrdinalIgnoreCase)
                     .Select(row => new { Host = row.Host.TrimEnd('.').ToLowerInvariant(), row.Address }).ToArray(),
+                Delegations = (zone.Delegations ?? []).OrderBy(cut => cut.Name.TrimEnd('.'),
+                        StringComparer.OrdinalIgnoreCase)
+                    .Select(cut => new
+                    {
+                        Name = cut.Name.TrimEnd('.').ToLowerInvariant(),
+                        NameServers = cut.NameServers.OrderBy(ns => ns.Host.TrimEnd('.'),
+                                StringComparer.OrdinalIgnoreCase).ThenBy(ns => ns.Address, StringComparer.Ordinal)
+                            .Select(ns => new { Host = ns.Host.TrimEnd('.').ToLowerInvariant(), ns.Address })
+                            .ToArray()
+                    }).ToArray(),
                 Sites = zone.Sites.OrderBy(site => site.AuthorityFenceSiteId, StringComparer.Ordinal)
                     .Select(site => new
                     {
