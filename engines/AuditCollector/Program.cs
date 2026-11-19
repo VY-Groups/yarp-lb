@@ -60,8 +60,14 @@ if (signingKey.KeySize is < 2048 or > 4096)
 // Verify private-key availability at startup, before accepting any write.
 _ = signingKey.SignData(new byte[] { 1 }, HashAlgorithmName.SHA256, RSASignaturePadding.Pss);
 using var ledger = new AuditLedger(statePath, signingKey);
-if (args.SequenceEqual(new[] { "--verify-ledger" }))
+if (args.Length > 0 && args[0] == "--verify-ledger")
 {
+    // Operators can compare against an independently retained checkpoint.
+    // An unanchored valid prefix is not proof against privileged truncation.
+    if (args.Length != 1 &&
+        (args.Length != 3 || !int.TryParse(args[1], out var expectedCount) ||
+         expectedCount != ledger.Count || !string.Equals(args[2], ledger.Head, StringComparison.Ordinal)))
+        throw new InvalidDataException("Ledger differs from external checkpoint");
     Console.WriteLine($"Verified {ledger.Count} chained audit intents; head {ledger.Head}");
     return;
 }
