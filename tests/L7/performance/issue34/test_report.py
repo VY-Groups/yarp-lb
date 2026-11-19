@@ -7,14 +7,24 @@ import sys
 from tempfile import TemporaryDirectory
 import urllib.request
 
-from instrument_lab_stats import (ADDITION, ANCHOR, METRIC_CALL,
-                                 METRIC_CALL_WITH_DIMENSIONS, instrument)
+from instrument_lab_stats import (ADDITION, ANCHOR, DIMENSION_CALL_PATTERN, METRIC_CALL,
+                                 METRIC_CALL_WITH_DIMENSIONS, instrument,
+                                 instrument_activity_lifecycle)
 from report import build_report
 from run_paired_profile import (_drain_bounded_log, measurement as parse_measurement,
                                format_early_trace_exit, OtlpReceiver, resolve_checkout)
 
 
 ISSUE34_DIR = Path(__file__).resolve().parent
+OLD_TELEMETRY_HELPER = """    public static void CompleteProxyActivity(Activity? activity, HttpContext context, string? destinationId)
+    {
+        if (activity is null) return;
+        SetBoundedId(activity, "gateway.destination.id", destinationId);
+        activity.SetTag("http.response.status_code", context.Response.StatusCode);
+        if (context.Response.StatusCode >= 500)
+            activity.SetStatus(ActivityStatusCode.Error);
+    }"""
+STOPPED_TELEMETRY_HELPER = OLD_TELEMETRY_HELPER[:-5] + "        activity.Stop();\n    }"
 
 
 def measurement(alloc, *, rps=100.0, p95=30.0, p99=50.0, errors=0):
@@ -202,7 +212,7 @@ class ReportTests(unittest.TestCase):
             path.parent.mkdir(parents=True)
             api = source / "control-center/GatewayOpenTelemetry.cs"
             api.parent.mkdir(parents=True)
-            api.write_text("internal static class GatewayOpenTelemetry {}\n", encoding="utf-8")
+            api.write_text(OLD_TELEMETRY_HELPER + "\n", encoding="utf-8")
             path.write_text("before\n" + ANCHOR + "after\n" + METRIC_CALL + "\n", encoding="utf-8")
             instrument(source)
             first = path.read_text(encoding="utf-8")
@@ -211,6 +221,44 @@ class ReportTests(unittest.TestCase):
             self.assertEqual(first.count(ADDITION), 1)
             self.assertEqual(first.count(METRIC_CALL_WITH_DIMENSIONS), 1)
             self.assertNotIn(METRIC_CALL, first)
+            self.assertEqual(api.read_text(encoding="utf-8").count("activity.Stop();"), 1)
+
+    def test_diagnostic_overlay_accepts_native_dimension_call_with_intervening_statements(self):
+        with TemporaryDirectory() as tmp:
+            source = Path(tmp)
+            path = source / "tests/L7/GatewayLab/Program.cs"
+            path.parent.mkdir(parents=True)
+            api = source / "control-center/GatewayOpenTelemetry.cs"
+            api.parent.mkdir(parents=True)
+            api.write_text(STOPPED_TELEMETRY_HELPER + "\n", encoding="utf-8")
+            native_call = (
+                "var feature = ctx.GetReverseProxyFeature();\n"
+                "var destination = feature.ProxiedDestination;\n"
+                "GatewayOpenTelemetry.CompleteProxyActivity(activity, ctx, destination?.DestinationId);\n"
+                "GatewayOpenTelemetry.RecordProxyResult(ctx, elapsedMs,\n"
+                "    feature.Route.Config.RouteId, feature.Cluster.Config.ClusterId,\n"
+                "    destination?.DestinationId);\n"
+            )
+            path.write_text(ANCHOR + native_call, encoding="utf-8")
+            instrument(source)
+            first = path.read_text(encoding="utf-8")
+            instrument(source)
+            self.assertEqual(path.read_text(encoding="utf-8"), first)
+            self.assertEqual(first.count(ADDITION), 1)
+            self.assertEqual(len(DIMENSION_CALL_PATTERN.findall(first)), 1)
+            self.assertIn("CompleteProxyActivity", first)
+            self.assertIn("destination?.DestinationId", first)
+            self.assertEqual(api.read_text(encoding="utf-8").count("activity.Stop();"), 1)
+
+    def test_telemetry_overlay_fails_closed_on_unknown_completion_helper(self):
+        with TemporaryDirectory() as tmp:
+            source = Path(tmp)
+            api = source / "control-center/GatewayOpenTelemetry.cs"
+            api.parent.mkdir(parents=True)
+            api.write_text("public static void CompleteProxyActivity(Activity? activity) {}\n",
+                           encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "proxy activity completion helper"):
+                instrument_activity_lifecycle(source)
 
     def test_historical_baseline_without_otel_api_keeps_gc_overlay(self):
         with TemporaryDirectory() as tmp:
@@ -233,7 +281,7 @@ class ReportTests(unittest.TestCase):
             path.parent.mkdir(parents=True)
             api = source / "control-center/GatewayOpenTelemetry.cs"
             api.parent.mkdir(parents=True)
-            api.write_text("internal static class GatewayOpenTelemetry {}\n", encoding="utf-8")
+            api.write_text(OLD_TELEMETRY_HELPER + "\n", encoding="utf-8")
             path.write_text("before\n" + ANCHOR + "after\n", encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "proxy result metric call"):
                 instrument(source)
