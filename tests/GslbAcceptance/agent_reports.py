@@ -151,10 +151,10 @@ def wait_for_metrics(metrics_port, required_lines, timeout=6):
     last_metrics = ""
     while time.monotonic() < deadline:
         last_metrics = scrape_metrics(metrics_port)
-        if all(line in last_metrics for line in required_lines):
+        if all(line in last_metrics.splitlines() for line in required_lines):
             return last_metrics
         time.sleep(.1)
-    missing = [line for line in required_lines if line not in last_metrics]
+    missing = [line for line in required_lines if line not in last_metrics.splitlines()]
     raise AssertionError(
         f"timed out waiting for report metrics on port {metrics_port}; "
         f"missing={missing!r}\nlast scrape:\n{last_metrics}")
@@ -598,6 +598,22 @@ def main():
                        log_paths=[authority["dns_log"], *authority["agent_logs"]])
         print("PASS: both authorities recover only after fresh matching peer snapshots")
 
+        # Exercise both asymmetric directions separately. An authority with
+        # incoming positive snapshots but no outbound acceptance must also fence.
+        for direction, proxy in (("A to B", fence_a_to_b), ("B to A", fence_b_to_a)):
+            proxy.partition()
+            started = time.monotonic()
+            for authority in (authority_a, authority_b):
+                expect_dns(authority["dns"], authority["dns_port"], 2, timeout=9,
+                           log_paths=[authority["dns_log"], *authority["agent_logs"]])
+                assert time.monotonic() - started < 9, \
+                    f"one-way {direction} partition did not fence both authorities"
+            proxy.restore()
+            for authority in (authority_a, authority_b):
+                expect_dns(authority["dns"], authority["dns_port"], 0, "192.0.2.17", timeout=9,
+                           log_paths=[authority["dns_log"], *authority["agent_logs"]])
+            print(f"PASS: one-way {direction} peer partition fences both authorities and recovers")
+
         # Restart one authority while the other remains active. Its persisted
         # epoch advances, while the peer's durable replay high-water prevents
         # old authority decisions from being accepted after restart.
@@ -696,9 +712,9 @@ def main():
         for authority in (authority_a, authority_b):
             expect_dns(authority["dns"], authority["dns_port"], 2,
                        log_paths=[authority["dns_log"], *authority["agent_logs"]])
-        negative_metrics = scrape_metrics(authority_a["metrics_port"])
-        assert all(line in negative_metrics for line in negative_lines), \
-            f"negative report evidence/quorum changed before verification:\n{negative_metrics}"
+            negative_metrics = scrape_metrics(authority["metrics_port"])
+            assert all(line in negative_metrics.splitlines() for line in negative_lines), \
+                f"negative report evidence/quorum changed before verification:\n{negative_metrics}"
         print("PASS: signed negative evidence withdraws the site without changing local probe health")
         agents[0]["upstream"].verdict = 200
         recovery_lines = [

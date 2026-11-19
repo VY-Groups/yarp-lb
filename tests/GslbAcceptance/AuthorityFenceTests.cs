@@ -101,6 +101,40 @@ internal static class AuthorityFenceTests
             Check(baselineDigest != AuthorityFenceFingerprint.Compute([fingerprintZone], null, 2, 1) &&
                   baselineDigest != AuthorityFenceFingerprint.Compute([fingerprintZone], null, 1, 2),
                 "authority fingerprint binds probe interval and concurrency policy");
+            Check(baselineDigest != AuthorityFenceFingerprint.Compute(
+                    [fingerprintZone with { SoaContact = "ops.fence.example.test" }], null),
+                "authority fingerprint binds SOA contact");
+            Check(baselineDigest == AuthorityFenceFingerprint.Compute(
+                    [fingerprintZone with { SoaContact = "HOSTMASTER.FENCE.EXAMPLE.TEST." }], null),
+                "explicit and implicit canonical SOA contact have equal fingerprints");
+            var delegation = new DnsDelegationConfig("child.fence.example.test",
+                [new DnsNameServerConfig("ns.child.fence.example.test", "192.0.2.53"),
+                 new DnsNameServerConfig("ns2.child.fence.example.test", "192.0.2.54")]);
+            var delegatedZone = fingerprintZone with { Delegations = [delegation] };
+            var delegatedDigest = AuthorityFenceFingerprint.Compute([delegatedZone], null);
+            Check(delegatedDigest != baselineDigest &&
+                  delegatedDigest != AuthorityFenceFingerprint.Compute(
+                    [delegatedZone with { Delegations = [delegation with {
+                        NameServers = [new DnsNameServerConfig("ns.child.fence.example.test", "192.0.2.55"),
+                                       delegation.NameServers[1]] }] }], null),
+                "authority fingerprint binds delegation membership and glue");
+            Check(delegatedDigest == AuthorityFenceFingerprint.Compute(
+                    [delegatedZone with { Delegations = [delegation with {
+                        NameServers = delegation.NameServers.Reverse().ToArray() }] }], null),
+                "equivalent delegation ordering has equal fingerprints");
+            var ds = new DnsDsRecordConfig(12345, 13, 2, new string('a', 64));
+            var signedDelegation = delegation with { DsRecords = [ds] };
+            var signedDelegatedZone = delegatedZone with { Delegations = [signedDelegation] };
+            var signedDigest = AuthorityFenceFingerprint.Compute([signedDelegatedZone], null);
+            Check(signedDigest != delegatedDigest &&
+                  signedDigest != AuthorityFenceFingerprint.Compute(
+                    [signedDelegatedZone with { Delegations = [signedDelegation with {
+                        DsRecords = [ds with { DigestHex = new string('B', 64) }] }] }], null),
+                "authority fingerprint binds signed child delegation DS records");
+            Check(signedDigest == AuthorityFenceFingerprint.Compute(
+                    [signedDelegatedZone with { Delegations = [signedDelegation with {
+                        DsRecords = [ds with { DigestHex = ds.DigestHex.ToUpperInvariant() }] }] }], null),
+                "case-equivalent DS digest hex has equal fingerprints");
             AgentReportServerConfig TrustPolicy(string vantage) => new("127.0.0.1", 16660, false,
                 certA, keyA, Path.Combine(root, "trust-replay.json"), 10, 10, 2, 100, [],
                 [new AgentTrust("observer-a", vantage, [pinA], [publicAPath]),
@@ -121,6 +155,9 @@ internal static class AuthorityFenceTests
                 Check(!receiver.IsAllowedPeerAddress(IPAddress.Parse("127.0.0.2")) &&
                       !receiver.IsAllowedPeerAddress(null),
                     "inbound peer IP allowlist rejects wrong or missing source addresses");
+                Check(!receiver.IsPeerEligible("fence.example.test", "primary", 101),
+                    "inbound lease alone cannot authorize a one-way partition");
+                receiver.RecordPeerAcknowledgement(100, 101);
                 Check(receiver.IsPeerEligible("fence.example.test.", "primary", 101),
                     "fresh matching eligible peer lease opens the fence");
                 Check(!receiver.TryAccept(initial, tlsA, now, 102), "duplicate authority snapshot is replay rejected");
@@ -141,12 +178,22 @@ internal static class AuthorityFenceTests
                 Check(!restartedReceiver.TryAccept(initial, tlsA, now, 200),
                     "durable receiver high-water rejects a pre-restart snapshot replay");
                 var recovered = restartedSource.CreateSnapshot(201);
+                restartedReceiver.RecordPeerAcknowledgement(201, 202);
                 Check(recovered.Epoch > initial.Epoch &&
                       restartedReceiver.TryAccept(recovered, tlsA, now, 201) &&
                       restartedReceiver.IsPeerEligible("fence.example.test", "primary", 202),
                     "new sender epoch provides fresh recovery after authority restart");
+                var freshInbound = restartedSource.CreateSnapshot(5200);
+                Check(restartedReceiver.TryAccept(freshInbound, tlsA, now, 5200),
+                    "fresh inbound report during one-way outage accepted as evidence");
                 Check(!restartedReceiver.IsPeerEligible("fence.example.test", "primary", 5202),
-                    "peer eligibility expires at the bounded monotonic lease");
+                    "fresh inbound evidence cannot extend expired outbound acknowledgement");
+                restartedReceiver.RecordPeerAcknowledgement(201, 5202);
+                Check(!restartedReceiver.IsPeerEligible("fence.example.test", "primary", 5202),
+                    "delayed acknowledgement cannot resurrect expired outbound lease");
+                restartedReceiver.RecordPeerAcknowledgement(5202, 5203);
+                Check(restartedReceiver.IsPeerEligible("fence.example.test", "primary", 5203),
+                    "fresh outbound acknowledgement restores bidirectional eligibility");
                 Check(!restartedReceiver.TryAccept(recovered with { Signature = "A" }, tlsA, now, 5203),
                     "tampered authority signature is rejected");
             }
@@ -164,9 +211,14 @@ internal static class AuthorityFenceTests
             {
                 Check(deletionReceiver.TryAccept(deletionSource.CreateSnapshot(400), tlsA, now, 400),
                     "replay state initializes once for a new authority pair");
+                deletionReceiver.RecordPeerAcknowledgement(400, 400);
+                Check(deletionReceiver.IsPeerEligible("fence.example.test", "primary", 400),
+                    "valid lease initially authorizes a target before durable state loss");
                 File.Delete(deletionConfig.ReplayStatePath);
                 Check(!deletionReceiver.TryAccept(deletionSource.CreateSnapshot(401), tlsA, now, 401),
                     "missing replay high-water state fails closed while authority is running");
+                Check(!deletionReceiver.IsPeerEligible("fence.example.test", "primary", 402),
+                    "detected durable state loss withdraws an existing positive lease immediately");
             }
             File.Delete(deletionConfig.ReplayStatePath + ".lock");
             Check(ThrowsInvalid(() => new AuthorityFenceStore(deletionConfig, fingerprint, [target])),
