@@ -57,7 +57,9 @@ internal static class EnterpriseOidcPolicyTests
         Check(policy.MatchesOrigin("https", "gateway.example.invalid:9443") &&
               !policy.MatchesOrigin("http", "gateway.example.invalid:9443") &&
               !policy.MatchesOrigin("https", "gateway.example.invalid:9444") &&
-              !policy.MatchesOrigin("https", "evil.example.invalid:9443"),
+              !policy.MatchesOrigin("https", "evil.example.invalid:9443") &&
+              !policy.MatchesOrigin("https", null) &&
+              !policy.MatchesOrigin("https", string.Empty),
             "enterprise administration restricted to configured management TLS origin");
         var ticket = Principal([new(EnterpriseOidcPolicy.SubjectClaim, "immutable-subject"),
             new(EnterpriseOidcPolicy.AuthTimeClaim, now.ToUnixTimeSeconds().ToString()),

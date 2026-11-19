@@ -94,7 +94,8 @@ internal sealed class EnterpriseOidcPolicy
 
     internal bool IsBreakGlass(string? username) =>
         string.Equals(username, Settings.BreakGlassUsername, StringComparison.OrdinalIgnoreCase);
-    internal bool MatchesOrigin(string scheme, string host) =>
+    internal bool MatchesOrigin(string scheme, string? host) =>
+        !string.IsNullOrWhiteSpace(host) &&
         Uri.TryCreate(scheme + "://" + host, UriKind.Absolute, out var uri) &&
         uri.Scheme == Uri.UriSchemeHttps && uri.UserInfo.Length == 0 && uri.AbsolutePath == "/" &&
         uri.Query.Length == 0 && uri.Fragment.Length == 0 &&

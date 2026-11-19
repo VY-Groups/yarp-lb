@@ -7,6 +7,7 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="../../MailProviderAuth.cs" Link="MailProviderAuth.cs" />
+    <Compile Include="../../ExternalAuditIntent.cs" Link="ExternalAuditIntent.cs" />
     <Compile Include="../../LocalAdminAudit.cs" Link="LocalAdminAudit.cs" />
     <Compile Include="../../EnterpriseOidcPolicy.cs" Link="EnterpriseOidcPolicy.cs" />
   </ItemGroup>
