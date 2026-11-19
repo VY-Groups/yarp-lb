@@ -5,7 +5,63 @@ cd "$ROOT"
 DIR="$PWD/artifacts/waf-crs"
 mkdir -p "$DIR"
 COMPOSE="$ROOT/integrations/WafCrs/compose.lab.yml"
+# Clear only this run's known synthetic result files; never count stale
+# evidence from an earlier invocation as a successful observation.
+for result in last-benign-status json-http-status xml-http-status large-json-http-status benign-query-http-status xss-http-status sqli-http-status traversal-http-status; do
+  rm -f "$DIR/$result.txt"
+done
+rm -f "$DIR/blocking-corpus-report.json"
+write_corpus_report() {
+  python3 - "$DIR" "$1" <<'PY'
+import json, pathlib, sys
+
+directory = pathlib.Path(sys.argv[1])
+strict = sys.argv[2] == "1"
+# Body-limit policy, readiness retries and detection-only checks have
+# separate assertions; do not mix them into the classification matrix.
+cases = (
+    ("benign-http", "/", "benign", "last-benign-status"),
+    ("benign-json", "/acceptance", "benign", "json-http-status"),
+    ("benign-xml", "/acceptance", "benign", "xml-http-status"),
+    ("benign-large-json", "/acceptance", "benign", "large-json-http-status"),
+    ("benign-query", "/", "benign", "benign-query-http-status"),
+    ("xss", "/", "malicious", "xss-http-status"),
+    ("sqli", "/", "malicious", "sqli-http-status"),
+    ("traversal", "/", "malicious", "traversal-http-status"),
+)
+rows = []
+matrices = {}
+for name, route, expected, file_name in cases:
+    file = directory / (file_name + ".txt")
+    status = file.read_text(encoding="utf-8").strip() if file.exists() else None
+    if status == "200":
+        outcome = "TN" if expected == "benign" else "FN"
+    elif status == "403":
+        outcome = "FP" if expected == "benign" else "TP"
+    else:
+        outcome = "missing" if status is None else "unexpected_status"
+    counts = matrices.setdefault(route, dict.fromkeys(("TP", "TN", "FP", "FN", "missing", "unexpected_status"), 0))
+    counts[outcome] += 1
+    rows.append({"case": name, "route": route, "expected": expected,
+                 "httpStatus": status, "outcome": outcome})
+totals = {key: sum(counts[key] for counts in matrices.values())
+          for key in ("TP", "TN", "FP", "FN", "missing", "unexpected_status")}
+complete = totals["missing"] == totals["unexpected_status"] == 0
+report = {"schemaVersion": 1, "scope": "synthetic-blocking-lab-only",
+          "complete": complete, "cases": rows, "perRoute": matrices, "totals": totals,
+          "falsePositiveRate": totals["FP"] / (totals["FP"] + totals["TN"])
+              if complete else None,
+          "falseNegativeRate": totals["FN"] / (totals["FN"] + totals["TP"])
+              if complete else None}
+(directory / "blocking-corpus-report.json").write_text(
+    json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+if strict and (not complete or totals["FP"] or totals["FN"]):
+    raise SystemExit("FAIL: synthetic WAF blocking corpus incomplete or misclassified")
+PY
+}
 function teardown {
+  # Preserve missing/unexpected outcomes even after a fail-fast assertion.
+  write_corpus_report 0 || true
   docker compose -f "$COMPOSE" logs --no-color >"$DIR/docker-compose.log" 2>&1 || true
   docker compose -f "$COMPOSE" down --remove-orphans --volumes || true
 }
@@ -96,6 +152,7 @@ done
 benign_code="$(curl --silent --show-error --max-time 8 --get \
   --data-urlencode "q=books-and-cats" --data-urlencode "page=2" \
   -o "$DIR/benign-query.txt" -w '%{http_code}' "http://127.0.0.1:18888/")"
+printf '%s\n' "$benign_code" > "$DIR/benign-query-http-status.txt"
 [[ "$benign_code" == "200" ]] || { echo "FAIL: false positive on benign query" >&2; exit 1; }
 # Reject bodies above the configured 128 KiB total body cap.
 head -c 180000 /dev/zero > "$DIR/oversized-request.bin"
@@ -150,4 +207,5 @@ assert all(not rows for rows in bindings.values()), f'Backend exposed on host: {
 print('PASS: Docker confirms no backend HostIp/HostPort bindings')
 PY
 docker compose -f "$COMPOSE" images > "$DIR/images.txt"
+write_corpus_report 1
 echo "WAF_CRS_LAB_PASS"

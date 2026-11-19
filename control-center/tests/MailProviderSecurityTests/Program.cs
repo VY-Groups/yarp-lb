@@ -87,6 +87,44 @@ using (var http = new HttpClient(unauthorized))
 }
 Console.WriteLine("PASS: ALL mail provider security checks");
 
+var auditRoot = Path.Combine(Path.GetTempPath(), "gatewaycore-audit-" + Guid.NewGuid().ToString("N"));
+Directory.CreateDirectory(auditRoot);
+try
+{
+    var auditFile = Path.Combine(auditRoot, "admin-audit.jsonl");
+    var audit = new LocalAdminAudit(auditFile);
+    Check((await audit.ReadRecentAsync()).Length == 0, "missing local audit returns an empty list");
+    var writers = Enumerable.Range(0, 96).Select(id =>
+        audit.AppendAsync("ci-actor-" + id, "CI_TEST", new { id })).ToArray();
+    var readers = Enumerable.Range(0, 12).Select(async _ =>
+    {
+        var rows = await audit.ReadRecentAsync();
+        Check(rows.Length <= 80 && rows.All(row => row?["action"]?.ToString() == "CI_TEST"),
+            "concurrent audit read returns complete records");
+    }).ToArray();
+    await Task.WhenAll(writers.Concat(readers));
+    var allLines = File.ReadAllLines(auditFile);
+    var ids = allLines.Select(line => JsonDocument.Parse(line))
+        .Select(doc => { using (doc) return doc.RootElement.GetProperty("details").GetProperty("id").GetInt32(); }).ToArray();
+    Check(ids.Length == 96 && ids.Distinct().Count() == 96,
+        "all concurrent local audit writes persisted as distinct JSONL records");
+    var recent = await audit.ReadRecentAsync();
+    Check(recent.Length == 80 && recent.Select(row => row!["details"]!["id"]!.GetValue<int>())
+        .SequenceEqual(ids.Reverse().Take(80)), "local audit preserves newest-first 80-record contract");
+
+    var blockedPath = Path.Combine(auditRoot, "not-yet-created", "audit.jsonl");
+    var recovering = new LocalAdminAudit(blockedPath);
+    var failed = false;
+    try { await recovering.AppendAsync("ci-actor", "CI_FAILURE"); }
+    catch (IOException) { failed = true; }
+    Check(failed, "local audit storage failures propagate rather than fake success");
+    Directory.CreateDirectory(Path.GetDirectoryName(blockedPath)!);
+    await recovering.AppendAsync("ci-actor", "CI_RECOVERY");
+    Check((await recovering.ReadRecentAsync()).Single()?["action"]?.ToString() == "CI_RECOVERY",
+        "local audit lock is released after a write failure");
+}
+finally { Directory.Delete(auditRoot, recursive: true); }
+
 sealed class CapturingHandler : HttpMessageHandler
 {
     readonly HttpStatusCode status;

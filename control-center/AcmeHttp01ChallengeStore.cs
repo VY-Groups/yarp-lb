@@ -17,15 +17,16 @@ public sealed class AcmeHttp01ChallengeStore
     private readonly Dictionary<string, Entry> entries = new(StringComparer.Ordinal);
     private readonly TimeProvider timeProvider;
 
-    private sealed record Entry(string KeyAuthorization, long PublishedAt, TimeSpan Lifetime);
+    private sealed record Entry(string DnsName, string KeyAuthorization, long PublishedAt, TimeSpan Lifetime);
 
     public AcmeHttp01ChallengeStore(TimeProvider? timeProvider = null) =>
         this.timeProvider = timeProvider ?? TimeProvider.System;
 
     /// <summary>Publish one RFC 8555 HTTP-01 token/key-authorization pair for a bounded lifetime.</summary>
-    public bool TryPublish(string token, string keyAuthorization, TimeSpan lifetime)
+    public bool TryPublish(string dnsName, string token, string keyAuthorization, TimeSpan lifetime)
     {
-        if (!ValidToken(token) || !ValidKeyAuthorization(token, keyAuthorization) ||
+        var target = AcmeTargetPolicy.ValidateDnsName(dnsName);
+        if (!target.Allowed || !ValidToken(token) || !ValidKeyAuthorization(token, keyAuthorization) ||
             lifetime < MinimumLifetime || lifetime > MaximumLifetime)
             return false;
 
@@ -37,32 +38,39 @@ public sealed class AcmeHttp01ChallengeStore
             // concurrent issuer may safely retry the identical publication,
             // but must not replace it or silently extend its lifetime.
             if (entries.TryGetValue(token, out var existing))
-                return string.Equals(existing.KeyAuthorization, keyAuthorization, StringComparison.Ordinal);
+                return string.Equals(existing.DnsName, target.NormalizedDnsName, StringComparison.Ordinal) &&
+                    string.Equals(existing.KeyAuthorization, keyAuthorization, StringComparison.Ordinal);
             if (entries.Count >= MaximumEntries)
                 return false;
-            entries[token] = new Entry(keyAuthorization, now, lifetime);
+            entries[token] = new Entry(target.NormalizedDnsName!, keyAuthorization, now, lifetime);
             return true;
         }
     }
 
-    public bool TryGet(string token, out string keyAuthorization)
+    public bool TryGet(string dnsName, string token, out string keyAuthorization)
     {
         keyAuthorization = string.Empty;
-        if (!ValidToken(token)) return false;
+        var target = AcmeTargetPolicy.ValidateDnsName(dnsName);
+        if (!target.Allowed || !ValidToken(token)) return false;
         lock (gate)
         {
             var now = timeProvider.GetTimestamp();
             RemoveExpired(now);
-            if (!entries.TryGetValue(token, out var entry)) return false;
+            if (!entries.TryGetValue(token, out var entry) ||
+                !string.Equals(entry.DnsName, target.NormalizedDnsName, StringComparison.Ordinal)) return false;
             keyAuthorization = entry.KeyAuthorization;
             return true;
         }
     }
 
-    public void Remove(string token)
+    public void Remove(string dnsName, string token)
     {
-        if (!ValidToken(token)) return;
-        lock (gate) entries.Remove(token);
+        var target = AcmeTargetPolicy.ValidateDnsName(dnsName);
+        if (!target.Allowed || !ValidToken(token)) return;
+        lock (gate)
+            if (entries.TryGetValue(token, out var entry) &&
+                string.Equals(entry.DnsName, target.NormalizedDnsName, StringComparison.Ordinal))
+                entries.Remove(token);
     }
 
     // Challenge lifetimes are relative; NTP or administrator wall-clock changes
@@ -106,7 +114,7 @@ public static class AcmeHttp01Endpoint
         {
             if (!publicChallengeEntrypointEnabled || context.Request.IsHttps ||
                 isPublicTrafficHttpListener?.Invoke(context) != true ||
-                !store.TryGet(token, out var keyAuthorization))
+                !store.TryGet(context.Request.Host.Host, token, out var keyAuthorization))
                 return Results.NotFound();
             context.Response.Headers.CacheControl = "no-store";
             context.Response.Headers["X-Content-Type-Options"] = "nosniff";

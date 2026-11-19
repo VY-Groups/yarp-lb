@@ -117,6 +117,8 @@ public static class EngineConfigContract
                 (!IPAddress.IsLoopback(address) && (!allowPublicBind || !publicOptIn)) ||
                 (listener["TcpIdleTimeoutSeconds"] is not null &&
                  !Num(listener["TcpIdleTimeoutSeconds"],1,3600)) ||
+                (listener.TryGetPropertyValue("UdpIdleTimeoutSeconds", out var udpIdle) &&
+                 !Num(udpIdle,1,3600)) ||
                 (listener["ProbeIntervalSeconds"] is not null &&
                  !Num(listener["ProbeIntervalSeconds"],1,60)) ||
                 (listener["SendProxyProtocolV1"] is not null &&

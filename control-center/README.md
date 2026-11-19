@@ -4,6 +4,24 @@ A **single-organization**, Windows-first YARP management application. The operat
 
 > **Not production certified.** Source, offline installer and browser frontend are provided. Windows C# compilation, integration tests, security review, and environment-specific CA/industry acceptance remain required. A checkbox or profile choice does not implement a WAF, GSLB, enterprise IdP, L4 transport or real multi-tenant isolation.
 
+## GitOps planning (v1 foundation)
+
+An authenticated Administrator or Operator can POST to
+`/admin/api/gitops/plan` using the existing session and CSRF protection.
+Send `{"schemaVersion":1,"payload":{"routes":{},"clusters":{},"disabled":{},"revision":"<current uppercase SHA-256>"}}`
+with the full intended route/cluster/disabled objects and the revision from
+`GET /admin/api/state`. The dry run uses the same business validator as
+reviewed changes, rejects stale revisions (409), unknown envelope versions
+or malformed payloads (400), and bodies above 512 KiB (413). It reports
+sorted added/removed/updated IDs and unchanged counts, not config values.
+
+This is a read-only structural plan, not a YARP runtime validation or a
+Git reconciler. It performs no application, backup, approval or drift repair.
+Submit the same payload through the existing change-request workflow and
+obtain a different administrator's approval; approval revalidates the
+payload and revision. Git signature verification, Terraform, Kubernetes
+Gateway API, multi-controller ownership and live rollback remain open (#49).
+
 ## What's actually new in this package
 
 - Brand-neutral browser frontend with **Organization** configuration as first-time step after initial local administrator setup.
@@ -102,3 +120,7 @@ This checks that response identities from BOTH backends are observed. Use `/test
 - Existing route validation accepts both `http://` and `https://` upstream destinations. HTTPS certificate validation remains enabled; do not disable it for production origins.
 - SMTP/LDAPS require actual approved relay/CA trust and network testing. Enterprise OIDC/FIDO2, immutable central audit, PostgreSQL HA control plane and fleet agent enrollment remain incomplete. L4 and GSLB are separate experimental engines; the Control Center has no live GSLB zone CRUD or direct authoritative DNS query. Its fleet page can optionally display a per-node quorum/evidence summary relayed over mTLS from the DNS process's loopback-only metrics endpoint; this is not node consensus. Opt-in signed file staging and the runtime metrics summary are documented in `GatewayAgent/ENGINE_STAGING.md`.
 - Review `docs/UNIVERSAL_PLATFORM_PLAN.md` and `docs/ACCEPTANCE_MATRIX.md` before considering expansion.
+
+## Local administrative audit boundary
+
+The local `admin-audit.jsonl` reader and writer share one process-local asynchronous gate. This preserves complete JSONL records across concurrent administrative requests and the existing newest-first 80-event view. Storage errors still propagate; this does not move audit persistence before every state mutation, provide a bounded delivery spool, authenticate records, or protect against another process or privileged file modification. External immutable audit, retention, mandatory pre-mutation receipts, and enterprise OIDC/FIDO2 remain open under #38.

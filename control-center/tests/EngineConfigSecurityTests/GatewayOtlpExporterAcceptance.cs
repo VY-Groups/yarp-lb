@@ -144,6 +144,9 @@ public static class GatewayOtlpExporterAcceptance
                 activity.SetTag("url.full", "https://gateway.example/private?token=otlp-secret-canary");
                 activity.SetTag("url.path", "/private");
                 activity.SetTag("url.query", "token=otlp-secret-canary");
+                activity.SetTag("http.request.header.x-api-key", "otlp-custom-header-canary");
+                activity.SetTag("http.request.header.x-customer-id", new[] { "otlp-header-array-canary" });
+                activity.SetTag("vendor.custom.payload", "otlp-enrichment-canary");
                 activity.SetTag("gateway.route.id", "acceptance_route");
                 activity.SetTag("gateway.cluster.id", "acceptance_cluster");
                 activity.SetTag("gateway.destination.id", "target_a");
@@ -194,7 +197,8 @@ public static class GatewayOtlpExporterAcceptance
                      {
                          "203.0.113.99", "203.0.113.77", "otlp-secret-canary",
                          "203.0.113.78", "customer-id-otlp-secret", "unmatched-id-otlp-secret",
-                         "second-secret-canary", "/private"
+                         "second-secret-canary", "/private", "otlp-custom-header-canary",
+                         "otlp-header-array-canary", "otlp-enrichment-canary"
                      })
                 if (tracePayload.Contains(sensitive, StringComparison.Ordinal))
                     throw new Exception($"Sensitive value was present in OTLP trace export: {sensitive}");

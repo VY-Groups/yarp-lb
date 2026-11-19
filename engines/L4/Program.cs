@@ -28,6 +28,7 @@ foreach (var listener in listeners)
         (!config.AllowNonLoopbackListeners && !IPAddress.IsLoopback(bind)) ||
         listener.Backends is not { Length: > 0 and <= 16 } ||
         listener.TcpIdleTimeoutSeconds is < 1 or > 3600 ||
+        listener.UdpIdleTimeoutSeconds is < 1 or > 3600 ||
         listener.ProbeIntervalSeconds is < 1 or > 60 ||
         listener.Backends.Any(b => b.Port is < 1 or > 65535 ||
             !IPAddress.TryParse(b.Host, out var ip) ||
@@ -196,57 +197,94 @@ async Task RunUdp(L4Listener cfg, CancellationToken token)
     var eligibleBackends = cfg.Backends.Where(b => !b.DrainNewConnections).ToArray();
     long cursor = -1;
     var buffer = new byte[65_535];
+    var idleMs = cfg.UdpIdleTimeoutSeconds * 1000L;
+    using var sweepTimer = new PeriodicTimer(TimeSpan.FromSeconds(1));
+    using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(token);
+    var ct = lifetime.Token;
+    Task<SocketReceiveFromResult> Receive() => listener.ReceiveFromAsync(buffer.AsMemory(),
+        SocketFlags.None, new IPEndPoint(IPAddress.Any, 0), ct).AsTask();
+    var receive = Receive();
+    var tick = sweepTimer.WaitForNextTickAsync(ct).AsTask();
+    bool Expired(UdpSession session, long now) =>
+        session.IsClosed || now - Interlocked.Read(ref session.LastSeenMs) >= idleMs;
     try
     {
-        while (!token.IsCancellationRequested)
+        while (!ct.IsCancellationRequested)
         {
-            SocketReceiveFromResult received;
-            try
+            // One outstanding receive and one timer. Idle cleanup continues
+            // even without traffic; avoid a full table scan for every packet.
+            if (!receive.IsCompleted && !tick.IsCompleted)
+                await Task.WhenAny(receive, tick);
+            if (tick.IsCompleted)
             {
-                received = await listener.ReceiveFromAsync(buffer, SocketFlags.None,
-                    new IPEndPoint(IPAddress.Any, 0), token);
+                if (!await tick) break;
+                var sweepNow = Environment.TickCount64;
+                var retired = 0;
+                foreach (var (expiredKey, expiredSession) in sessions.ToArray())
+                {
+                    if (!Expired(expiredSession, sweepNow)) continue;
+                    sessions.Remove(expiredKey);
+                    expiredSession.Close();
+                    retired++;
+                }
+                if (retired > 0)
+                    Console.WriteLine($"L4_UDP_RETIRED {cfg.Name} count={retired}");
+                tick = sweepTimer.WaitForNextTickAsync(ct).AsTask();
             }
-            catch (OperationCanceledException) when (token.IsCancellationRequested) { break; }
-            catch (SocketException) when (token.IsCancellationRequested) { break; }
+            if (!receive.IsCompleted) continue;
+            var received = await receive;
             var now = Environment.TickCount64;
-            foreach (var (expiredKey, value) in sessions.ToArray())
-            {
-                if (!value.IsClosed && now - Interlocked.Read(ref value.LastSeenMs) <= 30_000) continue;
-                sessions.Remove(expiredKey);
-                value.Close();
-            }
             var remote = (IPEndPoint)received.RemoteEndPoint;
             var key = remote.ToString();
-            if (!sessions.TryGetValue(key, out var session))
+            if (sessions.TryGetValue(key, out var session) && Expired(session, now))
             {
-                if (sessions.Count >= 1024 || eligibleBackends.Length == 0) continue;
+                sessions.Remove(key);
+                session.Close();
+                session = null;
+            }
+            if (session is null && sessions.Count < 1024 && eligibleBackends.Length != 0)
+            {
                 var selected = eligibleBackends[(int)((ulong)Interlocked.Increment(ref cursor) % (ulong)eligibleBackends.Length)];
                 var peer = new UdpClient(AddressFamily.InterNetwork);
                 peer.Connect(IPAddress.Parse(selected.Host), selected.Port);
                 session = new UdpSession(peer, remote, now);
                 sessions.Add(key, session);
-                _ = RelayUdpResponse(session, listener, token);
+                _ = RelayUdpResponse(session, listener, idleMs, ct);
             }
-            Interlocked.Exchange(ref session.LastSeenMs, now);
-            try { await session.Upstream.SendAsync(buffer.AsMemory(0, received.ReceivedBytes), token); }
-            catch (Exception ex) when (ex is SocketException or ObjectDisposedException)
+            if (session is not null)
             {
-                // Retire the broken relay; do not retry this datagram.
-                session.Close();
-                sessions.Remove(key);
+                Interlocked.Exchange(ref session.LastSeenMs, now);
+                try { await session.Upstream.SendAsync(buffer.AsMemory(0, received.ReceivedBytes), ct); }
+                catch (Exception ex) when (ex is SocketException or ObjectDisposedException)
+                {
+                    // Retire the broken relay; never retry this datagram.
+                    session.Close();
+                    sessions.Remove(key);
+                }
             }
+            receive = Receive();
         }
     }
-    finally { foreach (var entry in sessions.Values) entry.Close(); }
+    catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
+    catch (SocketException) when (ct.IsCancellationRequested) { }
+    finally
+    {
+        lifetime.Cancel();
+        foreach (var entry in sessions.Values) entry.Close();
+        // Observe outstanding asynchronous operations before disposing sockets.
+        try { await receive; } catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
+        catch (SocketException) when (ct.IsCancellationRequested) { }
+        try { await tick; } catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
+    }
 }
-static async Task RelayUdpResponse(UdpSession session, Socket downstream, CancellationToken token)
+static async Task RelayUdpResponse(UdpSession session, Socket downstream, long idleMs, CancellationToken token)
 {
     try
     {
         while (!token.IsCancellationRequested)
         {
             var reply = await session.Upstream.ReceiveAsync(token);
-            if (session.IsClosed || Environment.TickCount64 - Interlocked.Read(ref session.LastSeenMs) > 30_000) break;
+            if (session.IsClosed || Environment.TickCount64 - Interlocked.Read(ref session.LastSeenMs) >= idleMs) break;
             await downstream.SendToAsync(reply.Buffer, SocketFlags.None, session.Client, token);
         }
     }
@@ -257,6 +295,7 @@ sealed record L4Config(bool AllowNonLoopbackListeners, L4Listener[] Tcp, L4Liste
 sealed record L4Listener(string Name, string ListenHost, int ListenPort, L4Backend[] Backends)
 {
     public int TcpIdleTimeoutSeconds { get; init; } = 300;
+    public int UdpIdleTimeoutSeconds { get; init; } = 30;
     public int ProbeIntervalSeconds { get; init; } = 2;
     public bool SendProxyProtocolV1 { get; init; }
 }

@@ -23,7 +23,7 @@ public sealed record PeerStateFrame(string NodeId, long Minute, long Sequence,
     // The receiver deliberately accepts only the protocol version it knows.
     // This is a compatibility fence: rollout must keep both peers on the same
     // version until an explicit negotiation/upgrade protocol is introduced.
-    public const int CurrentProtocolVersion = 2;
+    public const int CurrentProtocolVersion = 4;
     [JsonRequired]
     public int ProtocolVersion { get; init; } = CurrentProtocolVersion;
 
@@ -38,6 +38,35 @@ public sealed record PeerStateFrame(string NodeId, long Minute, long Sequence,
 
     // Boot epoch allows full resynchronization when a peer process restarts.
     public long SourceEpoch { get; init; }
+
+    // Signed receiver challenge prevents captured snapshots from being
+    // accepted by a replacement process with an empty replay cache.
+    [JsonRequired]
+    public string ReceiverEpoch { get; init; } = "";
+
+    // Zero denotes a complete snapshot; a positive base requires exact receiver alignment.
+    [JsonRequired]
+    public long BaseSequence { get; init; }
+}
+
+public static class PeerDelta
+{
+    public static PeerStateFrame Select(PeerStateFrame full, PeerStateFrame? acknowledged)
+    {
+        if (acknowledged is null || full.BaseSequence != 0 || acknowledged.BaseSequence != 0 ||
+            full.NodeId != acknowledged.NodeId || full.SourceEpoch != acknowledged.SourceEpoch ||
+            full.Minute != acknowledged.Minute || full.ReceiverEpoch != acknowledged.ReceiverEpoch ||
+            full.Sequence <= acknowledged.Sequence ||
+            acknowledged.Counters.Any(kv => !full.Counters.TryGetValue(kv.Key, out var value) || value < kv.Value))
+            return full;
+
+        var changes = full.Counters.Where(kv => !acknowledged.Counters.TryGetValue(kv.Key, out var old) ||
+            kv.Value != old).ToDictionary(kv => kv.Key, kv => kv.Value, StringComparer.Ordinal);
+        // Keep full snapshots when they cost no more entries than a delta.
+        return changes.Count < full.Counters.Count
+            ? full with { BaseSequence = acknowledged.Sequence, Counters = changes }
+            : full;
+    }
 }
 
 public sealed record PeerSyncStatus(bool Enabled, string LocalNode, string RemoteNode,
@@ -54,6 +83,23 @@ public static class PeerSyncFreshness
 
 public sealed class PeerStateJournal
 {
+    public const string ReceiverEpochHeader = "X-GC-Peer-Receiver-Epoch";
+    public string ReceiverEpoch { get; } =
+        Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
+
+    public static bool IsReceiverEpoch(string? value) =>
+        value is { Length: 64 } && value.All(c =>
+            c is >= '0' and <= '9' or >= 'A' and <= 'F');
+
+    public bool MatchesReceiverEpoch(PeerStateFrame? frame) =>
+        frame is not null && frame.ProtocolVersion == PeerStateFrame.CurrentProtocolVersion &&
+        frame.NodeId == remoteId && string.Equals(frame.ReceiverEpoch, ReceiverEpoch, StringComparison.Ordinal);
+
+    // Network callers must authenticate the original bytes before invoking
+    // this method; the boot epoch is part of that signed payload.
+    public bool ApplyBoundFrame(PeerStateFrame? frame, long currentMinute) =>
+        MatchesReceiverEpoch(frame) && Apply(frame, currentMinute);
+
     private readonly object gate = new();
     private readonly byte[] secret;
     private readonly string localId;
@@ -106,10 +152,11 @@ public sealed class PeerStateJournal
         var key = Convert.ToHexString(HMACSHA256.HashData(secret, bytes));
         lock (gate)
         {
-            if (minute != localMinute)
-            {
+            // A late request or backward clock correction must not reset
+            // the current minute's counters or its sequence.
+            if (minute < localMinute) return;
+            if (minute > localMinute)
                 ExpireLocalOutsideMinute(minute);
-            }
             if (!local.ContainsKey(key) && local.Count >= maxIdentities) return;
             local[key] = local.TryGetValue(key, out var count) ? Math.Min(1_000_000, count + 1) : 1;
         }
@@ -119,25 +166,30 @@ public sealed class PeerStateJournal
     {
         lock (gate)
         {
-            if (minute != localMinute)
-            {
+            // Do not publish a relabelled snapshot during a wall-clock
+            // rollback. The publisher's existing bounded interval catches
+            // this failure and resumes when the clock reaches the high-water.
+            if (minute < localMinute)
+                throw new InvalidOperationException("Peer snapshot minute regressed");
+            if (minute > localMinute)
                 ExpireLocalOutsideMinute(minute);
-            }
             sequence++;
             return new PeerStateFrame(localId, minute, sequence,
                 new Dictionary<string,int>(local, StringComparer.Ordinal)) { SourceEpoch = sourceEpoch };
         }
     }
 
-    public bool Apply(PeerStateFrame? frame, long currentMinute)
+    internal bool Apply(PeerStateFrame? frame, long currentMinute)
     {
         if (frame is null || frame.ProtocolVersion != PeerStateFrame.CurrentProtocolVersion ||
             !PeerStateTableContract.IsSupported(frame.TableId, frame.TableVersion, frame.EntryTtlSeconds) ||
             frame.NodeId != remoteId ||
             frame.Minute != currentMinute || frame.Sequence <= 0 || frame.SourceEpoch <= 0 ||
+            frame.BaseSequence < 0 || frame.BaseSequence >= frame.Sequence ||
             frame.Counters is null || frame.Counters.Count > maxIdentities ||
             frame.Counters.Any(p => p.Key.Length != 64 ||
-                !p.Key.All(Uri.IsHexDigit) || p.Value is < 1 or > PeerStateTableContract.MaxCountPerEntry))
+                !p.Key.All(c => c is >= '0' and <= '9' or >= 'A' and <= 'F') ||
+                p.Value is < 1 or > PeerStateTableContract.MaxCountPerEntry))
             return false;
         lock (gate)
         {
@@ -152,11 +204,28 @@ public sealed class PeerStateJournal
             if (sameEpoch && frame.Minute < receivedMinute) return false;
             if (sameEpoch && frame.Minute == receivedMinute && frame.Sequence <= receivedSequence)
                 return false;
-            // Within an epoch a higher sequence cannot remove counters.
-            if (sameEpoch && frame.Minute == receivedMinute &&
-                remote.Any(kv => !frame.Counters.TryGetValue(kv.Key,out var n) || n < kv.Value))
-                return false;
-            remote = new Dictionary<string,int>(frame.Counters, StringComparer.Ordinal);
+            if (frame.BaseSequence > 0)
+            {
+                // A delta is never a cold-start or restart frame. Do not merge
+                // against collected state or an unacknowledged sequence.
+                if (!sameEpoch || frame.Minute != receivedMinute ||
+                    frame.BaseSequence != receivedSequence || !RemoteFresh(currentMinute))
+                    return false;
+                if (frame.Counters.Any(kv => remote.TryGetValue(kv.Key, out var old) && kv.Value < old) ||
+                    remote.Count + frame.Counters.Keys.Count(key => !remote.ContainsKey(key)) > maxIdentities)
+                    return false;
+                var merged = new Dictionary<string,int>(remote, StringComparer.Ordinal);
+                foreach (var (key, value) in frame.Counters) merged[key] = value;
+                remote = merged;
+            }
+            else
+            {
+                // Within an epoch a higher full sequence cannot remove live counters.
+                if (sameEpoch && frame.Minute == receivedMinute &&
+                    remote.Any(kv => !frame.Counters.TryGetValue(kv.Key,out var n) || n < kv.Value))
+                    return false;
+                remote = new Dictionary<string,int>(frame.Counters, StringComparer.Ordinal);
+            }
             receivedMinute = frame.Minute;
             receivedSequence = frame.Sequence;
             receivedSourceEpoch = frame.SourceEpoch;
@@ -190,7 +259,7 @@ public sealed class PeerStateJournal
     {
         lock (gate)
         {
-            if (localMinute != minute) ExpireLocalOutsideMinute(minute);
+            if (minute > localMinute) ExpireLocalOutsideMinute(minute);
             var validLocal = localMinute == minute;
             var validRemote = RemoteFresh(minute);
             long? lastAcceptedAgeSeconds = null;
@@ -245,6 +314,7 @@ public sealed class PeerSignedMessages
     private readonly object gate = new();
     private readonly Dictionary<string,long> nonceSeen = new(StringComparer.Ordinal);
     private const int NonceCap = 1024;
+    private long latestVerifiedNow = long.MinValue;
     public PeerSignedMessages(byte[] key)
     {
         if (key.Length < 32) throw new ArgumentException("Peer authentication secret requires 32 bytes");
@@ -270,7 +340,8 @@ public sealed class PeerSignedMessages
     public bool Verify(string sender,string expectedSender,long time,string nonce,
         string signature,byte[] payload,long now)
     {
-        if (sender != expectedSender || time < now - 30 || time > now + 30 ||
+        if (sender != expectedSender ||
+            !WithinWindow(time, now) ||
             nonce.Length != 32 || !nonce.All(Uri.IsHexDigit) ||
             signature.Length > 128 || payload.Length > 262144) return false;
         byte[] supplied;
@@ -281,11 +352,23 @@ public sealed class PeerSignedMessages
             !CryptographicOperations.FixedTimeEquals(supplied, expected)) return false;
         lock (gate)
         {
-            foreach (var old in nonceSeen.Where(p => now - p.Value > 60).Select(p=>p.Key).ToArray())
+            // A forward clock correction may collect old nonces. Never allow
+            // a later clock rollback to reopen the already collected window.
+            // Advance this fence only for authenticated, time-valid messages.
+            var effectiveNow = Math.Max(now, latestVerifiedNow);
+            if (!WithinWindow(time, effectiveNow)) return false;
+            latestVerifiedNow = effectiveNow;
+            foreach (var old in nonceSeen.Where(p => (decimal)effectiveNow - p.Value > 60)
+                         .Select(p => p.Key).ToArray())
                 nonceSeen.Remove(old);
-            if (nonceSeen.ContainsKey(nonce) || nonceSeen.Count >= NonceCap) return false;
-            nonceSeen.Add(nonce, now);
+            var canonicalNonce = nonce.ToUpperInvariant();
+            if (nonceSeen.ContainsKey(canonicalNonce) || nonceSeen.Count >= NonceCap) return false;
+            nonceSeen.Add(canonicalNonce, effectiveNow);
             return true;
         }
     }
+
+    // Decimal subtraction handles untrusted extreme Int64 timestamps without overflow.
+    private static bool WithinWindow(long time, long now) =>
+        Math.Abs((decimal)time - (decimal)now) <= 30;
 }

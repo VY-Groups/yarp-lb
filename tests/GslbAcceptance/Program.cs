@@ -282,15 +282,22 @@ try
             throw new Exception("FAIL: expected a fresh quorum before replay state loss");
         var savedState = File.ReadAllBytes(statePath);
         File.Delete(statePath);
+        // No incoming report: both existing positive observations would
+        // otherwise remain live at tick 1106 (well inside their age limit).
+        if (recovered.IsHealthy("lab.example.test", "mumbai", 1106) ||
+            recovered.EvidenceCounts(1106) != (0, 0, 0, 3) ||
+            recovered.AgentStatus(1106).Any(status => status.FreshReports != 0) ||
+            File.Exists(statePath))
+            throw new Exception("FAIL: DNS evidence reads did not fence missing replay state during report silence");
         if (recovered.TryAccept(Report("agent-2", 3, "healthy", 1000, 20, signing2), client2,
-                DateTimeOffset.FromUnixTimeSeconds(observed), 107) ||
-            recovered.IsHealthy("lab.example.test", "mumbai", 108) || File.Exists(statePath))
-            throw new Exception("FAIL: detected replay state loss did not withdraw live quorum");
+                DateTimeOffset.FromUnixTimeSeconds(observed), 1107))
+            throw new Exception("FAIL: incoming report accepted after read-side replay state fault");
         File.WriteAllBytes(statePath, savedState);
         if (!OperatingSystem.IsWindows())
             File.SetUnixFileMode(statePath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
         if (recovered.TryAccept(Report("agent-2", 3, "healthy", 1000, 20, signing2), client2,
-                DateTimeOffset.FromUnixTimeSeconds(observed), 109))
+                DateTimeOffset.FromUnixTimeSeconds(observed), 1109) ||
+            recovered.IsHealthy("lab.example.test", "mumbai", 1110))
             throw new Exception("FAIL: replay state fault was silently reset in the running process");
     }
     File.Delete(statePath);
@@ -461,6 +468,39 @@ using (var geoDatabase = new GeoIpEcsDatabase(countryFixture, asnFixture, 0))
         throw new Exception("FAIL: conflicting country/ASN routes did not fail closed or single-source route failed");
 }
 Console.WriteLine("PASS: MaxMind MMDB route mapping, privacy-boundary fallback, and unknown-country handling");
+var identityZone = new DnsZone("geo-fence.integration.test", 30,
+    [new DnsSite("192.0.2.1", "http://127.0.0.1:19711/ready", 1)
+        { Region = "mumbai", AuthorityFenceSiteId = "primary" }])
+{
+    RoutingPolicy = "GeoIpEcs", GeoAsnRoutes = [new GeoAsnRoute(15169, "mumbai")]
+};
+var geoIdentityPath = Path.Combine(Path.GetTempPath(), "gslb-geo-identity-" + Guid.NewGuid().ToString("N") + ".mmdb");
+try
+{
+    File.Copy(asnFixture, geoIdentityPath);
+    using var original = new GeoIpEcsDatabase(null, asnFixture, 0, bindAuthorityIdentity: true);
+    using var copied = new GeoIpEcsDatabase(null, geoIdentityPath, 0, bindAuthorityIdentity: true);
+    using var withCountry = new GeoIpEcsDatabase(countryFixture, asnFixture, 0, bindAuthorityIdentity: true);
+    string Digest(GeoIpAuthorityIdentity? identity) =>
+        AuthorityFenceFingerprint.Compute([identityZone], null, geoIpIdentity: identity);
+    var originalIdentity = original.AuthorityIdentity!;
+    if (originalIdentity.AsnSha256 != Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(asnFixture))) ||
+        Digest(originalIdentity) != Digest(copied.AuthorityIdentity) ||
+        Digest(originalIdentity) == Digest(withCountry.AuthorityIdentity) ||
+        Digest(originalIdentity) == Digest(originalIdentity with { MaxAgeDays = 45 }))
+        throw new Exception("FAIL: authority GeoIP identity did not bind loaded datasets and age policy independent of local path");
+    var missingIdentityRejected = false;
+    try { _ = Digest(null); } catch (InvalidDataException) { missingIdentityRejected = true; }
+    if (!missingIdentityRejected)
+        throw new Exception("FAIL: fenced GeoIP routing accepted absent dataset identity");
+    File.Copy(countryFixture, geoIdentityPath, overwrite: true);
+    if (Digest(copied.AuthorityIdentity) != Digest(originalIdentity) ||
+        copied.CreateTable(null, identityZone.GeoAsnRoutes).RegionForEcs(IPAddress.Parse("1.0.0.1"), 24)
+            is not { Region: "mumbai", PrefixLength: 24 })
+        throw new Exception("FAIL: replacing source MMDB changed the active fenced reader");
+    Console.WriteLine("PASS: authority fingerprint binds private loaded MMDB snapshot and maximum-age policy");
+}
+finally { File.Delete(geoIdentityPath); }
 // Use the fixture's own build timestamp, not today's wall clock.
 using (var fixtureReader = new MaxMind.Db.Reader(asnFixture))
 {
@@ -477,6 +517,18 @@ using (var fixtureReader = new MaxMind.Db.Reader(asnFixture))
     geoClock.RollbackWallClock(TimeSpan.FromHours(12));
     if (expiringRoutes.RegionForEcs(clientAddress, 24) is not null)
         throw new Exception("FAIL: wall-clock rollback resurrected expired GeoIP data");
+
+    var jumpClock = new GeoIpTestClock(build.AddHours(23));
+    using var jumpDatabase = new GeoIpEcsDatabase(null, asnFixture, 1, jumpClock);
+    var jumpRoutes = jumpDatabase.CreateTable(null, [new GeoAsnRoute(15169, "mumbai")]);
+    if (jumpRoutes.RegionForEcs(clientAddress, 24) is null)
+        throw new Exception("FAIL: valid GeoIP data unavailable before wall-clock jump");
+    jumpClock.AdvanceWallClock(TimeSpan.FromHours(1));
+    if (jumpRoutes.RegionForEcs(clientAddress, 24) is not null)
+        throw new Exception("FAIL: forward clock correction allowed expired GeoIP steering");
+    jumpClock.RollbackWallClock(TimeSpan.FromHours(2));
+    if (jumpRoutes.RegionForEcs(clientAddress, 24) is not null)
+        throw new Exception("FAIL: rollback resurrected wall-clock-expired GeoIP data");
 }
 Console.WriteLine("PASS: runtime GeoIP expiry and monotonic fallback");
 var staleGeoDatabaseRejected = false;
@@ -1044,9 +1096,11 @@ try
         ednsVersion: 0, udpPayloadSize: 512);
     Must((Dns16(edns512Reply,2)&0x0400)!=0 && (Dns16(edns512Reply,2)&0x0200)!=0 &&
          (Dns16(edns512Reply,2)&0xF)==0 && edns512Reply.Length<=512 &&
+         Dns16(edns512Reply,6)==0 && Dns16(edns512Reply,8)==0 &&
+         Dns16(edns512Reply,10)==1 &&
          Dns16(edns512Reply,edns512Reply.Length-10)==41 &&
          Dns16(edns512Reply,edns512Reply.Length-8)==1232,
-         "EDNS 512-byte client budget returns bounded TC while OPT advertises the server's 1232-byte receive size");
+         "EDNS 512-byte client budget omits the entire non-fitting NS RRset, sets TC, and preserves OPT");
     var edns512Retry = await TcpQuery(edns512Request);
     Must((Dns16(edns512Retry,2)&0x0200)==0 && Dns16(edns512Retry,6)==2 &&
          edns512Retry.Length>512 && Dns16(edns512Retry,edns512Retry.Length-8)==1232,
@@ -1573,5 +1627,6 @@ sealed class GeoIpTestClock(DateTimeOffset current) : TimeProvider
     public override long GetTimestamp() => tick;
     public override long TimestampFrequency => TimeSpan.TicksPerSecond;
     public void Advance(TimeSpan time) { utc += time; tick += time.Ticks; }
+    public void AdvanceWallClock(TimeSpan time) => utc += time;
     public void RollbackWallClock(TimeSpan time) => utc -= time;
 }

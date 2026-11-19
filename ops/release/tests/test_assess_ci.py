@@ -12,11 +12,23 @@ def sample(name, status="completed", conclusion="success", sha=SHA, run_id=2, cr
 class ReleaseEvidence(unittest.TestCase):
     def full(self):
         return {"workflow_runs":[sample(n) for n in REQUIRED]}
-    def test_14_exact_sha_green_is_only_ci_go(self):
+    def test_16_exact_sha_green_is_only_ci_go(self):
         result=evaluate(self.full(),SHA)
         self.assertEqual(result["ci_v01"],"GO")
         self.assertEqual(result["production"],"NO-GO")
-        self.assertEqual(result["completed_success"],14)
+        self.assertEqual(result["completed_success"],16)
+    def test_dns_and_l4_checks_are_mandatory(self):
+        for workflow in ("GSLB authoritative DNS health/failover acceptance",
+                         "L4 experimental engine socket acceptance"):
+            with self.subTest(workflow=workflow):
+                self.assertIn(workflow,REQUIRED)
+                obj=self.full()
+                obj["workflow_runs"]=[r for r in obj["workflow_runs"] if r["name"]!=workflow]
+                result=evaluate(obj,SHA)
+                self.assertEqual(result["ci_v01"],"PENDING")
+                self.assertIn(workflow,result["incomplete_workflows"])
+                obj["workflow_runs"].append(sample(workflow,conclusion="failure"))
+                self.assertEqual(evaluate(obj,SHA)["ci_v01"],"NO-GO")
     def test_wrong_commit_never_counts(self):
         self.assertEqual(evaluate(self.full(),"b"*40)["ci_v01"],"PENDING")
     def test_failed_workflow_never_counts(self):

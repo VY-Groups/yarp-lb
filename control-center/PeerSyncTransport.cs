@@ -63,13 +63,18 @@ public sealed class PeerSyncPublisher : BackgroundService
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         using var timer = new PeriodicTimer(TimeSpan.FromSeconds(settings.IntervalSeconds));
+        // No persisted challenge: learn the current receiver boot from an
+        // authenticated HTTPS response, then send a new snapshot next tick.
+        var receiverEpoch = "";
+        PeerStateFrame? acknowledged = null;
         while (!stoppingToken.IsCancellationRequested)
         {
             try
             {
                 var now=DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-                var snapshot=journal.Snapshot(now / 60);
-                var payload=JsonSerializer.SerializeToUtf8Bytes(snapshot);
+                var snapshot=journal.Snapshot(now / 60) with { ReceiverEpoch = receiverEpoch };
+                var frame = PeerDelta.Select(snapshot, acknowledged);
+                var payload=JsonSerializer.SerializeToUtf8Bytes(frame);
                 if (payload.Length > 262144)
                     throw new InvalidOperationException("Peer frame exceeds 256 KiB limit");
                 var (nonce, signature)=signing.Sign(settings.NodeId,now,payload);
@@ -82,12 +87,30 @@ public sealed class PeerSyncPublisher : BackgroundService
                 req.Content.Headers.ContentType=new System.Net.Http.Headers.MediaTypeHeaderValue("application/json");
                 using var result=await factory.CreateClient("peer-sync")
                     .SendAsync(req,HttpCompletionOption.ResponseHeadersRead,stoppingToken);
-                if (!result.IsSuccessStatusCode)
+                // Only a successful HTTPS response confirms this exact outbound baseline.
+                // No chain of queued deltas: one previous full image is retained, bounded.
+                acknowledged = result.IsSuccessStatusCode ? snapshot : null;
+                if (result.StatusCode == System.Net.HttpStatusCode.Conflict &&
+                    result.Headers.TryGetValues(PeerStateJournal.ReceiverEpochHeader, out var values))
+                {
+                    var candidates = values.Take(2).ToArray();
+                    if (candidates.Length == 1 && PeerStateJournal.IsReceiverEpoch(candidates[0]))
+                    {
+                        receiverEpoch = candidates[0];
+                        // Never replay the previous POST or reset local counters.
+                        // The next periodic iteration sends a fresh signed snapshot.
+                        logger.LogDebug("Peer receiver epoch learned; next periodic snapshot will resynchronize");
+                    }
+                    else
+                        logger.LogWarning("Peer receiver challenge response invalid");
+                }
+                else if (!result.IsSuccessStatusCode)
                     logger.LogWarning("Peer counter sync rejected with HTTP {Status}",(int)result.StatusCode);
             }
             catch (OperationCanceledException) when(stoppingToken.IsCancellationRequested) { break; }
             catch (Exception ex)
             {
+                acknowledged = null;
                 logger.LogWarning("Peer sync unavailable: {ErrorType}",ex.GetType().Name);
             }
             try

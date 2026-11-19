@@ -33,6 +33,8 @@ internal sealed class AgentHealthReportStore : IDisposable
     private readonly Dictionary<string, ReplayPoint> highWater;
     private FileStream? stateLock;
     private bool stateFaulted;
+    private long? lastStateCheckTick;
+    private const long StateCheckIntervalMs = 1000;
     private readonly Dictionary<string, LiveReport> live = new(StringComparer.Ordinal);
     private readonly Dictionary<string, LastAccepted> lastAccepted = new(StringComparer.Ordinal);
     private readonly Dictionary<string, int> rejectedByAgent = new(StringComparer.Ordinal);
@@ -186,12 +188,7 @@ internal sealed class AgentHealthReportStore : IDisposable
         {
             // Never recreate lost replay state from an incoming report. A
             // detected integrity failure is sticky until operator recovery.
-            if (stateFaulted || !File.Exists(statePath))
-            {
-                stateFaulted = true;
-                live.Clear();
-                return false;
-            }
+            if (!ReplayStateAvailable(nowTick, force: true)) return false;
             if (highWater.TryGetValue(replayKey, out var previous) &&
                 (report.Epoch < previous.Epoch ||
                  (report.Epoch == previous.Epoch && report.Sequence <= previous.Sequence)))
@@ -216,6 +213,22 @@ internal sealed class AgentHealthReportStore : IDisposable
         return true;
     }
 
+    // Called only under gate. Bound filesystem checks on the DNS read path;
+    // authenticated writes still check immediately. A missing/unreadable
+    // path is a sticky fault; restoration alone cannot re-enable evidence.
+    private bool ReplayStateAvailable(long nowTick, bool force = false)
+    {
+        if (stateFaulted) return false;
+        if (!force && lastStateCheckTick is { } last && nowTick >= last &&
+            (ulong)nowTick - (ulong)last < StateCheckIntervalMs)
+            return true;
+        lastStateCheckTick = nowTick;
+        if (File.Exists(statePath)) return true;
+        stateFaulted = true;
+        live.Clear();
+        return false;
+    }
+
     public void RecordRejectedReport(string agentId)
     {
         lock (gate)
@@ -227,6 +240,7 @@ internal sealed class AgentHealthReportStore : IDisposable
     {
         lock (gate)
         {
+            _ = ReplayStateAvailable(nowTick);
             return agents.Keys.Order(StringComparer.Ordinal).Select(agentId =>
             {
                 var configured = targets.Count(target =>
@@ -301,6 +315,7 @@ internal sealed class AgentHealthReportStore : IDisposable
         if (!targets.TryGetValue(targetKey, out var policy)) return false;
         lock (gate)
         {
+            if (!ReplayStateAvailable(nowTick)) return false;
             var positiveVantages = new HashSet<string>(StringComparer.Ordinal);
             foreach (var agentId in policy.AgentIds)
             {
@@ -317,6 +332,7 @@ internal sealed class AgentHealthReportStore : IDisposable
     {
         lock (gate)
         {
+            _ = ReplayStateAvailable(nowTick);
             var healthy = 0;
             var unhealthy = 0;
             var unknown = 0;

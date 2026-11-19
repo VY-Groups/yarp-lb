@@ -1,10 +1,12 @@
 # v0.1 CI GO is not production GO
 
 The release verifier fetches the live GitHub Actions API and insists that
-**all 14** named checks are `completed/success` on the **exact same
+**all 16** named checks are `completed/success` on the **exact same
 40-character source SHA**. A previous or newer successful build cannot
 substitute, and a failed/missing/pending check never passes. The run can
 be traced by the exact GitHub Actions links in the uploaded evidence JSON.
+
+GSLB authoritative DNS and experimental L4 socket acceptance are mandatory independent checks. An L7 pass cannot substitute for either.
 
 Run locally with **real API JSON** only:
 
