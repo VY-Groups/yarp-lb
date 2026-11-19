@@ -3,37 +3,38 @@
 ## Current continuation update (2026-11-19)
 
 This update supersedes the historical 2026-11-16 snapshot below where they
-conflict. Live GitHub was checked on 2026-11-19:
+conflict. Live GitHub was checked after PR #202 merged:
 
-- Current `origin/main`: `58b2df750c686e93fa1b6b0017e77650853c905a` (PR #200).
-- Open issues: 13 — #34, #36, #37, #38, #48, #49, #50, #51, #52, #53, #100,
-  #101, and #109. P0 #36, #52, and #109 remain open; none is complete from this
-  NSEC3 increment.
-- Open pull requests: #198 (paired allocation profiling) and draft #199
-  (failover recovery alerting). PRs #189 and #200 are merged.
-- Latest observed GSLB workflow success is run `44475498981` on PR #189 head
-  `501339b8fb740dae65b0f365d1857a94928e460c`; it is not an NSEC3 run and does
-  not validate this branch. Current main's latest GSLB-specific run in the
-  observed list is #188's run `44449819566`, success at its exact PR head.
-- NSEC3 work is isolated in branch `codex/issue52-nsec3-denial`, source commit
-  `13406431407f953a098ecabe2d3212eba5f9c537`. Exact-head GSLB Actions run
-  `44482778376` completed successfully on both Ubuntu 24.04 and Windows 2022.
-  Local full GslbAcceptance, existing NSEC DNSSEC acceptance, and focused
-  NSEC3 acceptance passed on Windows and WSL Ubuntu; the Linux run also passed
-  BIND/Knot independent NSEC interoperability checks and dnspython NSEC3
-  signature/proof checks. No public-authority or
-  customer deployment test has yet been performed for NSEC3.
-- The user explicitly authorized reuse under AGPL on 2026-11-19. The NSEC3
-  branch adds a root AGPL-3.0-or-later license applying to the repository as a
-  whole, plus third-party attribution. Only OpenGSLB's canonical NSEC3 hash
-  encoding is adapted. Its synthetic proof-generation code is not reused;
-  GatewayCore builds proofs from its actual canonical sorted hash ring.
-- NSEC3 is opt-in, requires explicit shared salt and iterations, and does not
-  change NSEC defaults. Issue #52 remains open; no public DNS delegation,
-  multi-authority, physical deployment, annual availability, or production
-  acceptance is established. Production remains **NO-GO**.
+- Product-code baseline before this handoff-only update:
+  `87adb8ba62c65f76bdb1492822226b1107944771`. All seven Actions workflows
+  triggered by its merge completed successfully. There are
+  **zero open PRs** and **13 open issues**: #34, #36, #37, #38, #48, #49, #50,
+  #51, #52, #53, #100, #101 and #109.
+- Recent merged increments include #184 (opt-in HTTP/3), #188 (two-authority
+  GSLB fencing), #189 (manual DNSSEC key overlap), #190 (application pools and
+  DR routing), #198 (paired allocation profiling), #199 (failover alert), #201
+  (opt-in NSEC3) and #202 (YARP per-request INFO log filtering). These do not
+  blanket-close their associated issues.
+- PR #108 is **closed, not merged**; its observed-latency routing is not part of
+  `main` unless separately implemented elsewhere.
+- PR #202 passed all exact-head checks, including three paired 75-VU profile
+  rounds and allocation traces (Actions run `44488122878`). Extra allocation
+  fell by 1,123.443 bytes per proxied request (95% CI −1,142.481 to −1,104.405);
+  rounds had zero request errors, with no statistically clear latency or
+  throughput regression. Candidate extra allocation remained about 7,664
+  bytes/request, so #34 remains open.
+- A 60-minute synthetic GitHub-hosted workload passed previously. It is not
+  #36's required on-prem VRRP/ECMP test with one-hour solo capacity runs on each
+  surviving physical gateway, real faults, zero operational loss, live alerts
+  and sign-off. #109 also lacks completed independent-vantage partition and
+  physical soak acceptance.
+- NSEC3 and direct-IP EC2 DNS checks are partial evidence for #52. Public parent
+  delegation/DS publication and recursive-resolver validation remain open.
+- **Release remains controlled-test GO / production NO-GO. Annual 99.9%
+  availability is unmeasured.** Actions and short cloud/EC2 tests do not establish
+  an annual SLO or production certification.
 
-**Snapshot date:** 2026-11-16 (UTC; refresh all live status before acting)  
+**Historical snapshot date:** 2026-11-16 (UTC; see the live update above)
 **Repository:** this checkout’s configured `origin` remote (verify with `git remote -v`)
 **Product:** GatewayCore — .NET 10 / YARP ADC-style single-organization on-premises L7 gateway and management UI, with separate experimental L4, WAF integration, and GSLB/DNS engines.  
 **Canonical baseline at handoff:** `main` = `cdee959d8c5f66a5bb8edf9b432de48bcd27ca1a` (PR #107).  
