@@ -5,6 +5,7 @@ using System.Net.Http;
 using System.Net.Quic;
 using System.Net.Security;
 using System.Net.Sockets;
+using System.Net.WebSockets;
 using System.Security.Authentication;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
@@ -21,11 +22,9 @@ internal static class DestinationAdmissionHttp3Acceptance
 {
     public static async Task RunAsync()
     {
-        if (!QuicConnection.IsSupported)
-        {
-            Console.WriteLine("SKIP: real HTTP/3 destination-admission acceptance requires MsQuic");
-            return;
-        }
+        var supportsHttp3 = QuicConnection.IsSupported;
+        if (!supportsHttp3)
+            Console.WriteLine("SKIP: HTTP/3 admission requires MsQuic; running the real WebSocket lifecycle over HTTP/1.1 instead");
         if (Environment.GetEnvironmentVariable("GITHUB_ACTIONS") != "true" ||
             Environment.GetEnvironmentVariable("CI") != "true")
         {
@@ -52,12 +51,44 @@ internal static class DestinationAdmissionHttp3Acceptance
 
         var backendReady = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var backendAttempts = new ConcurrentQueue<string>();
+        var backendWebSocketAttempts = new ConcurrentQueue<string>();
+        var backendWebSocketsInFlight = 0;
         var backendInFlight = 0;
         var backendPeak = 0;
         var backendBuilder = WebApplication.CreateBuilder();
         backendBuilder.WebHost.ConfigureKestrel(options => options.Listen(IPAddress.Loopback, 0,
             listen => listen.Protocols = HttpProtocols.Http1));
         await using var backend = backendBuilder.Build();
+        backend.UseWebSockets();
+        backend.Map("/ws", async context =>
+        {
+            if (!context.WebSockets.IsWebSocketRequest)
+            {
+                context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                return;
+            }
+            var id = context.Request.Query["id"].ToString();
+            using var socket = await context.WebSockets.AcceptWebSocketAsync();
+            backendWebSocketAttempts.Enqueue(id);
+            Interlocked.Increment(ref backendWebSocketsInFlight);
+            var buffer = new byte[256];
+            try
+            {
+                while (true)
+                {
+                    var message = await socket.ReceiveAsync(new ArraySegment<byte>(buffer), context.RequestAborted);
+                    if (message.MessageType == WebSocketMessageType.Close)
+                    {
+                        await socket.CloseAsync(message.CloseStatus ?? WebSocketCloseStatus.NormalClosure,
+                            message.CloseStatusDescription, CancellationToken.None);
+                        break;
+                    }
+                    await socket.SendAsync(buffer.AsMemory(0, message.Count), message.MessageType,
+                        message.EndOfMessage, context.RequestAborted);
+                }
+            }
+            finally { Interlocked.Decrement(ref backendWebSocketsInFlight); }
+        });
         backend.MapPost("/slow", async (HttpContext context) =>
         {
             var id = context.Request.Query["id"].ToString();
@@ -107,7 +138,7 @@ internal static class DestinationAdmissionHttp3Acceptance
         using var managementClientCert = X509CertificateLoader.LoadPkcs12FromFile(
             managementPfx, password, managementClientKeyFlags);
 
-        var tlsPort = GetDualTransportPort();
+        var tlsPort = supportsHttp3 ? GetDualTransportPort() : GetTcpPort();
         var httpPort = GetTcpPort();
         var adminPort = GetTcpPort();
         var metricsPort = GetTcpPort();
@@ -124,7 +155,8 @@ internal static class DestinationAdmissionHttp3Acceptance
             TrafficPfxPath = trafficPfx, TrafficPfxPasswordFile = trafficPassword,
             ManagementPfxPath = managementPfx, ManagementPfxPasswordFile = managementPassword,
             ClientCaPemPath = caPem, ClientThumbprints = new[] { managementCert.Thumbprint },
-            AllowedAdminCidrs = new[] { "127.0.0.0/8" }, MaxConcurrentConnections = 64L, HttpVersion = "3"
+            AllowedAdminCidrs = new[] { "127.0.0.0/8" }, MaxConcurrentConnections = 64L,
+            HttpVersion = supportsHttp3 ? "3" : "1.1"
         };
         WritePrivate(listenerConfig, JsonSerializer.Serialize(listeners));
         var appSettings = new
@@ -203,54 +235,84 @@ internal static class DestinationAdmissionHttp3Acceptance
             };
             using var managementClient = new HttpClient(managementHandler) { Timeout = Timeout.InfiniteTimeSpan };
             var endpoint = new Uri($"https://127.0.0.1:{tlsPort}/admit/slow");
+            // Process.Start does not imply Kestrel has bound its sockets.
+            // Only retry the idempotent readiness GET on connection refusal;
+            // TLS errors, wrong protocol/status and all admission failures stay fatal.
             using (var discoveryTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(12)))
             {
-                // Process.Start does not mean Kestrel has bound the HTTPS port.
-                // Retry only the idempotent readiness GET, never a test POST.
                 while (true)
                 {
                     if (appProcess.HasExited)
-                        throw new Exception($"GatewayCore exited before HTTP/3 discovery with code {appProcess.ExitCode}");
+                        throw new InvalidOperationException(
+                            $"GatewayCore exited before HTTPS readiness: {appProcess.ExitCode}");
                     try
                     {
                         using var discoveryWarmup = new HttpRequestMessage(HttpMethod.Get,
                             $"https://127.0.0.1:{tlsPort}/gateway/health")
                         { Version = HttpVersion.Version11, VersionPolicy = HttpVersionPolicy.RequestVersionExact };
                         using var discoveryResponse = await client.SendAsync(discoveryWarmup, discoveryTimeout.Token);
-                        if (discoveryResponse.IsSuccessStatusCode)
-                        {
-                            Check(discoveryResponse.Version == HttpVersion.Version11,
-                                "real GatewayCore HTTPS listener is ready over HTTP/1.1 before HTTP/3 admission traffic");
+                        Check(discoveryResponse.IsSuccessStatusCode && discoveryResponse.Version == HttpVersion.Version11,
+                            "real GatewayCore HTTPS listener is ready over HTTP/1.1");
+                        if (supportsHttp3)
                             Check(discoveryResponse.Headers.TryGetValues("Alt-Svc", out var altSvc) &&
                                 altSvc.Any(value => value.Contains("h3=", StringComparison.OrdinalIgnoreCase)),
                                 "HTTP/1.1 readiness response advertises the listener's HTTP/3 endpoint");
-                            break;
-                        }
+                        break;
                     }
-                    catch (HttpRequestException) { }
-                    await Task.Delay(100, discoveryTimeout.Token);
+                    catch (HttpRequestException ex) when (
+                        ex.InnerException is SocketException { SocketErrorCode: SocketError.ConnectionRefused })
+                    {
+                        await Task.Delay(100, discoveryTimeout.Token);
+                    }
                 }
             }
 
-            using (var readinessTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(15)))
+            async Task WaitForAdmissionSnapshot(int inFlight, int queued)
             {
+                using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+                var metricsEndpoint = new Uri($"https://127.0.0.2:{metricsPort}/gateway/metrics");
                 while (true)
                 {
-                    if (appProcess.HasExited)
-                        throw new Exception($"GatewayCore exited before readiness with code {appProcess.ExitCode}");
-                    try
+                    using var request = new HttpRequestMessage(HttpMethod.Get, metricsEndpoint)
+                    { Version = HttpVersion.Version11, VersionPolicy = HttpVersionPolicy.RequestVersionExact };
+                    using var response = await managementClient.SendAsync(request, timeout.Token);
+                    var body = await response.Content.ReadAsStringAsync(timeout.Token);
+                    static int? Value(string body, string metric)
                     {
-                        using var readiness = new HttpRequestMessage(HttpMethod.Get,
-                            $"https://127.0.0.1:{tlsPort}/gateway/health")
-                        { Version = HttpVersion.Version30, VersionPolicy = HttpVersionPolicy.RequestVersionExact };
-                        using var response = await client.SendAsync(readiness, readinessTimeout.Token);
-                        if (response.StatusCode == HttpStatusCode.OK) break;
+                        var line = body.Split('\n').FirstOrDefault(line =>
+                            line.StartsWith(metric + "{destination=\"admission/only\"} ", StringComparison.Ordinal));
+                        return line is not null && int.TryParse(line[(line.LastIndexOf(' ') + 1)..], out var value)
+                            ? value : null;
                     }
-                    catch (HttpRequestException) { }
-                    await Task.Delay(100, readinessTimeout.Token);
+                    if (response.IsSuccessStatusCode &&
+                        Value(body, "yarp_control_destination_admission_inflight_requests") == inFlight &&
+                        Value(body, "yarp_control_destination_admission_queued_requests") == queued)
+                        return;
+                    await Task.Delay(25, timeout.Token);
                 }
             }
-            await Task.Delay(500); // allow the initial applied-config admission reconciliation to complete
+
+            if (supportsHttp3)
+            {
+                using (var readinessTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(15)))
+                {
+                    while (true)
+                    {
+                        if (appProcess.HasExited)
+                            throw new Exception($"GatewayCore exited before readiness with code {appProcess.ExitCode}");
+                        try
+                        {
+                            using var readiness = new HttpRequestMessage(HttpMethod.Get,
+                                $"https://127.0.0.1:{tlsPort}/gateway/health")
+                            { Version = HttpVersion.Version30, VersionPolicy = HttpVersionPolicy.RequestVersionExact };
+                            using var response = await client.SendAsync(readiness, readinessTimeout.Token);
+                            if (response.StatusCode == HttpStatusCode.OK) break;
+                        }
+                        catch (HttpRequestException) { }
+                        await Task.Delay(100, readinessTimeout.Token);
+                    }
+                }
+                await Task.Delay(500); // allow the initial applied-config admission reconciliation to complete
 
             async Task<HttpResponseMessage> Send(string id, CancellationToken cancellationToken = default)
             {
@@ -340,6 +402,88 @@ internal static class DestinationAdmissionHttp3Acceptance
                     new[] { "active", "after-cancel", "cancel-active", "queued" }),
                 "rejected and canceled non-idempotent HTTP/3 POSTs never reach or replay to an upstream backend");
             Console.WriteLine("PASS: real HTTP/3 request lifecycle exercised GatewayCore per-destination admission");
+            }
+
+            async Task<ClientWebSocket> ConnectWebSocket(string id)
+            {
+                var socket = new ClientWebSocket();
+                socket.Options.RemoteCertificateValidationCallback = (_, _, _, _) => true;
+                socket.Options.SetRequestHeader("X-Acceptance-Request", id);
+                using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(12));
+                try
+                {
+                    await socket.ConnectAsync(new Uri($"wss://127.0.0.1:{tlsPort}/admit/ws?id={Uri.EscapeDataString(id)}"), timeout.Token);
+                    return socket;
+                }
+                catch
+                {
+                    socket.Dispose();
+                    throw;
+                }
+            }
+
+            using var activeWebSocket = await ConnectWebSocket("ws-active");
+            using var queuedWebSocketTaskTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(12));
+            var queuedWebSocketTask = ConnectWebSocket("ws-queued");
+            await WaitForAdmissionSnapshot(1, 1);
+            Check(!queuedWebSocketTask.IsCompleted && backendWebSocketAttempts.Count == 1 &&
+                Volatile.Read(ref backendWebSocketsInFlight) == 1,
+                "an open WebSocket holds its destination slot while a second handshake queues");
+
+            using var overflowRequest = new HttpRequestMessage(HttpMethod.Get,
+                $"https://127.0.0.1:{tlsPort}/admit/ws?id=ws-overflow")
+            { Version = HttpVersion.Version11, VersionPolicy = HttpVersionPolicy.RequestVersionExact };
+            overflowRequest.Headers.TryAddWithoutValidation("Connection", "Upgrade");
+            overflowRequest.Headers.TryAddWithoutValidation("Upgrade", "websocket");
+            overflowRequest.Headers.TryAddWithoutValidation("Sec-WebSocket-Version", "13");
+            overflowRequest.Headers.TryAddWithoutValidation("Sec-WebSocket-Key", Convert.ToBase64String(RandomNumberGenerator.GetBytes(16)));
+            using var overflowTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            using var overflowResponse = await client.SendAsync(overflowRequest,
+                HttpCompletionOption.ResponseHeadersRead, overflowTimeout.Token);
+            Check(overflowResponse.StatusCode == HttpStatusCode.ServiceUnavailable &&
+                overflowResponse.Headers.TryGetValues("X-GatewayCore-Rejection", out var wsRejection) &&
+                wsRejection.Single() == "destination_queue_full",
+                "WebSocket queue saturation returns local 503 without opening an upstream session");
+            Check(backendWebSocketAttempts.Count == 1,
+                "overloaded WebSocket handshake never reaches or replays to the backend");
+
+            using (var activeCloseTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(5)))
+                await activeWebSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "release admission slot", activeCloseTimeout.Token);
+            using var queuedWebSocket = await queuedWebSocketTask.WaitAsync(queuedWebSocketTaskTimeout.Token);
+            await WaitForAdmissionSnapshot(1, 0);
+            Check(queuedWebSocket.State == WebSocketState.Open && backendWebSocketAttempts.Count == 2,
+                "closing the active WebSocket releases its permit and admits the queued handshake");
+            var echo = System.Text.Encoding.UTF8.GetBytes("websocket-admitted");
+            using (var echoTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(5)))
+            {
+                await queuedWebSocket.SendAsync(echo, WebSocketMessageType.Text, true, echoTimeout.Token);
+                var echoed = new byte[64];
+                var result = await queuedWebSocket.ReceiveAsync(new ArraySegment<byte>(echoed), echoTimeout.Token);
+                Check(result.MessageType == WebSocketMessageType.Text &&
+                    System.Text.Encoding.UTF8.GetString(echoed, 0, result.Count) == "websocket-admitted",
+                    "admitted WebSocket keeps the permit for bidirectional streaming");
+                await queuedWebSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "complete", echoTimeout.Token);
+            }
+            // A close frame can reach the client just before the origin's
+            // finally block executes. Observe completed cleanup, not scheduling.
+            using (var drainTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(5)))
+                while (Volatile.Read(ref backendWebSocketsInFlight) != 0)
+                    await Task.Delay(10, drainTimeout.Token);
+            await WaitForAdmissionSnapshot(0, 0);
+            Check(Volatile.Read(ref backendWebSocketsInFlight) == 0 &&
+                backendWebSocketAttempts.Order(StringComparer.Ordinal).SequenceEqual(new[] { "ws-active", "ws-queued" }),
+                "WebSocket drain releases the active and queued destination permits without admitting overflow");
+
+            using var afterDrainTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(12));
+            using var afterDrain = await ConnectWebSocket("ws-after-drain");
+            Check(afterDrain.State == WebSocketState.Open && backendWebSocketAttempts.Count == 3,
+                "a fresh WebSocket is admitted after both earlier sessions close");
+            await afterDrain.CloseAsync(WebSocketCloseStatus.NormalClosure, "complete", afterDrainTimeout.Token);
+            using (var finalDrainTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(5)))
+                while (Volatile.Read(ref backendWebSocketsInFlight) != 0)
+                    await Task.Delay(10, finalDrainTimeout.Token);
+            await WaitForAdmissionSnapshot(0, 0);
+            Console.WriteLine("PASS: real WebSocket session lifecycle exercised GatewayCore per-destination admission");
         }
         finally
         {
@@ -411,3 +555,4 @@ internal static class DestinationAdmissionHttp3Acceptance
         }
     }
 }
+
