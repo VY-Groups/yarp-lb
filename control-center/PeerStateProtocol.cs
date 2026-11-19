@@ -137,7 +137,8 @@ public sealed class PeerStateJournal
             frame.Minute != currentMinute || frame.Sequence <= 0 || frame.SourceEpoch <= 0 ||
             frame.Counters is null || frame.Counters.Count > maxIdentities ||
             frame.Counters.Any(p => p.Key.Length != 64 ||
-                !p.Key.All(Uri.IsHexDigit) || p.Value is < 1 or > PeerStateTableContract.MaxCountPerEntry))
+                !p.Key.All(c => c is >= '0' and <= '9' or >= 'A' and <= 'F') ||
+                p.Value is < 1 or > PeerStateTableContract.MaxCountPerEntry))
             return false;
         lock (gate)
         {
