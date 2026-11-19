@@ -299,8 +299,9 @@ internal static class DestinationAdmissionHttp3Acceptance
 
         static X509Certificate2 CreateCertificate(string subject, bool ca, bool serverAndClient)
         {
-            using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
-            var request = new CertificateRequest($"CN={subject}", key, HashAlgorithmName.SHA256);
+            using var key = RSA.Create(2048);
+            var request = new CertificateRequest($"CN={subject}", key, HashAlgorithmName.SHA256,
+                RSASignaturePadding.Pkcs1);
             var san = new SubjectAlternativeNameBuilder();
             san.AddDnsName("localhost"); san.AddIpAddress(IPAddress.Loopback);
             request.CertificateExtensions.Add(san.Build());
