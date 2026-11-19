@@ -82,8 +82,10 @@ internal static class EnterpriseOidcAuthentication
                 try
                 {
                     var properties = ctx.Properties!;
-                    var row = policy.Resolve(properties.Items.GetValueOrDefault(ValidatedSubject));
-                    if (row is null || !long.TryParse(properties.Items.GetValueOrDefault(ValidatedTime),
+                    properties.Items.TryGetValue(ValidatedSubject, out var subject);
+                    properties.Items.TryGetValue(ValidatedTime, out var authenticationTime);
+                    var row = policy.Resolve(subject);
+                    if (row is null || !long.TryParse(authenticationTime,
                         NumberStyles.None, CultureInfo.InvariantCulture, out var time) ||
                         !EnterpriseOidcPolicy.Fresh(time, DateTimeOffset.UtcNow, EnterpriseOidcPolicy.StepUpLifetime))
                     { ctx.Fail("OIDC ticket not authorized"); return; }
