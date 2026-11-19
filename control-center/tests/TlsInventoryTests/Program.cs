@@ -57,4 +57,5 @@ if (!localAuthority.Allowed)
 Console.WriteLine("PASS: ACME target preflight rejects unsafe authority, hostname and HTTP-01 inputs");
 await AcmeHttp01Acceptance.RunAsync();
 await TrafficHttp3Acceptance.RunAsync();
+await DestinationAdmissionHttp3Acceptance.RunAsync();
 await TrafficCertificateRotationAcceptance.RunAsync();
