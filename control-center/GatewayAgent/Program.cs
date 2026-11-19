@@ -64,6 +64,22 @@ if (labCaCheckRevocation && string.IsNullOrWhiteSpace(labCaPath))
     throw new InvalidOperationException("Lab-only CRL checking requires an explicit loopback test CA");
 X509Certificate2? labRoot = null;
 ILogger? clientCertificateLogger = null;
+static void AddPeerPresentedChainCertificates(
+    X509Chain target, X509Chain? peerChain, X509Certificate2 leaf, X509Certificate2? trustAnchor)
+{
+    if (peerChain is null) return;
+    var added = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+    {
+        leaf.Thumbprint
+    };
+    if (trustAnchor is not null) added.Add(trustAnchor.Thumbprint);
+    foreach (var element in peerChain.ChainElements.Cast<X509ChainElement>())
+    {
+        var candidate = element.Certificate;
+        if (added.Add(candidate.Thumbprint))
+            target.ChainPolicy.ExtraStore.Add(candidate);
+    }
+}
 if (!string.IsNullOrWhiteSpace(labCaPath))
 {
     var listener = builder.Configuration["Kestrel:Endpoints:AgentHttps:Url"] ?? "";
@@ -116,7 +132,7 @@ builder.WebHost.ConfigureKestrel(server =>
         https.CheckCertificateRevocation = labRoot is null;
         if (labRoot is not null)
         {
-            https.ClientCertificateValidation = (cert, _, _) =>
+            https.ClientCertificateValidation = (cert, peerChain, _) =>
             {
                 if (cert is null) return false;
                 clientCertificateLogger?.LogInformation(
@@ -137,6 +153,10 @@ builder.WebHost.ConfigureKestrel(server =>
                     custom.ChainPolicy.ApplicationPolicy.Add(new Oid("1.3.6.1.5.5.7.3.2"));
                 }
                 custom.ChainPolicy.VerificationFlags = X509VerificationFlags.NoFlag;
+                // The TLS peer may send intermediate certificates that are not
+                // installed in the machine store. They are chain candidates only;
+                // CustomRootTrust and normal chain validation still determine trust.
+                AddPeerPresentedChainCertificates(custom, peerChain, cert, labRoot);
                 var eku = cert.Extensions.OfType<X509EnhancedKeyUsageExtension>()
                     .Any(ext => ext.EnhancedKeyUsages.Cast<Oid>()
                         .Any(oid => oid.Value=="1.3.6.1.5.5.7.3.2"));
@@ -157,7 +177,7 @@ builder.WebHost.ConfigureKestrel(server =>
             // Explicitly build the production client chain with online revocation
             // before any HTTP request reaches the application pipeline. Do not
             // rely solely on platform-specific Kestrel revocation defaults.
-            https.ClientCertificateValidation = (cert, _, _) =>
+            https.ClientCertificateValidation = (cert, peerChain, _) =>
             {
                 if (cert is null) return false;
                 using var chain = new X509Chain();
@@ -168,6 +188,10 @@ builder.WebHost.ConfigureKestrel(server =>
                 chain.ChainPolicy.VerificationFlags = X509VerificationFlags.NoFlag;
                 chain.ChainPolicy.UrlRetrievalTimeout = TimeSpan.FromSeconds(5);
                 chain.ChainPolicy.ApplicationPolicy.Add(new Oid("1.3.6.1.5.5.7.3.2"));
+                // Peer certificates remain untrusted chain candidates: the OS
+                // trust store, EKU, time validity and online revocation checks
+                // continue to govern admission.
+                AddPeerPresentedChainCertificates(chain, peerChain, cert, null);
                 var result = chain.Build(cert);
                 if (!result)
                 {

@@ -475,6 +475,14 @@ crlDistributionPoints = URI:http://127.0.0.1:{dead_port}/crl.pem
                  str(Path(__file__).with_name("agent_ocsp_acceptance.py"))],
                 check=True, timeout=180, env=ocsp_env,
             )
+            # Independently exercise the root-issued CRL for an intermediate.
+            # The leaf's own issuer CRL is clean, so rejection must be due to
+            # the revoked non-root CA in the presented peer chain.
+            subprocess.run(
+                [sys.executable,
+                 str(Path(__file__).with_name("agent_intermediate_crl_acceptance.py"))],
+                check=True, timeout=180, env=ocsp_env,
+            )
         finally:
             crl_server.shutdown()
             crl_server.server_close()
