@@ -193,6 +193,7 @@ async Task RunUdp(L4Listener cfg, CancellationToken token)
     listener.Bind(new IPEndPoint(IPAddress.Parse(cfg.ListenHost), cfg.ListenPort));
     Console.WriteLine($"L4_UDP_READY {cfg.Name} {cfg.ListenHost}:{cfg.ListenPort}");
     var sessions = new Dictionary<string, UdpSession>();
+    var eligibleBackends = cfg.Backends.Where(b => !b.DrainNewConnections).ToArray();
     long cursor = -1;
     var buffer = new byte[65_535];
     try
@@ -210,7 +211,7 @@ async Task RunUdp(L4Listener cfg, CancellationToken token)
             var now = Environment.TickCount64;
             foreach (var (expiredKey, value) in sessions.ToArray())
             {
-                if (now - value.LastSeenMs <= 30_000) continue;
+                if (!value.IsClosed && now - Interlocked.Read(ref value.LastSeenMs) <= 30_000) continue;
                 sessions.Remove(expiredKey);
                 value.Close();
             }
@@ -218,17 +219,22 @@ async Task RunUdp(L4Listener cfg, CancellationToken token)
             var key = remote.ToString();
             if (!sessions.TryGetValue(key, out var session))
             {
-                if (sessions.Count >= 1024) continue; // explicit bound; drop new sessions
-                var selected = cfg.Backends[(int)(Interlocked.Increment(ref cursor) % cfg.Backends.Length)];
+                if (sessions.Count >= 1024 || eligibleBackends.Length == 0) continue;
+                var selected = eligibleBackends[(int)((ulong)Interlocked.Increment(ref cursor) % (ulong)eligibleBackends.Length)];
                 var peer = new UdpClient(AddressFamily.InterNetwork);
                 peer.Connect(IPAddress.Parse(selected.Host), selected.Port);
                 session = new UdpSession(peer, remote, now);
                 sessions.Add(key, session);
                 _ = RelayUdpResponse(session, listener, token);
             }
-            session.LastSeenMs = now;
+            Interlocked.Exchange(ref session.LastSeenMs, now);
             try { await session.Upstream.SendAsync(buffer.AsMemory(0, received.ReceivedBytes), token); }
-            catch (Exception ex) when (ex is SocketException or ObjectDisposedException) { }
+            catch (Exception ex) when (ex is SocketException or ObjectDisposedException)
+            {
+                // Retire the broken relay; do not retry this datagram.
+                session.Close();
+                sessions.Remove(key);
+            }
         }
     }
     finally { foreach (var entry in sessions.Values) entry.Close(); }
@@ -240,11 +246,12 @@ static async Task RelayUdpResponse(UdpSession session, Socket downstream, Cancel
         while (!token.IsCancellationRequested)
         {
             var reply = await session.Upstream.ReceiveAsync(token);
-            if (Environment.TickCount64 - session.LastSeenMs > 30_000) break;
+            if (session.IsClosed || Environment.TickCount64 - Interlocked.Read(ref session.LastSeenMs) > 30_000) break;
             await downstream.SendToAsync(reply.Buffer, SocketFlags.None, session.Client, token);
         }
     }
     catch (Exception ex) when (ex is SocketException or ObjectDisposedException or OperationCanceledException) { }
+    finally { session.Close(); }
 }
 sealed record L4Config(bool AllowNonLoopbackListeners, L4Listener[] Tcp, L4Listener[] Udp);
 sealed record L4Listener(string Name, string ListenHost, int ListenPort, L4Backend[] Backends)
@@ -270,5 +277,10 @@ sealed class UdpSession
     public UdpClient Upstream { get; }
     public IPEndPoint Client { get; }
     public long LastSeenMs;
-    public void Close() => Upstream.Dispose();
+    private int closed;
+    public bool IsClosed => Volatile.Read(ref closed) != 0;
+    public void Close()
+    {
+        if (Interlocked.Exchange(ref closed, 1) == 0) Upstream.Dispose();
+    }
 }

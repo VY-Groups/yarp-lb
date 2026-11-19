@@ -43,7 +43,11 @@ File.WriteAllText(configFile, JsonSerializer.Serialize(new {
         Backends = new [] { new { Host="127.0.0.1", Port=19111, DrainNewConnections=true },
           new { Host="127.0.0.1", Port=19112, DrainNewConnections=false } } } },
     Udp = new [] { new { Name = "udp-echo", ListenHost="127.0.0.1", ListenPort=19021,
-      Backends = new [] { new { Host="127.0.0.1", Port=19121 }, new { Host="127.0.0.1", Port=19122 } } } }
+      Backends = new [] { new { Host="127.0.0.1", Port=19121, DrainNewConnections=false }, new { Host="127.0.0.1", Port=19122, DrainNewConnections=false } } },
+      new { Name = "udp-drain", ListenHost="127.0.0.1", ListenPort=19022,
+      Backends = new [] { new { Host="127.0.0.1", Port=19121, DrainNewConnections=true }, new { Host="127.0.0.1", Port=19122, DrainNewConnections=false } } },
+      new { Name = "udp-all-drained", ListenHost="127.0.0.1", ListenPort=19023,
+      Backends = new [] { new { Host="127.0.0.1", Port=19121, DrainNewConnections=true }, new { Host="127.0.0.1", Port=19122, DrainNewConnections=true } } } }
 }));
 var info=new ProcessStartInfo("dotnet") { WorkingDirectory=Path.GetDirectoryName(dll)!, UseShellExecute=false,
     RedirectStandardOutput=true, RedirectStandardError=true };
@@ -79,6 +83,25 @@ try
         var reply=await UdpRoundTrip(c1,"repeat"+i);
         Assert(reply.StartsWith(first[..2]),"UDP source endpoint remains sticky to same backend");
     }
+    for (var i=0;i<8;i++)
+    {
+        using var udpDrain=new UdpClient(AddressFamily.InterNetwork);
+        udpDrain.Connect(IPAddress.Loopback,19022);
+        Assert((await UdpRoundTrip(udpDrain,"udp-drain-"+i)).StartsWith("B|"),
+            "UDP new sessions exclude drained backends");
+    }
+    using (var allDrained=new UdpClient(AddressFamily.InterNetwork))
+    {
+        allDrained.Connect(IPAddress.Loopback,19023);
+        await allDrained.SendAsync(Encoding.UTF8.GetBytes("must-not-forward"));
+        using var noReply=new CancellationTokenSource(TimeSpan.FromMilliseconds(700));
+        var receivedReply=false;
+        try { await allDrained.ReceiveAsync(noReply.Token); receivedReply=true; }
+        catch (OperationCanceledException) when (noReply.IsCancellationRequested) { }
+        Assert(!receivedReply,"all-drained UDP listener fails closed");
+    }
+    Assert((await UdpRoundTrip(c1,"still-sticky")).StartsWith(first[..2]),
+        "drain checks do not disrupt unrelated UDP sessions");
     for (var i=0;i<12;i++)
         Assert((await TcpRoundTrip("drain-"+i,19014)).StartsWith("B|"),
             "backend flagged draining does not receive new TCP streams");
