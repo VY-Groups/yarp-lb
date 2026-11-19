@@ -13,6 +13,7 @@
     <Compile Include="../src/TrafficPolicies/PrimaryBackupPolicy.cs" Link="PrimaryBackupPolicy.cs" />
     <Compile Include="../src/TrafficPolicies/RiseFallCounter.cs" Link="RiseFallCounter.cs" />
     <Compile Include="../src/TrafficPolicies/RiseFallActiveHealthPolicy.cs" Link="RiseFallActiveHealthPolicy.cs" />
+    <PackageReference Include="Certes" Version="4.1.0" />
     <PackageReference Include="Yarp.ReverseProxy" Version="2.3.0" />
     <PackageReference Include="Microsoft.AspNetCore.Authentication.OpenIdConnect" Version="10.0.15" />
     <PackageReference Include="StackExchange.Redis" Version="2.9.32" />
