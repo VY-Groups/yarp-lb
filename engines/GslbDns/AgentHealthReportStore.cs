@@ -106,11 +106,14 @@ internal sealed class AgentHealthReportStore : IDisposable
             var targetRows = configuredTargets?.ToArray() ?? throw new InvalidDataException("Agent report targets required");
             if (targetRows.Length is < 1 or > 1024)
                 throw new InvalidDataException("Agent report targets must contain 1..1024 zone/site pairs");
-            targets = new Dictionary<string, ReportPolicy>(StringComparer.OrdinalIgnoreCase);
+            // DNS zone names are canonicalized by TargetKey, but opaque site
+            // IDs are case-sensitive in the signed payload and replay keys.
+            targets = new Dictionary<string, ReportPolicy>(StringComparer.Ordinal);
+            var uniqueTargets = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var target in targetRows)
             {
-                if (target is null || string.IsNullOrWhiteSpace(target.Zone) ||
-                    string.IsNullOrWhiteSpace(target.SiteId) ||
+                if (target is null || !AgentHealthReportContract.IsValidZone(target.Zone) ||
+                    !AgentHealthReportContract.IsValidIdentifier(target.SiteId) ||
                     target.RequiredAgentIds is not { Length: >= 2 and <= 16 } ||
                     target.MinimumHealthyVantageGroups is < 2 or > 16 ||
                     target.MinimumHealthyVantageGroups > target.RequiredAgentIds.Length ||
@@ -121,7 +124,9 @@ internal sealed class AgentHealthReportStore : IDisposable
                     .Distinct(StringComparer.Ordinal).Count();
                 if (target.MinimumHealthyVantageGroups > vantageGroups)
                     throw new InvalidDataException("Healthy-vantage threshold exceeds distinct configured vantage groups");
-                if (!targets.TryAdd(TargetKey(target.Zone, target.SiteId), new ReportPolicy(
+                var targetKey = TargetKey(target.Zone, target.SiteId);
+                // Preserve rejection of ambiguous case-only configuration duplicates.
+                if (!uniqueTargets.Add(targetKey) || !targets.TryAdd(targetKey, new ReportPolicy(
                     target.RequiredAgentIds.ToArray(), target.MinimumHealthyVantageGroups)))
                     throw new InvalidDataException("Duplicate report-gated zone/site");
             }
@@ -274,7 +279,9 @@ internal sealed class AgentHealthReportStore : IDisposable
     public bool IsHealthy(string zone, string siteId, long nowTick)
     {
         var targetKey = TargetKey(zone, siteId);
-        if (!targets.TryGetValue(targetKey, out var policy)) return true;
+        // Callers explicitly bypass this store for sites without report policy.
+        // Missing policy for a report-gated target must fail closed.
+        if (!targets.TryGetValue(targetKey, out var policy)) return false;
         lock (gate)
         {
             var positiveVantages = new HashSet<string>(StringComparer.Ordinal);
