@@ -45,6 +45,11 @@ public static class DestinationAdmissionTests
         Check(!DestinationAdmissionPolicy.TryParse(incomplete, out _, out _),
             "queue settings cannot enable a partial policy");
 
+        Check(DestinationAdmissionState.QueueWaitBucketIndex(6) == 2 &&
+              DestinationAdmissionState.QueueWaitBucketUpperBoundsMilliseconds[2] == 10 &&
+              DestinationAdmissionState.QueueWaitBucketIndex(60_001) == -1,
+            "known 6 ms wait maps to the 10 ms finite bucket and values above 60 s map to +Inf");
+
         var single = new DestinationAdmissionState(new DestinationAdmissionPolicy(1, 2, 5000));
         using var first = await single.AcquireAsync(CancellationToken.None) ??
             throw new Exception("FAIL: first destination permit should be acquired");

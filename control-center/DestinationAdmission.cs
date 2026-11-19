@@ -103,6 +103,15 @@ public sealed class DestinationAdmissionState
     public static IReadOnlyList<int> QueueWaitBucketUpperBoundsMilliseconds { get; } =
         Array.AsReadOnly(new[] { 1, 5, 10, 25, 50, 100, 250, 500, 1_000, 2_500, 5_000, 10_000, 30_000, 60_000 });
 
+    internal static int QueueWaitBucketIndex(double milliseconds)
+    {
+        if (!double.IsFinite(milliseconds) || milliseconds < 0)
+            throw new ArgumentOutOfRangeException(nameof(milliseconds));
+        for (var index = 0; index < QueueWaitBucketUpperBoundsMilliseconds.Count; index++)
+            if (milliseconds <= QueueWaitBucketUpperBoundsMilliseconds[index]) return index;
+        return -1; // above all finite bounds; represented by the implicit +Inf bucket.
+    }
+
     private sealed class Waiter(CancellationToken cancellationToken, Action? releasePending)
     {
         internal readonly TaskCompletionSource<DestinationAdmissionLease> Completion =
@@ -272,14 +281,8 @@ public sealed class DestinationAdmissionState
             _waitDurationTicks += elapsed;
             _waitDurationCount++;
             var milliseconds = elapsed * 1000d / System.Diagnostics.Stopwatch.Frequency;
-            for (var index = 0; index < QueueWaitBucketUpperBoundsMilliseconds.Count; index++)
-            {
-                if (milliseconds <= QueueWaitBucketUpperBoundsMilliseconds[index])
-                {
-                    _waitDurationBuckets[index]++;
-                    return;
-                }
-            }
+            var bucketIndex = QueueWaitBucketIndex(milliseconds);
+            if (bucketIndex >= 0) _waitDurationBuckets[bucketIndex]++;
             // The caller exposes the implicit +Inf bucket from WaitDurationCount.
         }
     }

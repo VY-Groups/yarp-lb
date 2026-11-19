@@ -161,6 +161,7 @@ internal static class DestinationAdmissionHttp3Acceptance
             HttpVersion = supportsHttp3 ? "3" : "1.1"
         };
         WritePrivate(listenerConfig, JsonSerializer.Serialize(listeners));
+        Console.WriteLine($"EC2_LAB_LISTENER_PORTS http={httpPort} https={tlsPort} admin={adminPort} metrics={metricsPort} http3={supportsHttp3}");
         var appSettings = new
         {
             ReverseProxy = new
@@ -265,6 +266,29 @@ internal static class DestinationAdmissionHttp3Acceptance
                         ex.InnerException is SocketException { SocketErrorCode: SocketError.ConnectionRefused })
                     {
                         await Task.Delay(100, discoveryTimeout.Token);
+                    }
+                    catch (HttpRequestException ex)
+                    {
+                        // If an HTTPS probe fails after TCP connected, identify a listener
+                        // that is accidentally speaking plaintext on the configured TLS port.
+                        using var plaintextHandler = new SocketsHttpHandler { UseProxy = false };
+                        using var plaintextClient = new HttpClient(plaintextHandler)
+                        { Timeout = TimeSpan.FromSeconds(1) };
+                        string diagnostic;
+                        try
+                        {
+                            using var plaintext = await plaintextClient.GetAsync(
+                                $"http://127.0.0.1:{tlsPort}/gateway/health");
+                            diagnostic = $"plaintext probe returned HTTP {(int)plaintext.StatusCode} " +
+                                $"{plaintext.Version} on the configured HTTPS port";
+                        }
+                        catch (Exception probeError) when (probeError is HttpRequestException or TaskCanceledException)
+                        {
+                            diagnostic = "plaintext probe did not reach an HTTP listener";
+                        }
+                        throw new InvalidOperationException(
+                            $"HTTPS readiness failed on configured TLS port {tlsPort}; {diagnostic}. " +
+                            $"Listener config: HTTP {httpPort}, HTTPS {tlsPort}, admin {adminPort}, metrics {metricsPort}.", ex);
                     }
                 }
             }
