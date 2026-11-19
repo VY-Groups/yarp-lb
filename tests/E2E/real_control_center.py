@@ -53,6 +53,8 @@ class Origin(BaseHTTPRequestHandler):
     connection_lock = threading.Lock()
     connection_active = 0
     connection_max_active = 0
+    replacement_release = threading.Event()
+    replacement_attempts = []
 
     @classmethod
     def reset_connection_counts(cls):
@@ -96,7 +98,10 @@ class Origin(BaseHTTPRequestHandler):
             self.end_headers()
             # Headers arrive immediately but the full response stream remains open.
             # This makes the admission E2E prove that a permit covers response-body copy.
-            if self.path.startswith("/hold-short"):
+            if self.path == "/hold-replacement":
+                if not Origin.replacement_release.wait(15):
+                    raise TimeoutError("replacement fixture release was not signaled")
+            elif self.path.startswith("/hold-short"):
                 time.sleep(.8)
             elif self.path.startswith("/hold"):
                 time.sleep(3.5)
@@ -107,6 +112,18 @@ class Origin(BaseHTTPRequestHandler):
             if tracked:
                 with Origin.connection_lock:
                     Origin.connection_active -= 1
+    def do_POST(self):
+        if not self.path.startswith("/replacement-"):
+            self.send_error(404)
+            return
+        payload=self.rfile.read(int(self.headers.get("Content-Length","0")))
+        with Origin.connection_lock:
+            Origin.replacement_attempts.append((self.server.server_address[1],self.path,payload))
+        body=f"replacement-origin:{self.server.server_address[1]}".encode()
+        self.send_response(200)
+        self.send_header("Content-Length",str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
     def log_message(self, *_): pass
 
 class Client:
@@ -245,8 +262,8 @@ def eventually(client:Client,path:str,expected_text:str,seconds:float=7):
         time.sleep(.2)
     raise AssertionError(f"real YARP did not forward {path} expected={expected_text}")
 
-def response(base:str,path:str):
-    req=Request(base+path,headers={"Accept":"text/plain"},method="GET")
+def response(base:str,path:str,method="GET",payload=None):
+    req=Request(base+path,data=payload,headers={"Accept":"text/plain"},method=method)
     opener=build_opener(ProxyHandler({}))
     try:
         with opener.open(req,timeout=8) as r:
@@ -408,6 +425,74 @@ def verify_destination_admission(base:str,https_base:str,admin:Client,reviewer:C
         "bounded-label queue wait summary is exported for dashboards")
     return pending
 
+def verify_queued_destination_replacement(base:str,admin:Client,reviewer:Client,origin_port:int):
+    """Keep a real response open, replace the selected destination under the same ID,
+    and wait for an in-memory YARP marker before releasing the queued transaction."""
+    def apply(address, marker):
+        state=admin.request("GET","/admin/api/state")
+        clusters=json.loads(json.dumps(state["clusters"]))
+        dests=clusters["fixture"]["Destinations"]
+        dests["origin"]["Address"]=address
+        dests["origin"]["Metadata"]["GatewayCore.Admission.QueueTimeoutMs"]="10000"
+        if marker:
+            dests["reload-marker"]={"Address":address,"Metadata":{"TrafficState":"draining"}}
+        else:
+            dests.pop("reload-marker",None)
+        pending=admin.request("POST","/admin/api/change-requests",{
+            "reason":"E2E replace same destination ID with independent origin",
+            "payload":{"routes":state["routes"],"clusters":clusters,
+                "disabled":state["disabled"],"revision":state["revision"]}})
+        reviewer.request("POST",f"/admin/api/change-requests/{pending['id']}/decision",{
+            "decision":"approve","reason":"Approve disposable destination replacement fixture"})
+    def await_marker(present):
+        end=time.monotonic()+5
+        while time.monotonic()<end:
+            runtime=admin.request("GET","/admin/api/runtime/destinations")
+            cluster=next(c for c in runtime["clusters"] if c["clusterId"]=="fixture")
+            if any(d["destinationId"]=="reload-marker" for d in cluster["destinations"])==present:
+                return
+            time.sleep(.03)
+        raise AssertionError("YARP in-memory configuration marker did not converge")
+    original=f"http://127.0.0.1:{origin_port}/"
+    apply(original,False)
+    # Verify the extended admission timeout applies through the live config before
+    # queueing. A temporary marker round trip fences the asynchronous reload.
+    apply(original,True)
+    await_marker(True)
+    apply(original,False)
+    await_marker(False)
+    Origin.replacement_release.clear()
+    with Origin.connection_lock:
+        Origin.replacement_attempts.clear()
+    with backend() as replacement, ThreadPoolExecutor(max_workers=3) as pool:
+        try:
+            held=pool.submit(response,base,"/admit/hold-replacement")
+            wait_metric(admin,"yarp_control_destination_admission_inflight_requests",1)
+            transaction=pool.submit(response,base,"/admit/replacement-queued","POST",b"unique-queued")
+            wait_metric(admin,"yarp_control_destination_admission_queued_requests",1)
+            apply(f"http://127.0.0.1:{replacement}/",True)
+            await_marker(True)
+            check(not transaction.done(),"same-ID replacement is loaded while original request remains queued")
+            Origin.replacement_release.set()
+            check(held.result(timeout=6)[0]==200,"original active response completes despite config replacement")
+            status,headers,_=transaction.result(timeout=6)
+            check(status==503 and headers.get("X-GatewayCore-Rejection")=="destination_unavailable_after_queue",
+                "live queued POST is rejected after same-ID destination replacement")
+            wait_metric(admin,"yarp_control_destination_admission_inflight_requests",0)
+            wait_metric(admin,"yarp_control_destination_admission_queued_requests",0)
+            with Origin.connection_lock:
+                check(Origin.replacement_attempts==[],"queued POST never reaches old or replacement origin")
+            status,_,body=response(base,"/admit/replacement-new","POST",b"unique-new")
+            check(status==200 and body==f"replacement-origin:{replacement}",
+                "new POST reaches the replacement destination after queue recovery")
+            with Origin.connection_lock:
+                check(Origin.replacement_attempts==[(replacement,"/replacement-new",b"unique-new")],
+                    "only the new transaction reaches the replacement origin exactly once")
+        finally:
+            Origin.replacement_release.set()
+            apply(original,False)
+            await_marker(False)
+
 def verify_max_connections_per_server(base:str,admin:Client,reviewer:Client):
     # Exercise YARP's actual outgoing HTTP connection cap independently from the
     # per-destination request gate: the latter is configured above the test load.
@@ -546,6 +631,7 @@ def acceptance(base:str,https_base:str,origin_port:int):
     eventually(anonymous,"/e2e/real-proxy","e2e-origin:/real-proxy")
     rollback_backup=admin.request("GET","/admin/api/backups")[0]
     verify_destination_admission(base,https_base,admin,reviewer,approved)
+    verify_queued_destination_replacement(base,admin,reviewer,origin_port)
     verify_max_connections_per_server(base,admin,reviewer)
     check(admin.request("GET","/admin/api/change-requests/"+pending["id"])["status"]=="Approved",
         "approved change recorded and auditable")
