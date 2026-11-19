@@ -25,6 +25,13 @@ BACKEND_A_PORT = 18081
 BACKEND_B_PORT = 18082
 MAX_TRACE_BYTES = 256 * 1024 * 1024
 OTLP_SIGNALS = ("traces", "metrics", "logs")
+OTLP_MARKERS = {
+    "traces": ("gateway.proxy.request", "gateway.route.id", "gateway.cluster.id",
+               "gateway.destination.id", "api"),
+    "metrics": ("gateway.proxy.requests", "gateway.route.id", "gateway.cluster.id",
+                "gateway.destination.id", "api", "A", "B"),
+    "logs": (),
+}
 
 
 class OtlpReceiver:
@@ -32,7 +39,7 @@ class OtlpReceiver:
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._received = {signal: {"requests": 0, "payload_bytes": 0}
+        self._received = {signal: {"requests": 0, "payload_bytes": 0, "markers": []}
                           for signal in OTLP_SIGNALS}
         receiver = self
 
@@ -57,6 +64,10 @@ class OtlpReceiver:
                 with receiver._lock:
                     receiver._received[signal]["requests"] += 1
                     receiver._received[signal]["payload_bytes"] += length
+                    seen = set(receiver._received[signal]["markers"])
+                    seen.update(marker for marker in OTLP_MARKERS[signal]
+                                if marker.encode("ascii") in body)
+                    receiver._received[signal]["markers"] = sorted(seen)
                 self.send_response(200)
                 self.send_header("Content-Length", "0")
                 self.end_headers()
@@ -212,13 +223,6 @@ class Lab:
         self.env = os.environ.copy()
         self.otel_receiver = None
         self.otel_received = None
-        if self.env.get("YARP_LAB_OTEL_OVERHEAD") == "1":
-            self.otel_receiver = OtlpReceiver()
-            self.env["YARP_OTEL_ENDPOINT"] = self.otel_receiver.endpoint
-            self.env["YARP_OTEL_TRACE_SAMPLE_RATIO"] = "0.05"
-        else:
-            self.env.pop("YARP_OTEL_ENDPOINT", None)
-            self.env.pop("YARP_OTEL_TRACE_SAMPLE_RATIO", None)
         gateway_bin = self.source / "tests/L7/GatewayLab/bin/Release/net10.0"
         backend_bin = self.source / "tests/L7/BackendLab/bin/Release/net10.0"
         for binary in (gateway_bin / "GatewayLab.dll", backend_bin / "BackendLab.dll"):
@@ -228,6 +232,13 @@ class Lab:
         self.env["YARP_LAB_HTTP_PORT"] = str(GATEWAY_PORT)
         self.env["YARP_LAB_TLS_PORT"] = "18443"
         try:
+            if self.env.get("YARP_LAB_OTEL_OVERHEAD") == "1":
+                self.otel_receiver = OtlpReceiver()
+                self.env["YARP_OTEL_ENDPOINT"] = self.otel_receiver.endpoint
+                self.env["YARP_OTEL_TRACE_SAMPLE_RATIO"] = "0.05"
+            else:
+                self.env.pop("YARP_OTEL_ENDPOINT", None)
+                self.env.pop("YARP_OTEL_TRACE_SAMPLE_RATIO", None)
             self._start(["dotnet", str(backend_bin / "BackendLab.dll"), str(BACKEND_A_PORT), "A"],
                         backend_bin, "backend-a")
             self._start(["dotnet", str(backend_bin / "BackendLab.dll"), str(BACKEND_B_PORT), "B"],
@@ -260,18 +271,28 @@ class Lab:
         return request_json(f"{BASE_URL}:{GATEWAY_PORT}/lab/stats")
 
     def close(self, *, require_otel: bool = True) -> None:
-        stop_processes(self.processes)
-        for thread in self.log_threads.values():
-            thread.join(timeout=2)
-        if self.otel_receiver is not None:
-            self.otel_received = self.otel_receiver.snapshot()
-            self.otel_receiver.close()
-            if require_otel:
-                missing = [signal for signal, counts in self.otel_received.items()
-                           if counts["requests"] == 0 or counts["payload_bytes"] == 0]
-                if missing:
-                    raise RuntimeError("GatewayLab did not export non-empty OTLP signals: " +
-                                       ", ".join(missing))
+        try:
+            stop_processes(self.processes)
+            for thread in self.log_threads.values():
+                thread.join(timeout=2)
+        finally:
+            if self.otel_receiver is not None:
+                try:
+                    self.otel_received = self.otel_receiver.snapshot()
+                finally:
+                    self.otel_receiver.close()
+        if require_otel and self.otel_received is not None:
+            missing = [signal for signal, counts in self.otel_received.items()
+                       if counts["requests"] == 0 or counts["payload_bytes"] == 0]
+            if missing:
+                raise RuntimeError("GatewayLab did not export non-empty OTLP signals: " +
+                                   ", ".join(missing))
+            for signal in ("traces", "metrics"):
+                missing_markers = sorted(set(OTLP_MARKERS[signal]) -
+                                          set(self.otel_received[signal]["markers"]))
+                if missing_markers:
+                    raise RuntimeError(f"GatewayLab {signal} export lacks proxy activity/dimensions: " +
+                                       ", ".join(missing_markers))
 
     def __enter__(self):
         return self

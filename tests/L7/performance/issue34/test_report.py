@@ -71,15 +71,23 @@ class ReportTests(unittest.TestCase):
     def test_disposable_otlp_receiver_counts_nonempty_signal_exports(self):
         receiver = OtlpReceiver()
         try:
+            payloads = {
+                "traces": b"gateway.proxy.request gateway.route.id gateway.cluster.id gateway.destination.id api",
+                "metrics": b"gateway.proxy.requests gateway.route.id gateway.cluster.id gateway.destination.id api A B",
+                "logs": b"disposable access log",
+            }
             for signal in ("traces", "metrics", "logs"):
                 request = urllib.request.Request(
-                    f"{receiver.endpoint}/v1/{signal}", data=b"\x0a\x01x",
+                    f"{receiver.endpoint}/v1/{signal}", data=payloads[signal],
                     headers={"Content-Type": "application/x-protobuf"}, method="POST")
                 with urllib.request.urlopen(request, timeout=2) as response:
                     self.assertEqual(response.status, 200)
             snapshot = receiver.snapshot()
             for signal in ("traces", "metrics", "logs"):
-                self.assertEqual(snapshot[signal], {"requests": 1, "payload_bytes": 3})
+                self.assertEqual(snapshot[signal]["requests"], 1)
+                self.assertEqual(snapshot[signal]["payload_bytes"], len(payloads[signal]))
+            self.assertIn("gateway.proxy.requests", snapshot["metrics"]["markers"])
+            self.assertIn("gateway.destination.id", snapshot["metrics"]["markers"])
         finally:
             receiver.close()
 
