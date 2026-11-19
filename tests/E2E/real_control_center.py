@@ -7,8 +7,10 @@ loopback origin servers and ephemeral state. No production hosts or network.
 """
 from __future__ import annotations
 import argparse
+import base64
 from contextlib import contextmanager
 from http.cookiejar import CookieJar
+import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
@@ -48,6 +50,28 @@ class Origin(BaseHTTPRequestHandler):
             cls.connection_max_active = 0
 
     def do_GET(self):
+        if self.path == "/ws-hold":
+            key = self.headers.get("Sec-WebSocket-Key", "")
+            if self.headers.get("Upgrade", "").lower() != "websocket" or not key:
+                self.send_error(400)
+                return
+            accept = base64.b64encode(hashlib.sha1(
+                (key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode("ascii")
+            ).digest()).decode("ascii")
+            self.send_response(101, "Switching Protocols")
+            self.send_header("Upgrade", "websocket")
+            self.send_header("Connection", "Upgrade")
+            self.send_header("Sec-WebSocket-Accept", accept)
+            self.end_headers()
+            self.wfile.flush()
+            # Keep the upgraded upstream open until the test client closes it.
+            # YARP must hold the selected destination permit for this whole tunnel.
+            self.connection.settimeout(8)
+            try:
+                self.connection.recv(1)
+            except (TimeoutError, OSError):
+                pass
+            return
         tracked = self.path.startswith("/probe-")
         if tracked:
             with Origin.connection_lock:
@@ -231,6 +255,28 @@ def abort_queued_request(base:str,client:Client):
     sock.close()
     wait_metric(client,"yarp_control_destination_admission_queued_requests",0)
 
+def open_websocket(base:str,path:str):
+    sock=socket.create_connection(("127.0.0.1",int(base.rsplit(":",1)[1])),timeout=4)
+    key=base64.b64encode(os.urandom(16)).decode("ascii")
+    request=(f"GET {path} HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\n"
+        f"Connection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: {key}\r\n\r\n")
+    sock.sendall(request.encode("ascii"))
+    response=b""
+    try:
+        while b"\r\n\r\n" not in response:
+            chunk=sock.recv(4096)
+            if not chunk:
+                raise AssertionError("WebSocket handshake ended before response headers")
+            response+=chunk
+            if len(response)>16384:
+                raise AssertionError("WebSocket handshake headers exceeded the test bound")
+        if not response.startswith(b"HTTP/1.1 101 "):
+            raise AssertionError(f"expected WebSocket 101 response, got {response[:300]!r}")
+        return sock
+    except Exception:
+        sock.close()
+        raise
+
 def verify_destination_admission(base:str,admin:Client,reviewer:Client,initial:dict):
     routes=dict(initial["routes"])
     routes["admission-e2e"]={"ClusterId":"fixture","Match":{"Path":"/admit/{**catch-all}"},
@@ -287,16 +333,34 @@ def verify_destination_admission(base:str,admin:Client,reviewer:Client,initial:d
         check(held_again.result(timeout=5)[0]==200,"client disconnect removes only its queued waiter")
         check(response(base,"/admit/normal")[0]==200,"destination recovers after timeout and client cancellation")
 
+        websocket=open_websocket(base,"/admit/ws-hold")
+        try:
+            wait_metric(admin,"yarp_control_destination_admission_inflight_requests",1)
+            websocket_waiter=pool.submit(response,base,"/admit/normal")
+            wait_metric(admin,"yarp_control_destination_admission_queued_requests",1)
+            status,headers,_=response(base,"/admit/rejected")
+            check(status==503 and headers.get("X-GatewayCore-Rejection")=="destination_queue_full",
+                "a live WebSocket tunnel retains its selected backend permit and bounds excess work")
+            websocket.close()
+            check(websocket_waiter.result(timeout=5)[0]==200,
+                "closing a WebSocket tunnel releases its backend permit to the queued request")
+        finally:
+            websocket.close()
+        wait_metric(admin,"yarp_control_destination_admission_inflight_requests",0)
+        wait_metric(admin,"yarp_control_destination_admission_queued_requests",0)
+        check(response(base,"/admit/normal")[0]==200,
+            "destination admission recovers after a WebSocket client disconnect")
+
     wait_metric(admin,"yarp_control_destination_admission_queued_requests",0)
     wait_metric(admin,"yarp_control_destination_admission_inflight_requests",0)
     metrics=admin.request("GET","/gateway/metrics")
-    check('yarp_control_destination_admission_rejected_total{destination="fixture/origin"} 1' in metrics,
+    check('yarp_control_destination_admission_rejected_total{destination="fixture/origin"} 2' in metrics,
         "destination admission rejection counter is exposed with bounded destination labels")
     check('yarp_control_destination_admission_queue_timeouts_total{destination="fixture/origin"} 1' in metrics,
         "destination admission queue timeout counter is exposed")
     check('yarp_control_destination_admission_waiter_canceled_total{destination="fixture/origin"} 2' in metrics,
         "queue timeout and client disconnect both release bounded waiter reservations")
-    check('yarp_control_destination_admission_queue_wait_seconds_count{destination="fixture/origin"} 3' in metrics,
+    check('yarp_control_destination_admission_queue_wait_seconds_count{destination="fixture/origin"} 4' in metrics,
         "bounded-label queue wait summary is exported for dashboards")
     return pending
 
