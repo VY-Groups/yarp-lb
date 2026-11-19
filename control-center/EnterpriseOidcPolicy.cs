@@ -1,6 +1,9 @@
 using System.Globalization;
 using System.Security.Claims;
 using System.Security.Cryptography;
+using System.Security.AccessControl;
+using System.Security.Principal;
+using System.Runtime.Versioning;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -84,12 +87,44 @@ internal sealed class EnterpriseOidcPolicy
              UnixFileMode.GroupExecute | UnixFileMode.OtherRead | UnixFileMode.OtherWrite |
              UnixFileMode.OtherExecute)) != 0)
             throw new InvalidDataException("OIDC config/secret requires owner-only access");
+        if (OperatingSystem.IsWindows()) ValidateWindowsFileAcl(path);
         using var file = File.OpenRead(path);
         if (file.Length is < 1 || file.Length > max) throw new InvalidDataException("OIDC file exceeds size bound");
         var bytes = new byte[(int)file.Length];
         file.ReadExactly(bytes);
         if (file.ReadByte() != -1) throw new InvalidDataException("OIDC file changed during read");
         return bytes;
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static void ValidateWindowsFileAcl(string path)
+    {
+        try
+        {
+            var serviceSid = WindowsIdentity.GetCurrent().User
+                ?? throw new InvalidDataException("Cannot identify the Windows service account");
+            var systemSid = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
+            var administratorsSid = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
+            var allowed = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            {
+                serviceSid.Value, systemSid.Value, administratorsSid.Value
+            };
+            var security = new FileInfo(path).GetAccessControl(AccessControlSections.Owner | AccessControlSections.Access);
+            if (security.GetOwner(typeof(SecurityIdentifier)) is not SecurityIdentifier owner ||
+                !allowed.Contains(owner.Value))
+                throw new InvalidDataException("OIDC config/secret owner must be the service account, SYSTEM or Administrators");
+            foreach (FileSystemAccessRule rule in security.GetAccessRules(true, true, typeof(SecurityIdentifier)))
+            {
+                if (rule.AccessControlType == AccessControlType.Allow &&
+                    rule.IdentityReference is SecurityIdentifier sid && !allowed.Contains(sid.Value))
+                    throw new InvalidDataException("OIDC config/secret ACL grants access outside the service account, SYSTEM and Administrators");
+            }
+        }
+        catch (InvalidDataException) { throw; }
+        catch (Exception ex) when (ex is not InvalidDataException)
+        {
+            throw new InvalidDataException("Cannot verify restrictive Windows ACL for OIDC config/secret", ex);
+        }
     }
 
     internal bool IsBreakGlass(string? username) =>

@@ -1,4 +1,7 @@
 using System.Security.Claims;
+using System.Security.AccessControl;
+using System.Security.Principal;
+using System.Runtime.Versioning;
 
 internal static class EnterpriseOidcPolicyTests
 {
@@ -75,5 +78,68 @@ internal static class EnterpriseOidcPolicyTests
         var replaced = new EnterpriseOidcPolicy(settings with { RequiredAcr = "urn:changed" });
         Check(!replaced.SessionValid(ticket, "alice", "Operator", now),
             "policy change revokes existing federated session");
+        if (OperatingSystem.IsWindows()) WindowsAclChecks();
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static void WindowsAclChecks()
+    {
+        static void Check(bool ok, string message)
+        {
+            if (!ok) throw new Exception("FAIL: " + message);
+            Console.WriteLine("PASS: " + message);
+        }
+        static void SetAcl(string path, bool grantUsers)
+        {
+            var service = WindowsIdentity.GetCurrent().User
+                ?? throw new InvalidOperationException("Windows test identity unavailable");
+            var acl = new FileSecurity();
+            acl.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
+            acl.SetOwner(service);
+            acl.AddAccessRule(new FileSystemAccessRule(service,
+                FileSystemRights.FullControl,
+                AccessControlType.Allow));
+            acl.AddAccessRule(new FileSystemAccessRule(
+                new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null),
+                FileSystemRights.FullControl, AccessControlType.Allow));
+            acl.AddAccessRule(new FileSystemAccessRule(
+                new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null),
+                FileSystemRights.FullControl, AccessControlType.Allow));
+            if (grantUsers)
+                acl.AddAccessRule(new FileSystemAccessRule(
+                    new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid, null),
+                    FileSystemRights.Read, AccessControlType.Allow));
+            new FileInfo(path).SetAccessControl(acl);
+        }
+        static bool Reject(Action action)
+        {
+            try { action(); return false; }
+            catch (InvalidDataException) { return true; }
+        }
+
+        var folder = Path.Combine(Path.GetTempPath(), "gateway-oidc-acl-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(folder);
+        try
+        {
+            var secret = Path.Combine(folder, "secret");
+            var config = Path.Combine(folder, "oidc.json");
+            File.WriteAllText(secret, "test-client-secret");
+            var settings = new OidcSettings("https://idp.example.invalid/realm", "gateway-client",
+                secret, "https://gateway.example.invalid", "urn:company:phishing-resistant", "fido2",
+                "recovery", [new OidcAccount("immutable-subject", "alice", "gateway-operators", "Operator")]);
+            File.WriteAllText(config, System.Text.Json.JsonSerializer.Serialize(settings));
+
+            SetAcl(secret, grantUsers: false);
+            SetAcl(config, grantUsers: false);
+            var policy = EnterpriseOidcPolicy.FromFile(config)!;
+            Check(policy.ReadClientSecret() == "test-client-secret",
+                "Windows owner/service plus SYSTEM and Administrators ACL accepted");
+
+            SetAcl(secret, grantUsers: true);
+            Check(Reject(() => policy.ReadClientSecret()), "Windows broad Users access to client secret rejected");
+            SetAcl(config, grantUsers: true);
+            Check(Reject(() => EnterpriseOidcPolicy.FromFile(config)), "Windows broad Users access to OIDC policy rejected");
+        }
+        finally { Directory.Delete(folder, recursive: true); }
     }
 }
