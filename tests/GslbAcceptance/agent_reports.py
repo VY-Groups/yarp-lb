@@ -211,6 +211,43 @@ def reject_authority_fence_frame(target_port, client_identity, ca_path, body, ex
         raise AssertionError(f"{label} was accepted")
 
 
+def post_agent_report_status(authority, agent, ca_path, body):
+    context = ssl.create_default_context(cafile=str(ca_path))
+    context.load_cert_chain(str(agent["cert"]), str(agent["key"]))
+    request = urllib.request.Request(
+        f"https://127.0.0.1:{authority['report_port']}/agent-health/v1/reports",
+        data=body, headers={"Content-Type": "application/json"}, method="POST")
+    try:
+        with urllib.request.urlopen(request, context=context, timeout=3) as response:
+            return response.status
+    except urllib.error.HTTPError as error:
+        error.close()
+        return error.code
+
+
+def signed_report_frame(agent, sequence, epoch):
+    observed = int(time.time())
+    der = subprocess.run(["openssl", "pkey", "-pubin", "-in", str(agent["public"]),
+                          "-outform", "DER"], check=True, capture_output=True).stdout
+    key_id = hashlib.sha256(der).hexdigest().upper()
+    report = {
+        "Version": 1, "AgentId": agent["id"], "KeyId": key_id,
+        "Zone": "lab.example.test", "SiteId": "mumbai", "Epoch": epoch,
+        "Sequence": sequence, "ObservedAtUnixSeconds": observed,
+        "ExpiresAtUnixSeconds": observed + 8, "ProbeType": "http",
+        "Verdict": "healthy", "ConfidencePermille": 1000,
+        "LatencyMilliseconds": 23, "Signature": "",
+    }
+    canonical = "\n".join((
+        "GatewayCore.AgentHealth.v1", report["AgentId"], key_id,
+        "lab.example.test", "mumbai", str(epoch), str(sequence), str(observed),
+        str(observed + 8), "http", "healthy", "1000", "23"))
+    signature = subprocess.run(["openssl", "dgst", "-sha256", "-sign", str(agent["signer"])],
+                               input=canonical.encode(), check=True, capture_output=True).stdout
+    report["Signature"] = __import__("base64").b64encode(signature).decode("ascii")
+    return json.dumps(report, separators=(",", ":"))
+
+
 def dns_query(dns_port):
     labels = b"".join(bytes([len(label)]) + label for label in (b"lab", b"example", b"test")) + b"\0"
     packet = b"\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00" + labels + b"\x00\x01\x00\x01"
@@ -845,6 +882,32 @@ def main():
         expect_dns(authority_a["dns"], authority_a["dns_port"], 0, "192.0.2.17", timeout=12,
                    log_paths=[authority_a["dns_log"], *authority_a["agent_logs"]])
         print("PASS: both authorities recover only after revocation is removed and fresh matching quorum returns")
+
+        # At the actual mTLS HTTP boundary, use cryptographically valid frames
+        # so duplicate-field rejection cannot pass because of a missing or bad
+        # signature. The clean request must still be usable after both rejects.
+        signer_agent = agents[0]
+        sequence = 900_000_001
+        epoch = 900_000_001
+        valid = signed_report_frame(signer_agent, sequence, epoch)
+        marker = f'"Sequence":{sequence}'
+        assert marker in valid
+        duplicate_before = valid.replace(marker,
+            f'"sequence":{sequence + 1},{marker}', 1)
+        duplicate_after = valid.replace(marker,
+            f'{marker},"sequence":{sequence}', 1)
+        assert post_agent_report_status(authority_b, signer_agent, root / "ca.pem",
+                                        duplicate_before.encode()) == 400, \
+            "valid signed report with conflicting case-alias before signed value was not rejected as duplicate"
+        assert post_agent_report_status(authority_b, signer_agent, root / "ca.pem",
+                                        duplicate_after.encode()) == 400, \
+            "valid signed report with duplicate after signed value was not rejected"
+        clean_status = post_agent_report_status(authority_b, signer_agent, root / "ca.pem", valid.encode())
+        assert clean_status == 202, f"clean signed report returned HTTP {clean_status}, expected 202"
+        assert post_agent_report_status(authority_b, signer_agent, root / "ca.pem",
+                                        valid.encode()) == 400, \
+            "replayed signed report was not rejected at the real mTLS HTTP boundary"
+        print("PASS: mTLS report ingress rejects valid signed duplicate-field frames in both orders, accepts clean frame, rejects replay")
 
 
 if __name__ == "__main__":

@@ -1,4 +1,5 @@
 using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using GatewayCore.Gslb.Contracts;
 
@@ -75,6 +76,8 @@ internal static class ProtocolMutationTests
             $"\"Sequence\":{valid.Sequence},\"Sequence\":{valid.Sequence + 1}",
             StringComparison.Ordinal);
         Require(!ReferenceEquals(duplicateSequence, reportJson), "report duplicate-field fixture was not built");
+        Require(!StrictJsonPropertyNames.HasNoDuplicates(Encoding.UTF8.GetBytes(duplicateSequence)),
+            "duplicate report properties are rejected before last-value JSON deserialization");
         var duplicateParsed = JsonSerializer.Deserialize<AgentHealthReport>(duplicateSequence);
         Require(duplicateParsed is not null && !AgentHealthReportContract.Verify(duplicateParsed, verifier, 8),
             "conflicting duplicate report field retained valid signature");
@@ -147,6 +150,8 @@ internal static class ProtocolMutationTests
             $"\"Sequence\":{valid.Sequence},\"Sequence\":{valid.Sequence + 1}",
             StringComparison.Ordinal);
         Require(!ReferenceEquals(duplicateSequence, authorityJson), "authority duplicate-field fixture was not built");
+        Require(!StrictJsonPropertyNames.HasNoDuplicates(Encoding.UTF8.GetBytes(duplicateSequence)),
+            "duplicate authority properties are rejected before last-value JSON deserialization");
         var duplicateParsed = JsonSerializer.Deserialize<AuthorityFenceSnapshot>(duplicateSequence);
         Require(duplicateParsed is not null && !AuthorityFenceContract.Verify(duplicateParsed, verifier),
             "conflicting duplicate authority field retained valid signature");

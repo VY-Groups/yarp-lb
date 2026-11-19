@@ -589,7 +589,10 @@ internal sealed class AuthorityFenceRuntime : IAsyncDisposable
                     body.Write(buffer, 0, read);
                 }
                 AuthorityFenceSnapshot? snapshot;
-                try { snapshot = JsonSerializer.Deserialize<AuthorityFenceSnapshot>(body.ToArray()); }
+                var payload = body.ToArray();
+                if (!StrictJsonPropertyNames.HasNoDuplicates(payload))
+                    return Results.BadRequest();
+                try { snapshot = JsonSerializer.Deserialize<AuthorityFenceSnapshot>(payload); }
                 catch (JsonException) { return Results.BadRequest(); }
                 if (snapshot is null) return Results.BadRequest();
                 if (!store.TryAccept(snapshot, context.Connection.ClientCertificate,

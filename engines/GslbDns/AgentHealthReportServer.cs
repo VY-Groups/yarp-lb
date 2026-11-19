@@ -29,6 +29,7 @@ internal sealed record AgentReportServerConfig(
 /// </summary>
 internal sealed class AgentHealthReportServer : IAsyncDisposable
 {
+    private static readonly JsonSerializerOptions ReportJsonOptions = new(JsonSerializerDefaults.Web);
     private readonly AgentHealthReportStore store;
     private readonly DnsRuntimeMetrics metrics;
     private readonly AgentReportServerConfig config;
@@ -105,8 +106,30 @@ internal sealed class AgentHealthReportServer : IAsyncDisposable
                 AgentHealthReport? report;
                 try
                 {
-                    report = await context.Request.ReadFromJsonAsync<AgentHealthReport>(
-                        cancellationToken: context.RequestAborted);
+                    using var body = new MemoryStream();
+                    var buffer = new byte[2048];
+                    while (true)
+                    {
+                        var read = await context.Request.Body.ReadAsync(buffer, context.RequestAborted);
+                        if (read == 0) break;
+                        if (body.Length + read > AgentHealthReportContract.MaximumSerializedBytes)
+                        {
+                            if (authenticatedAgentId is not null)
+                                store.RecordRejectedReport(authenticatedAgentId);
+                            metrics.AgentReportRejected();
+                            return Results.StatusCode(StatusCodes.Status413PayloadTooLarge);
+                        }
+                        body.Write(buffer, 0, read);
+                    }
+                    var payload = body.ToArray();
+                    if (!StrictJsonPropertyNames.HasNoDuplicates(payload))
+                    {
+                        if (authenticatedAgentId is not null)
+                            store.RecordRejectedReport(authenticatedAgentId);
+                        metrics.AgentReportRejected();
+                        return Results.BadRequest();
+                    }
+                    report = JsonSerializer.Deserialize<AgentHealthReport>(payload, ReportJsonOptions);
                 }
                 catch (JsonException)
                 {
