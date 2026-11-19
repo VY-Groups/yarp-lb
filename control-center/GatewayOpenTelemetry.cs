@@ -168,17 +168,18 @@ public static class GatewayOpenTelemetry
 /// </summary>
 internal sealed class GatewayTelemetryDimensionBudget
 {
-    public const int MaximumTrackedTuples = 4096;
-    private readonly int _maximumTrackedTuples;
+    public const int MaximumTotalTuples = 4096;
+    private readonly int _maximumNamedTuples;
     private readonly ConcurrentDictionary<string, byte> _tracked = new(StringComparer.Ordinal);
     private readonly object _registrationLock = new();
     private volatile bool _saturated;
 
-    public GatewayTelemetryDimensionBudget(int maximumTrackedTuples = MaximumTrackedTuples)
+    public GatewayTelemetryDimensionBudget(int maximumTotalTuples = MaximumTotalTuples)
     {
-        if (maximumTrackedTuples < 1 || maximumTrackedTuples > MaximumTrackedTuples)
-            throw new ArgumentOutOfRangeException(nameof(maximumTrackedTuples));
-        _maximumTrackedTuples = maximumTrackedTuples;
+        if (maximumTotalTuples < 2 || maximumTotalTuples > MaximumTotalTuples)
+            throw new ArgumentOutOfRangeException(nameof(maximumTotalTuples));
+        // Reserve one series tuple for the fixed overflow dimensions.
+        _maximumNamedTuples = maximumTotalTuples - 1;
     }
 
     public int TrackedTuples => _tracked.Count;
@@ -195,7 +196,7 @@ internal sealed class GatewayTelemetryDimensionBudget
             {
                 if (!_tracked.ContainsKey(key))
                 {
-                    if (_tracked.Count < _maximumTrackedTuples)
+                    if (_tracked.Count < _maximumNamedTuples)
                         _tracked.TryAdd(key, 0);
                     else
                     {
