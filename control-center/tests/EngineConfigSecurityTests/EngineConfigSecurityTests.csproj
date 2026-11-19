@@ -15,6 +15,7 @@
     <Compile Include="../../NonBlockingConsoleLogging.cs" Link="NonBlockingConsoleLogging.cs" />
     <Compile Include="../../GatewayLoggingConfiguration.cs" Link="GatewayLoggingConfiguration.cs" />
     <Compile Include="../../GatewayClientAddress.cs" Link="GatewayClientAddress.cs" />
+    <Compile Include="../../WindowsStateProtection.cs" Link="WindowsStateProtection.cs" />
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
     <PackageReference Include="Yarp.ReverseProxy" Version="2.3.0" />
     <PackageReference Include="OpenTelemetry.Extensions.Hosting" Version="1.19.1" />

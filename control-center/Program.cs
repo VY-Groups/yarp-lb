@@ -32,6 +32,8 @@ var privateDir = ec2Lab ? Ec2WorkflowLab.PrivateDirectory()
     : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
         "GatewayCoreYarp", "ControlPlane");
 if (OperatingSystem.IsWindows() && !ec2Lab)
+    WindowsStateProtection.InitializeStateDirectory(Path.GetDirectoryName(privateDir)!, privateDir);
+if (OperatingSystem.IsWindows() && !ec2Lab)
     LegacyStateGuard.RejectUnmigratedWindowsState(privateDir);
 if (!OperatingSystem.IsLinux() || ec2Lab)
     Directory.CreateDirectory(privateDir);
