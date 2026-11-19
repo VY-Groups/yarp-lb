@@ -59,7 +59,26 @@ if (signingKey.KeySize is < 2048 or > 4096)
     throw new InvalidOperationException("RSA signing key must be 2048..4096 bits");
 // Verify private-key availability at startup, before accepting any write.
 _ = signingKey.SignData(new byte[] { 1 }, HashAlgorithmName.SHA256, RSASignaturePadding.Pss);
-using var ledger = new AuditLedger(statePath, signingKey);
+var wormVariables = new[] { "AUDIT_WORM_ENDPOINT", "AUDIT_WORM_REGION", "AUDIT_WORM_BUCKET",
+    "AUDIT_WORM_PREFIX", "AUDIT_WORM_DAYS", "AUDIT_WORM_ACCESS_FILE", "AUDIT_WORM_SECRET_FILE", "AUDIT_WORM_PENDING_FILE" };
+var wormEnabled = wormVariables.Any(v => Environment.GetEnvironmentVariable(v) is not null);
+string? pendingPath = null;
+ObjectLockRetention? worm = null;
+if (wormEnabled)
+{
+    foreach (var name in wormVariables) _ = Required(name);
+    pendingPath = Required("AUDIT_WORM_PENDING_FILE");
+    PrivatePath(pendingPath, false);
+    PrivatePath(Path.GetDirectoryName(pendingPath)!, true);
+    if (!int.TryParse(Required("AUDIT_WORM_DAYS"), NumberStyles.None, CultureInfo.InvariantCulture, out var days))
+        throw new InvalidDataException("Invalid retention days");
+    worm = ObjectLockRetention.Create(Required("AUDIT_WORM_ENDPOINT"), Required("AUDIT_WORM_REGION"),
+        Required("AUDIT_WORM_BUCKET"), Required("AUDIT_WORM_PREFIX"), days,
+        Encoding.UTF8.GetString(ReadPrivate(Required("AUDIT_WORM_ACCESS_FILE"), 256)).TrimEnd('\r','\n'),
+        Encoding.UTF8.GetString(ReadPrivate(Required("AUDIT_WORM_SECRET_FILE"), 256)).TrimEnd('\r','\n'));
+}
+using var retention = worm;
+using var ledger = new AuditLedger(statePath, signingKey, retention, pendingPath);
 if (args.Length > 0 && args[0] == "--verify-ledger")
 {
     // Operators can compare against an independently retained checkpoint.
@@ -95,6 +114,7 @@ builder.WebHost.ConfigureKestrel(options =>
     });
 });
 builder.Logging.SetMinimumLevel(LogLevel.Warning);
+if (retention is not null) builder.Services.AddHostedService(_ => new RetentionRetryWorker(ledger));
 var app = builder.Build();
 using var slots = new SemaphoreSlim(8, 8);
 app.MapPost("/audit/v1/intents", async (HttpContext ctx) =>
@@ -131,3 +151,17 @@ app.MapPost("/audit/v1/intents", async (HttpContext ctx) =>
     finally { slots.Release(); }
 });
 await app.RunAsync();
+
+internal sealed class RetentionRetryWorker(AuditLedger ledger) : BackgroundService
+{
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(5));
+        try
+        {
+            do { ledger.RetryPending(); }
+            while (await timer.WaitForNextTickAsync(stoppingToken));
+        }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { }
+    }
+}

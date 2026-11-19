@@ -14,6 +14,7 @@
     <Compile Include="../src/TrafficPolicies/RiseFallCounter.cs" Link="RiseFallCounter.cs" />
     <Compile Include="../src/TrafficPolicies/RiseFallActiveHealthPolicy.cs" Link="RiseFallActiveHealthPolicy.cs" />
     <PackageReference Include="Yarp.ReverseProxy" Version="2.3.0" />
+    <PackageReference Include="Microsoft.AspNetCore.Authentication.OpenIdConnect" Version="10.0.15" />
     <PackageReference Include="StackExchange.Redis" Version="2.9.32" />
     <PackageReference Include="System.DirectoryServices.Protocols" Version="10.0.15" />
     <PackageReference Include="MailKit" Version="4.18.2" />
