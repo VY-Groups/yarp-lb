@@ -45,9 +45,10 @@ internal static class GatewayLogFilteringAcceptance
             var body = await response.Content.ReadAsStringAsync();
             Must(response.StatusCode == HttpStatusCode.OK && body == "forwarded",
                 "real YARP forwarding succeeds while log filters are active");
-            gateway.Services.GetRequiredService<ILoggerFactory>()
-                .CreateLogger("Yarp.ReverseProxy.Forwarder.HttpForwarder")
-                .LogWarning("acceptance-warning-preserved");
+            var yarpLogger = gateway.Services.GetRequiredService<ILoggerFactory>()
+                .CreateLogger("Yarp.ReverseProxy.Forwarder.HttpForwarder");
+            yarpLogger.LogInformation("acceptance-info-filtered");
+            yarpLogger.LogWarning("acceptance-warning-preserved");
 
             var accessLogDeadline = DateTimeOffset.UtcNow.AddSeconds(3);
             while ((!output.ToString().Contains("GATEWAY_ACCESS", StringComparison.Ordinal) ||
@@ -61,8 +62,9 @@ internal static class GatewayLogFilteringAcceptance
                  lines.Contains("clientIp=127.0.0.1", StringComparison.Ordinal) &&
                  lines.Contains("clientIpSource=socket", StringComparison.Ordinal),
                 "timestamped client-IP access log remains enabled at Information");
-            Must(!lines.Contains("Information Yarp.ReverseProxy.Forwarder.HttpForwarder", StringComparison.Ordinal),
-                "YARP per-request Information logs are filtered from the console sink");
+            Must(!lines.Contains("acceptance-info-filtered", StringComparison.Ordinal) &&
+                 !lines.Contains("Information Yarp.ReverseProxy.Forwarder.HttpForwarder", StringComparison.Ordinal),
+                "YARP Information sentinel and per-request messages are filtered from the console sink");
             Must(lines.Contains("Warning Yarp.ReverseProxy.Forwarder.HttpForwarder", StringComparison.Ordinal),
                 "YARP warnings remain visible in the console sink");
             Console.WriteLine("PASS: real forwarding preserves access log while suppressing YARP per-request INFO");
