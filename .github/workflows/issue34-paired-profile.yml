@@ -7,6 +7,7 @@ on:
       - "tests/L7/BackendLab/**"
       - "tests/L7/performance/**"
       - "src/TrafficPolicies/**"
+      - "control-center/GatewayOpenTelemetry.cs"
       - "control-center/GatewayLoggingConfiguration.cs"
       - "control-center/NonBlockingConsoleLogging.cs"
   workflow_dispatch:
@@ -26,10 +27,12 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           path: source/candidate
           persist-credentials: false
-      - name: Checkout pinned allocation baseline
+      - name: Checkout exact PR base (historical baseline for manual runs)
         uses: actions/checkout@v4
         with:
-          ref: d2b135f760e92fb2646ec5542d89a7dc309eb88c
+          # PR runs compare exact base and head SHAs. Manual runs retain the
+          # original historical allocation baseline for reproducibility.
+          ref: ${{ github.event.pull_request.base.sha || 'd2b135f760e92fb2646ec5542d89a7dc309eb88c' }}
           path: source/baseline
           persist-credentials: false
       - uses: actions/setup-dotnet@v4
@@ -59,8 +62,9 @@ jobs:
       - name: Run three alternating before/after pairs and bounded allocation traces
         id: paired_profile
         env:
-          BASELINE_COMMIT: d2b135f760e92fb2646ec5542d89a7dc309eb88c
+          BASELINE_COMMIT: ${{ github.event.pull_request.base.sha || 'd2b135f760e92fb2646ec5542d89a7dc309eb88c' }}
           CANDIDATE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+          YARP_LAB_OTEL_OVERHEAD: ${{ github.event_name == 'pull_request' && '1' || '0' }}
         run: |
           python3 source/candidate/tests/L7/performance/issue34/run_paired_profile.py \
             --baseline-dir source/baseline \
@@ -91,7 +95,7 @@ jobs:
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as out:
               print(f"Interim allocation delta only: {delta['mean']} B/request "
                     f"(95% CI {delta['ci95_low']} to {delta['ci95_high']}); "
-                    "this does not satisfy the paired profile acceptance.")
+                    "this does not satisfy the paired profile acceptance.", file=out)
           PY
             fi
             exit 0
@@ -113,7 +117,7 @@ jobs:
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as out:
               print(f"## Paired allocation evidence complete\n"
                     f"Allocation delta: {s['mean']} B/request "
-                    f"(95% CI {s['ci95_low']} to {s['ci95_high']}); {s['interpretation']}")
+                    f"(95% CI {s['ci95_low']} to {s['ci95_high']}); {s['interpretation']}", file=out)
           PY
           fi
       - if: always()

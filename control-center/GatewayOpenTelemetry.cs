@@ -166,6 +166,7 @@ public static class GatewayOpenTelemetry
         activity.SetTag("http.response.status_code", context.Response.StatusCode);
         if (context.Response.StatusCode >= 500)
             activity.SetStatus(ActivityStatusCode.Error);
+        activity.Stop();
     }
 
     public static void RecordProxyResult(HttpContext context, double elapsedMs,
