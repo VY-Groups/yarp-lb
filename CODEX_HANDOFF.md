@@ -15,11 +15,14 @@ conflict. Live GitHub was checked on 2026-11-19:
   `501339b8fb740dae65b0f365d1857a94928e460c`; it is not an NSEC3 run and does
   not validate this branch. Current main's latest GSLB-specific run in the
   observed list is #188's run `44449819566`, success at its exact PR head.
-- NSEC3 work is isolated in branch `codex/issue52-nsec3-denial`, local commit
-  `59f2cff3a766454542063306ca6ed59219960cad` before the final DNS-name guard
-  and handoff updates. Local Windows GslbAcceptance, existing NSEC DNSSEC
-  acceptance, and the focused NSEC3 acceptance have passed; exact-head GitHub
-  Actions and independent public-authority tests have not yet run.
+- NSEC3 work is isolated in branch `codex/issue52-nsec3-denial`, source commit
+  `13406431407f953a098ecabe2d3212eba5f9c537`. Exact-head GSLB Actions run
+  `44482778376` completed successfully on both Ubuntu 24.04 and Windows 2022.
+  Local full GslbAcceptance, existing NSEC DNSSEC acceptance, and focused
+  NSEC3 acceptance passed on Windows and WSL Ubuntu; the Linux run also passed
+  BIND/Knot independent NSEC interoperability checks and dnspython NSEC3
+  signature/proof checks. No public-authority or
+  customer deployment test has yet been performed for NSEC3.
 - The user explicitly authorized reuse under AGPL on 2026-11-19. The NSEC3
   branch adds a root AGPL-3.0-or-later license applying to the repository as a
   whole, plus third-party attribution. Only OpenGSLB's canonical NSEC3 hash
