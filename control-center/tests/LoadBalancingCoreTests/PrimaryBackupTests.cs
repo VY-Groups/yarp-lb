@@ -15,6 +15,11 @@ public static class PrimaryBackupTests
             "explicit backup role recognized");
         Verify(PrimaryBackupCore.TryBackupRole("BACKUP", out var upper) && upper,
             "backup role case-insensitive without broad parsing");
+        Verify(PrimaryBackupCore.HasSuccessfulActiveCheck("Healthy") &&
+               !PrimaryBackupCore.HasSuccessfulActiveCheck("Unknown") &&
+               !PrimaryBackupCore.HasSuccessfulActiveCheck("Unhealthy") &&
+               !PrimaryBackupCore.HasSuccessfulActiveCheck(null),
+            "standby promotion requires a successful active readiness check; unknown fails closed");
         foreach (var invalid in new[]{"", "secondary", " standby", "backup ", "yes", "primary/backup"})
             Verify(!PrimaryBackupCore.TryBackupRole(invalid, out _),
                 "invalid backend role rejected: " + invalid);

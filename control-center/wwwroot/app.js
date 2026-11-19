@@ -16,6 +16,8 @@ else if (view !== 'setup') {
 let view = 'setup';
 let dirty = false;
 let probes = [];
+let liveDestinationHealth = null;
+let liveDestinationHealthAt = '';
 let csrf = '';
 let currentRole = '';
 let currentUser = '';
@@ -128,11 +130,13 @@ async function save() {
 function actionBtn(text, action, id, klass = 'small-btn mini') { return `<button class="${klass}" data-action="${esc(action)}" data-id="${esc(id)}">${esc(text)}</button>`; }
 function destinationRows() { const arr = []; for (const cid of keys(data.clusters)) {
     for (const did of keys(data.clusters[cid]?.Destinations)) {
-        arr.push({ cid, did, address: data.clusters[cid].Destinations[did].Address, enabled: true });
+        const destination = data.clusters[cid].Destinations[did];
+        arr.push({ cid, did, address: destination.Address, enabled: true, metadata: destination.Metadata || {}, trafficState: String(destination.Metadata?.TrafficState || 'active'), weight: String(destination.Metadata?.Weight || '1'), trafficRole: String(destination.Metadata?.TrafficRole || 'primary') });
     }
 } for (const id of keys(data.disabled)) {
     const [cid, did] = id.split('::');
-    arr.push({ cid, did, address: data.disabled[id].Address, enabled: false });
+    const destination = data.disabled[id];
+    arr.push({ cid, did, address: destination.Address, enabled: false, metadata: destination.Metadata || {}, trafficState: String(destination.Metadata?.TrafficState || 'active'), weight: String(destination.Metadata?.Weight || '1'), trafficRole: String(destination.Metadata?.TrafficRole || 'primary') });
 } return arr; }
 function summary() {
     const ready = !gatewayReadyWarn && gatewayReadyLabel.includes('Backend readiness observed');
@@ -142,7 +146,19 @@ function summary() {
 function overview() { let routes = keys(data.routes).slice(0, 5).map(id => `<div class="rowline"><div><b>${esc(id)}</b><div class="subtle mono">${esc(data.routes[id]?.Match?.Path || '—')}</div></div><span class="chip">${esc(data.routes[id]?.ClusterId || '—')}</span></div>`).join('') || '<div class="empty">No routes configured</div>'; let nodes = destinationRows().slice(0, 6).map(d => `<div class="rowline"><div><b>${esc(d.did)}</b><div class="subtle mono">${esc(d.address)}</div></div><span class="chip ${d.enabled ? '' : 'bad'}">${d.enabled ? 'Configured' : 'Disabled'}</span></div>`).join('') || '<div class="empty">No destinations configured</div>'; return summary() + `<div class="grid2"><div class="card"><div class="flex"><h2 class="section-title">Traffic architecture</h2><span class="chip">Design view</span></div><div class="arch"><div class="archnode">Clients / Public & internal ingress</div><div class="arrow">↓</div><div class="archnode">Firewall / upstream HA VIP</div><div class="arrow">↓</div><div class="archnode accent">${esc(topologyModeName(topologyResponse?.plan?.mode || 'standalone'))} (design topology)</div><div class="arrow">↓</div><div class="twonodes"><div class="archnode">Backend node 01</div><div class="archnode">Backend node 02</div></div><div class="arrow">↓</div><div class="archnode">Application-specific data services (optional)</div></div><div class="healthbanner">This gateway is one running instance. The onboarding design is metadata, not proof that a gateway fleet, VIP or backend is healthy.</div></div><div><div class="card"><h2 class="section-title">Route snapshot</h2>${routes}${actionBtn('Manage routes', 'switch', 'routes')}</div><div class="card card-spaced"><h2 class="section-title">Destinations</h2>${nodes}${actionBtn('Manage backends', 'switch', 'backends')}</div></div></div>`; }
 function routes() { const rows = keys(data.routes).map(id => { const r = data.routes[id]; return `<tr><td><b>${esc(id)}</b></td><td class="mono">${esc((r.Match?.Hosts || []).join(', ') || 'Any host')}</td><td class="mono">${esc(r.Match?.Path)}</td><td>${esc(r.ClusterId)}</td><td>${actionBtn('Edit', 'route-edit', id)} ${actionBtn('Advanced', 'route-advanced', id)} ${actionBtn('Delete', 'route-delete', id, 'danger-btn mini')}</td></tr>`; }).join(''); return `<div class="toolbar"><div><h2>Routes</h2><p class="subtle">Map incoming host/path matches to clusters.</p></div>${actionBtn('+ Add route', 'route-add', '')}</div><div class="tablewrap"><table><thead><tr><th>Route ID</th><th>Hosts</th><th>Path</th><th>Cluster</th><th>Actions</th></tr></thead><tbody>${rows || '<tr><td colspan="5" class="empty">No routes configured</td></tr>'}</tbody></table></div>`; }
 function clusters() { const rows = keys(data.clusters).map(id => { const c = data.clusters[id]; return `<tr><td><b>${esc(id)}</b></td><td>${esc(c.LoadBalancingPolicy || 'Default')}</td><td>${keys(c.Destinations || {}).length}</td><td>${c.HealthCheck?.Active?.Enabled ? '<span class="chip good">Enabled</span>' : '<span class="chip">Disabled</span>'}</td><td>${actionBtn('Edit', 'cluster-edit', id)} ${actionBtn('Advanced', 'cluster-advanced', id)} ${actionBtn('Delete', 'cluster-delete', id, 'danger-btn mini')}</td></tr>`; }).join(''); return `<div class="toolbar"><div><h2>Clusters</h2><p class="subtle">Balance and health-check each application separately.</p></div>${actionBtn('+ Add cluster', 'cluster-add', '')}</div><div class="tablewrap"><table><thead><tr><th>Cluster</th><th>Policy</th><th>Active backends</th><th>Health checks</th><th>Actions</th></tr></thead><tbody>${rows || '<tr><td colspan="5" class="empty">No clusters configured</td></tr>'}</tbody></table></div>`; }
-function backends() { const rows = destinationRows().map(d => `<tr><td><b>${esc(d.did)}</b><div class="subtle">${esc(d.cid)}</div></td><td class="mono">${esc(d.address)}</td><td><span class="chip ${d.enabled ? 'good' : 'bad'}">${d.enabled ? 'Enabled' : 'Disabled'}</span></td><td>${actionBtn(d.enabled ? 'Disable' : 'Enable', 'dest-toggle', d.cid + '::' + d.did)} ${actionBtn('Edit', 'dest-edit', d.cid + '::' + d.did)} ${actionBtn('Advanced', 'dest-advanced', d.cid + '::' + d.did)} ${actionBtn('Delete', 'dest-delete', d.cid + '::' + d.did, 'danger-btn mini')}</td></tr>`).join(''); return `<div class="toolbar"><div><h2>Backend destinations</h2><p class="subtle">Enable, disable, add, or edit nodes. Changes apply only after saving.</p></div>${actionBtn('+ Add backend', 'dest-add', '')}</div><div class="tablewrap"><table><thead><tr><th>Destination</th><th>Address</th><th>Configured state</th><th>Actions</th></tr></thead><tbody>${rows || '<tr><td colspan="4" class="empty">No destinations</td></tr>'}</tbody></table></div><div class="healthbanner">Disabling a destination removes it from the YARP cluster configuration when saved. Existing in-flight requests may still complete. Do not use this alone for graceful drain of sensitive operations.</div>`; }
+function backends() { const rows = destinationRows().map(d => { const live = liveDestinationHealth?.find(x => x.clusterId === d.cid && x.destinationId === d.did); const configuredState = !d.enabled ? 'Disabled' : d.trafficState === 'draining' ? 'Draining' : 'Active'; const stateClass = configuredState === 'Active' ? 'good' : configuredState === 'Draining' ? 'warn' : 'bad'; const runtime = live ? `<span class="chip">A: ${esc(live.activeHealth || 'Unknown')}</span> <span class="chip">P: ${esc(live.passiveHealth || 'Unknown')}</span><div class="subtle">In-flight: ${esc(String(live.concurrentRequests ?? '—'))}</div>` : '<span class="subtle">Not inspected</span>'; const drainButton = d.enabled ? actionBtn(d.trafficState === 'draining' ? 'Restore traffic' : 'Drain new traffic', 'dest-drain', d.cid + '::' + d.did) : ''; return `<tr><td><b>${esc(d.did)}</b><div class="subtle">${esc(d.cid)} · weight ${esc(d.weight)} · ${esc(d.trafficRole)}</div></td><td class="mono">${esc(d.address)}</td><td><span class="chip ${stateClass}">${configuredState}</span><div class="subtle">Configured draft state; runtime health shown separately</div></td><td>${runtime}<div>${drainButton} ${actionBtn(d.enabled ? 'Disable' : 'Enable', 'dest-toggle', d.cid + '::' + d.did)} ${actionBtn('Edit', 'dest-edit', d.cid + '::' + d.did)} ${actionBtn('Advanced', 'dest-advanced', d.cid + '::' + d.did)} ${actionBtn('Delete', 'dest-delete', d.cid + '::' + d.did, 'danger-btn mini')}</div></td></tr>`; }).join(''); const liveNote = liveDestinationHealth ? `<p class="subtle">Live YARP snapshot checked ${esc(liveDestinationHealthAt)} · single local process. Unsaved changes do not affect this runtime snapshot.</p>` : '<p class="subtle">Runtime health has not been inspected in this session.</p>'; return `<div class="toolbar"><div><h2>Backend destinations</h2><p class="subtle">Each application route points to its own cluster. Runtime health is per gateway; draining is a reviewed configuration change.</p></div>${actionBtn('Inspect live health', 'runtime-health', '')} ${actionBtn('+ Add backend', 'dest-add', '')}</div>${liveNote}<div class="tablewrap"><table><thead><tr><th>Destination / pool</th><th>Address</th><th>Traffic state</th><th>Runtime health and actions</th></tr></thead><tbody>${rows || '<tr><td colspan="4" class="empty">No destinations</td></tr>'}</tbody></table></div><div class="healthbanner">Drain removes a destination from new-request selection after an approved config rollout; in-flight requests continue. A host match separates routes, but private API access still requires a restricted listener and firewall policy. Runtime health is an authenticated, point-in-time view of this process only.</div>`; }
+async function refreshDestinationRuntime() { try {
+    const r = await api('/admin/api/runtime/destinations');
+    const clusters = Array.isArray(r.clusters) ? r.clusters : [];
+    liveDestinationHealth = clusters.flatMap((cluster) => Array.isArray(cluster.destinations) ? cluster.destinations.map(destination => ({ ...destination, clusterId: String(cluster.clusterId || '') })) : []);
+    liveDestinationHealthAt = String(r.timestampUtc || 'unknown');
+    if (view === 'backends')
+        render();
+    show('Live local YARP health snapshot loaded. Unknown remains distinct from healthy.');
+}
+catch (e) {
+    show('Could not inspect live local YARP health: ' + String(e), true);
+} }
 function health() { const p = probes.map(d => `<tr><td>${esc(d.cluster)} / ${esc(d.destination)}</td><td class="mono">${esc(d.address)}</td><td><span class="chip ${d.status === 'reachable' ? 'good' : 'bad'}">${esc(d.status)}</span></td><td>${esc(d.httpStatus ?? '—')}</td></tr>`).join(''); return `<div class="toolbar"><div><h2>On-demand backend probes</h2><p class="subtle">Sends GET to the configured health-check path with a 3-second timeout.</p></div>${actionBtn('Run probes now', 'probe', '')}</div><div class="healthbanner">This is an on-demand HTTP connectivity check, NOT YARP's internal destination health state, and not transaction readiness validation. Use HTTPS with trusted certificates for CA services.</div><div class="tablewrap table-spaced"><table><thead><tr><th>Backend</th><th>Destination URL</th><th>Probe</th><th>HTTP</th></tr></thead><tbody>${p || '<tr><td colspan="4" class="empty">No probes run yet</td></tr>'}</tbody></table></div>`; }
 async function backups() { try {
     const [b, a] = await Promise.all([api('/admin/api/backups'), api('/admin/api/audit')]);
@@ -325,7 +341,7 @@ async function setupPage() {
         $('content').innerHTML = `<div class="setup-hero card"><div><div class="setup-eyebrow">FIRST-RUN BOOTSTRAP & OPERATIONS</div><h2>Set up your YARP gateway</h2><p>Choose deployment architecture, verify services and identity, then approve changes before routing traffic. All checks show actual server-side configuration state.</p><span class="chip">Version ${esc(x.version)} · ${esc(x.channel)}</span><span class="chip">${esc(x.gateway)}</span></div><div class="setup-score"><strong>${configured}/${x.stages.length}</strong><span>Configured setup controls, not a production-readiness score</span></div></div>
    <div class="setup-alert">${x.freeze.frozen ? `<b>Routing change freeze is ON.</b> ${esc(x.freeze.reason)}` : `<b>Routing changes are allowed with approval.</b> A local emergency freeze can stop route/change operations.`} ${currentRole === 'Administrator' ? `<button class="ghost mini" data-action="setup-toggle-freeze" data-id="${x.freeze.frozen ? 'off' : 'on'}">${x.freeze.frozen ? 'Unfreeze' : 'Freeze routing changes'}</button>` : ''}</div>
    <div class="setup-summary"><div class="card"><b>${x.routeCount}</b><span>Routes</span></div><div class="card"><b>${x.clusterCount}</b><span>Clusters</span></div><div class="card"><b>${x.destinationCount}</b><span>Enabled backend entries</span></div><div class="card"><b>${x.fleetEntries}</b><span>Gateway agent records</span></div></div>
-   <div class="toolbar"><div><h2>Bootstrap checklist</h2><p class="subtle">“Configured” is not the same as operationally tested or production certified.</p></div><div><button class="primary" data-action="setup-add-application">+ Advanced public HTTPS application</button> <button class="ghost" data-action="setup-local-web">+ Local IIS / Apache / Nginx test</button> <button class="ghost" data-action="setup-refresh">Refresh evidence</button></div></div>
+   <div class="toolbar"><div><h2>Bootstrap checklist</h2><p class="subtle">“Configured” is not the same as operationally tested or production certified.</p></div><div><button class="primary" data-action="setup-add-esign-pools">+ Application pools (eSign preset)</button> <button class="ghost" data-action="setup-add-application">+ Advanced public HTTPS application</button> <button class="ghost" data-action="setup-local-web">+ Local IIS / Apache / Nginx test</button> <button class="ghost" data-action="setup-refresh">Refresh evidence</button></div></div>
    <div class="setup-stage-grid">${x.stages.map((s, i) => `<div class="card setup-stage"><div class="setup-stage-head"><span class="setup-number">${String(i + 1).padStart(2, '0')}</span><span class="chip ${readyClass(s.status)}">${esc(s.status.replace(/-/g, ' '))}</span></div><h3>${esc(s.title)}</h3><p>${esc(s.evidence)}</p><button class="ghost mini" data-action="setup-open" data-id="${esc(s.action)}">${esc(setupActionText(s))} →</button></div>`).join('')}</div>
    <div class="grid2"><div class="card"><h3>Live YARP health states</h3><p class="subtle">Queries YARP's internal active/passive destination states. Unknown means the policy has not classified the backend.</p><button class="primary" data-action="setup-live-health">Inspect live destinations</button><div id="setup-live-output" class="setup-live-output">No runtime query made yet.</div></div><div class="card"><h3>Production safety gates</h3><p class="subtle">The following are not magically provisioned by this setup page:</p><ul class="setup-bullets"><li>Remote gateway agents, mTLS and network admission</li><li>AD/SMTP delivery and phishing-resistant SSO</li><li>Independent immutable audit retention</li><li>OCSP/CRL and CA issuance failover acceptance</li></ul><p class="subtle">The console deliberately refuses to call this instance production certified.</p></div></div>`;
     }
@@ -561,6 +577,94 @@ function addApplicationWizard() {
         show('Application added to unsaved draft. Validate both readiness endpoints before enabling active health, then submit for independent approval.');
     });
 }
+function addApplicationPoolsWizard() {
+    if (currentRole === 'Viewer')
+        return show('Viewer accounts cannot submit configuration changes', true);
+    if (topologyResponse?.status !== 'design-confirmed')
+        return show('Confirm the architecture design first', true);
+    modal('Application public and private API pools', 'Creates independent route/cluster pools, each with two HTTPS application servers. eSign is the preset; choose a category and only the exposure pools it may safely use. Private host matching does not isolate network access; bind a restricted listener and firewall policy before sending sensitive traffic. No automatic request retry is added.', [
+        { name: 'id', label: 'Application ID (letters, digits, - or _)', value: 'esign', kind: 'text' },
+        { name: 'service', label: 'Application category', value: 'eSign', options: ['eSign', 'SSCA Admin', 'RA', 'OCSP', 'TCA', 'eSign CA', 'Public API', 'Private API'] },
+        { name: 'scope', label: 'Pools to create', value: 'public-and-private', options: ['public-and-private', 'public-only', 'private-only'] },
+        { name: 'mode', label: 'Traffic mode', value: 'active-active', options: ['active-active', 'weighted-active-active', 'primary-backup'] },
+        { name: 'health', label: 'Health validation', value: 'active', options: ['active', 'passive-only'] },
+        { name: 'publicHost', label: 'Public API hostname (if selected)', value: 'esign.example.com', optional: true },
+        { name: 'publicPath', label: 'Public API route path (if selected)', value: '/esign/{**catch-all}', optional: true },
+        { name: 'publicApp1', label: 'Public application server 1 HTTPS URL (if selected)', value: 'https://esign-public-01.internal.example.com:5001/', optional: true },
+        { name: 'publicApp2', label: 'Public application server 2 HTTPS URL (if selected)', value: 'https://esign-public-02.internal.example.com:5001/', optional: true },
+        { name: 'publicWeight1', label: 'Public server 1 weight (weighted mode, 1–100)', value: '50', kind: 'number' },
+        { name: 'publicWeight2', label: 'Public server 2 weight (weighted mode, 1–100)', value: '50', kind: 'number' },
+        { name: 'privateHost', label: 'Private API hostname (if selected)', value: 'esign-api.internal.example.com', optional: true },
+        { name: 'privatePath', label: 'Private API route path (if selected)', value: '/esign-api/{**catch-all}', optional: true },
+        { name: 'privateApp1', label: 'Private application server 1 HTTPS URL (if selected)', value: 'https://esign-private-01.internal.example.com:5001/', optional: true },
+        { name: 'privateApp2', label: 'Private application server 2 HTTPS URL (if selected)', value: 'https://esign-private-02.internal.example.com:5001/', optional: true },
+        { name: 'privateWeight1', label: 'Private server 1 weight (weighted mode, 1–100)', value: '50', kind: 'number' },
+        { name: 'privateWeight2', label: 'Private server 2 weight (weighted mode, 1–100)', value: '50', kind: 'number' },
+        { name: 'ready', label: 'Readiness path on all four servers', value: '/health/ready' }
+    ], v => {
+        const id = String(v.id).trim();
+        if (!/^[A-Za-z0-9_-]{1,48}$/.test(id))
+            throw Error('Application ID must be 1–48 letters, digits, hyphens or underscores');
+        const restricted = ['SSCA Admin', 'RA', 'TCA', 'eSign CA'].includes(v.service);
+        const scopeForService = { 'eSign': 'public-and-private', 'SSCA Admin': 'private-only', 'RA': 'private-only', 'OCSP': 'public-only', 'TCA': 'private-only', 'eSign CA': 'private-only', 'Public API': 'public-only', 'Private API': 'private-only' };
+        if (!scopeForService[v.service])
+            throw Error('Select a supported application category');
+        if (v.scope !== scopeForService[v.service] && (restricted || v.service === 'OCSP' || v.service === 'Public API' || v.service === 'Private API'))
+            throw Error(`${v.service} must use the ${scopeForService[v.service]} pool scope to preserve its configured exposure boundary`);
+        if (!['public-and-private', 'public-only', 'private-only'].includes(v.scope))
+            throw Error('Select a supported pool scope');
+        const includePublic = v.scope !== 'private-only', includePrivate = v.scope !== 'public-only';
+        if (!['active-active', 'weighted-active-active', 'primary-backup'].includes(v.mode))
+            throw Error('Select a supported traffic mode');
+        if (!['active', 'passive-only'].includes(v.health))
+            throw Error('Select active health checks or passive-only fallback');
+        if (v.mode === 'primary-backup' && v.health !== 'active')
+            throw Error('Primary/DR standby requires active readiness checks; passive-only cannot safely promote the standby');
+        function validHost(raw) { const host = String(raw).trim().toLowerCase(); return /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/.test(host) && !host.includes('..'); }
+        const publicHost = String(v.publicHost).trim().toLowerCase(), privateHost = String(v.privateHost).trim().toLowerCase();
+        if (includePublic && !validHost(publicHost))
+            throw Error('Provide a valid public API hostname');
+        if (includePrivate && !validHost(privateHost))
+            throw Error('Provide a valid private API hostname');
+        if (includePublic && includePrivate && publicHost === privateHost)
+            throw Error('Public and private API hostnames must be different');
+        function validPath(raw) { const path = String(raw).trim(); return path.startsWith('/') && !path.startsWith('/admin') && !path.startsWith('/dashboard') && !path.startsWith('/gateway') && !path.includes('\\') && path.length <= 300; }
+        if (includePublic && !validPath(v.publicPath) || includePrivate && !validPath(v.privatePath))
+            throw Error('API paths must be valid non-management paths starting with /');
+        if (!String(v.ready).trim().startsWith('/') || String(v.ready).includes('\\'))
+            throw Error('Readiness path must start with /');
+        function backend(raw) { const u = new URL(String(raw).trim()); if (u.protocol !== 'https:' || u.username || u.password || u.search || u.hash || u.pathname !== '/')
+            throw Error('All eSign application servers must use trusted HTTPS origins ending in /'); return u.href; }
+        const public1 = includePublic ? backend(v.publicApp1) : '', public2 = includePublic ? backend(v.publicApp2) : '', private1 = includePrivate ? backend(v.privateApp1) : '', private2 = includePrivate ? backend(v.privateApp2) : '';
+        if (includePublic && public1 === public2 || includePrivate && private1 === private2)
+            throw Error('Each API pool needs two distinct application servers');
+        function weight(raw) { const value = String(raw).trim(); if (!/^(?:[1-9]|[1-9][0-9]|100)$/.test(value))
+            throw Error('Server weights must be integers from 1 to 100'); return value; }
+        const publicWeights = includePublic ? [weight(v.publicWeight1), weight(v.publicWeight2)] : [], privateWeights = includePrivate ? [weight(v.privateWeight1), weight(v.privateWeight2)] : [];
+        const routeIds = [...(includePublic ? [id + '-public-route'] : []), ...(includePrivate ? [id + '-private-route'] : [])];
+        const clusterIds = [...(includePublic ? [id + '-public-pool'] : []), ...(includePrivate ? [id + '-private-pool'] : [])];
+        if (routeIds.some(key => data.routes[key]) || clusterIds.some(key => data.clusters[key]))
+            throw Error('An application route or pool with this ID already exists');
+        const policy = v.mode === 'primary-backup' ? 'PrimaryBackup' : v.mode === 'weighted-active-active' ? 'WeightedRandom' : 'RoundRobin';
+        const healthy = v.health === 'active';
+        function makePool(first, second, weights, exposure) {
+            const metadata = (weightValue, role) => ({ Weight: weightValue, TrafficRole: role, TrafficState: 'active' });
+            return { LoadBalancingPolicy: policy, Destinations: { 'app-01': { Address: first, Metadata: metadata(v.mode === 'primary-backup' ? '100' : weights[0], 'primary') }, 'app-02': { Address: second, Metadata: metadata(v.mode === 'primary-backup' ? '100' : weights[1], v.mode === 'primary-backup' ? 'backup' : 'primary') } }, HealthCheck: { AvailableDestinationsPolicy: 'HealthyAndUnknown', Active: { Enabled: healthy, Interval: '00:00:15', Timeout: '00:00:05', Policy: 'ConsecutiveFailures', Path: String(v.ready).trim() } }, Metadata: { 'YARP.ApplicationCategory': String(v.service), 'GatewayCore.ExposurePool': exposure } };
+        }
+        if (includePublic) {
+            data.clusters[id + '-public-pool'] = makePool(public1, public2, publicWeights, 'public');
+            data.routes[id + '-public-route'] = { ClusterId: id + '-public-pool', Match: { Hosts: [publicHost], Path: String(v.publicPath).trim() } };
+        }
+        if (includePrivate) {
+            data.clusters[id + '-private-pool'] = makePool(private1, private2, privateWeights, 'private');
+            data.routes[id + '-private-route'] = { ClusterId: id + '-private-pool', Match: { Hosts: [privateHost], Path: String(v.privatePath).trim() } };
+        }
+        edit();
+        const policyName = policy === 'PrimaryBackup' ? 'primary plus DR standby' : policy === 'WeightedRandom' ? 'weighted active-active' : 'equal-share active-active';
+        const poolNames = includePublic && includePrivate ? 'public and private' : includePublic ? 'public' : 'private';
+        show(`Added ${poolNames} ${v.service} route and backend pool(s) (${policyName}). ${healthy ? 'Active readiness checks are configured.' : 'Passive-only fallback selected: failures are learned from traffic, so an outage can affect requests before ejection.'} Private host matching does not enforce network isolation. Submit for independent approval; no route is live yet.`);
+    });
+}
 function addLocalWebWizard() {
     if (currentRole === 'Viewer')
         return show('Viewer accounts cannot submit routing changes', true);
@@ -661,12 +765,30 @@ function updateDest(id = '') {
     });
 }
 function act(type, id) {
+    if (type === 'runtime-health') {
+        void refreshDestinationRuntime();
+        return;
+    }
+    if (type === 'dest-drain') {
+        const [c, d] = id.split('::');
+        const destination = data.clusters[c]?.Destinations?.[d];
+        if (!destination)
+            return show('Only enabled destinations can be drained', true);
+        destination.Metadata = { ...(destination.Metadata || {}), TrafficState: String(destination.Metadata?.TrafficState || 'active').toLowerCase() === 'draining' ? 'active' : 'draining' };
+        edit();
+        show('Traffic state changed in the unsaved draft. New requests stop after independent approval and rollout; this does not terminate in-flight work.');
+        return;
+    }
     if (type === 'org-edit') {
         editOrganization();
         return;
     }
     if (type === 'setup-add-application') {
         addApplicationWizard();
+        return;
+    }
+    if (type === 'setup-add-esign-pools') {
+        addApplicationPoolsWizard();
         return;
     }
     if (type === 'setup-local-web') {
