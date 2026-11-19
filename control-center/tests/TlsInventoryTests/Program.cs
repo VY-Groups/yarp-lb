@@ -40,3 +40,4 @@ if (!localAuthority.Allowed)
     throw new Exception("explicit loopback test authority should be accepted for isolated fixture use");
 Console.WriteLine("PASS: ACME target preflight rejects unsafe authority, hostname and HTTP-01 inputs");
 await TrafficHttp3Acceptance.RunAsync();
+await TrafficCertificateRotationAcceptance.RunAsync();

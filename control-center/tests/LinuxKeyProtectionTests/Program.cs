@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
+using System.Xml.Linq;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.Extensions.DependencyInjection;
 
@@ -95,6 +96,29 @@ try
         Assert(dp.Unprotect(encrypted)=="sensitive-session-value-123",
             "session value decrypts across a new service provider using persisted key ring");
     }
+    var tamperState=Path.Combine(root,"tamper-state");
+    Set("YARP_CONTROL_PLANE_DIR",tamperState);
+    LinuxKeyProtection.InitializeStateDirectory();
+    string tamperedSession;
+    using(var service=Provider(tamperState))
+        tamperedSession=service.GetRequiredService<IDataProtectionProvider>()
+            .CreateProtector("session-probe").Protect("session-before-disk-tamper");
+    var tamperedKeyFile=Directory.GetFiles(Path.Combine(tamperState,"data-protection-keys"),"key-*.xml").Single();
+    var tamperedDocument=XDocument.Load(tamperedKeyFile);
+    var encryptedSecretElement=tamperedDocument.Descendants()
+        .Single(element=>element.Name.LocalName=="encryptedSecret");
+    var encryptedSecretBytes=Convert.FromBase64String(encryptedSecretElement.Value);
+    encryptedSecretBytes[encryptedSecretBytes.Length/2]^=0x40;
+    encryptedSecretElement.Value=Convert.ToBase64String(encryptedSecretBytes);
+    File.WriteAllText(tamperedKeyFile,tamperedDocument.ToString(SaveOptions.DisableFormatting));
+    Set("YARP_CONTROL_PLANE_DIR",tamperState);
+    Assert(Throws(()=>
+    {
+        using var service=Provider(tamperState);
+        service.GetRequiredService<IDataProtectionProvider>()
+            .CreateProtector("session-probe").Unprotect(tamperedSession);
+    }),"tampering with persisted encrypted key material never authenticates an existing session");
+    Set("YARP_CONTROL_PLANE_DIR",state);
     File.SetUnixFileMode(first.PasswordFile,
         PrivateFile|UnixFileMode.OtherRead);
     Assert(Throws(()=>{using var _=Provider(state);}),

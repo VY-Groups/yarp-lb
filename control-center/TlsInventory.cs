@@ -61,7 +61,8 @@ public static class TlsInventory
                 storeState,
                 certificates,
                 configuredEndpoints = endpoints,
-                acmeIntegration = "preflight-policy-only; issuance-and-renewal-not-implemented",
+                acmeIntegration = "preflight-and-traffic-pfx-rotation-only; issuance-and-renewal-not-implemented",
+                trafficCertificateRotation = "opt-in via TrafficCertificateDnsNames in isolated listener configuration",
                 backendMutualTlsProvisioning = "not-implemented"
             });
         }).RequireAuthorization(p => p.RequireRole("Administrator", "Operator"));
