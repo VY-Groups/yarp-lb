@@ -36,7 +36,7 @@ def until(label, fn, timeout=12):
 def certificate(root, name):
     key=root/(name+".key")
     cert=root/(name+".crt")
-    subprocess.run(["openssl","req","-x509","-newkey","rsa:2048","-nodes","-days","1",
+    subprocess.run(["openssl","req","-x509","-newkey","rsa:2048","-nodes","-days","7",
         "-subj","/CN=127.0.0.1","-addext","subjectAltName=IP:127.0.0.1",
         "-addext","basicConstraints=critical,CA:TRUE",
         "-keyout",str(key),"-out",str(cert)],check=True,
