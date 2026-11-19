@@ -1960,15 +1960,15 @@ app.MapReverseProxy(proxyPipeline =>
         var state = registryHandle.State;
         var policy = state.Policy;
 
+        var applicationStopping = context.RequestServices.GetRequiredService<IHostApplicationLifetime>().ApplicationStopping;
         using var waitCancellation = CancellationTokenSource.CreateLinkedTokenSource(
             context.RequestAborted,
-            context.RequestServices.GetRequiredService<IHostApplicationLifetime>().ApplicationStopping);
-        var waitStartedTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
-        waitCancellation.CancelAfter(policy.QueueTimeoutMs);
+            applicationStopping);
         DestinationAdmissionState.DestinationAdmissionLease? lease;
         try
         {
-            lease = await state.AcquireAsync(waitCancellation.Token);
+            lease = await state.AcquireAsync(waitCancellation.Token,
+                TimeSpan.FromMilliseconds(policy.QueueTimeoutMs));
         }
         catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested)
         {
@@ -2005,10 +2005,11 @@ app.MapReverseProxy(proxyPipeline =>
             // the timer and checking its token alone would miss a timer whose
             // callback had not run by the time the permit continuation resumed.
             var failureAfterGrant = DestinationAdmissionForwarding.CompleteQueueWait(
-                waitCancellation,
+                lease.WasQueued,
+                lease.QueueWaitToken,
                 context.RequestAborted,
-                context.RequestServices.GetRequiredService<IHostApplicationLifetime>().ApplicationStopping,
-                waitStartedTimestamp,
+                applicationStopping,
+                lease.QueueStartedTimestamp,
                 TimeSpan.FromMilliseconds(policy.QueueTimeoutMs));
             if (failureAfterGrant == DestinationAdmissionFailure.ClientAborted) return;
             if (failureAfterGrant != DestinationAdmissionFailure.None)

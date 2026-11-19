@@ -102,12 +102,20 @@ public sealed class DestinationAdmissionState
     {
         internal readonly TaskCompletionSource<DestinationAdmissionLease> Completion =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
-        internal readonly CancellationToken CancellationToken = cancellationToken;
-        internal readonly long CreatedTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
+        internal readonly CancellationTokenSource QueueCancellation =
+            CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        internal CancellationToken CancellationToken => QueueCancellation.Token;
+        internal long CreatedTimestamp;
         internal LinkedListNode<Waiter>? Node;
         internal CancellationTokenRegistration Registration;
         internal bool Completed;
         internal Action? ReleasePending = releasePending;
+        internal void StartQueueTimeout(TimeSpan? timeout)
+        {
+            CreatedTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
+            if (timeout is { } value) QueueCancellation.CancelAfter(value);
+        }
+        internal void DisarmQueueTimeout() => QueueCancellation.CancelAfter(Timeout.InfiniteTimeSpan);
         internal void ReleasePendingReservation() => Interlocked.Exchange(ref ReleasePending, null)?.Invoke();
     }
 
@@ -176,7 +184,23 @@ public sealed class DestinationAdmissionState
         return true;
     }
 
-    public ValueTask<DestinationAdmissionLease?> AcquireAsync(CancellationToken cancellationToken)
+    public ValueTask<DestinationAdmissionLease?> AcquireAsync(CancellationToken cancellationToken) =>
+        AcquireAsync(cancellationToken, null);
+
+    /// <summary>
+    /// Acquire a permit, starting the bounded wait deadline only after this request
+    /// has actually been inserted into the FIFO queue. Immediate permits never
+    /// consume queue time.
+    /// </summary>
+    public ValueTask<DestinationAdmissionLease?> AcquireAsync(
+        CancellationToken cancellationToken, TimeSpan queueTimeout)
+    {
+        if (queueTimeout <= TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(queueTimeout));
+        return AcquireAsync(cancellationToken, (TimeSpan?)queueTimeout);
+    }
+
+    private ValueTask<DestinationAdmissionLease?> AcquireAsync(
+        CancellationToken cancellationToken, TimeSpan? queueTimeout)
     {
         Waiter? waiter = null;
         lock (_sync)
@@ -208,11 +232,12 @@ public sealed class DestinationAdmissionState
 
             waiter = new Waiter(cancellationToken, _releasePending);
             waiter.Node = _waiters.AddLast(waiter);
+            waiter.StartQueueTimeout(queueTimeout);
         }
 
-        if (cancellationToken.CanBeCanceled)
+        if (waiter.CancellationToken.CanBeCanceled)
         {
-            var registration = cancellationToken.Register(static state =>
+            var registration = waiter.CancellationToken.Register(static state =>
             {
                 var tuple = ((DestinationAdmissionState Owner, Waiter Waiter))state!;
                 tuple.Owner.CancelWaiter(tuple.Waiter);
@@ -237,8 +262,15 @@ public sealed class DestinationAdmissionState
         Interlocked.Increment(ref _waitDurationCount);
     }
 
-    private static async ValueTask<DestinationAdmissionLease?> AwaitWaiter(Waiter waiter) =>
-        await waiter.Completion.Task.ConfigureAwait(false);
+    private static async ValueTask<DestinationAdmissionLease?> AwaitWaiter(Waiter waiter)
+    {
+        try { return await waiter.Completion.Task.ConfigureAwait(false); }
+        finally
+        {
+            waiter.Registration.Dispose();
+            waiter.QueueCancellation.Dispose();
+        }
+    }
 
     private void CancelWaiter(Waiter waiter)
     {
@@ -293,16 +325,28 @@ public sealed class DestinationAdmissionState
         foreach (var waiter in granted)
         {
             waiter.Registration.Dispose();
+            waiter.DisarmQueueTimeout();
             RecordWaitDuration(waiter);
             waiter.ReleasePendingReservation();
-            waiter.Completion.TrySetResult(new DestinationAdmissionLease(this));
+            waiter.Completion.TrySetResult(new DestinationAdmissionLease(
+                this, wasQueued: true, waiter.CreatedTimestamp, waiter.CancellationToken));
         }
     }
 
     public sealed class DestinationAdmissionLease : IDisposable
     {
         private DestinationAdmissionState? _owner;
-        internal DestinationAdmissionLease(DestinationAdmissionState owner) => _owner = owner;
+        internal DestinationAdmissionLease(DestinationAdmissionState owner, bool wasQueued = false,
+            long queueStartedTimestamp = 0, CancellationToken queueWaitToken = default)
+        {
+            _owner = owner;
+            WasQueued = wasQueued;
+            QueueStartedTimestamp = queueStartedTimestamp;
+            QueueWaitToken = queueWaitToken;
+        }
+        public bool WasQueued { get; }
+        public long QueueStartedTimestamp { get; }
+        public CancellationToken QueueWaitToken { get; }
         public void Dispose() => Interlocked.Exchange(ref _owner, null)?.Release();
     }
 }

@@ -113,22 +113,39 @@ public static class DestinationAdmissionTests
                 "post-grant cancellation rejection releases the lease and queue slot");
         }
 
-        using (var completedQueueWait = new CancellationTokenSource())
+        var immediateGate = new DestinationAdmissionState(new DestinationAdmissionPolicy(1, 0, 1));
+        using (var immediate = await immediateGate.AcquireAsync(CancellationToken.None, TimeSpan.FromMilliseconds(1)) ??
+            throw new Exception("FAIL: immediate permit should not require queue capacity"))
         {
-            var started = Stopwatch.GetTimestamp();
-            Check(DestinationAdmissionForwarding.CompleteQueueWait(completedQueueWait,
-                    CancellationToken.None, CancellationToken.None, started, TimeSpan.FromSeconds(30)) ==
-                  DestinationAdmissionFailure.None && !completedQueueWait.IsCancellationRequested,
-                "successful admission disarms its queue timer before forwarding");
-            completedQueueWait.Cancel();
+            await Task.Delay(25);
+            Check(!immediate.WasQueued && DestinationAdmissionForwarding.CompleteQueueWait(
+                    immediate.WasQueued, immediate.QueueWaitToken, CancellationToken.None,
+                    CancellationToken.None, immediate.QueueStartedTimestamp,
+                    TimeSpan.FromMilliseconds(1)) == DestinationAdmissionFailure.None,
+                "an immediate permit remains valid after exceeding the queue timeout");
         }
-        using (var expiredQueueWait = new CancellationTokenSource())
+
+        var completedQueueGate = new DestinationAdmissionState(new DestinationAdmissionPolicy(1, 1, 30000));
+        using (var occupied = await completedQueueGate.AcquireAsync(CancellationToken.None) ??
+            throw new Exception("FAIL: queue-timer fixture permit"))
         {
-            // Model the timer callback being delayed past its deadline: the
-            // CTS is still live, but the monotonic deadline itself has passed.
+            var queuedAcquire = completedQueueGate.AcquireAsync(CancellationToken.None,
+                TimeSpan.FromSeconds(30)).AsTask();
+            occupied.Dispose();
+            using var granted = await queuedAcquire.WaitAsync(TimeSpan.FromSeconds(2)) ??
+                throw new Exception("FAIL: queued request should be granted");
+            Check(granted.WasQueued && !granted.QueueWaitToken.IsCancellationRequested &&
+                  DestinationAdmissionForwarding.CompleteQueueWait(granted.WasQueued,
+                      granted.QueueWaitToken, CancellationToken.None, CancellationToken.None,
+                      granted.QueueStartedTimestamp, TimeSpan.FromSeconds(30)) == DestinationAdmissionFailure.None,
+                "a timely queued grant disarms its deadline before forwarding");
+        }
+        {
+            // Model the timeout callback arriving late after the deadline passed.
+            // The caller's queue token is live, so the monotonic deadline must fence it.
             var startedBeforeTimeout = Stopwatch.GetTimestamp() -
                 (long)Math.Ceiling(Stopwatch.Frequency * 2d);
-            Check(DestinationAdmissionForwarding.CompleteQueueWait(expiredQueueWait,
+            Check(DestinationAdmissionForwarding.CompleteQueueWait(true, CancellationToken.None,
                     CancellationToken.None, CancellationToken.None, startedBeforeTimeout,
                     TimeSpan.FromSeconds(1)) == DestinationAdmissionFailure.QueueTimeout,
                 "elapsed monotonic deadline fences grant even before timer callback cancels");
@@ -136,10 +153,22 @@ public static class DestinationAdmissionTests
         using (var canceledQueueWait = new CancellationTokenSource())
         {
             canceledQueueWait.Cancel();
-            Check(DestinationAdmissionForwarding.CompleteQueueWait(canceledQueueWait,
+            Check(DestinationAdmissionForwarding.CompleteQueueWait(true, canceledQueueWait.Token,
                     CancellationToken.None, CancellationToken.None, Stopwatch.GetTimestamp(),
                     TimeSpan.FromSeconds(30)) == DestinationAdmissionFailure.QueueTimeout,
-                "already-fired queue cancellation remains fenced after timer disarm");
+                "already-fired queue deadline remains fenced after a permit grant");
+        }
+        var timedQueueGate = new DestinationAdmissionState(new DestinationAdmissionPolicy(1, 1, 10));
+        using (var heldForTimeout = await timedQueueGate.AcquireAsync(CancellationToken.None) ??
+            throw new Exception("FAIL: timed queue fixture permit"))
+        {
+            var expiredAcquire = timedQueueGate.AcquireAsync(CancellationToken.None,
+                TimeSpan.FromMilliseconds(10)).AsTask();
+            var timedOut = false;
+            try { await expiredAcquire.WaitAsync(TimeSpan.FromSeconds(2)); }
+            catch (OperationCanceledException) { timedOut = true; }
+            Check(timedOut && timedQueueGate.Snapshot is { InFlight: 1, Queued: 0 },
+                "a queued request expires at its own bounded deadline without releasing another request's permit");
         }
 
         var drainGate = new DestinationAdmissionState(new DestinationAdmissionPolicy(1, 1, 5000));

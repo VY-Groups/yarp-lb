@@ -14,23 +14,24 @@ public static class DestinationAdmissionForwarding
         return DestinationAdmissionFailure.None;
     }
 
-    // Stop the queue-only timer before inspecting its state. The monotonic
-    // elapsed-time check closes the timer-callback race where the deadline has
-    // passed but the cancellation callback has not run yet.
+    // Only a request that entered the FIFO queue has a deadline. The monotonic
+    // check closes the timer-callback race where the deadline elapsed before a
+    // permit grant but its cancellation callback has not run yet.
     public static DestinationAdmissionFailure CompleteQueueWait(
-        CancellationTokenSource queueWait,
+        bool wasQueued,
+        CancellationToken queueWait,
         CancellationToken requestAborted,
         CancellationToken applicationStopping,
         long waitStartedTimestamp,
         TimeSpan queueTimeout)
     {
-        ArgumentNullException.ThrowIfNull(queueWait);
-        if (waitStartedTimestamp < 0) throw new ArgumentOutOfRangeException(nameof(waitStartedTimestamp));
+        if (wasQueued && waitStartedTimestamp < 0) throw new ArgumentOutOfRangeException(nameof(waitStartedTimestamp));
         if (queueTimeout <= TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(queueTimeout));
 
-        queueWait.CancelAfter(Timeout.InfiniteTimeSpan);
-        var failure = FailureAfterGrant(requestAborted, applicationStopping, queueWait.Token);
-        if (failure != DestinationAdmissionFailure.None) return failure;
+        if (requestAborted.IsCancellationRequested) return DestinationAdmissionFailure.ClientAborted;
+        if (applicationStopping.IsCancellationRequested) return DestinationAdmissionFailure.ServiceStopping;
+        if (!wasQueued) return DestinationAdmissionFailure.None;
+        if (queueWait.IsCancellationRequested) return DestinationAdmissionFailure.QueueTimeout;
 
         return System.Diagnostics.Stopwatch.GetElapsedTime(waitStartedTimestamp) >= queueTimeout
             ? DestinationAdmissionFailure.QueueTimeout
