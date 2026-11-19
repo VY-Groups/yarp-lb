@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Text.Json.Nodes;
 
 public static class DestinationAdmissionTests
@@ -110,6 +111,35 @@ public static class DestinationAdmissionTests
             }
             Check(grantRaceGate.Snapshot is { InFlight: 0, Queued: 0 },
                 "post-grant cancellation rejection releases the lease and queue slot");
+        }
+
+        using (var completedQueueWait = new CancellationTokenSource())
+        {
+            var started = Stopwatch.GetTimestamp();
+            Check(DestinationAdmissionForwarding.CompleteQueueWait(completedQueueWait,
+                    CancellationToken.None, CancellationToken.None, started, TimeSpan.FromSeconds(30)) ==
+                  DestinationAdmissionFailure.None && !completedQueueWait.IsCancellationRequested,
+                "successful admission disarms its queue timer before forwarding");
+            completedQueueWait.Cancel();
+        }
+        using (var expiredQueueWait = new CancellationTokenSource())
+        {
+            // Model the timer callback being delayed past its deadline: the
+            // CTS is still live, but the monotonic deadline itself has passed.
+            var startedBeforeTimeout = Stopwatch.GetTimestamp() -
+                (long)Math.Ceiling(Stopwatch.Frequency * 2d);
+            Check(DestinationAdmissionForwarding.CompleteQueueWait(expiredQueueWait,
+                    CancellationToken.None, CancellationToken.None, startedBeforeTimeout,
+                    TimeSpan.FromSeconds(1)) == DestinationAdmissionFailure.QueueTimeout,
+                "elapsed monotonic deadline fences grant even before timer callback cancels");
+        }
+        using (var canceledQueueWait = new CancellationTokenSource())
+        {
+            canceledQueueWait.Cancel();
+            Check(DestinationAdmissionForwarding.CompleteQueueWait(canceledQueueWait,
+                    CancellationToken.None, CancellationToken.None, Stopwatch.GetTimestamp(),
+                    TimeSpan.FromSeconds(30)) == DestinationAdmissionFailure.QueueTimeout,
+                "already-fired queue cancellation remains fenced after timer disarm");
         }
 
         var drainGate = new DestinationAdmissionState(new DestinationAdmissionPolicy(1, 1, 5000));

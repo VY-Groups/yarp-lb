@@ -14,6 +14,29 @@ public static class DestinationAdmissionForwarding
         return DestinationAdmissionFailure.None;
     }
 
+    // Stop the queue-only timer before inspecting its state. The monotonic
+    // elapsed-time check closes the timer-callback race where the deadline has
+    // passed but the cancellation callback has not run yet.
+    public static DestinationAdmissionFailure CompleteQueueWait(
+        CancellationTokenSource queueWait,
+        CancellationToken requestAborted,
+        CancellationToken applicationStopping,
+        long waitStartedTimestamp,
+        TimeSpan queueTimeout)
+    {
+        ArgumentNullException.ThrowIfNull(queueWait);
+        if (waitStartedTimestamp < 0) throw new ArgumentOutOfRangeException(nameof(waitStartedTimestamp));
+        if (queueTimeout <= TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(queueTimeout));
+
+        queueWait.CancelAfter(Timeout.InfiniteTimeSpan);
+        var failure = FailureAfterGrant(requestAborted, applicationStopping, queueWait.Token);
+        if (failure != DestinationAdmissionFailure.None) return failure;
+
+        return System.Diagnostics.Stopwatch.GetElapsedTime(waitStartedTimestamp) >= queueTimeout
+            ? DestinationAdmissionFailure.QueueTimeout
+            : DestinationAdmissionFailure.None;
+    }
+
     /// <summary>
     /// A queued request is bound to its original destination. Recheck the current
     /// available set after the permit is granted; never transfer it to another

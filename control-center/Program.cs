@@ -1853,6 +1853,7 @@ app.MapReverseProxy(proxyPipeline =>
         using var waitCancellation = CancellationTokenSource.CreateLinkedTokenSource(
             context.RequestAborted,
             context.RequestServices.GetRequiredService<IHostApplicationLifetime>().ApplicationStopping);
+        var waitStartedTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
         waitCancellation.CancelAfter(policy.QueueTimeoutMs);
         DestinationAdmissionState.DestinationAdmissionLease? lease;
         try
@@ -1890,10 +1891,15 @@ app.MapReverseProxy(proxyPipeline =>
             // Do not transfer the request to a different backend. If a queued
             // destination was removed, drained or made unhealthy, fail locally.
             var lookup = context.RequestServices.GetRequiredService<IProxyStateLookup>();
-            var failureAfterGrant = DestinationAdmissionForwarding.FailureAfterGrant(
+            // Atomically fence the queue deadline before forwarding. Stopping
+            // the timer and checking its token alone would miss a timer whose
+            // callback had not run by the time the permit continuation resumed.
+            var failureAfterGrant = DestinationAdmissionForwarding.CompleteQueueWait(
+                waitCancellation,
                 context.RequestAborted,
                 context.RequestServices.GetRequiredService<IHostApplicationLifetime>().ApplicationStopping,
-                waitCancellation.Token);
+                waitStartedTimestamp,
+                TimeSpan.FromMilliseconds(policy.QueueTimeoutMs));
             if (failureAfterGrant == DestinationAdmissionFailure.ClientAborted) return;
             if (failureAfterGrant != DestinationAdmissionFailure.None)
             {
@@ -1907,9 +1913,6 @@ app.MapReverseProxy(proxyPipeline =>
                 }
                 return;
             }
-            // The timer is for admission only; it must not govern a
-            // long-lived HTTP/2, gRPC, WebSocket or streaming response.
-            waitCancellation.CancelAfter(Timeout.Infinite);
             if (!lookup.TryGetCluster(clusterId, out var currentCluster) ||
                 !DestinationAdmissionForwarding.IsStillEligibleAfterWait(
                     selected.DestinationId,
