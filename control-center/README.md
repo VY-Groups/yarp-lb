@@ -4,6 +4,24 @@ A **single-organization**, Windows-first YARP management application. The operat
 
 > **Not production certified.** Source, offline installer and browser frontend are provided. Windows C# compilation, integration tests, security review, and environment-specific CA/industry acceptance remain required. A checkbox or profile choice does not implement a WAF, GSLB, enterprise IdP, L4 transport or real multi-tenant isolation.
 
+## GitOps planning (v1 foundation)
+
+An authenticated Administrator or Operator can POST to
+`/admin/api/gitops/plan` using the existing session and CSRF protection.
+Send `{"schemaVersion":1,"payload":{"routes":{},"clusters":{},"disabled":{},"revision":"<current uppercase SHA-256>"}}`
+with the full intended route/cluster/disabled objects and the revision from
+`GET /admin/api/state`. The dry run uses the same business validator as
+reviewed changes, rejects stale revisions (409), unknown envelope versions
+or malformed payloads (400), and bodies above 512 KiB (413). It reports
+sorted added/removed/updated IDs and unchanged counts, not config values.
+
+This is a read-only structural plan, not a YARP runtime validation or a
+Git reconciler. It performs no application, backup, approval or drift repair.
+Submit the same payload through the existing change-request workflow and
+obtain a different administrator's approval; approval revalidates the
+payload and revision. Git signature verification, Terraform, Kubernetes
+Gateway API, multi-controller ownership and live rollback remain open (#49).
+
 ## What's actually new in this package
 
 - Brand-neutral browser frontend with **Organization** configuration as first-time step after initial local administrator setup.
