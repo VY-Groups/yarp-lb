@@ -360,13 +360,13 @@ internal static class DestinationAdmissionHttp3Acceptance
 
         static int GetDualTransportPort() => TrafficHttp3Acceptance.SelectDualTransportPort(() =>
         {
-            var tcp = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
-            tcp.Bind(new IPEndPoint(IPAddress.Loopback, 0));
-            return (((IPEndPoint)tcp.LocalEndPoint!).Port, tcp);
+            var udp = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+            udp.Bind(new IPEndPoint(IPAddress.Loopback, 0));
+            return (((IPEndPoint)udp.LocalEndPoint!).Port, udp);
         }, port =>
         {
-            using var udp = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
-            udp.Bind(new IPEndPoint(IPAddress.Loopback, port));
+            using var tcp = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+            tcp.Bind(new IPEndPoint(IPAddress.Loopback, port));
         });
 
     }
