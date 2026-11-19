@@ -1977,19 +1977,19 @@ app.MapOrganizationProfile(privateDir);
 app.MapTlsInventory();
 app.MapReverseProxy(proxyPipeline =>
 {
+    GatewayOpenTelemetry.UseProxyTelemetry(proxyPipeline, (context, elapsedMs) =>
+    {
+        var feature = context.Features.Get<Yarp.ReverseProxy.Model.IReverseProxyFeature>();
+        if (feature?.ProxiedDestination is { } destination)
+        {
+            var id = feature.Cluster.Config.ClusterId + "/" + destination.DestinationId;
+            destinationTelemetry.Record(id, context.Response.StatusCode, elapsedMs);
+        }
+    });
     // Fence new proxy work as soon as the host starts graceful shutdown.
     // Existing forwarded streams are not linked to ApplicationStopping.
     var stopping = app.Lifetime.ApplicationStopping;
-    proxyPipeline.Use(async (context, next) =>
-    {
-        if (stopping.IsCancellationRequested)
-        {
-            context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
-            GatewayOpenTelemetry.MarkLocalRejection(context, "gateway_shutdown");
-            return;
-        }
-        await next();
-    });
+    GatewayOpenTelemetry.UseShutdownFence(proxyPipeline, stopping);
     if (peerStateJournal is not null)
         proxyPipeline.Use(async (context,next) => {
             // Telemetry only. Never use eventual peer counters for strict admission.
@@ -2048,35 +2048,6 @@ app.MapReverseProxy(proxyPipeline =>
             feature.AvailableDestinations = feature.AvailableDestinations
                 .Where(d => !TrafficLifecycle.IsDraining(d)).ToArray();
         await next();
-    });
-    proxyPipeline.Use(async (context, next) =>
-    {
-        var clock = System.Diagnostics.Stopwatch.GetTimestamp();
-        var activity = GatewayOpenTelemetry.StartProxyActivity(context);
-        try
-        {
-            await next();
-        }
-        catch (Exception ex)
-        {
-            GatewayOpenTelemetry.RecordProxyException(activity, ex);
-            throw;
-        }
-        finally
-        {
-            var elapsedMs = (System.Diagnostics.Stopwatch.GetTimestamp() - clock) * 1000.0 /
-                System.Diagnostics.Stopwatch.Frequency;
-            var feature = context.GetReverseProxyFeature();
-            var destination = feature.ProxiedDestination;
-            GatewayOpenTelemetry.CompleteProxyActivity(activity, context, destination?.DestinationId);
-            GatewayOpenTelemetry.RecordProxyResult(context, elapsedMs,
-                feature.Route.Config.RouteId, feature.Cluster.Config.ClusterId, destination?.DestinationId);
-            if (destination != null)
-            {
-                var id = feature.Cluster.Config.ClusterId + "/" + destination.DestinationId;
-                destinationTelemetry.Record(id, context.Response.StatusCode, elapsedMs);
-            }
-        }
     });
     proxyPipeline.UseSessionAffinity();
     proxyPipeline.UseLoadBalancing();
