@@ -17,11 +17,14 @@ var halfCloseBackend = new TcpListener(IPAddress.Loopback,19115);
 proxyBackend.Start(); idleBackend.Start(); halfCloseBackend.Start();
 using var udpA = new UdpClient(new IPEndPoint(IPAddress.Loopback, 19121));
 using var udpB = new UdpClient(new IPEndPoint(IPAddress.Loopback, 19122));
+long udpAReceived = 0;
+long udpBReceived = 0;
 var workers = new [] {
     TcpEcho(tcpA, "A", stop.Token), TcpEcho(tcpB, "B", stop.Token),
     ProxyProtocolBackend(proxyBackend, stop.Token), IdleBackend(idleBackend, stop.Token),
     HalfCloseBackend(halfCloseBackend, stop.Token),
-    UdpEcho(udpA, "A", stop.Token), UdpEcho(udpB, "B", stop.Token)
+    UdpEcho(udpA, "A", stop.Token, () => Interlocked.Increment(ref udpAReceived)),
+    UdpEcho(udpB, "B", stop.Token, () => Interlocked.Increment(ref udpBReceived))
 };
 var scratch = Path.Combine(Path.GetTempPath(), "yarp-l4-" + Guid.NewGuid().ToString("N"));
 Directory.CreateDirectory(scratch);
@@ -53,7 +56,28 @@ var info=new ProcessStartInfo("dotnet") { WorkingDirectory=Path.GetDirectoryName
     RedirectStandardOutput=true, RedirectStandardError=true };
 info.ArgumentList.Add(dll); info.ArgumentList.Add(configFile);
 using var proxy=Process.Start(info) ?? throw new Exception("Unable to start L4 process");
-var stdout=proxy.StandardOutput.ReadToEndAsync();
+var udpReady = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+var stdout=ReadProxyOutput();
+async Task<string> ReadProxyOutput()
+{
+    var output = new StringBuilder();
+    var expected = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "L4_UDP_READY udp-echo 127.0.0.1:19021",
+        "L4_UDP_READY udp-drain 127.0.0.1:19022",
+        "L4_UDP_READY udp-all-drained 127.0.0.1:19023"
+    };
+    while (await proxy.StandardOutput.ReadLineAsync() is { } line)
+    {
+        output.AppendLine(line);
+        expected.Remove(line);
+        if (expected.Count == 0) udpReady.TrySetResult();
+    }
+    if (expected.Count != 0)
+        udpReady.TrySetException(new InvalidOperationException(
+            "L4 exited before binding UDP listeners: " + string.Join(", ", expected)));
+    return output.ToString();
+}
 var stderr=proxy.StandardError.ReadToEndAsync();
 try
 {
@@ -61,6 +85,10 @@ try
     {
         try { return (await TcpRoundTrip("ready")).Length > 0; } catch { return false; }
     });
+    // TCP can accept connections before the UDP sockets are bound. Windows
+    // reports an early ICMP Port Unreachable as WSAECONNRESET (10054).
+    // Wait for every actual UDP bind; never hide dropped test datagrams by retry.
+    await udpReady.Task.WaitAsync(TimeSpan.FromSeconds(10));
     var tcpNodes=new Dictionary<string,int> {["A"]=0,["B"]=0};
     for (var i=0;i<24;i++)
     {
@@ -93,15 +121,25 @@ try
     using (var allDrained=new UdpClient(AddressFamily.InterNetwork))
     {
         allDrained.Connect(IPAddress.Loopback,19023);
+        var backendAReceived = Interlocked.Read(ref udpAReceived);
+        var backendBReceived = Interlocked.Read(ref udpBReceived);
         await allDrained.SendAsync(Encoding.UTF8.GetBytes("must-not-forward"));
         using var noReply=new CancellationTokenSource(TimeSpan.FromMilliseconds(700));
         var receivedReply=false;
         try { await allDrained.ReceiveAsync(noReply.Token); receivedReply=true; }
         catch (OperationCanceledException) when (noReply.IsCancellationRequested) { }
+        catch (SocketException ex) when (OperatingSystem.IsWindows() &&
+            ex.SocketErrorCode == SocketError.ConnectionReset)
+        {
+            // Windows may surface the expected no-response as ICMP port-unreachable.
+        }
         Assert(!receivedReply,"all-drained UDP listener fails closed");
+        Assert(Interlocked.Read(ref udpAReceived) == backendAReceived &&
+               Interlocked.Read(ref udpBReceived) == backendBReceived,
+            "all-drained UDP datagram reaches neither backend");
     }
-    Assert((await UdpRoundTrip(c1,"still-sticky")).StartsWith(first[..2]),
-        "drain checks do not disrupt unrelated UDP sessions");
+    Assert(!proxy.HasExited && (await UdpRoundTrip(c1,"still-sticky")).StartsWith(first[..2]),
+        "L4 engine remains alive and drain checks preserve unrelated UDP sessions");
     for (var i=0;i<12;i++)
         Assert((await TcpRoundTrip("drain-"+i,19014)).StartsWith("B|"),
             "backend flagged draining does not receive new TCP streams");
@@ -203,13 +241,25 @@ async Task<bool> ValidatePublicBindDenied()
         Backends=new [] {new {Host="127.0.0.1",Port=19111}} }},
         Udp=Array.Empty<object>()
     }));
-    var start=new ProcessStartInfo("dotnet") { UseShellExecute=false,
+    var start=new ProcessStartInfo("dotnet") { WorkingDirectory=Path.GetDirectoryName(dll)!, UseShellExecute=false,
         RedirectStandardOutput=true,RedirectStandardError=true };
     start.ArgumentList.Add(dll);start.ArgumentList.Add(forbidden);
     using var child=Process.Start(start)!;
-    using var timeout=new CancellationTokenSource(TimeSpan.FromSeconds(5));
-    await child.WaitForExitAsync(timeout.Token);
-    return child.ExitCode != 0;
+    var childOutput=child.StandardOutput.ReadToEndAsync();
+    var childError=child.StandardError.ReadToEndAsync();
+    using var timeout=new CancellationTokenSource(TimeSpan.FromSeconds(15));
+    try { await child.WaitForExitAsync(timeout.Token); }
+    catch (OperationCanceledException) when (timeout.IsCancellationRequested)
+    {
+        if (!child.HasExited) child.Kill(entireProcessTree:true);
+        await child.WaitForExitAsync();
+        throw new Exception("L4 public-bind rejection process timed out; " +
+            $"stdout={await childOutput}; stderr={await childError}");
+    }
+    var output=await childOutput;
+    var error=await childError;
+    return child.ExitCode != 0 && error.Contains(
+        "public binds require explicit opt-in",StringComparison.Ordinal);
 }
 async Task WaitFor(Func<Task<bool>> check)
 {
@@ -249,13 +299,14 @@ static async Task TcpEcho(TcpListener listener,string id,CancellationToken token
     }
     catch(SocketException) when(token.IsCancellationRequested){}
 }
-static async Task UdpEcho(UdpClient listener,string id,CancellationToken token)
+static async Task UdpEcho(UdpClient listener,string id,CancellationToken token,Action recordReceived)
 {
     try
     {
         while(!token.IsCancellationRequested)
         {
             var packet=await listener.ReceiveAsync(token);
+            recordReceived();
             var msg=id+"|"+Encoding.UTF8.GetString(packet.Buffer);
             await listener.SendAsync(Encoding.UTF8.GetBytes(msg),packet.RemoteEndPoint,token);
         }
