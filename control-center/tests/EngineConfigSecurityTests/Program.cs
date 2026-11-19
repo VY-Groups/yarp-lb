@@ -3,6 +3,8 @@ using System.Security.Cryptography.X509Certificates;
 using Microsoft.AspNetCore.Http;
 using System.Text.Json.Nodes;
 
+await GatewayLogFilteringAcceptance.RunAsync();
+
 static void Must(bool condition, string name)
 {
     if (!condition) throw new Exception("FAIL: "+name);

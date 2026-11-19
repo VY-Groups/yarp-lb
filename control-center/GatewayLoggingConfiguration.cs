@@ -14,6 +14,12 @@ public static class GatewayLoggingConfiguration
         // The default ConsoleLoggerProvider can synchronously wait on its
         // internal queue, leading to ThreadPool starvation when stdout stalls.
         logging.AddFilter<ConsoleLoggerProvider>((_, _) => false);
+        // Per-request access records are emitted by GatewayCore.AccessLog and
+        // remain at Information. YARP's own request/response diagnostics are
+        // redundant at that level and allocate formatted strings for every
+        // forwarded request; keep actionable YARP warnings and errors.
+        logging.AddFilter<NonBlockingConsoleLoggerProvider>(
+            "Yarp.ReverseProxy", LogLevel.Warning);
         var provider = new NonBlockingConsoleLoggerProvider(output, capacity, maxLineChars);
         logging.AddProvider(provider);
         return provider;
