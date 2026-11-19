@@ -583,6 +583,22 @@ def main():
                        log_paths=[authority["dns_log"], *authority["agent_logs"]])
         print("PASS: both authorities recover only after fresh matching peer snapshots")
 
+        # Exercise both asymmetric directions separately. An authority with
+        # incoming positive snapshots but no outbound acceptance must also fence.
+        for direction, proxy in (("A to B", fence_a_to_b), ("B to A", fence_b_to_a)):
+            proxy.partition()
+            started = time.monotonic()
+            for authority in (authority_a, authority_b):
+                expect_dns(authority["dns"], authority["dns_port"], 2, timeout=9,
+                           log_paths=[authority["dns_log"], *authority["agent_logs"]])
+                assert time.monotonic() - started < 9, \
+                    f"one-way {direction} partition did not fence both authorities"
+            proxy.restore()
+            for authority in (authority_a, authority_b):
+                expect_dns(authority["dns"], authority["dns_port"], 0, "192.0.2.17", timeout=9,
+                           log_paths=[authority["dns_log"], *authority["agent_logs"]])
+            print(f"PASS: one-way {direction} peer partition fences both authorities and recovers")
+
         # Restart one authority while the other remains active. Its persisted
         # epoch advances, while the peer's durable replay high-water prevents
         # old authority decisions from being accepted after restart.
