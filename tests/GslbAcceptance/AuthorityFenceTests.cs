@@ -214,11 +214,21 @@ internal static class AuthorityFenceTests
                 deletionReceiver.RecordPeerAcknowledgement(400, 400);
                 Check(deletionReceiver.IsPeerEligible("fence.example.test", "primary", 400),
                     "valid lease initially authorizes a target before durable state loss");
+                var savedReplay = File.ReadAllBytes(deletionConfig.ReplayStatePath);
                 File.Delete(deletionConfig.ReplayStatePath);
-                Check(!deletionReceiver.TryAccept(deletionSource.CreateSnapshot(401), tlsA, now, 401),
-                    "missing replay high-water state fails closed while authority is running");
-                Check(!deletionReceiver.IsPeerEligible("fence.example.test", "primary", 402),
-                    "detected durable state loss withdraws an existing positive lease immediately");
+                Check(!deletionReceiver.IsPeerEligible("fence.example.test", "primary", 1400),
+                    "DNS read detects durable state loss without another incoming snapshot, before lease expiry");
+                Check(ThrowsInvalid(() => deletionReceiver.CreateSnapshot(1401)),
+                    "faulted authority cannot publish a new positive decision");
+                File.WriteAllBytes(deletionConfig.ReplayStatePath, savedReplay);
+                if (!OperatingSystem.IsWindows())
+                    File.SetUnixFileMode(deletionConfig.ReplayStatePath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+                deletionReceiver.RecordPeerAcknowledgement(1402, 1402);
+                Check(!deletionReceiver.TryAccept(deletionSource.CreateSnapshot(1402), tlsA, now, 1402) &&
+                      !deletionReceiver.IsPeerEligible("fence.example.test", "primary", 1403) &&
+                      ThrowsInvalid(() => deletionReceiver.CreateSnapshot(1403)),
+                    "restored state cannot clear a latched runtime authority fault");
+                File.Delete(deletionConfig.ReplayStatePath);
             }
             File.Delete(deletionConfig.ReplayStatePath + ".lock");
             Check(ThrowsInvalid(() => new AuthorityFenceStore(deletionConfig, fingerprint, [target])),
