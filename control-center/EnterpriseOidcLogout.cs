@@ -39,7 +39,9 @@ internal static class EnterpriseOidcLogout
                 if (result.IsValid)
                 {
                     var jwt = (JsonWebToken)result.SecurityToken;
-                    if (jwt.Typ is not (null or "" or "JWT" or "logout+jwt" or "application/logout+jwt")) return null;
+                    // OIDC Back-Channel Logout permits an absent typ header;
+                    // when present it must be exactly the registered value.
+                    if (!HasAcceptedType(jwt)) return null;
                     return ParseValidated(Base64UrlEncoder.DecodeBytes(jwt.EncodedPayload), policy, DateTimeOffset.UtcNow);
                 }
                 if (attempt != 0 || result.Exception is not SecurityTokenSignatureKeyNotFoundException) return null;
@@ -50,6 +52,27 @@ internal static class EnterpriseOidcLogout
                                    InvalidOperationException or IOException or ArgumentException or SecurityTokenException)
         { }
         return null;
+    }
+
+    private static bool HasAcceptedType(JsonWebToken jwt)
+    {
+        try
+        {
+            using var header = JsonDocument.Parse(Base64UrlEncoder.DecodeBytes(jwt.EncodedHeader),
+                new JsonDocumentOptions { MaxDepth = 5 });
+            if (header.RootElement.ValueKind != JsonValueKind.Object) return false;
+            var names = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var property in header.RootElement.EnumerateObject())
+            {
+                if (!names.Add(property.Name)) return false;
+                if (property.Name == "typ" &&
+                    (property.Value.ValueKind != JsonValueKind.String || property.Value.GetString() != "logout+jwt"))
+                    return false;
+            }
+            return true;
+        }
+        catch (Exception ex) when (ex is JsonException or FormatException or InvalidOperationException)
+        { return false; }
     }
 
     internal static OidcLogoutNotice? ParseValidated(byte[] payload, EnterpriseOidcPolicy policy, DateTimeOffset now)
