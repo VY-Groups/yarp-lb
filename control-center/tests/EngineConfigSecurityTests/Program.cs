@@ -124,6 +124,28 @@ Must(EngineConfigContract.Validate("l4",remote,true),
 var invalid=l4.DeepClone().AsObject();
 invalid["Tcp"]![0]!["Backends"]![0]!["Port"]=0;
 Must(!EngineConfigContract.Validate("l4",invalid,false), "invalid backend port rejected");
+var udpIdleConfig = l4.DeepClone().AsObject();
+var udpIdleListener = udpIdleConfig["Tcp"]![0]!.DeepClone().AsObject();
+udpIdleListener.Remove("TcpIdleTimeoutSeconds");
+udpIdleConfig["Tcp"] = new JsonArray();
+udpIdleConfig["Udp"] = new JsonArray(udpIdleListener);
+Must(EngineConfigContract.Validate("l4",udpIdleConfig,false), "UDP idle timeout defaults remain valid");
+foreach (var value in new[] { 1, 30, 3600 })
+{
+    udpIdleListener["UdpIdleTimeoutSeconds"] = value;
+    Must(EngineConfigContract.Validate("l4",udpIdleConfig,false),
+        "signed UDP configuration accepts bounded idle timeout " + value);
+}
+foreach (var value in new[] { 0, -1, 3601 })
+{
+    udpIdleListener["UdpIdleTimeoutSeconds"] = value;
+    Must(!EngineConfigContract.Validate("l4",udpIdleConfig,false),
+        "signed UDP configuration rejects out-of-range idle timeout " + value);
+}
+udpIdleListener["UdpIdleTimeoutSeconds"] = "30";
+Must(!EngineConfigContract.Validate("l4",udpIdleConfig,false), "signed UDP configuration rejects string idle timeout");
+udpIdleListener["UdpIdleTimeoutSeconds"] = null;
+Must(!EngineConfigContract.Validate("l4",udpIdleConfig,false), "signed UDP configuration rejects explicit null idle timeout");
 var badDns=dns.DeepClone().AsObject();
 badDns["Zones"]![0]!["Sites"]![0]!["HealthUrl"]="file:///etc/passwd";
 Must(!EngineConfigContract.Validate("gslb",badDns,false),
