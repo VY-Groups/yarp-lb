@@ -35,6 +35,18 @@ public static class AcmeTargetPolicy
             (officialDirectory && !directory.IsDefaultPort))
             return Reject("directory-host-is-not-an-approved-acme-authority");
 
+        var target = ValidateDnsName(dnsName);
+        if (!target.Allowed) return target;
+
+        if (http01 && !publicChallengeEntrypointEnabled)
+            return Reject("http-01-requires-an-explicit-public-challenge-entrypoint");
+
+        return target;
+    }
+
+    // Shared by the issuer preflight and request-host challenge binding.
+    internal static Validation ValidateDnsName(string? dnsName)
+    {
         if (string.IsNullOrWhiteSpace(dnsName) || dnsName.Contains('*') || dnsName.EndsWith('.'))
             return Reject("dns-name-must-be-a-single-explicit-hostname-without-wildcard-or-trailing-dot");
 
@@ -56,11 +68,8 @@ public static class AcmeTargetPolicy
             NonPublicSuffixes.Any(suffix => asciiName.EndsWith(suffix, StringComparison.OrdinalIgnoreCase)))
             return Reject("dns-name-is-not-an-eligible-public-hostname");
 
-        if (http01 && !publicChallengeEntrypointEnabled)
-            return Reject("http-01-requires-an-explicit-public-challenge-entrypoint");
-
         return new Validation(true, asciiName, "eligible-for-preflight-only");
-
-        static Validation Reject(string reason) => new(false, null, reason);
     }
+
+    private static Validation Reject(string reason) => new(false, null, reason);
 }
