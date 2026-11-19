@@ -179,9 +179,12 @@ app.MapReverseProxy(proxyPipeline =>
             finally
             {
                 var elapsedMs = Stopwatch.GetElapsedTime(started).TotalMilliseconds;
-                var destination = ctx.GetReverseProxyFeature().ProxiedDestination;
+                var feature = ctx.GetReverseProxyFeature();
+                var destination = feature.ProxiedDestination;
                 GatewayOpenTelemetry.CompleteProxyActivity(activity, ctx, destination?.DestinationId);
-                GatewayOpenTelemetry.RecordProxyResult(ctx, elapsedMs);
+                GatewayOpenTelemetry.RecordProxyResult(ctx, elapsedMs,
+                    feature.Route.Config.RouteId, feature.Cluster.Config.ClusterId,
+                    destination?.DestinationId);
             }
         });
     }

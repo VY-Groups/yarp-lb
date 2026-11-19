@@ -17,6 +17,7 @@ static bool RejectsOtlpEndpoint(string value)
 }
 Must(OtlpEndpointPolicy.Parse(null) is null && OtlpEndpointPolicy.Parse(" ") is null,
     "OTLP remains disabled without an endpoint");
+GatewayTelemetryLifecycleTests.Run();
 Must(OtlpEndpointPolicy.Parse("https://collector.example:4318") is not null,
     "remote OTLP collector requires and accepts HTTPS");
 Must(OtlpEndpointPolicy.Parse("http://127.0.0.1:4318") is not null &&
