@@ -63,12 +63,15 @@ public sealed class PeerSyncPublisher : BackgroundService
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         using var timer = new PeriodicTimer(TimeSpan.FromSeconds(settings.IntervalSeconds));
+        // No persisted challenge: learn the current receiver boot from an
+        // authenticated HTTPS response, then send a new snapshot next tick.
+        var receiverEpoch = "";
         while (!stoppingToken.IsCancellationRequested)
         {
             try
             {
                 var now=DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-                var snapshot=journal.Snapshot(now / 60);
+                var snapshot=journal.Snapshot(now / 60) with { ReceiverEpoch = receiverEpoch };
                 var payload=JsonSerializer.SerializeToUtf8Bytes(snapshot);
                 if (payload.Length > 262144)
                     throw new InvalidOperationException("Peer frame exceeds 256 KiB limit");
@@ -82,7 +85,21 @@ public sealed class PeerSyncPublisher : BackgroundService
                 req.Content.Headers.ContentType=new System.Net.Http.Headers.MediaTypeHeaderValue("application/json");
                 using var result=await factory.CreateClient("peer-sync")
                     .SendAsync(req,HttpCompletionOption.ResponseHeadersRead,stoppingToken);
-                if (!result.IsSuccessStatusCode)
+                if (result.StatusCode == System.Net.HttpStatusCode.Conflict &&
+                    result.Headers.TryGetValues(PeerStateJournal.ReceiverEpochHeader, out var values))
+                {
+                    var candidates = values.Take(2).ToArray();
+                    if (candidates.Length == 1 && PeerStateJournal.IsReceiverEpoch(candidates[0]))
+                    {
+                        receiverEpoch = candidates[0];
+                        // Never replay the previous POST or reset local counters.
+                        // The next periodic iteration sends a fresh signed snapshot.
+                        logger.LogDebug("Peer receiver epoch learned; next periodic snapshot will resynchronize");
+                    }
+                    else
+                        logger.LogWarning("Peer receiver challenge response invalid");
+                }
+                else if (!result.IsSuccessStatusCode)
                     logger.LogWarning("Peer counter sync rejected with HTTP {Status}",(int)result.StatusCode);
             }
             catch (OperationCanceledException) when(stoppingToken.IsCancellationRequested) { break; }

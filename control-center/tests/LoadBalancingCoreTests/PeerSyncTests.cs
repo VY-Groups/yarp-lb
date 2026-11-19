@@ -36,6 +36,35 @@ public static class PeerSyncTests
         a.Observe(IPAddress.Parse("::ffff:10.123.4.5"),now);
         var frame=a.Snapshot(now);
         var serializedFrame = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(frame);
+        // Exercise the network-facing gate independently of the journal's
+        // pure counter-state tests below.
+        var bootReceiver = new PeerStateJournal("node-b", "node-a", secret, 2);
+        var bound = frame with { ReceiverEpoch = bootReceiver.ReceiverEpoch };
+        Check(PeerStateJournal.IsReceiverEpoch(bootReceiver.ReceiverEpoch) &&
+              !bootReceiver.ApplyBoundFrame(frame, now) &&
+              bootReceiver.PeerTelemetry(now) == (0, 0L),
+            "unbound initial snapshot cannot populate a receiver");
+        Check(bootReceiver.ApplyBoundFrame(bound, now) &&
+              !bootReceiver.ApplyBoundFrame(bound, now),
+            "receiver-bound signed snapshot is accepted once");
+        var replacement = new PeerStateJournal("node-b", "node-a", secret, 2);
+        Check(replacement.ReceiverEpoch != bootReceiver.ReceiverEpoch &&
+              !replacement.ApplyBoundFrame(bound, now) &&
+              replacement.PeerTelemetry(now) == (0, 0L),
+            "receiver process replacement rejects captured old-boot snapshot even with empty journal");
+        var rebound = a.Snapshot(now) with { ReceiverEpoch = replacement.ReceiverEpoch };
+        Check(replacement.ApplyBoundFrame(rebound, now) &&
+              replacement.PeerTelemetry(now) == (1, 2L),
+            "new snapshot bound to replacement receiver recovers counters");
+        var signer = new PeerSignedMessages(secret);
+        var boundBytes = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(bound);
+        var signedAt = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        var (boundNonce, boundSignature) = signer.Sign("node-a", signedAt, boundBytes);
+        var reboundBytes = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(
+            bound with { ReceiverEpoch = replacement.ReceiverEpoch });
+        Check(!signer.Verify("node-a", "node-a", signedAt, boundNonce, boundSignature, reboundBytes, signedAt) &&
+              signer.Verify("node-a", "node-a", signedAt, boundNonce, boundSignature, boundBytes, signedAt),
+            "rewriting the receiver epoch invalidates the original HMAC");
         Check(System.Text.Json.JsonDocument.Parse(serializedFrame).RootElement
                   .GetProperty("ProtocolVersion").GetInt32() == PeerStateFrame.CurrentProtocolVersion,
             "peer snapshots carry an explicit protocol version");
@@ -216,6 +245,33 @@ public static class PeerSyncTests
         Check(localGc.RetainedLocalEntries == 0,
             "local table is collected at the first observation boundary after its minute TTL");
 
+        var localRollback = new PeerStateJournal("node-a", "node-b", secret, 2);
+        localRollback.Observe(client, now);
+        var previousLocal = localRollback.Snapshot(now);
+        localRollback.Observe(client, now + 1);
+        localRollback.Observe(client, now + 1);
+        var currentLocal = localRollback.Snapshot(now + 1);
+        localRollback.Observe(IPAddress.Parse("10.123.4.99"), now);
+        Check(localRollback.Status(now).LocalIdentities == 0 &&
+              localRollback.Status(now).LocalRequests == 0,
+            "rollback status hides counters from the newer minute");
+        Check(localRollback.RetainedLocalEntries == 1 &&
+              localRollback.Status(now + 1).LocalRequests == 2,
+            "late observation and status cannot clear or pollute the current local minute");
+        var staleSnapshotRejected = false;
+        try { _ = localRollback.Snapshot(now); }
+        catch (InvalidOperationException) { staleSnapshotRejected = true; }
+        Check(staleSnapshotRejected,
+            "publisher cannot relabel newer counters as a regressed minute");
+        var recoveredLocal = localRollback.Snapshot(now + 1);
+        Check(recoveredLocal.Sequence == currentLocal.Sequence + 1 &&
+              recoveredLocal.Counters.Single().Value == 2 &&
+              recoveredLocal.Minute > previousLocal.Minute,
+            "local sequence and counters survive clock catch-up without rollback");
+        Check(localRollback.Snapshot(now + 2).Counters.Count == 0 &&
+              localRollback.Status(now + 2).LocalRequests == 0,
+            "normal forward minute transition still collects local telemetry");
+
         var remoteMinuteGcSource = new PeerStateJournal("node-a", "node-b", secret, 2);
         remoteMinuteGcSource.Observe(IPAddress.Parse("10.123.4.12"), now);
         var remoteMinuteGc = new PeerStateJournal("node-b", "node-a", secret, 2);
@@ -272,6 +328,26 @@ public static class PeerSyncTests
         var (nonce,sig)=auth.Sign("node-a",t,bytes);
         Check(auth.Verify("node-a","node-a",t,nonce,sig,bytes,t),"valid signed frame accepted");
         Check(!auth.Verify("node-a","node-a",t,nonce,sig,bytes,t),"replayed nonce rejected");
+
+        var clockFence = new PeerSignedMessages(secret);
+        var (expiredNonce, expiredSig) = clockFence.Sign("node-a", t, bytes);
+        Check(clockFence.Verify("node-a", "node-a", t, expiredNonce, expiredSig, bytes, t),
+            "nonce clock-fence fixture accepts initial authenticated frame");
+        var (newNonce, newSig) = clockFence.Sign("node-a", t + 61, bytes);
+        Check(clockFence.Verify("node-a", "node-a", t + 61, newNonce, newSig, bytes, t + 61),
+            "authenticated forward clock observation collects expired nonce window");
+        Check(!clockFence.Verify("node-a", "node-a", t, expiredNonce, expiredSig, bytes, t),
+            "clock rollback cannot replay a nonce after collection");
+        var (freshNonce, freshSig) = clockFence.Sign("node-a", t, bytes);
+        Check(!clockFence.Verify("node-a", "node-a", t, freshNonce, freshSig, bytes, t),
+            "clock rollback cannot reopen a previously closed timestamp window");
+        var (recoveryNonce, recoverySig) = clockFence.Sign("node-a", t + 62, bytes);
+        Check(clockFence.Verify("node-a", "node-a", t + 62, recoveryNonce, recoverySig, bytes, t + 62),
+            "fresh authenticated peer frames recover when wall clock catches up");
+        var unauthenticatedFence = new PeerSignedMessages(secret);
+        Check(!unauthenticatedFence.Verify("node-a", "node-a", t + 1000, newNonce, newSig, bytes, t + 1000) &&
+              unauthenticatedFence.Verify("node-a", "node-a", t, expiredNonce, expiredSig, bytes, t),
+            "forged future frame cannot advance the authenticated time fence");
         var (nonce2,sig2)=auth.Sign("node-a",t,bytes);
         Check(!auth.Verify("node-a","node-b",t,nonce2,sig2,bytes,t),
             "wrong peer identity rejected");

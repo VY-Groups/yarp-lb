@@ -1,5 +1,7 @@
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
+using System.Xml;
+using System.Xml.Linq;
 using Microsoft.AspNetCore.DataProtection;
 
 /// <summary>
@@ -87,12 +89,46 @@ public static class LinuxKeyProtection
         }
     }
 
+    // ProtectKeysWithCertificate only wraps newly persisted keys. It does
+    // not reject a legacy plaintext ring imported from an earlier lab.
+    // Inspect existing XML without modifying it or deserializing key types.
+    private static void ValidateExistingKeyRing(string directory)
+    {
+        XNamespace protection = "http://schemas.asp.net/2015/03/dataProtection";
+        foreach (var path in Directory.EnumerateFiles(directory, "*.xml"))
+        {
+            if ((File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0)
+                throw new InvalidOperationException("Existing Linux key-ring XML must not be a symlink");
+            if ((File.GetUnixFileMode(path) & PublicPermissions) != 0)
+                throw new InvalidOperationException("Existing Linux key-ring XML requires owner-only permissions");
+            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+            if (stream.Length is <= 0 or > 1024 * 1024)
+                throw new InvalidOperationException("Existing Linux key-ring XML exceeds the supported size");
+            using var reader = XmlReader.Create(stream, new XmlReaderSettings
+            {
+                DtdProcessing = DtdProcessing.Prohibit,
+                XmlResolver = null,
+                MaxCharactersInDocument = 1024 * 1024
+            });
+            var root = XDocument.Load(reader).Root;
+            // ASP.NET stores revocations separately from master key XML.
+            if (root?.Name == "revocation") continue;
+            if (root?.Name != "key" ||
+                root.Descendants().Any(element => element.Name.LocalName == "masterKey") ||
+                root.Descendants(protection + "encryptedSecret").Count() != 1)
+                throw new InvalidOperationException(
+                    "Existing Linux key ring is not certificate-wrapped; isolate and recover an approved protected backup");
+        }
+    }
+
     public static void Configure(IDataProtectionBuilder dataProtection, string rootDirectory)
     {
         if (!OperatingSystem.IsLinux())
             throw new PlatformNotSupportedException("Linux key protector is Linux-only");
         CheckPrivateDirectory(rootDirectory);
-        CheckPrivateDirectory(Path.Combine(rootDirectory, "data-protection-keys"));
+        var keyDirectory = Path.Combine(rootDirectory, "data-protection-keys");
+        CheckPrivateDirectory(keyDirectory);
+        ValidateExistingKeyRing(keyDirectory);
         var current = LoadRsaProtector("YARP_LINUX_DP_CERT_PFX_PATH",
             "YARP_LINUX_DP_CERT_PASSWORD_FILE");
         dataProtection.ProtectKeysWithCertificate(current);

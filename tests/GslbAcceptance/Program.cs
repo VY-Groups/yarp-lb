@@ -461,6 +461,39 @@ using (var geoDatabase = new GeoIpEcsDatabase(countryFixture, asnFixture, 0))
         throw new Exception("FAIL: conflicting country/ASN routes did not fail closed or single-source route failed");
 }
 Console.WriteLine("PASS: MaxMind MMDB route mapping, privacy-boundary fallback, and unknown-country handling");
+var identityZone = new DnsZone("geo-fence.integration.test", 30,
+    [new DnsSite("192.0.2.1", "http://127.0.0.1:19711/ready", 1)
+        { Region = "mumbai", AuthorityFenceSiteId = "primary" }])
+{
+    RoutingPolicy = "GeoIpEcs", GeoAsnRoutes = [new GeoAsnRoute(15169, "mumbai")]
+};
+var geoIdentityPath = Path.Combine(Path.GetTempPath(), "gslb-geo-identity-" + Guid.NewGuid().ToString("N") + ".mmdb");
+try
+{
+    File.Copy(asnFixture, geoIdentityPath);
+    using var original = new GeoIpEcsDatabase(null, asnFixture, 0, bindAuthorityIdentity: true);
+    using var copied = new GeoIpEcsDatabase(null, geoIdentityPath, 0, bindAuthorityIdentity: true);
+    using var withCountry = new GeoIpEcsDatabase(countryFixture, asnFixture, 0, bindAuthorityIdentity: true);
+    string Digest(GeoIpAuthorityIdentity? identity) =>
+        AuthorityFenceFingerprint.Compute([identityZone], null, geoIpIdentity: identity);
+    var originalIdentity = original.AuthorityIdentity!;
+    if (originalIdentity.AsnSha256 != Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(asnFixture))) ||
+        Digest(originalIdentity) != Digest(copied.AuthorityIdentity) ||
+        Digest(originalIdentity) == Digest(withCountry.AuthorityIdentity) ||
+        Digest(originalIdentity) == Digest(originalIdentity with { MaxAgeDays = 45 }))
+        throw new Exception("FAIL: authority GeoIP identity did not bind loaded datasets and age policy independent of local path");
+    var missingIdentityRejected = false;
+    try { _ = Digest(null); } catch (InvalidDataException) { missingIdentityRejected = true; }
+    if (!missingIdentityRejected)
+        throw new Exception("FAIL: fenced GeoIP routing accepted absent dataset identity");
+    File.Copy(countryFixture, geoIdentityPath, overwrite: true);
+    if (Digest(copied.AuthorityIdentity) != Digest(originalIdentity) ||
+        copied.CreateTable(null, identityZone.GeoAsnRoutes).RegionForEcs(IPAddress.Parse("1.0.0.1"), 24)
+            is not { Region: "mumbai", PrefixLength: 24 })
+        throw new Exception("FAIL: replacing source MMDB changed the active fenced reader");
+    Console.WriteLine("PASS: authority fingerprint binds private loaded MMDB snapshot and maximum-age policy");
+}
+finally { File.Delete(geoIdentityPath); }
 // Use the fixture's own build timestamp, not today's wall clock.
 using (var fixtureReader = new MaxMind.Db.Reader(asnFixture))
 {
@@ -477,6 +510,18 @@ using (var fixtureReader = new MaxMind.Db.Reader(asnFixture))
     geoClock.RollbackWallClock(TimeSpan.FromHours(12));
     if (expiringRoutes.RegionForEcs(clientAddress, 24) is not null)
         throw new Exception("FAIL: wall-clock rollback resurrected expired GeoIP data");
+
+    var jumpClock = new GeoIpTestClock(build.AddHours(23));
+    using var jumpDatabase = new GeoIpEcsDatabase(null, asnFixture, 1, jumpClock);
+    var jumpRoutes = jumpDatabase.CreateTable(null, [new GeoAsnRoute(15169, "mumbai")]);
+    if (jumpRoutes.RegionForEcs(clientAddress, 24) is null)
+        throw new Exception("FAIL: valid GeoIP data unavailable before wall-clock jump");
+    jumpClock.AdvanceWallClock(TimeSpan.FromHours(1));
+    if (jumpRoutes.RegionForEcs(clientAddress, 24) is not null)
+        throw new Exception("FAIL: forward clock correction allowed expired GeoIP steering");
+    jumpClock.RollbackWallClock(TimeSpan.FromHours(2));
+    if (jumpRoutes.RegionForEcs(clientAddress, 24) is not null)
+        throw new Exception("FAIL: rollback resurrected wall-clock-expired GeoIP data");
 }
 Console.WriteLine("PASS: runtime GeoIP expiry and monotonic fallback");
 var staleGeoDatabaseRejected = false;
@@ -1573,5 +1618,6 @@ sealed class GeoIpTestClock(DateTimeOffset current) : TimeProvider
     public override long GetTimestamp() => tick;
     public override long TimestampFrequency => TimeSpan.TicksPerSecond;
     public void Advance(TimeSpan time) { utc += time; tick += time.Ticks; }
+    public void AdvanceWallClock(TimeSpan time) => utc += time;
     public void RollbackWallClock(TimeSpan time) => utc -= time;
 }

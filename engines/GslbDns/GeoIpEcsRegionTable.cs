@@ -1,4 +1,5 @@
 using System.Net;
+using System.Security.Cryptography;
 using MaxMind.Db;
 
 // Offline MaxMind MMDB lookups. The ECS prefix is already privacy-masked before
@@ -11,16 +12,26 @@ internal sealed class GeoIpEcsDatabase : IDisposable
 
     private readonly int maxAgeDays;
     private readonly TimeProvider clock;
+    // Strict fencing uses an immutable snapshot; bound startup memory per file.
+    private const int MaxFencedDatabaseBytes = 256 * 1024 * 1024;
+    public GeoIpAuthorityIdentity? AuthorityIdentity { get; }
 
     public GeoIpEcsDatabase(string? countryPath, string? asnPath, int maxAgeDays,
-        TimeProvider? clock = null)
+        TimeProvider? clock = null, bool bindAuthorityIdentity = false)
     {
         this.clock = clock ?? TimeProvider.System;
         this.maxAgeDays = maxAgeDays;
         if (maxAgeDays is < 0 or > 3650)
             throw new InvalidDataException("GeoIP maximum database age must be 0..3650 days (0 disables age enforcement)");
-        country = Open(countryPath, "Country", maxAgeDays, this.clock);
-        try { asn = Open(asnPath, "ASN", maxAgeDays, this.clock); }
+        country = Open(countryPath, "Country", maxAgeDays, this.clock,
+            bindAuthorityIdentity, out var countryHash);
+        try
+        {
+            asn = Open(asnPath, "ASN", maxAgeDays, this.clock,
+                bindAuthorityIdentity, out var asnHash);
+            if (bindAuthorityIdentity)
+                AuthorityIdentity = new GeoIpAuthorityIdentity(countryHash, asnHash, maxAgeDays);
+        }
         catch { country?.Dispose(); throw; }
     }
 
@@ -35,12 +46,31 @@ internal sealed class GeoIpEcsDatabase : IDisposable
         asn?.Dispose();
     }
 
-    private static Reader? Open(string? path, string expected, int maxAgeDays, TimeProvider clock)
+    private static Reader? Open(string? path, string expected, int maxAgeDays, TimeProvider clock,
+        bool bindAuthorityIdentity, out string? fingerprint)
     {
+        fingerprint = null;
         if (string.IsNullOrWhiteSpace(path)) return null;
         if (!Path.IsPathFullyQualified(path) || !File.Exists(path))
             throw new InvalidDataException($"Configured GeoIP {expected} database must be an existing absolute path");
-        var reader = new Reader(path);
+        Reader reader;
+        if (bindAuthorityIdentity)
+        {
+            using var input = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+            if (input.Length is <= 0 or > MaxFencedDatabaseBytes)
+                throw new InvalidDataException("Fenced GeoIP database must be 1..256 MiB");
+            var bytes = new byte[checked((int)input.Length)];
+            input.ReadExactly(bytes);
+            if (input.ReadByte() != -1)
+                throw new InvalidDataException("GeoIP database changed length during startup");
+            // The hash and Reader consume the same private byte snapshot, not
+            // independent path reads. Replacing the source after load cannot
+            // change the dataset advertised in this authority's fingerprint.
+            fingerprint = Convert.ToHexString(SHA256.HashData(bytes));
+            using var snapshot = new MemoryStream(bytes, writable: false);
+            reader = new Reader(snapshot);
+        }
+        else reader = new Reader(path);
         try
         {
             var type = reader.Metadata.DatabaseType;
@@ -59,6 +89,7 @@ internal sealed class GeoIpEcsDatabase : IDisposable
     }
 }
 
+internal sealed record GeoIpAuthorityIdentity(string? CountrySha256, string? AsnSha256, int MaxAgeDays);
 internal sealed record GeoCountryRoute(string CountryCode, string Region);
 internal sealed record GeoAsnRoute(long Asn, string Region);
 internal sealed class GeoIpCountryLookup
@@ -91,6 +122,8 @@ internal sealed class GeoIpEcsRegionTable
     private readonly TimeProvider clock;
     private readonly long openedAt;
     private readonly TimeSpan? remainingLifetime;
+    private readonly DateTime? expiresUtc;
+    private int expired;
 
     public GeoIpEcsRegionTable(Reader? country, Reader? asn,
         IEnumerable<GeoCountryRoute> countryRoutes, IEnumerable<GeoAsnRoute> asnRoutes,
@@ -123,9 +156,13 @@ internal sealed class GeoIpEcsRegionTable
             foreach (var reader in new[] { country, asn })
             {
                 if (reader is null) continue;
-                var remaining = reader.Metadata.BuildDate.AddDays(maxAgeDays) - now;
+                var expiry = reader.Metadata.BuildDate.AddDays(maxAgeDays);
+                var remaining = expiry - now;
                 if (remainingLifetime is null || remaining < remainingLifetime.Value)
+                {
                     remainingLifetime = remaining;
+                    expiresUtc = expiry;
+                }
             }
         }
     }
@@ -136,9 +173,17 @@ internal sealed class GeoIpEcsRegionTable
     public (string Region, int PrefixLength)? RegionForEcs(IPAddress address, int sourcePrefixLength)
     {
         ArgumentNullException.ThrowIfNull(address);
-        if (remainingLifetime is { } lifetime &&
-            clock.GetElapsedTime(openedAt) >= lifetime)
-            return null; // Expired geography is unknown; normal healthy-site fallback applies.
+        if (remainingLifetime is { } lifetime)
+        {
+            // Either clock can expire the database. Once observed expired,
+            // a subsequent wall-clock rollback must not re-enable steering.
+            var elapsed = clock.GetElapsedTime(openedAt);
+            if (elapsed < TimeSpan.Zero || elapsed >= lifetime ||
+                (expiresUtc is { } deadline && clock.GetUtcNow().UtcDateTime >= deadline))
+                Interlocked.Exchange(ref expired, 1);
+            if (Volatile.Read(ref expired) != 0)
+                return null; // Unknown geography: normal healthy-site fallback.
+        }
         var maxPrefix = address.GetAddressBytes().Length * 8;
         if (sourcePrefixLength < 0 || sourcePrefixLength > maxPrefix ||
             address.IsIPv4MappedToIPv6 || address.AddressFamily is not

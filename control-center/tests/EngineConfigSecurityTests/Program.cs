@@ -41,6 +41,12 @@ using (var privacyActivity = new System.Diagnostics.Activity("privacy-contract")
     privacyActivity.SetTag("url.query", "id=secret");
     privacyActivity.SetTag("http.request.header.authorization", "Bearer secret");
     privacyActivity.SetTag("gateway.route.id", "public_route");
+    privacyActivity.SetTag("http.request.header.x-api-key", "custom-header-secret");
+    privacyActivity.SetTag("http.request.header.x-customer-id", new[] { "customer-secret" });
+    privacyActivity.SetTag("custom.enrichment", "arbitrary-secret");
+    privacyActivity.SetTag("gateway.cluster.id", "invalid/id");
+    privacyActivity.SetTag("http.response.status_code", 503);
+    privacyActivity.SetTag("network.protocol.version", "2");
     privacyActivity.Start();
     new GatewayTelemetryPrivacyProcessor().OnEnd(privacyActivity);
     Must(privacyActivity.GetTagItem("client.address") is null &&
@@ -50,8 +56,15 @@ using (var privacyActivity = new System.Diagnostics.Activity("privacy-contract")
          privacyActivity.GetTagItem("url.query") is null &&
          privacyActivity.GetTagItem("http.request.header.authorization") is null,
         "OTLP privacy processor removes client address, raw URL and secret attributes");
-    Must((string?)privacyActivity.GetTagItem("gateway.route.id") == "public_route",
-        "OTLP privacy processor preserves bounded route attribution");
+    Must((string?)privacyActivity.GetTagItem("gateway.route.id") == "public_route" &&
+         privacyActivity.GetTagItem("http.response.status_code") is 503 &&
+         (string?)privacyActivity.GetTagItem("network.protocol.version") == "2",
+        "OTLP privacy processor preserves bounded route, status and protocol attribution");
+    Must(privacyActivity.GetTagItem("http.request.header.x-api-key") is null &&
+         privacyActivity.GetTagItem("http.request.header.x-customer-id") is null &&
+         privacyActivity.GetTagItem("custom.enrichment") is null &&
+         privacyActivity.GetTagItem("gateway.cluster.id") is null,
+        "OTLP span attribute allowlist rejects unknown header arrays, custom data and invalid attribution");
 }
 await GatewayOtlpExporterAcceptance.RunAsync();
 await GatewayOtlpExporterAcceptance.RunWithoutCollectorAsync();
@@ -124,6 +137,28 @@ Must(EngineConfigContract.Validate("l4",remote,true),
 var invalid=l4.DeepClone().AsObject();
 invalid["Tcp"]![0]!["Backends"]![0]!["Port"]=0;
 Must(!EngineConfigContract.Validate("l4",invalid,false), "invalid backend port rejected");
+var udpIdleConfig = l4.DeepClone().AsObject();
+var udpIdleListener = udpIdleConfig["Tcp"]![0]!.DeepClone().AsObject();
+udpIdleListener.Remove("TcpIdleTimeoutSeconds");
+udpIdleConfig["Tcp"] = new JsonArray();
+udpIdleConfig["Udp"] = new JsonArray(udpIdleListener);
+Must(EngineConfigContract.Validate("l4",udpIdleConfig,false), "UDP idle timeout defaults remain valid");
+foreach (var value in new[] { 1, 30, 3600 })
+{
+    udpIdleListener["UdpIdleTimeoutSeconds"] = value;
+    Must(EngineConfigContract.Validate("l4",udpIdleConfig,false),
+        "signed UDP configuration accepts bounded idle timeout " + value);
+}
+foreach (var value in new[] { 0, -1, 3601 })
+{
+    udpIdleListener["UdpIdleTimeoutSeconds"] = value;
+    Must(!EngineConfigContract.Validate("l4",udpIdleConfig,false),
+        "signed UDP configuration rejects out-of-range idle timeout " + value);
+}
+udpIdleListener["UdpIdleTimeoutSeconds"] = "30";
+Must(!EngineConfigContract.Validate("l4",udpIdleConfig,false), "signed UDP configuration rejects string idle timeout");
+udpIdleListener["UdpIdleTimeoutSeconds"] = null;
+Must(!EngineConfigContract.Validate("l4",udpIdleConfig,false), "signed UDP configuration rejects explicit null idle timeout");
 var badDns=dns.DeepClone().AsObject();
 badDns["Zones"]![0]!["Sites"]![0]!["HealthUrl"]="file:///etc/passwd";
 Must(!EngineConfigContract.Validate("gslb",badDns,false),

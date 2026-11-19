@@ -45,11 +45,13 @@ File.WriteAllText(configFile, JsonSerializer.Serialize(new {
       new { Name = "tcp-drain", ListenHost="127.0.0.1", ListenPort=19014,
         Backends = new [] { new { Host="127.0.0.1", Port=19111, DrainNewConnections=true },
           new { Host="127.0.0.1", Port=19112, DrainNewConnections=false } } } },
-    Udp = new [] { new { Name = "udp-echo", ListenHost="127.0.0.1", ListenPort=19021,
+    Udp = new [] { new { Name = "udp-echo", ListenHost="127.0.0.1", ListenPort=19021, UdpIdleTimeoutSeconds=30,
       Backends = new [] { new { Host="127.0.0.1", Port=19121, DrainNewConnections=false }, new { Host="127.0.0.1", Port=19122, DrainNewConnections=false } } },
-      new { Name = "udp-drain", ListenHost="127.0.0.1", ListenPort=19022,
+      new { Name = "udp-drain", ListenHost="127.0.0.1", ListenPort=19022, UdpIdleTimeoutSeconds=30,
       Backends = new [] { new { Host="127.0.0.1", Port=19121, DrainNewConnections=true }, new { Host="127.0.0.1", Port=19122, DrainNewConnections=false } } },
-      new { Name = "udp-all-drained", ListenHost="127.0.0.1", ListenPort=19023,
+      new { Name = "udp-idle", ListenHost="127.0.0.1", ListenPort=19024, UdpIdleTimeoutSeconds=2,
+      Backends = new [] { new { Host="127.0.0.1", Port=19121, DrainNewConnections=false }, new { Host="127.0.0.1", Port=19122, DrainNewConnections=false } } },
+      new { Name = "udp-all-drained", ListenHost="127.0.0.1", ListenPort=19023, UdpIdleTimeoutSeconds=30,
       Backends = new [] { new { Host="127.0.0.1", Port=19121, DrainNewConnections=true }, new { Host="127.0.0.1", Port=19122, DrainNewConnections=true } } } }
 }));
 var info=new ProcessStartInfo("dotnet") { WorkingDirectory=Path.GetDirectoryName(dll)!, UseShellExecute=false,
@@ -57,6 +59,7 @@ var info=new ProcessStartInfo("dotnet") { WorkingDirectory=Path.GetDirectoryName
 info.ArgumentList.Add(dll); info.ArgumentList.Add(configFile);
 using var proxy=Process.Start(info) ?? throw new Exception("Unable to start L4 process");
 var udpReady = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+var idleRetired = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 var stdout=ReadProxyOutput();
 async Task<string> ReadProxyOutput()
 {
@@ -65,12 +68,14 @@ async Task<string> ReadProxyOutput()
     {
         "L4_UDP_READY udp-echo 127.0.0.1:19021",
         "L4_UDP_READY udp-drain 127.0.0.1:19022",
-        "L4_UDP_READY udp-all-drained 127.0.0.1:19023"
+        "L4_UDP_READY udp-all-drained 127.0.0.1:19023",
+        "L4_UDP_READY udp-idle 127.0.0.1:19024"
     };
     while (await proxy.StandardOutput.ReadLineAsync() is { } line)
     {
         output.AppendLine(line);
         expected.Remove(line);
+        if (line == "L4_UDP_RETIRED udp-idle count=1") idleRetired.TrySetResult();
         if (expected.Count == 0) udpReady.TrySetResult();
     }
     if (expected.Count != 0)
@@ -140,6 +145,15 @@ try
     }
     Assert(!proxy.HasExited && (await UdpRoundTrip(c1,"still-sticky")).StartsWith(first[..2]),
         "L4 engine remains alive and drain checks preserve unrelated UDP sessions");
+    using (var idleUdp = new UdpClient(AddressFamily.InterNetwork))
+    {
+        idleUdp.Connect(IPAddress.Loopback, 19024);
+        var initial = await UdpRoundTrip(idleUdp, "before-idle");
+        await idleRetired.Task.WaitAsync(TimeSpan.FromSeconds(6));
+        var afterIdle = await UdpRoundTrip(idleUdp, "after-idle");
+        Assert(initial[..1] != afterIdle[..1] && afterIdle.EndsWith("after-idle"),
+            "idle UDP socket is retired without inbound traffic; same endpoint establishes a fresh relay");
+    }
     for (var i=0;i<12;i++)
         Assert((await TcpRoundTrip("drain-"+i,19014)).StartsWith("B|"),
             "backend flagged draining does not receive new TCP streams");
