@@ -198,8 +198,8 @@ foreach(var zone in config.Zones)
             !DnsWireProtocol.ValidName(source.Name.TrimEnd('.')) ||
             source.Name.TrimEnd('.').Equals(origin, StringComparison.OrdinalIgnoreCase) ||
             !source.Name.TrimEnd('.').EndsWith("." + origin, StringComparison.OrdinalIgnoreCase) ||
-            source.NameServers is not { Length: >= 1 and <= 4 })
-            throw new InvalidDataException("Delegation must be a strict child of the hosted zone with 1..4 name servers");
+            source.NameServers is not { Length: >= 1 and <= 8 })
+            throw new InvalidDataException("Delegation must be a strict child of the hosted zone with 1..4 unique name servers (at most one A and one AAAA address each)");
         var cut = source.Name.TrimEnd('.').ToLowerInvariant();
         if (!delegationNames.Add(cut))
             throw new InvalidDataException("Duplicate delegation cut");
@@ -227,6 +227,7 @@ foreach(var zone in config.Zones)
         }
         var childServers = new List<DnsNameServer>();
         var childServerNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var childServerAddressFamilies = new HashSet<(string Host, AddressFamily Family)>();
         foreach (var child in source.NameServers)
         {
             if (child is null || string.IsNullOrWhiteSpace(child.Host) ||
@@ -236,10 +237,13 @@ foreach(var zone in config.Zones)
                 childAddress.AddressFamily is not (AddressFamily.InterNetwork or AddressFamily.InterNetworkV6))
                 throw new InvalidDataException("Invalid delegated name-server hostname or address");
             var host = child.Host.TrimEnd('.').ToLowerInvariant();
-            if (!childServerNames.Add(host))
-                throw new InvalidDataException("Duplicate delegated name-server hostname");
+            childServerNames.Add(host);
+            if (!childServerAddressFamilies.Add((host, childAddress.AddressFamily)))
+                throw new InvalidDataException("Duplicate delegated name-server address family");
             childServers.Add(new DnsNameServer(host, childAddress));
         }
+        if (childServerNames.Count > 4)
+            throw new InvalidDataException("A delegation may configure at most four unique name servers");
         delegations.Add(new DnsDelegation(cut, childServers.ToArray(), dsRecords.ToArray()));
     }
     if (delegations.Any(cut => delegations.Any(other =>

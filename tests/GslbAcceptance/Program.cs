@@ -628,6 +628,7 @@ File.WriteAllText(configuration,JsonSerializer.Serialize(new {
         new {Name="child.delegated.integration.test",
         NameServers=new[]{
           new {Host="ns.child.delegated.integration.test",Address="127.0.0.61"},
+          new {Host="ns.child.delegated.integration.test",Address="2001:db8::61"},
           new {Host="ns.other.example.net",Address="192.0.2.53"}}}},
       RoutingPolicy="Failover",FailureThreshold=1,SuccessThreshold=1,
       FailClosedWhenAllSitesDown=true},
@@ -756,15 +757,18 @@ try
     Must(fullyQuarantined.Status == 2 && fullyQuarantined.Address is null,
         "availability-first fallback never selects an administratively quarantined site");
     Console.WriteLine("PASS: operator quarantine keeps a healthy primary out of DNS failover selection");
-    var delegatedNs = await TcpQuery(DnsRequest("child.delegated.integration.test", 2));
-    Must((Dns16(delegatedNs, 2) & 0x0400) == 0 && (Dns16(delegatedNs, 2) & 0x000f) == 0 &&
-         Dns16(delegatedNs, 6) == 0 && Dns16(delegatedNs, 8) == 2 && Dns16(delegatedNs, 10) == 1 &&
-         DnsRecordTypes(delegatedNs, 1).SequenceEqual(new ushort[] { 2, 2 }) &&
-         DnsRecordTypes(delegatedNs, 2).SequenceEqual(new ushort[] { 1 }),
-         "delegation apex returns non-authoritative NS referral and in-bailiwick glue only");
+    var (delegatedNsRequest, delegatedNsUdp) = await QueryWire("child.delegated.integration.test", 2,
+        ednsVersion: 0, udpPayloadSize: 1232);
+    var delegatedNsTcp = await TcpQuery(delegatedNsRequest);
+    foreach (var delegatedNs in new[] { delegatedNsUdp, delegatedNsTcp })
+        Must((Dns16(delegatedNs, 2) & 0x0400) == 0 && (Dns16(delegatedNs, 2) & 0x000f) == 0 &&
+             Dns16(delegatedNs, 6) == 0 && Dns16(delegatedNs, 8) == 2 && Dns16(delegatedNs, 10) == 3 &&
+             DnsRecordTypes(delegatedNs, 1).SequenceEqual(new ushort[] { 2, 2 }) &&
+             DnsRecordTypes(delegatedNs, 2).SequenceEqual(new ushort[] { 1, 28, 41 }),
+             "UDP and TCP delegation referrals return one NS per hostname and all in-bailiwick A/AAAA glue only");
     var delegatedChild = await TcpQuery(DnsRequest("www.child.delegated.integration.test", 1));
     Must((Dns16(delegatedChild, 2) & 0x0400) == 0 && Dns16(delegatedChild, 6) == 0 &&
-         Dns16(delegatedChild, 8) == 2 && Dns16(delegatedChild, 10) == 1,
+         Dns16(delegatedChild, 8) == 2 && Dns16(delegatedChild, 10) == 2,
          "names beneath a delegation receive the nearest referral instead of parent-zone answers");
     var delegatedDs = await TcpQuery(DnsRequest("child.delegated.integration.test", 43));
     Must((Dns16(delegatedDs, 2) & 0x0400) != 0 && (Dns16(delegatedDs, 2) & 0x000f) == 0 &&
