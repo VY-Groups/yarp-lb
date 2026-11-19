@@ -35,6 +35,8 @@ for host in s.get("hosts",[]):
             previous_end=last
             raw=json.loads((folder/w["artifact"]).read_text());summary=raw["summary"]
             duration=num(summary["total"]);rps=num(summary["requestsPerSec"])
+            if duration < s["window_seconds"]-.5 or duration > w["wall_seconds"]+1:
+                raise ValueError("aggregate duration inconsistent with mandatory window")
             body=num(summary["totalData"]);pct=raw["latencyPercentiles"]
             p99=num(pct["p99"])*1000;p95=num(pct["p95"])*1000;p50=num(pct["p50"])*1000
             if not(0<=p50<=p95<=p99):raise ValueError("invalid latency ordering")
@@ -93,7 +95,8 @@ for host in s.get("hosts",[]):
                     reconstructed_errors[reason]=reconstructed_errors.get(reason,0)+qty
                 bytes_sent=num(raw_summary["totalData"])
                 raw_duration=num(raw_summary["total"])
-                if raw_duration<=0 or not n or num(raw_summary["successRate"])!=1:
+                if (raw_duration < s["window_seconds"]-.5 or raw_duration > w["wall_seconds"]+1
+                    or not n or num(raw_summary["successRate"])!=1):
                     raise ValueError("invalid raw oha summary")
                 if n!=got["count"] or bytes_sent!=got["body_bytes"] or bytes_sent!=n*configured["response_bytes"]:
                     raise ValueError("aggregate disagrees with raw oha bodies/counts")
@@ -107,7 +110,10 @@ for host in s.get("hosts",[]):
                 raise ValueError("aggregate disagrees with raw oha counters/p99")
             if abs(count/duration-rps)>max(1,rps*.01):
                 raise ValueError("aggregate rate inconsistent with raw oha counts")
-            rows.append({"start":first,"end":last,"rps":rps,"body_gbps":body*8/(duration*1e9),"p99_ms":p99,"errors":bad})
+            # Rates must cover the full measured window, not a shorter
+            # self-reported generator interval.
+            rate_duration=max(duration,w["wall_seconds"])
+            rows.append({"start":first,"end":last,"rps":count/rate_duration,"body_gbps":body*8/(rate_duration*1e9),"p99_ms":p99,"errors":bad})
         all_hosts[host]=rows
     except (OSError,KeyError,ValueError,TypeError,ZeroDivisionError) as e:errors.append(f"{host}: missing/unusable generator evidence {e}")
 if len(all_hosts)==len(s.get("hosts",[])) and all_hosts:
