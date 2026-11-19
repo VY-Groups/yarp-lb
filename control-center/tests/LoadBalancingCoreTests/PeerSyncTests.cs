@@ -36,6 +36,35 @@ public static class PeerSyncTests
         a.Observe(IPAddress.Parse("::ffff:10.123.4.5"),now);
         var frame=a.Snapshot(now);
         var serializedFrame = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(frame);
+        // Exercise the network-facing gate independently of the journal's
+        // pure counter-state tests below.
+        var bootReceiver = new PeerStateJournal("node-b", "node-a", secret, 2);
+        var bound = frame with { ReceiverEpoch = bootReceiver.ReceiverEpoch };
+        Check(PeerStateJournal.IsReceiverEpoch(bootReceiver.ReceiverEpoch) &&
+              !bootReceiver.ApplyBoundFrame(frame, now) &&
+              bootReceiver.PeerTelemetry(now) == (0, 0L),
+            "unbound initial snapshot cannot populate a receiver");
+        Check(bootReceiver.ApplyBoundFrame(bound, now) &&
+              !bootReceiver.ApplyBoundFrame(bound, now),
+            "receiver-bound signed snapshot is accepted once");
+        var replacement = new PeerStateJournal("node-b", "node-a", secret, 2);
+        Check(replacement.ReceiverEpoch != bootReceiver.ReceiverEpoch &&
+              !replacement.ApplyBoundFrame(bound, now) &&
+              replacement.PeerTelemetry(now) == (0, 0L),
+            "receiver process replacement rejects captured old-boot snapshot even with empty journal");
+        var rebound = a.Snapshot(now) with { ReceiverEpoch = replacement.ReceiverEpoch };
+        Check(replacement.ApplyBoundFrame(rebound, now) &&
+              replacement.PeerTelemetry(now) == (1, 2L),
+            "new snapshot bound to replacement receiver recovers counters");
+        var signer = new PeerSignedMessages(secret);
+        var boundBytes = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(bound);
+        var signedAt = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        var (boundNonce, boundSignature) = signer.Sign("node-a", signedAt, boundBytes);
+        var reboundBytes = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(
+            bound with { ReceiverEpoch = replacement.ReceiverEpoch });
+        Check(!signer.Verify("node-a", "node-a", signedAt, boundNonce, boundSignature, reboundBytes, signedAt) &&
+              signer.Verify("node-a", "node-a", signedAt, boundNonce, boundSignature, boundBytes, signedAt),
+            "rewriting the receiver epoch invalidates the original HMAC");
         Check(System.Text.Json.JsonDocument.Parse(serializedFrame).RootElement
                   .GetProperty("ProtocolVersion").GetInt32() == PeerStateFrame.CurrentProtocolVersion,
             "peer snapshots carry an explicit protocol version");
