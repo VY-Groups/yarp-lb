@@ -635,6 +635,17 @@ out-of-bailiwick name servers never receive glue from the parent. Referral TTLs
 use the parent zone TTL. The current engine does not load or serve the child
 zone's data; configure its nameservers to serve that child authority.
 
+For a signed parent, an optional `DsRecords` array can publish the child zone's
+parent-side DS RRset. Each row contains `KeyTag`, `Algorithm`, `DigestType`
+(`2` for SHA-256 or `4` for SHA-384), and `DigestHex` with the exact digest
+length. The parent signer includes these DS records in the signed zone and,
+for DO-enabled referrals, returns the DS RRset with its parent signature.
+DO-enabled referrals to cuts without configured DS retain a signed NSEC/NSEC3
+proof of DS absence. DS configuration on an unsigned parent, unrecognized
+DNSKEY algorithms, unsupported digest types, malformed digests and duplicate
+records fail startup. Derive DS data from the child's DNSKEY and independently compare it before deployment;
+this feature does not push DS to a registrar or parent authority.
+
 Example fragment:
 
     "Delegations": [{
@@ -642,6 +653,10 @@ Example fragment:
       "NameServers": [
         {"Host": "ns1.child.example.test", "Address": "192.0.2.53"},
         {"Host": "ns.other.example.net", "Address": "198.51.100.53"}
+      ],
+      "DsRecords": [
+        {"KeyTag": 12345, "Algorithm": 13, "DigestType": 2,
+         "DigestHex": "<64 hexadecimal SHA-256 characters>"}
       ]
     }]
 

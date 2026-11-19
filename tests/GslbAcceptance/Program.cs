@@ -217,6 +217,14 @@ try
             throw new Exception("FAIL: authenticated per-agent request budget is not bounded");
         if (reports.IsHealthy("lab.example.test", "mumbai", 100))
             throw new Exception("FAIL: missing multi-vantage evidence admitted a target");
+        if (reports.IsHealthy("lab.example.test", "missing", 100) ||
+            reports.IsHealthy("unknown.example.test", "mumbai", 100))
+            throw new Exception("FAIL: unknown report target incorrectly admitted");
+        var wrongCase = Report("agent-1", 99, "healthy", 1000, 12, signing1) with
+            { SiteId = "MUMBAI" };
+        wrongCase = wrongCase with { Signature = AgentHealthReportContract.Sign(wrongCase, signing1) };
+        if (reports.TryAccept(wrongCase, client1, DateTimeOffset.FromUnixTimeSeconds(observed), 100))
+            throw new Exception("FAIL: signed case-alias site bypassed exact target identity");
         if (reports.TryAccept(Report("agent-1", 1, "healthy", 1000, 12, signing1,
                     observedAt: observed + 3), client1,
                 DateTimeOffset.FromUnixTimeSeconds(observed), 100))
@@ -230,6 +238,9 @@ try
                 DateTimeOffset.FromUnixTimeSeconds(observed), 100) ||
             !reports.IsHealthy("lab.example.test", "mumbai", 101))
             throw new Exception("FAIL: two fresh independent reports did not satisfy 2-of-3 policy");
+        if (!reports.IsHealthy("LAB.EXAMPLE.TEST.", "mumbai", 101) ||
+            reports.IsHealthy("lab.example.test", "MUMBAI", 101))
+            throw new Exception("FAIL: DNS canonicalization must not alias opaque site identity");
         var unknown = Report("agent-3", 1, "unknown", 0, null, signing3);
         if (!reports.TryAccept(unknown, client3, DateTimeOffset.FromUnixTimeSeconds(observed), 100) ||
             !reports.IsHealthy("lab.example.test", "mumbai", 101))
@@ -259,6 +270,11 @@ try
         if (recovered.TryAccept(Report("agent-2", 3, "healthy", 1000, 20, signing2), client2,
                 DateTimeOffset.FromUnixTimeSeconds(observed + 6), 103))
             throw new Exception("FAIL: stale observer report accepted");
+        if (recovered.IsHealthy("lab.example.test", "mumbai", 5_101))
+            throw new Exception("FAIL: evidence remained eligible beyond configured observation age");
+        if (recovered.TryAccept(Report("agent-2", 3, "healthy", 1000, 20, signing2), client2,
+                DateTimeOffset.FromUnixTimeSeconds(observed + 5), 105))
+            throw new Exception("FAIL: observation with no remaining freshness was accepted");
         if (!recovered.TryAccept(Report("agent-1", 3, "healthy", 1000, 14, signing1Rotated), client1Rotated,
                 DateTimeOffset.FromUnixTimeSeconds(observed), 104))
             throw new Exception("FAIL: overlapping client certificate and signing-key rotation rejected");
@@ -421,6 +437,24 @@ using (var geoDatabase = new GeoIpEcsDatabase(countryFixture, asnFixture, 0))
         throw new Exception("FAIL: conflicting country/ASN routes did not fail closed or single-source route failed");
 }
 Console.WriteLine("PASS: MaxMind MMDB route mapping, privacy-boundary fallback, and unknown-country handling");
+// Use the fixture's own build timestamp, not today's wall clock.
+using (var fixtureReader = new MaxMind.Db.Reader(asnFixture))
+{
+    var build = new DateTimeOffset(fixtureReader.Metadata.BuildDate.ToUniversalTime());
+    var geoClock = new GeoIpTestClock(build.AddHours(23));
+    using var expiring = new GeoIpEcsDatabase(null, asnFixture, 1, geoClock);
+    var expiringRoutes = expiring.CreateTable(null, [new GeoAsnRoute(15169, "mumbai")]);
+    var clientAddress = IPAddress.Parse("1.0.0.1");
+    if (expiringRoutes.RegionForEcs(clientAddress, 24) is null)
+        throw new Exception("FAIL: valid unexpired GeoIP database did not route");
+    geoClock.Advance(TimeSpan.FromHours(1));
+    if (expiringRoutes.RegionForEcs(clientAddress, 24) is not null)
+        throw new Exception("FAIL: long-running GeoIP table used expired data");
+    geoClock.RollbackWallClock(TimeSpan.FromHours(12));
+    if (expiringRoutes.RegionForEcs(clientAddress, 24) is not null)
+        throw new Exception("FAIL: wall-clock rollback resurrected expired GeoIP data");
+}
+Console.WriteLine("PASS: runtime GeoIP expiry and monotonic fallback");
 var staleGeoDatabaseRejected = false;
 try { using var _ = new GeoIpEcsDatabase(countryFixture, null, 1); }
 catch (InvalidDataException) { staleGeoDatabaseRejected = true; }
@@ -512,7 +546,10 @@ File.WriteAllText(configuration,JsonSerializer.Serialize(new {
  new {Name="delegated.integration.test",TtlSeconds=10,
       Sites=new[]{new {Address="127.0.0.21",HealthUrl="http://127.0.0.1:19711/ready",Weight=1,Priority=0,HealthCheckType="Http",TcpPort=0}},
       NameServers=new[]{new {Host="ns1.delegated.integration.test",Address="127.0.0.31"}},
-      Delegations=new[]{new {Name="child.delegated.integration.test",
+      Delegations=new[]{new {Name="deep.branch.delegated.integration.test",
+        NameServers=new[]{
+          new {Host="ns.deep.branch.delegated.integration.test",Address="127.0.0.62"}}},
+        new {Name="child.delegated.integration.test",
         NameServers=new[]{
           new {Host="ns.child.delegated.integration.test",Address="127.0.0.61"},
           new {Host="ns.other.example.net",Address="192.0.2.53"}}}},
@@ -658,6 +695,18 @@ try
          Dns16(delegatedDs, 6) == 0 && Dns16(delegatedDs, 8) == 1 &&
          DnsRecordTypes(delegatedDs, 1).SequenceEqual(new ushort[] { 6 }),
          "unsigned-parent DS absence returns authoritative negative SOA instead of referral");
+    foreach (var type in new ushort[] { 1, 28, 2 })
+    {
+        var (request, udp) = await QueryWire("branch.delegated.integration.test", type);
+        var tcp = await TcpQuery(request);
+        foreach (var reply in new[] { udp, tcp })
+            Must((Dns16(reply, 2) & 0x0400) != 0 && (Dns16(reply, 2) & 0xf) == 0 &&
+                 Dns16(reply, 6) == 0 && DnsRecordTypes(reply, 1).SequenceEqual(new ushort[] { 6 }),
+                "empty ancestor of a delegation is authoritative NODATA, not NXDOMAIN");
+    }
+    var deepReferral = await TcpQuery(DnsRequest("www.deep.branch.delegated.integration.test", 1));
+    Must((Dns16(deepReferral, 2) & 0x0400) == 0 && Dns16(deepReferral, 8) == 1 &&
+         Dns16(deepReferral, 10) == 1, "deep delegation still returns referral and glue");
     Console.WriteLine("PASS: DNS child-zone referrals, authority flags, in-bailiwick glue and DS absence");
     Console.WriteLine("PASS: loopback GSLB runtime metrics, transport counters and low-cardinality privacy contract");
     // The policy deliberately falls back to weighted while samples accumulate.
@@ -1491,3 +1540,14 @@ static async Task ProbeTcpServer(TcpListener server,CancellationToken ct)
 }
 
 sealed class ProbeState {public volatile int Healthy=1;public int DelayMs;}
+
+sealed class GeoIpTestClock(DateTimeOffset current) : TimeProvider
+{
+    private DateTimeOffset utc = current;
+    private long tick;
+    public override DateTimeOffset GetUtcNow() => utc;
+    public override long GetTimestamp() => tick;
+    public override long TimestampFrequency => TimeSpan.TicksPerSecond;
+    public void Advance(TimeSpan time) { utc += time; tick += time.Ticks; }
+    public void RollbackWallClock(TimeSpan time) => utc -= time;
+}

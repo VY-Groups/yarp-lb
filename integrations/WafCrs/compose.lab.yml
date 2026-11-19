@@ -21,6 +21,9 @@ services:
       DETECTION_PARANOIA: "1"
       ANOMALY_INBOUND: "5"
       MODSEC_AUDIT_ENGINE: "On"
+      # Native output exposes CRS rule IDs in a stable, grep-friendly form
+      # for the detection-only acceptance evidence below.
+      MODSEC_AUDIT_LOG_FORMAT: "Native"
     ports:
       - "127.0.0.1:18888:8080"
     depends_on:

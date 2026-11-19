@@ -57,7 +57,12 @@ internal static class AuthorityFenceFingerprint
                         NameServers = cut.NameServers.OrderBy(ns => ns.Host.TrimEnd('.'),
                                 StringComparer.OrdinalIgnoreCase).ThenBy(ns => ns.Address, StringComparer.Ordinal)
                             .Select(ns => new { Host = ns.Host.TrimEnd('.').ToLowerInvariant(), ns.Address })
-                            .ToArray()
+                            .ToArray(),
+                        DsRecords = (cut.DsRecords ?? []).OrderBy(ds => ds.KeyTag)
+                            .ThenBy(ds => ds.Algorithm).ThenBy(ds => ds.DigestType)
+                            .ThenBy(ds => ds.DigestHex.ToUpperInvariant(), StringComparer.Ordinal)
+                            .Select(ds => new { ds.KeyTag, ds.Algorithm, ds.DigestType,
+                                DigestHex = ds.DigestHex.ToUpperInvariant() }).ToArray()
                     }).ToArray(),
                 Sites = zone.Sites.OrderBy(site => site.AuthorityFenceSiteId, StringComparer.Ordinal)
                     .Select(site => new

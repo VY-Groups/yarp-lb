@@ -107,8 +107,16 @@ internal sealed class DnssecZoneSigner : IDisposable
         foreach (var delegation in delegations)
         {
             var cut = Canonical(delegation.Name);
-            unsignedDelegationOwners.Add(cut);
-            AddOwner(cut, 2);
+            // The ancestors between an apex and a configured delegation are
+            // existing empty non-terminals, even without any address RRsets.
+            for (var current = Parent(cut); current != this.apex; current = Parent(current))
+                AddOwner(current);
+            AddOwner(cut, delegation.DsRecords.Length == 0 ? [2] : [2, DsType]);
+            if (delegation.DsRecords.Length == 0)
+                unsignedDelegationOwners.Add(cut);
+            else
+                staticRecords.AddRange(delegation.DsRecords.Select(ds =>
+                    new DnsResource(cut, DsType, ttl, ds.Rdata)));
             foreach (var server in delegation.NameServers)
             {
                 var host = Canonical(server.Host);

@@ -122,6 +122,19 @@ internal static class AuthorityFenceTests
                     [delegatedZone with { Delegations = [delegation with {
                         NameServers = delegation.NameServers.Reverse().ToArray() }] }], null),
                 "equivalent delegation ordering has equal fingerprints");
+            var ds = new DnsDsRecordConfig(12345, 13, 2, new string('a', 64));
+            var signedDelegation = delegation with { DsRecords = [ds] };
+            var signedDelegatedZone = delegatedZone with { Delegations = [signedDelegation] };
+            var signedDigest = AuthorityFenceFingerprint.Compute([signedDelegatedZone], null);
+            Check(signedDigest != delegatedDigest &&
+                  signedDigest != AuthorityFenceFingerprint.Compute(
+                    [signedDelegatedZone with { Delegations = [signedDelegation with {
+                        DsRecords = [ds with { DigestHex = new string('B', 64) }] }] }], null),
+                "authority fingerprint binds signed child delegation DS records");
+            Check(signedDigest == AuthorityFenceFingerprint.Compute(
+                    [signedDelegatedZone with { Delegations = [signedDelegation with {
+                        DsRecords = [ds with { DigestHex = ds.DigestHex.ToUpperInvariant() }] }] }], null),
+                "case-equivalent DS digest hex has equal fingerprints");
             AgentReportServerConfig TrustPolicy(string vantage) => new("127.0.0.1", 16660, false,
                 certA, keyA, Path.Combine(root, "trust-replay.json"), 10, 10, 2, 100, [],
                 [new AgentTrust("observer-a", vantage, [pinA], [publicAPath]),

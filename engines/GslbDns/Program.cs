@@ -201,6 +201,28 @@ foreach(var zone in config.Zones)
         var cut = source.Name.TrimEnd('.').ToLowerInvariant();
         if (!delegationNames.Add(cut))
             throw new InvalidDataException("Duplicate delegation cut");
+        var dsRows = source.DsRecords ?? [];
+        if (dsRows.Length > 8 || (dsRows.Length > 0 && !hasDnssecKeyConfig))
+            throw new InvalidDataException("Delegation DS records require a signed parent zone and are limited to 8 per cut");
+        var dsRecords = new List<DnsDsRecord>();
+        var dsRdata = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var ds in dsRows)
+        {
+            var expectedHexLength = ds?.DigestType switch { 2 => 64, 4 => 96, _ => 0 };
+            if (ds is null || ds.Algorithm is not (1 or 3 or 5 or 6 or 7 or 8 or 10 or 12 or 13 or 14 or 15 or 16) ||
+                expectedHexLength == 0 ||
+                ds.DigestHex is null || ds.DigestHex.Length != expectedHexLength ||
+                !ds.DigestHex.All(Uri.IsHexDigit))
+                throw new InvalidDataException("Delegation DS requires a recognized DNSKEY algorithm and SHA-256 or SHA-384 digest of the exact length");
+            var rdata = new byte[4 + expectedHexLength / 2];
+            BinaryPrimitives.WriteUInt16BigEndian(rdata, ds.KeyTag);
+            rdata[2] = ds.Algorithm;
+            rdata[3] = ds.DigestType;
+            Convert.FromHexString(ds.DigestHex).CopyTo(rdata, 4);
+            if (!dsRdata.Add(Convert.ToHexString(rdata)))
+                throw new InvalidDataException("Duplicate delegation DS record");
+            dsRecords.Add(new DnsDsRecord(rdata));
+        }
         var childServers = new List<DnsNameServer>();
         var childServerNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var child in source.NameServers)
@@ -216,7 +238,7 @@ foreach(var zone in config.Zones)
                 throw new InvalidDataException("Duplicate delegated name-server hostname");
             childServers.Add(new DnsNameServer(host, childAddress));
         }
-        delegations.Add(new DnsDelegation(cut, childServers.ToArray()));
+        delegations.Add(new DnsDelegation(cut, childServers.ToArray(), dsRecords.ToArray()));
     }
     if (delegations.Any(cut => delegations.Any(other =>
             !ReferenceEquals(cut, other) && cut.Name.EndsWith("." + other.Name, StringComparison.OrdinalIgnoreCase))) ||
@@ -533,8 +555,13 @@ sealed record DnsNameServer(string Host,IPAddress Address)
 {
     public ushort RecordType => Address.AddressFamily == AddressFamily.InterNetwork ? (ushort)1 : (ushort)28;
 }
-sealed record DnsDelegationConfig(string Name,DnsNameServerConfig[] NameServers);
-sealed record DnsDelegation(string Name,DnsNameServer[] NameServers);
+sealed record DnsDelegationConfig(string Name,DnsNameServerConfig[] NameServers)
+{
+    public DnsDsRecordConfig[]? DsRecords { get; init; }
+}
+sealed record DnsDsRecordConfig(ushort KeyTag, byte Algorithm, byte DigestType, string DigestHex);
+sealed record DnsDsRecord(byte[] Rdata);
+sealed record DnsDelegation(string Name,DnsNameServer[] NameServers,DnsDsRecord[] DsRecords);
 sealed record DnsSite(string Address,string? HealthUrl,int Weight,int Priority=0)
 {
     public string[]? ValidatorUrls { get; init; }

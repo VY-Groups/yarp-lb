@@ -35,6 +35,8 @@ for host in s.get("hosts",[]):
             previous_end=last
             raw=json.loads((folder/w["artifact"]).read_text());summary=raw["summary"]
             duration=num(summary["total"]);rps=num(summary["requestsPerSec"])
+            if duration < s["window_seconds"]-.5 or duration > w["wall_seconds"]+1:
+                raise ValueError("aggregate duration inconsistent with mandatory window")
             body=num(summary["totalData"]);pct=raw["latencyPercentiles"]
             p99=num(pct["p99"])*1000;p95=num(pct["p95"])*1000;p50=num(pct["p50"])*1000
             if not(0<=p50<=p95<=p99):raise ValueError("invalid latency ordering")
@@ -71,7 +73,8 @@ for host in s.get("hosts",[]):
             by_part={x["name"]:x for x in parts}
             if len(by_part)!=len(parts) or set(by_part)!=set(by):
                 raise ValueError("raw oha manifest profile identities mismatch")
-            reconstructed_codes={};reconstructed_errors={};max_raw_p99=0
+            reconstructed_codes={};reconstructed_errors={}
+            max_raw_latency={key:0 for key in ("p50","p95","p99")}
             raw_count=0;raw_body=0
             for configured in s["response_mix"]:
                 name=configured["name"];entry=by_part[name];got=by[name]
@@ -93,21 +96,29 @@ for host in s.get("hosts",[]):
                     reconstructed_errors[reason]=reconstructed_errors.get(reason,0)+qty
                 bytes_sent=num(raw_summary["totalData"])
                 raw_duration=num(raw_summary["total"])
-                if raw_duration<=0 or not n or num(raw_summary["successRate"])!=1:
+                if (raw_duration < s["window_seconds"]-.5 or raw_duration > w["wall_seconds"]+1
+                    or not n or num(raw_summary["successRate"])!=1):
                     raise ValueError("invalid raw oha summary")
                 if n!=got["count"] or bytes_sent!=got["body_bytes"] or bytes_sent!=n*configured["response_bytes"]:
                     raise ValueError("aggregate disagrees with raw oha bodies/counts")
                 if abs(n/raw_duration-num(raw_summary["requestsPerSec"]))>max(1,n/raw_duration*.01):
                     raise ValueError("raw oha rate inconsistent")
-                max_raw_p99=max(max_raw_p99,num(raw["latencyPercentiles"]["p99"]))
+                raw_pct={key:num(raw["latencyPercentiles"][key]) for key in max_raw_latency}
+                if not 0<=raw_pct["p50"]<=raw_pct["p95"]<=raw_pct["p99"]:
+                    raise ValueError("invalid raw oha latency ordering")
+                for key,value in raw_pct.items():
+                    max_raw_latency[key]=max(max_raw_latency[key],value)
                 raw_count+=n;raw_body+=bytes_sent
             if (reconstructed_codes!=codes or reconstructed_errors!=faults or
                 raw_count!=count or raw_body!=body or
-                abs(max_raw_p99-p99/1000)>1e-9):
-                raise ValueError("aggregate disagrees with raw oha counters/p99")
+                any(abs(max_raw_latency[key]-num(pct[key]))>1e-9 for key in max_raw_latency)):
+                raise ValueError("aggregate disagrees with raw oha counters/latency")
             if abs(count/duration-rps)>max(1,rps*.01):
                 raise ValueError("aggregate rate inconsistent with raw oha counts")
-            rows.append({"start":first,"end":last,"rps":rps,"body_gbps":body*8/(duration*1e9),"p99_ms":p99,"errors":bad})
+            # Rates must cover the full measured window, not a shorter
+            # self-reported generator interval.
+            rate_duration=max(duration,w["wall_seconds"])
+            rows.append({"start":first,"end":last,"rps":count/rate_duration,"body_gbps":body*8/(rate_duration*1e9),"p99_ms":p99,"errors":bad})
         all_hosts[host]=rows
     except (OSError,KeyError,ValueError,TypeError,ZeroDivisionError) as e:errors.append(f"{host}: missing/unusable generator evidence {e}")
 if len(all_hosts)==len(s.get("hosts",[])) and all_hosts:
@@ -130,9 +141,21 @@ try:
     node=s["isolated_gateway"]
     if any(x["gateway_node"]!=node for x in rows):raise ValueError("wrong embedded gateway identity")
     if len({(x["process_id"],x["process_start_utc"]) for x in rows})!=1:raise ValueError("process restarted")
-    if any("yarp_control_gc_collections_total" not in x["gc_prometheus_raw"] or "yarp_control_gc_heap_bytes" not in x["gc_prometheus_raw"] for x in rows):
-        raise ValueError("missing real GC heap/Gen2 metrics")
+    # Metric names in HELP comments or malformed samples are not evidence.
+    # The shipping exporter emits integer heap bytes and generation counters.
+    gc_gen2=[]
+    for row in rows:
+        raw=row["gc_prometheus_raw"]
+        heaps=re.findall(r"^yarp_control_gc_heap_bytes ([0-9]+)\r?$",raw,re.M)
+        gen2=re.findall(r'^yarp_control_gc_collections_total\{generation="2"\} ([0-9]+)\r?$',raw,re.M)
+        if len(heaps)!=1 or len(gen2)!=1:
+            raise ValueError("missing/invalid/duplicate real GC heap/Gen2 metrics")
+        gc_gen2.append(int(gen2[0]))
+    if any(b<a for a,b in zip(gc_gen2,gc_gen2[1:])):
+        errors.append("counter decreased/reset: GC generation 2 collections")
     times=[stamp(x["timestamp_utc"]) for x in rows]
+    if int(rows[0]["process_id"])<=0 or stamp(rows[0]["process_start_utc"])>times[0]:
+        raise ValueError("invalid process identity/start time")
     if start and (times[0]>start+10 or times[-1]<end-10):raise ValueError("missing telemetry time coverage")
     if any(b-a<=0 or b-a>15 for a,b in zip(times,times[1:])):raise ValueError("telemetry out of order/gaps")
     for key in ("rx_dropped","tx_dropped","process_cpu_seconds"):

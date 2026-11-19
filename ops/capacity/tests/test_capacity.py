@@ -107,6 +107,22 @@ class CapacityEvidence(unittest.TestCase):
         self.assertEqual(d["decision"],"NO-GO")
         self.assertIn("NIC drops increased: rx_dropped",d["error_reasons"])
         self.assertIn("counter decreased/reset: rx_dropped",d["error_reasons"])
+    def test_gc_metric_names_without_real_samples_fail(self):
+        for raw in ('# HELP yarp_control_gc_heap_bytes heap\n# HELP yarp_control_gc_collections_total collections',
+                    'yarp_control_gc_heap_bytes NaN\nyarp_control_gc_collections_total{generation="2"} 0',
+                    'yarp_control_gc_heap_bytes 1000\nyarp_control_gc_collections_total{generation="1"} 0',
+                    'yarp_control_gc_heap_bytes 1000\nyarp_control_gc_heap_bytes 2000\nyarp_control_gc_collections_total{generation="2"} 0'):
+            with self.subTest(raw=raw):
+                self.mutate_telemetry("gc_prometheus_raw",100,raw)
+                r,d=self.report()
+                self.assertNotEqual(r.returncode,0)
+                self.assertIn("missing/invalid/duplicate real GC",str(d["error_reasons"]))
+    def test_gc_collection_counter_reset_fails(self):
+        self.mutate_telemetry("gc_prometheus_raw",100,
+            'yarp_control_gc_heap_bytes 2000000\nyarp_control_gc_collections_total{generation="2"} 3')
+        r,d=self.report()
+        self.assertNotEqual(r.returncode,0)
+        self.assertIn("counter decreased/reset: GC generation 2 collections",d["error_reasons"])
     def test_cpu_counter_rollback_fails(self):
         self.mutate_telemetry("process_cpu_seconds", 100, 0)
         r,d=self.report()
@@ -141,6 +157,24 @@ class CapacityEvidence(unittest.TestCase):
         doc["perProfile"][0]["body_bytes"]-=1;f.write_text(json.dumps(doc))
         r,d=self.report();self.assertNotEqual(r.returncode,0)
         self.assertIn("mixed body/count",str(d["error_reasons"]))
+    def test_short_raw_profile_cannot_claim_full_window(self):
+        f=self.p/"results"/"h1"/"window-007-profile-small.json"
+        doc=json.loads(f.read_text())
+        doc["summary"]["total"]=30
+        doc["summary"]["requestsPerSec"]=800
+        f.write_text(json.dumps(doc))
+        r,d=self.report()
+        self.assertNotEqual(r.returncode,0)
+        self.assertIn("invalid raw oha summary",str(d["error_reasons"]))
+    def test_short_aggregate_cannot_inflate_rates(self):
+        f=self.p/"results"/"h1"/"window-007.json"
+        doc=json.loads(f.read_text())
+        doc["summary"]["total"]=30
+        doc["summary"]["requestsPerSec"]=1600
+        f.write_text(json.dumps(doc))
+        r,d=self.report()
+        self.assertNotEqual(r.returncode,0)
+        self.assertIn("aggregate duration inconsistent",str(d["error_reasons"]))
     def test_missing_raw_subprofile_fails_closed(self):
         (self.p/"results"/"h1"/"window-007-profile-small.json").unlink()
         r,d=self.report();self.assertNotEqual(r.returncode,0)
@@ -151,6 +185,29 @@ class CapacityEvidence(unittest.TestCase):
         f.write_text(json.dumps(doc))
         r,d=self.report();self.assertNotEqual(r.returncode,0)
         self.assertIn("aggregate disagrees with raw oha",str(d["error_reasons"]))
+    def test_invalid_raw_latency_cannot_be_hidden_by_another_profile(self):
+        f=self.p/"results"/"h1"/"window-009-profile-small.json"
+        original=json.loads(f.read_text())
+        for invalid in ({"p50":-0.01,"p95":0.025,"p99":0.05},
+                        {"p50":0.04,"p95":0.025,"p99":0.05},
+                        {"p50":0.01,"p95":0.025,"p99":-0.01}):
+            with self.subTest(latency=invalid):
+                doc=dict(original,latencyPercentiles=invalid)
+                f.write_text(json.dumps(doc))
+                r,d=self.report()
+                self.assertNotEqual(r.returncode,0)
+                self.assertIn("invalid raw oha latency ordering",str(d["error_reasons"]))
+    def test_aggregate_p50_p95_must_match_raw_profiles(self):
+        f=self.p/"results"/"h1"/"window-008.json"
+        original=json.loads(f.read_text())
+        for field,value in (("p50",0.005),("p95",0.02)):
+            with self.subTest(percentile=field):
+                doc=dict(original,latencyPercentiles=dict(original["latencyPercentiles"]))
+                doc["latencyPercentiles"][field]=value
+                f.write_text(json.dumps(doc))
+                r,d=self.report()
+                self.assertNotEqual(r.returncode,0)
+                self.assertIn("aggregate disagrees with raw oha counters/latency",str(d["error_reasons"]))
     def test_raw_http_failure_cannot_be_hidden_by_aggregate(self):
         f=self.p/"results"/"h1"/"window-009-profile-small.json"
         doc=json.loads(f.read_text())
