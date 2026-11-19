@@ -5,6 +5,7 @@ using System.Net.Http;
 using System.Net.Quic;
 using System.Net.Security;
 using System.Net.Sockets;
+using System.Net.WebSockets;
 using System.Security.Authentication;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
@@ -52,12 +53,44 @@ internal static class DestinationAdmissionHttp3Acceptance
 
         var backendReady = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var backendAttempts = new ConcurrentQueue<string>();
+        var backendWebSocketAttempts = new ConcurrentQueue<string>();
+        var backendWebSocketsInFlight = 0;
         var backendInFlight = 0;
         var backendPeak = 0;
         var backendBuilder = WebApplication.CreateBuilder();
         backendBuilder.WebHost.ConfigureKestrel(options => options.Listen(IPAddress.Loopback, 0,
             listen => listen.Protocols = HttpProtocols.Http1));
         await using var backend = backendBuilder.Build();
+        backend.UseWebSockets();
+        backend.Map("/ws", async context =>
+        {
+            if (!context.WebSockets.IsWebSocketRequest)
+            {
+                context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                return;
+            }
+            var id = context.Request.Query["id"].ToString();
+            using var socket = await context.WebSockets.AcceptWebSocketAsync();
+            backendWebSocketAttempts.Enqueue(id);
+            Interlocked.Increment(ref backendWebSocketsInFlight);
+            var buffer = new byte[256];
+            try
+            {
+                while (true)
+                {
+                    var message = await socket.ReceiveAsync(new ArraySegment<byte>(buffer), context.RequestAborted);
+                    if (message.MessageType == WebSocketMessageType.Close)
+                    {
+                        await socket.CloseAsync(message.CloseStatus ?? WebSocketCloseStatus.NormalClosure,
+                            message.CloseStatusDescription, CancellationToken.None);
+                        break;
+                    }
+                    await socket.SendAsync(buffer.AsMemory(0, message.Count), message.MessageType,
+                        message.EndOfMessage, context.RequestAborted);
+                }
+            }
+            finally { Interlocked.Decrement(ref backendWebSocketsInFlight); }
+        });
         backend.MapPost("/slow", async (HttpContext context) =>
         {
             var id = context.Request.Query["id"].ToString();
@@ -324,6 +357,70 @@ internal static class DestinationAdmissionHttp3Acceptance
                     new[] { "active", "after-cancel", "cancel-active", "queued" }),
                 "rejected and canceled non-idempotent HTTP/3 POSTs never reach or replay to an upstream backend");
             Console.WriteLine("PASS: real HTTP/3 request lifecycle exercised GatewayCore per-destination admission");
+
+            async Task<ClientWebSocket> ConnectWebSocket(string id)
+            {
+                var socket = new ClientWebSocket();
+                socket.Options.RemoteCertificateValidationCallback = (_, _, _, _) => true;
+                socket.Options.SetRequestHeader("X-Acceptance-Request", id);
+                using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(12));
+                try
+                {
+                    await socket.ConnectAsync(new Uri($"wss://127.0.0.1:{tlsPort}/admit/ws?id={Uri.EscapeDataString(id)}"), timeout.Token);
+                    return socket;
+                }
+                catch
+                {
+                    socket.Dispose();
+                    throw;
+                }
+            }
+
+            using var activeWebSocket = await ConnectWebSocket("ws-active");
+            using var queuedWebSocketTaskTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(12));
+            var queuedWebSocketTask = ConnectWebSocket("ws-queued");
+            await Task.Delay(150);
+            Check(!queuedWebSocketTask.IsCompleted && backendWebSocketAttempts.Count == 1 &&
+                Volatile.Read(ref backendWebSocketsInFlight) == 1,
+                "an open WebSocket holds its destination slot while a second handshake queues");
+
+            using var overflowRequest = new HttpRequestMessage(HttpMethod.Get,
+                $"https://127.0.0.1:{tlsPort}/admit/ws?id=ws-overflow")
+            { Version = HttpVersion.Version11, VersionPolicy = HttpVersionPolicy.RequestVersionExact };
+            overflowRequest.Headers.TryAddWithoutValidation("Connection", "Upgrade");
+            overflowRequest.Headers.TryAddWithoutValidation("Upgrade", "websocket");
+            overflowRequest.Headers.TryAddWithoutValidation("Sec-WebSocket-Version", "13");
+            overflowRequest.Headers.TryAddWithoutValidation("Sec-WebSocket-Key", Convert.ToBase64String(RandomNumberGenerator.GetBytes(16)));
+            using var overflowTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            using var overflowResponse = await client.SendAsync(overflowRequest,
+                HttpCompletionOption.ResponseHeadersRead, overflowTimeout.Token);
+            Check(overflowResponse.StatusCode == HttpStatusCode.ServiceUnavailable &&
+                overflowResponse.Headers.TryGetValues("X-GatewayCore-Rejection", out var wsRejection) &&
+                wsRejection.Single() == "destination_queue_full",
+                "WebSocket queue saturation returns local 503 without opening an upstream session");
+            Check(backendWebSocketAttempts.Count == 1,
+                "overloaded WebSocket handshake never reaches or replays to the backend");
+
+            using (var activeCloseTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(5)))
+                await activeWebSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "release admission slot", activeCloseTimeout.Token);
+            using var queuedWebSocket = await queuedWebSocketTask.WaitAsync(queuedWebSocketTaskTimeout.Token);
+            Check(queuedWebSocket.State == WebSocketState.Open && backendWebSocketAttempts.Count == 2,
+                "closing the active WebSocket releases its permit and admits the queued handshake");
+            var echo = System.Text.Encoding.UTF8.GetBytes("websocket-admitted");
+            using (var echoTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(5)))
+            {
+                await queuedWebSocket.SendAsync(echo, WebSocketMessageType.Text, true, echoTimeout.Token);
+                var echoed = new byte[64];
+                var result = await queuedWebSocket.ReceiveAsync(new ArraySegment<byte>(echoed), echoTimeout.Token);
+                Check(result.MessageType == WebSocketMessageType.Text &&
+                    System.Text.Encoding.UTF8.GetString(echoed, 0, result.Count) == "websocket-admitted",
+                    "admitted WebSocket keeps the permit for bidirectional streaming");
+                await queuedWebSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "complete", echoTimeout.Token);
+            }
+            Check(Volatile.Read(ref backendWebSocketsInFlight) == 0 &&
+                backendWebSocketAttempts.Order(StringComparer.Ordinal).SequenceEqual(new[] { "ws-active", "ws-queued" }),
+                "WebSocket drain releases all destination permits without admitting the overflow session");
+            Console.WriteLine("PASS: real WebSocket session lifecycle exercised GatewayCore per-destination admission");
         }
         finally
         {
