@@ -199,6 +199,8 @@ public sealed class GatewayListenerIsolation : IDisposable
         ctx.Connection.LocalIpAddress?.Equals(local) == true && ctx.Connection.LocalPort == port;
     public bool OnData(HttpContext ctx) => OnSocket(ctx, _traffic, Config.TrafficHttpPort) ||
                                             OnSocket(ctx, _traffic, Config.TrafficHttpsPort);
+    public bool OnTrafficHttp(HttpContext ctx) =>
+        AcmeHttp01Endpoint.IsPublicTrafficHttpListener(ctx, _traffic, Config.TrafficHttpPort);
     private bool HasApprovedClient(HttpContext ctx)
     {
         var remote = ctx.Connection.RemoteIpAddress;

@@ -39,5 +39,6 @@ var localAuthority = AcmeTargetPolicy.Validate("https://127.0.0.1:14000/director
 if (!localAuthority.Allowed)
     throw new Exception("explicit loopback test authority should be accepted for isolated fixture use");
 Console.WriteLine("PASS: ACME target preflight rejects unsafe authority, hostname and HTTP-01 inputs");
+await AcmeHttp01Acceptance.RunAsync();
 await TrafficHttp3Acceptance.RunAsync();
 await TrafficCertificateRotationAcceptance.RunAsync();

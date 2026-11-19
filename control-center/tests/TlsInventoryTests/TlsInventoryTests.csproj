@@ -4,6 +4,7 @@
   <ItemGroup><FrameworkReference Include="Microsoft.AspNetCore.App" />
     <Compile Include="../../TlsInventory.cs" Link="TlsInventory.cs" />
     <Compile Include="../../AcmeTargetPolicy.cs" Link="AcmeTargetPolicy.cs" />
+    <Compile Include="../../AcmeHttp01ChallengeStore.cs" Link="AcmeHttp01ChallengeStore.cs" />
     <Compile Include="../../TrafficHttpProtocols.cs" Link="TrafficHttpProtocols.cs" />
     <Compile Include="../../TrafficCertificateRotation.cs" Link="TrafficCertificateRotation.cs" /></ItemGroup>
 </Project>
