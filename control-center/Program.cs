@@ -14,6 +14,8 @@ using Yarp.ReverseProxy.Model;
 using Yarp.ReverseProxy.Health;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Cookies;
+using Microsoft.AspNetCore.Authentication.OpenIdConnect;
+using Microsoft.Extensions.Options;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.RateLimiting;
@@ -134,7 +136,8 @@ var adminAuthentication = builder.Services.AddAuthentication(CookieAuthenticatio
                 if (oidcPolicy is not null)
                 {
                     var allowed = active.Provider == "Local" && (oidcSubject is not null
-                        ? oidcPolicy.SessionValid(principal, active.Username, active.Role, DateTimeOffset.UtcNow)
+                        ? oidcPolicy.SessionValid(principal, active.Username, active.Role, DateTimeOffset.UtcNow) &&
+                          EnterpriseOidcPolicy.AfterRevocation(principal, active.OidcRevokedBefore)
                         : active.Role == "Administrator" && oidcPolicy.IsBreakGlass(active.Username) &&
                           principal.FindFirst(EnterpriseOidcPolicy.RecoveryClaim)?.Value == oidcPolicy.Fingerprint);
                     if (!allowed)
@@ -170,6 +173,8 @@ builder.Services.AddRateLimiter(options =>
         cfg.QueueLimit = proxyBounds.QueueLimit;
         cfg.QueueProcessingOrder = QueueProcessingOrder.OldestFirst;
     });
+    options.AddFixedWindowLimiter("oidc-logout", cfg =>
+    { cfg.PermitLimit = 32; cfg.Window = TimeSpan.FromMinutes(1); cfg.QueueLimit = 0; });
     options.AddFixedWindowLimiter("mailtest", cfg => { cfg.PermitLimit = 3; cfg.Window = TimeSpan.FromMinutes(5); cfg.QueueLimit = 0; });
     options.AddFixedWindowLimiter("ldaptest", cfg => { cfg.PermitLimit = 4; cfg.Window = TimeSpan.FromMinutes(5); cfg.QueueLimit = 0; });
     options.AddFixedWindowLimiter("login", cfg =>
@@ -360,7 +365,15 @@ app.Use(async (ctx, next) =>
                 (!Uri.TryCreate(origin, UriKind.Absolute, out var o) ||
                  !string.Equals(o.Authority, ctx.Request.Host.Value, StringComparison.OrdinalIgnoreCase)))
             { ctx.Response.StatusCode = 403; return; }
-            if (!ctx.Request.HasJsonContentType()) { ctx.Response.StatusCode = 415; return; }
+            // The only non-JSON management mutation is an independently
+            // signed IdP logout POST. It still requires the management listener.
+            if (ctx.Request.Method == "POST" && ctx.Request.Path == EnterpriseOidcLogout.Path && oidcPolicy is not null)
+            {
+                if (ctx.Request.ContentLength is not long size || size < 1 || size > EnterpriseOidcLogout.MaxForm ||
+                    !string.Equals(ctx.Request.ContentType?.Split(';')[0].Trim(), "application/x-www-form-urlencoded", StringComparison.OrdinalIgnoreCase))
+                { ctx.Response.StatusCode = 400; return; }
+            }
+            else if (!ctx.Request.HasJsonContentType()) { ctx.Response.StatusCode = 415; return; }
         }
     }
     await next();
@@ -735,9 +748,19 @@ List<AdminUser> ReadUsers() => File.Exists(usersPath)
     : new();
 void WriteUsers(List<AdminUser> users)
 {
-    var tmp = usersPath + ".tmp";
-    File.WriteAllText(tmp, JsonSerializer.Serialize(users));
-    File.Move(tmp, usersPath, true);
+    var tmp = usersPath + "." + Guid.NewGuid().ToString("N") + ".tmp";
+    try
+    {
+        var options = new FileStreamOptions { Mode = FileMode.CreateNew, Access = FileAccess.Write, Share = FileShare.None };
+        if (!OperatingSystem.IsWindows()) options.UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
+        using (var file = new FileStream(tmp, options))
+        {
+            file.Write(JsonSerializer.SerializeToUtf8Bytes(users));
+            file.Flush(flushToDisk: true);
+        }
+        File.Move(tmp, usersPath, true);
+    }
+    finally { if (File.Exists(tmp)) File.Delete(tmp); }
 }
 Task Audit(string actor, string action, object? details = null) =>
     localAudit.AppendAsync(actor, action, details);
@@ -808,6 +831,40 @@ app.MapGet("/admin/oidc/start", (HttpContext ctx) =>
     return Results.Challenge(new AuthenticationProperties { RedirectUri = "/dashboard" },
         [EnterpriseOidcPolicy.Scheme]);
 }).RequireRateLimiting("login");
+app.MapPost(EnterpriseOidcLogout.Path, async (HttpContext ctx, IOptionsMonitor<OpenIdConnectOptions> options) =>
+{
+    if (oidcPolicy is null) return Results.NotFound();
+    IFormCollection form;
+    try { form = await ctx.Request.ReadFormAsync(ctx.RequestAborted); }
+    catch (Exception ex) when (ex is InvalidDataException or IOException or OperationCanceledException)
+    { return Results.BadRequest(); }
+    if (form.Count != 1 || !form.TryGetValue("logout_token", out var tokens) || tokens.Count != 1)
+        return Results.BadRequest();
+    var notice = await EnterpriseOidcLogout.ValidateAsync(tokens[0] ?? "", oidcPolicy,
+        options.Get(EnterpriseOidcPolicy.Scheme), ctx.RequestAborted);
+    if (notice is null) return Results.BadRequest();
+    var row = oidcPolicy.Resolve(notice.Subject)!;
+    await loginGate.WaitAsync(ctx.RequestAborted);
+    try
+    {
+        var users = ReadUsers();
+        var user = users.SingleOrDefault(u => u.Username.Equals(row.Username, StringComparison.OrdinalIgnoreCase));
+        if (user is null || user.Provider != "Local") return Results.Ok();
+        // Persist a monotonic subject-wide cutoff. Retrying an older/equal
+        // notice cannot revoke a newer authentication or rotate its stamp.
+        if (notice.IssuedAt > user.OidcRevokedBefore)
+        {
+            users[users.IndexOf(user)] = user with { OidcRevokedBefore = notice.IssuedAt,
+                SecurityStamp = Convert.ToHexString(RandomNumberGenerator.GetBytes(24)) };
+            WriteUsers(users);
+            await Audit(user.Username, "OIDC_BACKCHANNEL_LOGOUT", new { revokedBefore = notice.IssuedAt });
+        }
+        return Results.Ok();
+    }
+    catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or InvalidOperationException)
+    { return Results.StatusCode(503); }
+    finally { loginGate.Release(); }
+}).RequireRateLimiting("oidc-logout");
 app.MapGet("/admin/oidc/error", () => Results.Text(
     "Enterprise sign-in was denied. Check your identity provider, account mapping, MFA policy or contact an administrator. Return to /dashboard.", statusCode: 403));
 
@@ -961,7 +1018,7 @@ app.MapPost("/admin/api/users/{username}/password", async (HttpContext ctx, stri
         var user = users.FirstOrDefault(x => x.Username.Equals(username, StringComparison.OrdinalIgnoreCase));
         if (user is null) return Results.NotFound();
         if (user.Provider == "AD") return Results.BadRequest(new { error = "Reset directory passwords in Active Directory, not this console" });
-        var updated = NewUser(user.Username, user.Role, input.Password, user.Email) with { Enabled = user.Enabled };
+        var updated = NewUser(user.Username, user.Role, input.Password, user.Email) with { Enabled = user.Enabled, OidcRevokedBefore = user.OidcRevokedBefore };
         users[users.IndexOf(user)] = updated;
         WriteUsers(users);
         await Audit(Actor(ctx), "PASSWORD_RESET", new { username });
@@ -2168,7 +2225,7 @@ record UserInput(string Username, string Role, string Password, string? Email);
 record PasswordInput(string Password);
 record ChangeDecision(string Decision, string? Reason);
 record InventoryInput(string Id, string Name, string Type, string Address, string Notes);
-record AdminUser(string Username, string Role, string Salt, string Hash, string? Email = null, bool Enabled = true, string SecurityStamp = "", string Provider = "Local", string DistinguishedName = "");
+record AdminUser(string Username, string Role, string Salt, string Hash, string? Email = null, bool Enabled = true, string SecurityStamp = "", string Provider = "Local", string DistinguishedName = "", long OidcRevokedBefore = 0);
 
 record FleetGateway(string Id, string Url, string ClientCertificateThumbprint);
 
