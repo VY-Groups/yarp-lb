@@ -181,6 +181,25 @@ try
     catch (InvalidDataException) { duplicateVantageRejected = true; }
     if (!duplicateVantageRejected)
         throw new Exception("FAIL: two agent identities from the same declared vantage group were counted as independent votes");
+    // Different paths, TLS certificates and vantage names must not make a
+    // shared signing key count as independent cryptographic identities.
+    var duplicateKeyPath = Path.Combine(reportRoot, "duplicate-signing-key.pem");
+    File.WriteAllText(duplicateKeyPath, signing1Rotated.ExportSubjectPublicKeyInfoPem());
+    var sharedSigningKeyRejected = false;
+    try
+    {
+        using var invalidReports = new AgentHealthReportStore(
+            [agents[0], agents[1] with { SigningPublicKeyPems = [key2Path, duplicateKeyPath] }],
+            [new AgentReportTarget("lab.example.test", "shared-signing-key", ["agent-1", "agent-2"], 2)],
+            Path.Combine(reportRoot, "shared-signing-key-state.json"), 10, 5, 2);
+    }
+    catch (InvalidDataException ex) when (ex.Message.Contains("signing keys must identify exactly one agent", StringComparison.Ordinal))
+    {
+        sharedSigningKeyRejected = true;
+    }
+    if (!sharedSigningKeyRejected)
+        throw new Exception("FAIL: a signing credential shared across independent agents was accepted");
+    Console.WriteLine("PASS: signing credential reuse across observer identities rejected, including rotation overlap");
     var observed = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
     AgentHealthReport Report(string agent, long sequence, string verdict, int confidence, int? latency,
         ECDsa signer, long? observedAt = null) {
