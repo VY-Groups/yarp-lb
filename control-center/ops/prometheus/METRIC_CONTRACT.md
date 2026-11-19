@@ -114,6 +114,18 @@ single unlabeled gauge for enabled policies omitted when the admission registry
 is full; those destinations fail closed rather than forwarding without their
 configured limit.
 
+`YarpDestinationAdmissionRejected` and `YarpDestinationAdmissionQueueTimeout`
+alert when either local counter increases in a five-minute window. These are
+actual local 503 outcomes, not generic upstream 502/503/504 responses or a
+queue-depth threshold. They retain only the scrape labels and the existing
+bounded configured `destination` identifier; they include no request path,
+client identity, or backend address. A queue that is occupied but still
+servicing requests does not fire these alerts. Rule syntax, firing labels,
+annotations, and the no-event case are covered by the synthetic promtool test.
+Successful rule tests validate expression behavior only; they do not establish
+that a deployed Alertmanager has an approved receiver or that notifications
+reach an operator.
+
 ### Explicit external-exporter series
 - `up`
 - `probe_success`

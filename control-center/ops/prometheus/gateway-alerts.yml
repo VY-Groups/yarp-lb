@@ -41,6 +41,22 @@ groups:
         expr: yarp_control_destination_active_health{job="gatewaycore-gateway"} == 0
         for: 2m
         labels: {severity: warning}
+      - alert: YarpDestinationAdmissionRejected
+        expr: increase(yarp_control_destination_admission_rejected_total{job="gatewaycore-gateway"}[5m]) > 0
+        for: 0m
+        labels: {severity: critical}
+        annotations:
+          summary: "GatewayCore rejected requests at a full destination queue"
+          description: "Gateway {{ $labels.instance }} rejected one or more requests for {{ $labels.destination }} in the last five minutes. Check destination health, service capacity, and its configured admission limits."
+          runbook: "control-center/docs/L7_LIFECYCLE_OBSERVABILITY.md"
+      - alert: YarpDestinationAdmissionQueueTimeout
+        expr: increase(yarp_control_destination_admission_queue_timeouts_total{job="gatewaycore-gateway"}[5m]) > 0
+        for: 0m
+        labels: {severity: critical}
+        annotations:
+          summary: "GatewayCore destination queue wait timed out"
+          description: "Gateway {{ $labels.instance }} timed out one or more queued requests for {{ $labels.destination }} in the last five minutes. Check destination health, service capacity, and its configured queue timeout."
+          runbook: "control-center/docs/L7_LIFECYCLE_OBSERVABILITY.md"
       - alert: YarpTLSExpiringWithin14Days
         expr: (probe_ssl_earliest_cert_expiry{job="gatewaycore-tls-probe"} - time()) < 1209600
         for: 5m

@@ -106,6 +106,42 @@ tests:
           - exp_labels: {job: gatewaycore-gateway,instance: gateway-01,destination: "cluster-a/node-b",severity: warning}
   - interval: 1m
     input_series:
+      - series: 'yarp_control_destination_admission_rejected_total{job="gatewaycore-gateway",instance="gateway-01",destination="cluster-a/backend-1"}'
+        values: '0 0 1 1 1 1 1'
+      - series: 'yarp_control_destination_admission_queue_timeouts_total{job="gatewaycore-gateway",instance="gateway-01",destination="cluster-a/backend-2"}'
+        values: '0 0 0 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: YarpDestinationAdmissionRejected
+        exp_alerts:
+          - exp_labels: {job: gatewaycore-gateway,instance: gateway-01,destination: "cluster-a/backend-1",severity: critical}
+            exp_annotations:
+              summary: "GatewayCore rejected requests at a full destination queue"
+              description: "Gateway gateway-01 rejected one or more requests for cluster-a/backend-1 in the last five minutes. Check destination health, service capacity, and its configured admission limits."
+              runbook: "control-center/docs/L7_LIFECYCLE_OBSERVABILITY.md"
+      - eval_time: 5m
+        alertname: YarpDestinationAdmissionQueueTimeout
+        exp_alerts:
+          - exp_labels: {job: gatewaycore-gateway,instance: gateway-01,destination: "cluster-a/backend-2",severity: critical}
+            exp_annotations:
+              summary: "GatewayCore destination queue wait timed out"
+              description: "Gateway gateway-01 timed out one or more queued requests for cluster-a/backend-2 in the last five minutes. Check destination health, service capacity, and its configured queue timeout."
+              runbook: "control-center/docs/L7_LIFECYCLE_OBSERVABILITY.md"
+  - interval: 1m
+    input_series:
+      - series: 'yarp_control_destination_admission_rejected_total{job="gatewaycore-gateway",instance="gateway-01",destination="cluster-a/backend-1"}'
+        values: '0 0 0 0 0 0'
+      - series: 'yarp_control_destination_admission_queue_timeouts_total{job="gatewaycore-gateway",instance="gateway-01",destination="cluster-a/backend-1"}'
+        values: '0 0 0 0 0 0'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: YarpDestinationAdmissionRejected
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: YarpDestinationAdmissionQueueTimeout
+        exp_alerts: []
+  - interval: 1m
+    input_series:
       - series: 'probe_success{job="gatewaycore-tls-probe",instance="gateway-01"}'
         values: '0 0 0 0'
     alert_rule_test:
