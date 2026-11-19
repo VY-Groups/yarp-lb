@@ -155,7 +155,11 @@ internal sealed class AgentHealthReportStore : IDisposable
         if (report.ObservedAtUnixSeconds > nowSeconds + maxClockSkewSeconds ||
             nowSeconds - report.ObservedAtUnixSeconds > maxAgeSeconds ||
             report.ExpiresAtUnixSeconds <= nowSeconds) return false;
-        var remainingSeconds = Math.Min(report.ExpiresAtUnixSeconds - nowSeconds, maxTtlSeconds);
+        // Admission age is also a live-evidence freshness bound. A delayed
+        // observation must not remain eligible until a longer advertised TTL.
+        var remainingSeconds = Math.Min(
+            Math.Min(report.ExpiresAtUnixSeconds - nowSeconds, maxTtlSeconds),
+            Math.Min(report.ObservedAtUnixSeconds + maxAgeSeconds - nowSeconds, maxAgeSeconds));
         if (remainingSeconds <= 0) return false;
 
         if (!IsAuthorizedCertificate(clientCertificate, report.AgentId)) return false;
