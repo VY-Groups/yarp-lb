@@ -5,8 +5,9 @@
 This update supersedes the historical 2026-11-16 snapshot below where they
 conflict. Live GitHub was checked after PR #202 merged:
 
-- Current `origin/main`: `87adb8ba62c65f76bdb1492822226b1107944771`. All seven
-  Actions workflows triggered by this merge completed successfully. There are
+- Product-code baseline before this handoff-only update:
+  `87adb8ba62c65f76bdb1492822226b1107944771`. All seven Actions workflows
+  triggered by its merge completed successfully. There are
   **zero open PRs** and **13 open issues**: #34, #36, #37, #38, #48, #49, #50,
   #51, #52, #53, #100, #101 and #109.
 - Recent merged increments include #184 (opt-in HTTP/3), #188 (two-authority
