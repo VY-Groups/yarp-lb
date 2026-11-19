@@ -259,6 +259,11 @@ try
         if (recovered.TryAccept(Report("agent-2", 3, "healthy", 1000, 20, signing2), client2,
                 DateTimeOffset.FromUnixTimeSeconds(observed + 6), 103))
             throw new Exception("FAIL: stale observer report accepted");
+        if (recovered.IsHealthy("lab.example.test", "mumbai", 5_101))
+            throw new Exception("FAIL: evidence remained eligible beyond configured observation age");
+        if (recovered.TryAccept(Report("agent-2", 3, "healthy", 1000, 20, signing2), client2,
+                DateTimeOffset.FromUnixTimeSeconds(observed + 5), 105))
+            throw new Exception("FAIL: observation with no remaining freshness was accepted");
         if (!recovered.TryAccept(Report("agent-1", 3, "healthy", 1000, 14, signing1Rotated), client1Rotated,
                 DateTimeOffset.FromUnixTimeSeconds(observed), 104))
             throw new Exception("FAIL: overlapping client certificate and signing-key rotation rejected");
