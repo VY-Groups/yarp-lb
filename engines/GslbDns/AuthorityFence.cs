@@ -53,6 +53,7 @@ internal sealed class AuthorityFenceStore : IDisposable
     private long localSequence;
     private PersistedReplay replay;
     private LiveSnapshot? live;
+    private long? outboundAcknowledgedUntilTick;
 
     public AuthorityFenceStore(AuthorityFenceConfig config, string configFingerprint,
         IEnumerable<AuthorityFenceTarget> targets)
@@ -132,8 +133,21 @@ internal sealed class AuthorityFenceStore : IDisposable
     {
         lock (gate)
         {
-            return live is { } state && nowTick < state.ExpiresAtTick &&
+            return outboundAcknowledgedUntilTick is long outboundDeadline && nowTick < outboundDeadline &&
+                live is { } state && nowTick < state.ExpiresAtTick &&
                 state.Decisions.TryGetValue(TargetKey(zone, siteId), out var eligible) && eligible;
+        }
+    }
+
+    // A successful response authenticates acceptance through pinned mTLS.
+    // Anchor the local lease at send time, never at delayed response receipt.
+    public void RecordPeerAcknowledgement(long sentAtTick, long receivedAtTick)
+    {
+        lock (gate)
+        {
+            var deadline = checked(sentAtTick + config.LeaseSeconds * 1000L);
+            if (receivedAtTick >= sentAtTick && receivedAtTick < deadline)
+                outboundAcknowledgedUntilTick = Math.Max(outboundAcknowledgedUntilTick ?? long.MinValue, deadline);
         }
     }
 
@@ -550,7 +564,7 @@ internal sealed class AuthorityFenceRuntime : IAsyncDisposable
         try
         {
             await web.StartAsync(token);
-            var handler = new HttpClientHandler();
+            var handler = new HttpClientHandler { AllowAutoRedirect = false, UseProxy = false };
             handler.ClientCertificates.Add(clientCertificate);
             handler.SslProtocols = System.Security.Authentication.SslProtocols.Tls12 |
                 System.Security.Authentication.SslProtocols.Tls13;
@@ -579,14 +593,16 @@ internal sealed class AuthorityFenceRuntime : IAsyncDisposable
         {
             try
             {
-                var snapshot = store.CreateSnapshot(Environment.TickCount64);
+                var sentAtTick = Environment.TickCount64;
+                var snapshot = store.CreateSnapshot(sentAtTick);
                 var payload = JsonSerializer.SerializeToUtf8Bytes(snapshot);
                 if (payload.Length > AuthorityFenceContract.MaximumSerializedBytes)
                     throw new InvalidDataException("Authority fence snapshot exceeds 128 KiB bound");
                 using var content = new ByteArrayContent(payload);
                 content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
                 using var response = await client!.PostAsync(config.Peer.Endpoint, content, token);
-                _ = response.IsSuccessStatusCode;
+                if (response.StatusCode == HttpStatusCode.NoContent)
+                    store.RecordPeerAcknowledgement(sentAtTick, Environment.TickCount64);
             }
             catch (OperationCanceledException) when (token.IsCancellationRequested) { break; }
             catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or InvalidDataException) { }
