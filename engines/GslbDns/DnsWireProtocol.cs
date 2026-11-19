@@ -46,9 +46,17 @@ internal static class DnsWireProtocol
             if (pos >= query.Length) return null;
             var length = query[pos++];
             if (length == 0) break;
-            if (length > 63 || labels.Count >= 32 || pos + length > query.Length) return null;
-            var label = Encoding.ASCII.GetString(query.Slice(pos, length));
-            if (label.Any(ch => ch < '!' || ch > '~' || ch == '.')) return null;
+            // RFC 1035 limits the entire wire name (label length octets and
+            // terminal root included) to 255 octets, not to 32 labels.
+            if (length > 63 || pos + length > query.Length || pos + length - 12 >= 255)
+                return null;
+            var labelBytes = query.Slice(pos, length);
+            // Keep the existing printable-ASCII owner policy; reject unsupported
+            // octets before ASCII decoding can silently substitute '?'.
+            foreach (var octet in labelBytes)
+                if (octet < (byte)'!' || octet > (byte)'~' || octet == (byte)'.')
+                    return null;
+            var label = Encoding.ASCII.GetString(labelBytes);
             labels.Add(label);
             pos += length;
         }
