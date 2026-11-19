@@ -133,6 +133,16 @@ public static class DestinationAdmissionTests
         Check(DestinationAdmissionForwarding.IsStillEligibleAfterWait("east", stillEligible,
                   static destination => destination.Id, static destination => destination.IsDraining),
             "queued request can continue when its original backend remains available and ready");
+        var original = new AdmissionDestination("east", IsDraining: false, Address: "https://192.0.2.1/");
+        var replaced = new[] { new AdmissionDestination("east", IsDraining: false, Address: "https://192.0.2.2/") };
+        Check(!DestinationAdmissionForwarding.IsStillEligibleAfterWait("east", replaced,
+                  static destination => destination.Id, static destination => destination.IsDraining,
+                  destination => destination == original),
+            "reusing destination ID with a different endpoint cannot redirect a queued POST");
+        Check(DestinationAdmissionForwarding.IsStillEligibleAfterWait("east", new[] { original },
+                  static destination => destination.Id, static destination => destination.IsDraining,
+                  destination => destination == original),
+            "unchanged original selection remains eligible after grant");
         grantedForEast.Dispose();
         Check(drainGate.Snapshot is { InFlight: 0, Queued: 0 },
             "post-queue rejection path releases the granted backend permit");
@@ -334,5 +344,5 @@ public static class DestinationAdmissionTests
             "4097 destination replacements are reclaimed without exceeding the registry cap");
     }
 
-    private readonly record struct AdmissionDestination(string Id, bool IsDraining);
+    private readonly record struct AdmissionDestination(string Id, bool IsDraining, string Address = "");
 }
