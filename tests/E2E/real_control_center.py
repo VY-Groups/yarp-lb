@@ -18,6 +18,7 @@ from pathlib import Path
 import socket
 import ssl
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -32,6 +33,16 @@ def check(ok, label):
     if not ok:
         raise AssertionError(label)
     print("PASS: " + label, flush=True)
+
+def ensure_http2_test_client():
+    # This harness is explicitly restricted to disposable GitHub Actions CI.
+    # Keep its protocol-test dependency pinned and self-contained so running
+    # the harness does not rely on ambient packages on the runner.
+    import importlib.util
+    if importlib.util.find_spec("httpx") and importlib.util.find_spec("h2"):
+        return
+    subprocess.run([sys.executable,"-m","pip","install","--disable-pip-version-check",
+        "httpx[http2]==0.28.1"],check=True)
 
 def port():
     with socket.socket() as s:
@@ -147,12 +158,14 @@ def backend():
     finally: server.shutdown();server.server_close();thread.join(timeout=3)
 
 @contextmanager
-def gateway(cwd:Path, dll:Path, root:Path, listen_port:int):
+def gateway(cwd:Path, dll:Path, root:Path, listen_port:int, https_port:int):
     env=os.environ.copy()
     env.pop("YARP_EC2_LAB_MODE",None)
     env.update(
         ASPNETCORE_ENVIRONMENT="Production",
-        ASPNETCORE_URLS=f"http://127.0.0.1:{listen_port}",
+        ASPNETCORE_URLS=f"http://127.0.0.1:{listen_port};https://127.0.0.1:{https_port}",
+        ASPNETCORE_Kestrel__Certificates__Default__Path=str(root/"secrets"/"dp.pfx"),
+        ASPNETCORE_Kestrel__Certificates__Default__Password="temporary-e2e-only-password",
         YARP_CONTROL_PLANE_DIR=str(root/"state"),
         YARP_RUNTIME_CONFIG_PATH=str(root/"state"/"config"/"appsettings.json"),
         YARP_LINUX_DP_CERT_PFX_PATH=str(root/"secrets"/"dp.pfx"),
@@ -202,7 +215,7 @@ def openssl_state(root:Path,origin_port:int):
         "-subj","/CN=temporary-gatewaycore-e2e", "-keyout",str(key),"-out",str(cert)],
         check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
     subprocess.run(["openssl","pkcs12","-export","-out",str(secrets/"dp.pfx"),
-        "-inkey",str(key),"-in",str(cert),"-passout","file:"+str(secrets/"dp-password")],
+        "-inkey",str(key),"-in",str(cert),"-passout","pass:temporary-e2e-only-password"],
         check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
     for p in (key,cert,secrets/"dp.pfx"): p.chmod(0o600)
     appconfig=config/"appsettings.json"
@@ -277,7 +290,7 @@ def open_websocket(base:str,path:str):
         sock.close()
         raise
 
-def verify_destination_admission(base:str,admin:Client,reviewer:Client,initial:dict):
+def verify_destination_admission(base:str,https_base:str,admin:Client,reviewer:Client,initial:dict):
     routes=dict(initial["routes"])
     routes["admission-e2e"]={"ClusterId":"fixture","Match":{"Path":"/admit/{**catch-all}"},
         "Transforms":[{"PathRemovePrefix":"/admit"}]}
@@ -351,16 +364,41 @@ def verify_destination_admission(base:str,admin:Client,reviewer:Client,initial:d
         check(response(base,"/admit/normal")[0]==200,
             "destination admission recovers after a WebSocket client disconnect")
 
+        # Exercise the same shipping process over a negotiated HTTP/2 TLS
+        # listener. Concurrent requests share one HTTP/2 client pool, while the
+        # per-destination request gate continues to bound streams, not sockets.
+        import httpx
+        # A single transport connection makes this a multiplexing test rather
+        # than merely three independent HTTP/2 connections.
+        with httpx.Client(http2=True,verify=False,timeout=8.0,trust_env=False,
+                          limits=httpx.Limits(max_connections=1,max_keepalive_connections=1)) as h2:
+            check(h2.get(https_base+"/gateway/health").http_version=="HTTP/2",
+                "TLS listener negotiates real HTTP/2 before admission checks")
+            h2_first=pool.submit(h2.get,https_base+"/admit/hold-short")
+            wait_metric(admin,"yarp_control_destination_admission_inflight_requests",1)
+            h2_second=pool.submit(h2.get,https_base+"/admit/normal")
+            wait_metric(admin,"yarp_control_destination_admission_queued_requests",1)
+            h2_rejected=h2.get(https_base+"/admit/rejected")
+            check(h2_rejected.status_code==503 and h2_rejected.http_version=="HTTP/2" and
+                  h2_rejected.headers.get("X-GatewayCore-Rejection")=="destination_queue_full",
+                "HTTP/2 multiplexed overload is rejected locally without an upstream replay")
+            h2_first_response=h2_first.result(timeout=5)
+            h2_second_response=h2_second.result(timeout=5)
+            check(h2_first_response.status_code==200 and h2_first_response.http_version=="HTTP/2",
+                "HTTP/2 response body retains its selected destination permit through streaming")
+            check(h2_second_response.status_code==200 and h2_second_response.http_version=="HTTP/2",
+                "queued HTTP/2 stream receives the released FIFO destination permit")
+
     wait_metric(admin,"yarp_control_destination_admission_queued_requests",0)
     wait_metric(admin,"yarp_control_destination_admission_inflight_requests",0)
     metrics=admin.request("GET","/gateway/metrics")
-    check('yarp_control_destination_admission_rejected_total{destination="fixture/origin"} 2' in metrics,
+    check('yarp_control_destination_admission_rejected_total{destination="fixture/origin"} 3' in metrics,
         "destination admission rejection counter is exposed with bounded destination labels")
     check('yarp_control_destination_admission_queue_timeouts_total{destination="fixture/origin"} 1' in metrics,
         "destination admission queue timeout counter is exposed")
     check('yarp_control_destination_admission_waiter_canceled_total{destination="fixture/origin"} 2' in metrics,
         "queue timeout and client disconnect both release bounded waiter reservations")
-    check('yarp_control_destination_admission_queue_wait_seconds_count{destination="fixture/origin"} 4' in metrics,
+    check('yarp_control_destination_admission_queue_wait_seconds_count{destination="fixture/origin"} 5' in metrics,
         "bounded-label queue wait summary is exported for dashboards")
     return pending
 
@@ -422,7 +460,7 @@ def verify_max_connections_per_server(base:str,admin:Client,reviewer:Client):
         time.sleep(.1)
     check(constrained==1,"MaxConnectionsPerServer=1 limits actual concurrent upstream connections to one")
 
-def acceptance(base:str,origin_port:int):
+def acceptance(base:str,https_base:str,origin_port:int):
     anonymous=Client(base)
     check(not anonymous.session()["initialized"],"clean state requires bootstrap")
     check("<html" in anonymous.request("GET","/dashboard"),"real dashboard HTML served")
@@ -501,7 +539,7 @@ def acceptance(base:str,origin_port:int):
         "second admin applied approved route with revision bump")
     eventually(anonymous,"/e2e/real-proxy","e2e-origin:/real-proxy")
     rollback_backup=admin.request("GET","/admin/api/backups")[0]
-    verify_destination_admission(base,admin,reviewer,approved)
+    verify_destination_admission(base,https_base,admin,reviewer,approved)
     verify_max_connections_per_server(base,admin,reviewer)
     check(admin.request("GET","/admin/api/change-requests/"+pending["id"])["status"]=="Approved",
         "approved change recorded and auditable")
@@ -565,14 +603,16 @@ def main():
     # Explicit CI guard; this harness cannot be pointed at production.
     if os.environ.get("GITHUB_ACTIONS")!="true" or os.environ.get("CI")!="true":
         raise SystemExit("REJECTED: E2E fixture requires disposable GitHub Actions CI")
+    ensure_http2_test_client()
     with tempfile.TemporaryDirectory(prefix="gatewaycore-real-e2e-") as td, backend() as origin:
         root=Path(td)
         openssl_state(root,origin)
         listen=port()
-        with gateway(cwd,dll,root,listen) as base:
-            results=acceptance(base,origin)
+        https_listen=port()
+        with gateway(cwd,dll,root,listen,https_listen) as base:
+            results=acceptance(base,f"https://127.0.0.1:{https_listen}",origin)
         # Require the persisted state to survive a genuine process restart.
-        with gateway(cwd,dll,root,listen) as base:
+        with gateway(cwd,dll,root,listen,https_listen) as base:
             admin=Client(base)
             admin.login("admin_e2e","Admin-secret-long-4096!")
             check(admin.request("GET","/admin/api/onboarding")["status"]=="design-confirmed",
