@@ -33,6 +33,8 @@ var privateDir = ec2Lab ? Ec2WorkflowLab.PrivateDirectory()
         "GatewayCoreYarp", "ControlPlane");
 if (OperatingSystem.IsWindows() && !ec2Lab)
     LegacyStateGuard.RejectUnmigratedWindowsState(privateDir);
+if (OperatingSystem.IsWindows() && !ec2Lab)
+    WindowsStateProtection.InitializeStateDirectory(Path.GetDirectoryName(privateDir)!, privateDir);
 if (!OperatingSystem.IsLinux() || ec2Lab)
     Directory.CreateDirectory(privateDir);
 var keyDir = Path.Combine(privateDir, "data-protection-keys");

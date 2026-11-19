@@ -1,4 +1,6 @@
 using System.Security.Cryptography;
+using System.Security.AccessControl;
+using System.Security.Principal;
 using System.Runtime.Versioning;
 using System.Xml.Linq;
 using Microsoft.AspNetCore.DataProtection;
@@ -33,8 +35,10 @@ public static class WindowsDpapiAcceptance
         }
 
         var root = Path.Combine(Path.GetTempPath(), "gatewaycore-windows-dp-" + Guid.NewGuid().ToString("N"));
-        var keyDirectory = Path.Combine(root, "keys");
-        Directory.CreateDirectory(keyDirectory);
+        var stateDirectory = Path.Combine(root, "ControlPlane");
+        WindowsStateProtection.InitializeStateDirectory(
+            root, stateDirectory);
+        var keyDirectory = Path.Combine(stateDirectory, "data-protection-keys");
         try
         {
             const string payload = "windows-dpapi-session-survives-restart";
@@ -47,6 +51,20 @@ public static class WindowsDpapiAcceptance
 
             var keyFiles = Directory.GetFiles(keyDirectory, "key-*.xml");
             Must(keyFiles.Length > 0, "Windows DPAPI persists a Data Protection key XML file");
+            var keyAcl = new FileInfo(keyFiles[0]).GetAccessControl(AccessControlSections.Access);
+            var keyRules = keyAcl.GetAccessRules(includeExplicit: true, includeInherited: true,
+                targetType: typeof(SecurityIdentifier)).Cast<FileSystemAccessRule>().ToArray();
+            var broadSids = new[]
+            {
+                new SecurityIdentifier(WellKnownSidType.WorldSid, null),
+                new SecurityIdentifier(WellKnownSidType.AuthenticatedUserSid, null),
+                new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid, null)
+            };
+            Must(keyRules.All(rule => rule.AccessControlType != AccessControlType.Allow ||
+                    !broadSids.Contains((SecurityIdentifier)rule.IdentityReference)),
+                "Windows DPAPI key file ACL excludes Everyone, Authenticated Users, and Users");
+            WindowsStateProtection.InitializeStateDirectory(root, stateDirectory);
+            Must(true, "existing Windows state with the approved ACL is accepted without ACL changes");
             var originalXml = File.ReadAllText(keyFiles[0]);
             Must(originalXml.Contains("<encryptedSecret", StringComparison.Ordinal) &&
                  !originalXml.Contains("<masterKey", StringComparison.Ordinal),
@@ -87,6 +105,109 @@ public static class WindowsDpapiAcceptance
         finally
         {
             Directory.Delete(root, recursive: true);
+        }
+
+        var unsafeProduct = Path.Combine(Path.GetTempPath(), "gatewaycore-windows-acl-reject-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(unsafeProduct);
+        try
+        {
+            var unsafeAcl = new DirectoryInfo(unsafeProduct).GetAccessControl();
+            unsafeAcl.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
+            unsafeAcl.AddAccessRule(new FileSystemAccessRule(
+                WindowsIdentity.GetCurrent().User!, FileSystemRights.FullControl,
+                InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+                PropagationFlags.None, AccessControlType.Allow));
+            unsafeAcl.AddAccessRule(new FileSystemAccessRule(
+                new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null), FileSystemRights.FullControl,
+                InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+                PropagationFlags.None, AccessControlType.Allow));
+            unsafeAcl.AddAccessRule(new FileSystemAccessRule(
+                new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null), FileSystemRights.FullControl,
+                InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+                PropagationFlags.None, AccessControlType.Allow));
+            unsafeAcl.AddAccessRule(new FileSystemAccessRule(
+                new SecurityIdentifier(WellKnownSidType.WorldSid, null), FileSystemRights.ReadAndExecute,
+                InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+                PropagationFlags.None, AccessControlType.Allow));
+            new DirectoryInfo(unsafeProduct).SetAccessControl(unsafeAcl);
+            var before = new DirectoryInfo(unsafeProduct).GetAccessControl().GetSecurityDescriptorSddlForm(AccessControlSections.Access);
+            var refused = false;
+            try
+            {
+                WindowsStateProtection.InitializeStateDirectory(unsafeProduct,
+                    Path.Combine(unsafeProduct, "ControlPlane"));
+            }
+            catch (InvalidOperationException)
+            {
+                refused = true;
+            }
+            var after = new DirectoryInfo(unsafeProduct).GetAccessControl().GetSecurityDescriptorSddlForm(AccessControlSections.Access);
+            Must(refused && before == after && !Directory.Exists(Path.Combine(unsafeProduct, "ControlPlane")),
+                "existing broadly accessible Windows state is rejected without ACL rewrite or key-ring mutation");
+        }
+        finally
+        {
+            Directory.Delete(unsafeProduct, recursive: true);
+        }
+
+        var unsafeKeyProduct = Path.Combine(Path.GetTempPath(), "gatewaycore-windows-key-acl-reject-" + Guid.NewGuid().ToString("N"));
+        var unsafeKeyState = Path.Combine(unsafeKeyProduct, "ControlPlane");
+        WindowsStateProtection.InitializeStateDirectory(unsafeKeyProduct, unsafeKeyState);
+        try
+        {
+            var unsafeKeyFile = Path.Combine(unsafeKeyState, "data-protection-keys", "key-test.xml");
+            File.WriteAllText(unsafeKeyFile, "<key />");
+            var fileAcl = new FileInfo(unsafeKeyFile).GetAccessControl();
+            fileAcl.AddAccessRule(new FileSystemAccessRule(
+                new SecurityIdentifier(WellKnownSidType.WorldSid, null), FileSystemRights.Read,
+                AccessControlType.Allow));
+            new FileInfo(unsafeKeyFile).SetAccessControl(fileAcl);
+            var before = new FileInfo(unsafeKeyFile).GetAccessControl()
+                .GetSecurityDescriptorSddlForm(AccessControlSections.Access);
+            var refused = false;
+            try
+            {
+                WindowsStateProtection.InitializeStateDirectory(unsafeKeyProduct, unsafeKeyState);
+            }
+            catch (InvalidOperationException)
+            {
+                refused = true;
+            }
+            var after = new FileInfo(unsafeKeyFile).GetAccessControl()
+                .GetSecurityDescriptorSddlForm(AccessControlSections.Access);
+            Must(refused && before == after && File.ReadAllText(unsafeKeyFile) == "<key />",
+                "existing broadly accessible DPAPI key file is rejected without ACL or key material rewrite");
+        }
+        finally
+        {
+            Directory.Delete(unsafeKeyProduct, recursive: true);
+        }
+
+        var legacyRoot = Path.Combine(Path.GetTempPath(), "gatewaycore-windows-legacy-state-" + Guid.NewGuid().ToString("N"));
+        var programData = Path.Combine(legacyRoot, "ProgramData");
+        var priorState = Path.Combine(programData, "PriorYarp", "ControlPlane");
+        var newProduct = Path.Combine(programData, "GatewayCoreYarp");
+        var newState = Path.Combine(newProduct, "ControlPlane");
+        Directory.CreateDirectory(priorState);
+        File.WriteAllText(Path.Combine(priorState, "admin-users.json"), "{}");
+        try
+        {
+            var refused = false;
+            try
+            {
+                LegacyStateGuard.RejectUnmigratedWindowsState(newState);
+            }
+            catch (InvalidOperationException)
+            {
+                refused = true;
+            }
+            Must(refused && !Directory.Exists(newProduct) && !Directory.Exists(newState) &&
+                 !Directory.Exists(Path.Combine(newState, "data-protection-keys")),
+                "legacy Windows state is rejected before any new product, state, or key directory is created");
+        }
+        finally
+        {
+            Directory.Delete(legacyRoot, recursive: true);
         }
     }
 }
