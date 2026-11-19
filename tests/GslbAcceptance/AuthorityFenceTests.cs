@@ -107,6 +107,44 @@ internal static class AuthorityFenceTests
             Check(baselineDigest == AuthorityFenceFingerprint.Compute(
                     [fingerprintZone with { SoaContact = "HOSTMASTER.FENCE.EXAMPLE.TEST." }], null),
                 "explicit and implicit canonical SOA contact have equal fingerprints");
+            var nsConfig = new[] {
+                new DnsNameServerConfig("ns1.fence.example.test", "192.0.2.53"),
+                new DnsNameServerConfig("ns2.fence.example.test", "192.0.2.54") };
+            var nsZone = fingerprintZone with { NameServers = nsConfig };
+            Check(AuthorityFenceFingerprint.Compute([nsZone], null) !=
+                  AuthorityFenceFingerprint.Compute([nsZone with { NameServers = nsConfig.Reverse().ToArray() }], null),
+                "SOA primary name server order is bound to authority fingerprint");
+            var loadedNs = nsConfig.Select(ns => new DnsNameServer(ns.Host, IPAddress.Parse(ns.Address))).ToArray();
+            var secureZone = nsZone with { DnssecPrivateKeyPath = signerAPath };
+            using var dnssecA = new DnssecZoneSigner(secureZone.Name, 5, signerAPath,
+                "hostmaster.fence.example.test", 1, loadedNs, [], true, false);
+            using var dnssecB = new DnssecZoneSigner(secureZone.Name, 5, signerBPath,
+                "hostmaster.fence.example.test", 1, loadedNs, [], true, false);
+            using var dnssecOverlap = new DnssecZoneSigner(secureZone.Name, 5, signerAPath,
+                "hostmaster.fence.example.test", 1, loadedNs, [], true, false,
+                prepublishPublicKeyPaths: [publicBPath]);
+            using var dnssecDual = new DnssecZoneSigner(secureZone.Name, 5, signerAPath,
+                "hostmaster.fence.example.test", 1, loadedNs, [], true, false,
+                additionalSigningKeyPaths: [signerBPath]);
+            string SignedDigest(DnsZone zone, DnssecZoneSigner signer) =>
+                AuthorityFenceFingerprint.Compute([zone], null, loadedSigners:
+                    new Dictionary<string, DnssecZoneSigner> { [zone.Name] = signer });
+            var secureDigest = SignedDigest(secureZone, dnssecA);
+            Check(secureDigest != SignedDigest(secureZone, dnssecB) &&
+                  secureDigest != AuthorityFenceFingerprint.Compute([nsZone], null),
+                "authority fingerprint distinguishes loaded DNSSEC key and unsigned zone");
+            Check(secureDigest == SignedDigest(secureZone with { DnssecPrivateKeyPath = "other-local-path.pem" }, dnssecA),
+                "authority fingerprint uses loaded public material rather than local key paths");
+            Check(SignedDigest(secureZone, dnssecOverlap) != SignedDigest(secureZone, dnssecDual),
+                "authority fingerprint distinguishes prepublication from dual signing");
+            using var dnssecNsec3 = new DnssecZoneSigner(secureZone.Name, 5, signerAPath,
+                "hostmaster.fence.example.test", 1, loadedNs, [], true, false,
+                denialMode: "Nsec3", nsec3SaltHex: "0011223344556677", nsec3Iterations: 1);
+            Check(secureDigest != SignedDigest(secureZone with { DnssecDenialMode = "Nsec3",
+                    DnssecNsec3SaltHex = "0011223344556677", DnssecNsec3Iterations = 1 }, dnssecNsec3),
+                "authority fingerprint binds DNSSEC denial policy");
+            Check(ThrowsInvalid(() => AuthorityFenceFingerprint.Compute([secureZone], null)),
+                "signed zone fingerprint cannot omit its loaded signer");
             var delegation = new DnsDelegationConfig("child.fence.example.test",
                 [new DnsNameServerConfig("ns.child.fence.example.test", "192.0.2.53"),
                  new DnsNameServerConfig("ns2.child.fence.example.test", "192.0.2.54")]);
