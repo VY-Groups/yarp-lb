@@ -169,6 +169,10 @@ internal sealed class EnterpriseOidcPolicy
             authTime > seconds - (long)maximum.TotalSeconds;
     }
 
+    internal static bool AfterRevocation(ClaimsPrincipal principal, long revokedBefore) =>
+        revokedBefore >= 0 && long.TryParse(Single(principal, AuthTimeClaim),
+            NumberStyles.None, CultureInfo.InvariantCulture, out var time) && time > revokedBefore;
+
     internal bool SessionValid(ClaimsPrincipal principal, string username, string role, DateTimeOffset now,
         bool stepUp = false)
     {
