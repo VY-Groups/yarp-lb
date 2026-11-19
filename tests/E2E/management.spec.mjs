@@ -139,7 +139,7 @@ test('browser: bootstrap, navigation, onboarding, websites, route edit, users an
     await page.locator('#f-publicHost').fill('ocsp.example.invalid');
     await page.locator('#f-publicApp1').fill('https://ocsp-01.example.invalid/');
     await page.locator('#f-publicApp2').fill('https://ocsp-02.example.invalid/');
-    await expect(page.locator('#modal-help')).toContainText('BoundedTransportFailure');
+    await expect(page.locator('#modal-help')).toContainText('bounded transport-failure ejection');
     await page.locator('#confirm').click();
     await expect(page.locator('#notice')).toContainText('two consecutive failures');
     await page.locator('button.nav[data-view="clusters"]').click();
