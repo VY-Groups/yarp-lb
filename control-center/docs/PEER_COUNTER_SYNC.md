@@ -43,7 +43,14 @@ counts are withheld.
 A higher-sequence, properly authenticated fresh snapshot restores reporting.
 Receipt-age expiry uses the process monotonic clock (`TimeProvider`), so NTP
 correction or wall-clock rollback cannot lengthen or prematurely expire this
-TTL. The current-minute protocol check still uses UTC wall time; if that minute
+TTL. The authenticated `/admin/api/peer-sync/status` view exposes the last
+accepted UTC timestamp and monotonic `lastAcceptedAgeSeconds`; the operator UI
+uses monotonic age when deciding whether an exchange is recent. The protected
+`/gateway/metrics` scrape exposes fixed-cardinality `yarp_peer_sync_enabled`,
+`yarp_peer_sync_remote_fresh`, and `yarp_peer_sync_last_accepted_age_seconds`
+gauges without node, IP, identity or secret labels. Age remains observable after
+remote counters expire and resets only after a newly accepted frame or process
+restart. The current-minute protocol check still uses UTC wall time; if that minute
 is incorrect or regresses, snapshots fail closed until the minute agrees again.
 Within one source epoch, frames from a minute older than the last accepted minute
 are rejected, so a receiver clock rollback cannot replace newer telemetry with a

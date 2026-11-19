@@ -42,7 +42,8 @@ public sealed record PeerStateFrame(string NodeId, long Minute, long Sequence,
 
 public sealed record PeerSyncStatus(bool Enabled, string LocalNode, string RemoteNode,
     int LocalIdentities, long LocalRequests, int RemoteIdentities, long RemoteRequests,
-    bool RemoteReportedInCurrentMinute, DateTimeOffset? LastAcceptedUtc, long RemoteSequence);
+    bool RemoteReportedInCurrentMinute, DateTimeOffset? LastAcceptedUtc, long RemoteSequence,
+    long? LastAcceptedAgeSeconds);
 
 public sealed class PeerStateJournal
 {
@@ -56,6 +57,7 @@ public sealed class PeerStateJournal
     private readonly TimeProvider timeProvider;
     private long localMinute = -1, sequence, receivedMinute = -1, receivedSequence = -1;
     private long receivedSourceEpoch;
+    private bool remoteExpired;
     private readonly long sourceEpoch = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
     private DateTimeOffset? lastAcceptedUtc;
     private long? lastAcceptedTimestamp;
@@ -153,6 +155,7 @@ public sealed class PeerStateJournal
             receivedSourceEpoch = frame.SourceEpoch;
             lastAcceptedUtc = clock();
             lastAcceptedTimestamp = timeProvider.GetTimestamp();
+            remoteExpired = false;
             return true;
         }
     }
@@ -161,10 +164,10 @@ public sealed class PeerStateJournal
     // preserves replay/sequence fencing so an older snapshot cannot resurrect.
     private bool RemoteFresh(long minute)
     {
-        if (receivedMinute != minute || lastAcceptedTimestamp is null)
+        if (receivedMinute != minute || lastAcceptedTimestamp is null || remoteExpired)
         {
             remote.Clear();
-            lastAcceptedTimestamp = null;
+            if (lastAcceptedTimestamp is not null) remoteExpired = true;
             return false;
         }
         var age = timeProvider.GetElapsedTime(lastAcceptedTimestamp.Value);
@@ -172,7 +175,7 @@ public sealed class PeerStateJournal
         // Keep sequence/epoch high-water marks after collection so replayed
         // snapshots cannot repopulate an expired table.
         remote.Clear();
-        lastAcceptedTimestamp = null;
+        remoteExpired = true;
         return false;
     }
 
@@ -183,13 +186,20 @@ public sealed class PeerStateJournal
             if (localMinute != minute) ExpireLocalOutsideMinute(minute);
             var validLocal = localMinute == minute;
             var validRemote = RemoteFresh(minute);
+            long? lastAcceptedAgeSeconds = null;
+            if (lastAcceptedTimestamp is { } acceptedTimestamp)
+            {
+                var elapsed = timeProvider.GetElapsedTime(acceptedTimestamp);
+                if (elapsed >= TimeSpan.Zero)
+                    lastAcceptedAgeSeconds = (long)Math.Floor(elapsed.TotalSeconds);
+            }
             return new PeerSyncStatus(true, localId, remoteId,
                 validLocal ? local.Count : 0,
                 validLocal ? local.Values.Sum(x => (long)x) : 0,
                 validRemote ? remote.Count : 0,
                 validRemote ? remote.Values.Sum(x => (long)x) : 0,
                 validRemote, lastAcceptedUtc,
-                validRemote ? receivedSequence : 0);
+                validRemote ? receivedSequence : 0, lastAcceptedAgeSeconds);
         }
     }
 

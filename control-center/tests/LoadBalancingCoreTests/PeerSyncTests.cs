@@ -92,6 +92,22 @@ public static class PeerSyncTests
               ageLimited.Status(now).RemoteIdentities == 0 &&
               ageLimited.PeerTelemetry(now)==(0,0L) && ageLimited.RetainedRemoteEntries == 0,
             "monotonic TTL expires and collects remote frame within the same minute");
+        var expiredStatus = ageLimited.Status(now);
+        Check(expiredStatus.LastAcceptedAgeSeconds == 7,
+            "monotonic last-accepted age remains observable after stale counters are collected");
+        var peerMetricText = new StringBuilder();
+        PeerSyncPrometheus.Append(peerMetricText, configured: true, status: expiredStatus);
+        Check(peerMetricText.ToString().Contains("yarp_peer_sync_enabled 1\n", StringComparison.Ordinal) &&
+              peerMetricText.ToString().Contains("yarp_peer_sync_remote_fresh 0\n", StringComparison.Ordinal) &&
+              peerMetricText.ToString().Contains("yarp_peer_sync_last_accepted_age_seconds 7\n", StringComparison.Ordinal) &&
+              !peerMetricText.ToString().Contains("node-a", StringComparison.Ordinal),
+            "Prometheus exports peer freshness and monotonic age with no peer identity labels");
+        var disabledMetricText = new StringBuilder();
+        PeerSyncPrometheus.Append(disabledMetricText, configured: false, status: null);
+        Check(disabledMetricText.ToString().Contains("yarp_peer_sync_enabled 0\n", StringComparison.Ordinal) &&
+              disabledMetricText.ToString().Contains("yarp_peer_sync_remote_fresh 0\n", StringComparison.Ordinal) &&
+              !disabledMetricText.ToString().Contains("\nyarp_peer_sync_last_accepted_age_seconds ", StringComparison.Ordinal),
+            "unconfigured peer metrics report disabled without inventing a receipt age");
         Check(!ageLimited.Apply(frame,now),
             "expired frame cannot be replayed to revive stale counters");
         var recovered = a.Snapshot(now);
