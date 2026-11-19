@@ -54,6 +54,9 @@ internal sealed class AuthorityFenceStore : IDisposable
     private PersistedReplay replay;
     private LiveSnapshot? live;
     private long? outboundAcknowledgedUntilTick;
+    private bool durableStateFaulted;
+    private long? lastDurableCheckTick;
+    private const long DurableCheckIntervalMs = 1000;
 
     public AuthorityFenceStore(AuthorityFenceConfig config, string configFingerprint,
         IEnumerable<AuthorityFenceTarget> targets)
@@ -113,6 +116,9 @@ internal sealed class AuthorityFenceStore : IDisposable
 
     public AuthorityFenceSnapshot CreateSnapshot(long nowTick)
     {
+        lock (gate)
+            if (!CheckDurableState(nowTick, force: true))
+                throw new InvalidDataException("Authority durable state fault; operator recovery required");
         long sequence;
         lock (sequenceGate)
         {
@@ -133,7 +139,8 @@ internal sealed class AuthorityFenceStore : IDisposable
     {
         lock (gate)
         {
-            return outboundAcknowledgedUntilTick is long outboundDeadline && nowTick < outboundDeadline &&
+            return CheckDurableState(nowTick) &&
+                outboundAcknowledgedUntilTick is long outboundDeadline && nowTick < outboundDeadline &&
                 live is { } state && nowTick < state.ExpiresAtTick &&
                 state.Decisions.TryGetValue(TargetKey(zone, siteId), out var eligible) && eligible;
         }
@@ -145,6 +152,7 @@ internal sealed class AuthorityFenceStore : IDisposable
     {
         lock (gate)
         {
+            if (!CheckDurableState(receivedAtTick)) return;
             var deadline = checked(sentAtTick + config.LeaseSeconds * 1000L);
             if (receivedAtTick >= sentAtTick && receivedAtTick < deadline)
                 outboundAcknowledgedUntilTick = Math.Max(outboundAcknowledgedUntilTick ?? long.MinValue, deadline);
@@ -190,13 +198,7 @@ internal sealed class AuthorityFenceStore : IDisposable
 
         lock (gate)
         {
-            if (!ReplayStateIntact(replayStatePath, replayLock, replay, epochStatePath, localEpoch))
-            {
-                // Once durable fencing integrity is lost, an earlier positive
-                // peer decision must no longer authorize even a remaining lease.
-                live = null;
-                return false;
-            }
+            if (!CheckDurableState(nowTick, force: true)) return false;
             if (snapshot.Epoch < replay.Epoch ||
                 (snapshot.Epoch == replay.Epoch && snapshot.Sequence <= replay.Sequence))
                 return false;
@@ -204,7 +206,7 @@ internal sealed class AuthorityFenceStore : IDisposable
             try { PersistReplay(replayStatePath, next); }
             catch
             {
-                live = null;
+                LatchDurableStateFault();
                 throw;
             }
             replay = next;
@@ -214,6 +216,28 @@ internal sealed class AuthorityFenceStore : IDisposable
             live = new LiveSnapshot(decisions, checked(nowTick + leaseSeconds * 1000L));
             return true;
         }
+    }
+
+    // Only under gate. Verify the same durable replay/epoch contents as
+    // authenticated writes. Bound disk reads on the DNS eligibility path.
+    private bool CheckDurableState(long nowTick, bool force = false)
+    {
+        if (durableStateFaulted) return false;
+        if (!force && lastDurableCheckTick is { } last && nowTick >= last &&
+            (ulong)nowTick - (ulong)last < DurableCheckIntervalMs)
+            return true;
+        lastDurableCheckTick = nowTick;
+        if (ReplayStateIntact(replayStatePath, replayLock, replay, epochStatePath, localEpoch))
+            return true;
+        LatchDurableStateFault();
+        return false;
+    }
+
+    private void LatchDurableStateFault()
+    {
+        durableStateFaulted = true;
+        live = null;
+        outboundAcknowledgedUntilTick = null;
     }
 
     public static bool IsPinnedCertificate(X509Certificate2? certificate,
