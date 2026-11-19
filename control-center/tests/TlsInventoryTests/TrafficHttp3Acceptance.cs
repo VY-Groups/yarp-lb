@@ -15,6 +15,35 @@ using Microsoft.Extensions.Logging;
 
 internal static class TrafficHttp3Acceptance
 {
+    internal static int SelectDualTransportPort(Func<(int Port, IDisposable Reservation)> reserveTcp, Action<int> bindUdp,
+        int maxAttempts = 32)
+    {
+        ArgumentNullException.ThrowIfNull(reserveTcp);
+        ArgumentNullException.ThrowIfNull(bindUdp);
+        if (maxAttempts < 1) throw new ArgumentOutOfRangeException(nameof(maxAttempts));
+
+        SocketException? lastFailure = null;
+        for (var attempt = 0; attempt < maxAttempts; attempt++)
+        {
+            var (port, reservation) = reserveTcp();
+            using (reservation)
+            {
+                try
+                {
+                    bindUdp(port);
+                    return port;
+                }
+                catch (SocketException ex) when (ex.SocketErrorCode is SocketError.AddressAlreadyInUse or SocketError.AccessDenied)
+                {
+                    lastFailure = ex;
+                }
+            }
+        }
+
+        throw new InvalidOperationException(
+            $"Could not reserve a loopback TCP+UDP port after {maxAttempts} attempts.", lastFailure);
+    }
+
     private sealed class TestCertificate : IDisposable
     {
         public X509Certificate2 Certificate { get; }
@@ -77,20 +106,16 @@ internal static class TrafficHttp3Acceptance
 
         int GetAvailableDualTransportPort()
         {
-            for (var attempt = 0; attempt < 8; attempt++)
+            return SelectDualTransportPort(() =>
             {
-                using var tcp = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+                var tcp = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
                 tcp.Bind(new IPEndPoint(IPAddress.Loopback, 0));
-                var port = ((IPEndPoint)tcp.LocalEndPoint!).Port;
+                return (((IPEndPoint)tcp.LocalEndPoint!).Port, tcp);
+            }, port =>
+            {
                 using var udp = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
-                try
-                {
-                    udp.Bind(new IPEndPoint(IPAddress.Loopback, port));
-                    return port;
-                }
-                catch (SocketException) when (attempt < 7) { }
-            }
-            throw new SocketException((int)SocketError.AddressAlreadyInUse);
+                udp.Bind(new IPEndPoint(IPAddress.Loopback, port));
+            });
         }
 
         var key = OperatingSystem.IsWindows()

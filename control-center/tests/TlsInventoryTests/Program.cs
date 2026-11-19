@@ -1,8 +1,24 @@
+using System.Net.Sockets;
+
 var now = new DateTime(2026,11,13,12,0,0,DateTimeKind.Utc);
 if (TlsInventory.ExpiryState(now.AddDays(-1),now) != "expired") throw new Exception("expired state");
 if (TlsInventory.ExpiryState(now.AddDays(10),now) != "expiring-within-30-days") throw new Exception("warning state");
 if (TlsInventory.ExpiryState(now.AddDays(60),now) != "valid-date-only") throw new Exception("valid state");
 Console.WriteLine("PASS: TLS certificate expiry boundaries");
+
+var dualTransportCandidates = new Queue<int>([51001, 51002, 51003]);
+var udpBindAttempts = 0;
+var selectedDualTransportPort = TrafficHttp3Acceptance.SelectDualTransportPort(
+    () => (dualTransportCandidates.Dequeue(), new MemoryStream()),
+    _ =>
+    {
+        udpBindAttempts++;
+        if (udpBindAttempts == 1) throw new SocketException((int)SocketError.AccessDenied);
+        if (udpBindAttempts == 2) throw new SocketException((int)SocketError.AddressAlreadyInUse);
+    });
+if (selectedDualTransportPort != 51003 || udpBindAttempts != 3)
+    throw new Exception("dual TCP/UDP port selection must retry reserved and concurrently occupied UDP ports");
+Console.WriteLine("PASS: dual TCP/UDP port selection retries Windows reserved-port and in-use errors");
 
 var staging = "https://acme-staging-v02.api.letsencrypt.org/directory";
 var eligible = AcmeTargetPolicy.Validate(staging, "api.example.com", http01: true,
