@@ -105,7 +105,7 @@ test('browser: bootstrap, navigation, onboarding, websites, route edit, users an
     await expect(page.locator('#content')).toContainText('esign-browser-private-pool');
     await page.locator('button.nav[data-view="clusters"]').click();
     await expect(page.locator('#content')).toContainText('PrimaryBackup');
-    await expect(page.locator('#content')).toContainText('Enabled');
+    await expect(page.locator('#content')).toContainText('Active');
     await page.locator('button.nav[data-view="backends"]').click();
     await expect(page.locator('#content')).toContainText('A host match separates routes');
     await expect(page.locator('#content')).toContainText('Inspect live health');
