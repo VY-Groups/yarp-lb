@@ -68,8 +68,15 @@ internal static class AcmeHttp01Acceptance
             using var unknown = await client.GetAsync("/.well-known/acme-challenge/0123456789abcdefunknown");
             Check(unknown.StatusCode == HttpStatusCode.NotFound, "unknown tokens are not disclosed");
 
-            clock.Advance(TimeSpan.FromMinutes(3));
-            Check(!store.TryGet(token, out _), "expired challenge is removed on access");
+            clock.AdjustUtc(TimeSpan.FromHours(12));
+            Check(store.TryGet(token, out _), "forward wall-clock correction does not prematurely expire a challenge");
+            clock.AdjustUtc(TimeSpan.FromHours(-24));
+            clock.Advance(TimeSpan.FromMinutes(2) - TimeSpan.FromTicks(1));
+            Check(store.TryGet(token, out _), "challenge is valid immediately before its monotonic deadline");
+            clock.Advance(TimeSpan.FromTicks(1));
+            Check(!store.TryGet(token, out _), "challenge expires at its monotonic deadline despite wall-clock rollback");
+            clock.AdjustUtc(TimeSpan.FromHours(-12));
+            Check(!store.TryGet(token, out _), "a further wall-clock rollback cannot resurrect an expired challenge");
             using var expired = await client.GetAsync("/.well-known/acme-challenge/" + token);
             Check(expired.StatusCode == HttpStatusCode.NotFound, "expired challenge no longer responds");
         }
@@ -103,6 +110,7 @@ internal static class AcmeHttp01Acceptance
         }
         Check(!bounded.TryPublish("challenge-token-overflow", "challenge-token-overflow." + new string('C', 43), TimeSpan.FromMinutes(1)),
             "challenge table fails closed at its fixed capacity");
+        clock.AdjustUtc(TimeSpan.FromDays(-1));
         clock.Advance(TimeSpan.FromMinutes(2));
         Check(bounded.TryPublish("challenge-token-after-expiry", "challenge-token-after-expiry." + new string('D', 43), TimeSpan.FromMinutes(1)),
             "expired entries are reclaimed before enforcing capacity");
@@ -113,7 +121,15 @@ internal static class AcmeHttp01Acceptance
     private sealed class ManualTimeProvider(DateTimeOffset now) : TimeProvider
     {
         private DateTimeOffset current = now;
+        private long timestamp;
         public override DateTimeOffset GetUtcNow() => current;
-        public void Advance(TimeSpan duration) => current += duration;
+        public override long TimestampFrequency => TimeSpan.TicksPerSecond;
+        public override long GetTimestamp() => timestamp;
+        public void AdjustUtc(TimeSpan duration) => current += duration;
+        public void Advance(TimeSpan duration)
+        {
+            current += duration;
+            timestamp += duration.Ticks;
+        }
     }
 }

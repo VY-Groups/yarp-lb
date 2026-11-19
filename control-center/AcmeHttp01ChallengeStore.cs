@@ -17,7 +17,7 @@ public sealed class AcmeHttp01ChallengeStore
     private readonly Dictionary<string, Entry> entries = new(StringComparer.Ordinal);
     private readonly TimeProvider timeProvider;
 
-    private sealed record Entry(string KeyAuthorization, DateTimeOffset ExpiresAt);
+    private sealed record Entry(string KeyAuthorization, long PublishedAt, TimeSpan Lifetime);
 
     public AcmeHttp01ChallengeStore(TimeProvider? timeProvider = null) =>
         this.timeProvider = timeProvider ?? TimeProvider.System;
@@ -31,10 +31,11 @@ public sealed class AcmeHttp01ChallengeStore
 
         lock (gate)
         {
-            RemoveExpired(timeProvider.GetUtcNow());
+            var now = timeProvider.GetTimestamp();
+            RemoveExpired(now);
             if (!entries.ContainsKey(token) && entries.Count >= MaximumEntries)
                 return false;
-            entries[token] = new Entry(keyAuthorization, timeProvider.GetUtcNow() + lifetime);
+            entries[token] = new Entry(keyAuthorization, now, lifetime);
             return true;
         }
     }
@@ -45,7 +46,7 @@ public sealed class AcmeHttp01ChallengeStore
         if (!ValidToken(token)) return false;
         lock (gate)
         {
-            var now = timeProvider.GetUtcNow();
+            var now = timeProvider.GetTimestamp();
             RemoveExpired(now);
             if (!entries.TryGetValue(token, out var entry)) return false;
             keyAuthorization = entry.KeyAuthorization;
@@ -59,9 +60,12 @@ public sealed class AcmeHttp01ChallengeStore
         lock (gate) entries.Remove(token);
     }
 
-    private void RemoveExpired(DateTimeOffset now)
+    // Challenge lifetimes are relative; NTP or administrator wall-clock changes
+    // must not extend or prematurely expire a published authorization.
+    private void RemoveExpired(long now)
     {
-        foreach (var expired in entries.Where(pair => pair.Value.ExpiresAt <= now)
+        foreach (var expired in entries.Where(pair =>
+                         timeProvider.GetElapsedTime(pair.Value.PublishedAt, now) >= pair.Value.Lifetime)
                      .Select(pair => pair.Key).ToArray())
             entries.Remove(expired);
     }
