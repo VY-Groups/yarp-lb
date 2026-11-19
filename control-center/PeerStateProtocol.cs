@@ -164,6 +164,7 @@ public sealed class PeerStateJournal
         if (receivedMinute != minute || lastAcceptedTimestamp is null)
         {
             remote.Clear();
+            lastAcceptedTimestamp = null;
             return false;
         }
         var age = timeProvider.GetElapsedTime(lastAcceptedTimestamp.Value);
@@ -171,6 +172,7 @@ public sealed class PeerStateJournal
         // Keep sequence/epoch high-water marks after collection so replayed
         // snapshots cannot repopulate an expired table.
         remote.Clear();
+        lastAcceptedTimestamp = null;
         return false;
     }
 

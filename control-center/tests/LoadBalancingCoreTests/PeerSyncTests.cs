@@ -196,6 +196,26 @@ public static class PeerSyncTests
         Check(remoteMinuteGc.RetainedRemoteEntries == 0,
             "remote table is collected after its declared minute TTL");
 
+        var rollbackSource = new PeerStateJournal("node-a", "node-b", secret, 2);
+        rollbackSource.Observe(IPAddress.Parse("10.123.4.13"), now);
+        var rollbackFrame = rollbackSource.Snapshot(now);
+        var rollbackTime = new ManualTimeProvider(DateTimeOffset.UtcNow);
+        var rollbackGcReceiver = new PeerStateJournal("node-b", "node-a", secret, 2,
+            TimeSpan.FromSeconds(60), timeProvider: rollbackTime);
+        Check(rollbackGcReceiver.Apply(rollbackFrame, now),
+            "remote minute rollback fixture accepts an initial current-minute snapshot");
+        Check(!rollbackGcReceiver.Status(now + 1).RemoteReportedInCurrentMinute &&
+              rollbackGcReceiver.RetainedRemoteEntries == 0,
+            "advancing the receiver minute collects remote state");
+        Check(!rollbackGcReceiver.Status(now).RemoteReportedInCurrentMinute &&
+              rollbackGcReceiver.RetainedRemoteEntries == 0,
+            "rolling the receiver minute backward cannot make collected state fresh again");
+        Check(!rollbackGcReceiver.Apply(rollbackFrame, now),
+            "minute rollback does not reset replay high-water marks");
+        Check(rollbackGcReceiver.Apply(rollbackSource.Snapshot(now), now) &&
+              rollbackGcReceiver.Status(now).RemoteReportedInCurrentMinute,
+            "only a new higher-sequence snapshot restores freshness after minute rollback");
+
         var maxFrame = new PeerStateJournal("node-a", "node-b", secret, 2048);
         for (var i = 0; i < 2048; i++)
             maxFrame.Observe(new IPAddress(new byte[] { 10, 20,
