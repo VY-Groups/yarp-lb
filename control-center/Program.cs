@@ -850,14 +850,26 @@ app.MapPost(EnterpriseOidcLogout.Path, async (HttpContext ctx, IOptionsMonitor<O
         var users = ReadUsers();
         var user = users.SingleOrDefault(u => u.Username.Equals(row.Username, StringComparison.OrdinalIgnoreCase));
         if (user is null || user.Provider != "Local") return Results.Ok();
-        // Persist a monotonic subject-wide cutoff. Retrying an older/equal
-        // notice cannot revoke a newer authentication or rotate its stamp.
+        // Persist a monotonic subject-wide cutoff and audit checkpoint. A
+        // failed audit append leaves it pending, so an IdP retry cannot receive
+        // 200 until the corresponding local audit record has been appended.
         if (notice.IssuedAt > user.OidcRevokedBefore)
         {
-            users[users.IndexOf(user)] = user with { OidcRevokedBefore = notice.IssuedAt,
+            var index = users.IndexOf(user);
+            user = user with { OidcRevokedBefore = notice.IssuedAt,
                 SecurityStamp = Convert.ToHexString(RandomNumberGenerator.GetBytes(24)) };
+            users[index] = user;
             WriteUsers(users);
-            await Audit(user.Username, "OIDC_BACKCHANNEL_LOGOUT", new { revokedBefore = notice.IssuedAt });
+        }
+        if (user.OidcLogoutAuditThrough < user.OidcRevokedBefore)
+        {
+            await Audit(user.Username, "OIDC_BACKCHANNEL_LOGOUT", new { revokedBefore = user.OidcRevokedBefore });
+            users = ReadUsers();
+            var current = users.SingleOrDefault(u => u.Username.Equals(row.Username, StringComparison.OrdinalIgnoreCase));
+            if (current is null || current.Provider != "Local" || current.OidcRevokedBefore != user.OidcRevokedBefore)
+                return Results.StatusCode(503);
+            users[users.IndexOf(current)] = current with { OidcLogoutAuditThrough = current.OidcRevokedBefore };
+            WriteUsers(users);
         }
         return Results.Ok();
     }
@@ -1018,7 +1030,9 @@ app.MapPost("/admin/api/users/{username}/password", async (HttpContext ctx, stri
         var user = users.FirstOrDefault(x => x.Username.Equals(username, StringComparison.OrdinalIgnoreCase));
         if (user is null) return Results.NotFound();
         if (user.Provider == "AD") return Results.BadRequest(new { error = "Reset directory passwords in Active Directory, not this console" });
-        var updated = NewUser(user.Username, user.Role, input.Password, user.Email) with { Enabled = user.Enabled, OidcRevokedBefore = user.OidcRevokedBefore };
+        var updated = NewUser(user.Username, user.Role, input.Password, user.Email) with
+        { Enabled = user.Enabled, OidcRevokedBefore = user.OidcRevokedBefore,
+            OidcLogoutAuditThrough = user.OidcLogoutAuditThrough };
         users[users.IndexOf(user)] = updated;
         WriteUsers(users);
         await Audit(Actor(ctx), "PASSWORD_RESET", new { username });
@@ -2225,7 +2239,7 @@ record UserInput(string Username, string Role, string Password, string? Email);
 record PasswordInput(string Password);
 record ChangeDecision(string Decision, string? Reason);
 record InventoryInput(string Id, string Name, string Type, string Address, string Notes);
-record AdminUser(string Username, string Role, string Salt, string Hash, string? Email = null, bool Enabled = true, string SecurityStamp = "", string Provider = "Local", string DistinguishedName = "", long OidcRevokedBefore = 0);
+record AdminUser(string Username, string Role, string Salt, string Hash, string? Email = null, bool Enabled = true, string SecurityStamp = "", string Provider = "Local", string DistinguishedName = "", long OidcRevokedBefore = 0, long OidcLogoutAuditThrough = 0);
 
 record FleetGateway(string Id, string Url, string ClientCertificateThumbprint);
 

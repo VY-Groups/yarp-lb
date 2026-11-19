@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import secrets
+import shutil
 import ssl
 import subprocess
 import tempfile
@@ -250,7 +251,22 @@ def main():
                         backchannel(origin,ctx,forged,400)
                         check(original.session()["authenticated"],"invalid logout cannot revoke session: "+mode)
                     notice,stamp=idp.logout_notice()
+                    audit_path=root/"state"/"admin-audit.jsonl"
+                    audit_backup=root/"admin-audit.saved"
+                    had_audit=audit_path.exists()
+                    if had_audit: audit_path.rename(audit_backup)
+                    audit_path.mkdir()
+                    try:
+                        backchannel(origin,ctx,notice,503)
+                    finally:
+                        shutil.rmtree(audit_path)
+                        if had_audit: audit_backup.rename(audit_path)
+                        else: audit_path.touch()
                     backchannel(origin,ctx,notice,200)
+                    audit_rows=[json.loads(line) for line in audit_path.read_text(encoding="utf8").splitlines()]
+                    recorded=[row for row in audit_rows if row.get("action")=="OIDC_BACKCHANNEL_LOGOUT" and
+                              row.get("details",{}).get("revokedBefore")==stamp]
+                    check(len(recorded)==1,"retry durably records logout after an audit failure before acknowledging it")
                     check(not original.session()["authenticated"],"valid IdP notice revokes next authenticated request")
                     absent_typ,_=idp.logout_notice("typ-absent",issued=stamp)
                     backchannel(origin,ctx,absent_typ,200)
