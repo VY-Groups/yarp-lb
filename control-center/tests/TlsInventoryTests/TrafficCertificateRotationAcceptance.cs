@@ -44,24 +44,28 @@ internal static class TrafficCertificateRotationAcceptance
             };
             testChainPolicy.CustomTrustStore.Add(root);
 
-            X509Certificate2 CreateLeaf(string commonName, string dnsName, DateTimeOffset notBefore, DateTimeOffset notAfter)
+            X509Certificate2 CreateLeaf(string commonName, string dnsName, DateTimeOffset notBefore,
+                DateTimeOffset notAfter, X509Certificate2? issuer = null, bool serverAuthentication = true)
             {
                 using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
                 var request = new CertificateRequest($"CN={commonName}", key, HashAlgorithmName.SHA256);
                 var san = new SubjectAlternativeNameBuilder();
                 san.AddDnsName(dnsName);
                 request.CertificateExtensions.Add(san.Build());
-                var eku = new OidCollection { new("1.3.6.1.5.5.7.3.1") };
+                var eku = new OidCollection
+                {
+                    new(serverAuthentication ? "1.3.6.1.5.5.7.3.1" : "1.3.6.1.5.5.7.3.2")
+                };
                 request.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension(eku, true));
                 request.CertificateExtensions.Add(new X509KeyUsageExtension(X509KeyUsageFlags.DigitalSignature, true));
                 var serial = RandomNumberGenerator.GetBytes(16);
-                using var publicCert = request.Create(root, notBefore, notAfter, serial);
+                using var publicCert = request.Create(issuer ?? root, notBefore, notAfter, serial);
                 return publicCert.CopyWithPrivateKey(key);
             }
 
-            void WritePfx(string targetPath, X509Certificate2 leaf)
+            void WritePfx(string targetPath, X509Certificate2 leaf, X509Certificate2? issuer = null)
             {
-                var collection = new X509Certificate2Collection { leaf, root };
+                var collection = new X509Certificate2Collection { leaf, issuer ?? root };
                 File.WriteAllBytes(targetPath, collection.Export(X509ContentType.Pkcs12, password)!);
                 if (OperatingSystem.IsLinux()) File.SetUnixFileMode(targetPath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
             }
@@ -71,6 +75,19 @@ internal static class TrafficCertificateRotationAcceptance
             var third = CreateLeaf("api.example.test", "api.example.test", DateTimeOffset.UtcNow.AddMinutes(-5), DateTimeOffset.UtcNow.AddDays(10));
             var wrongName = CreateLeaf("wrong.example.test", "wrong.example.test", DateTimeOffset.UtcNow.AddMinutes(-5), DateTimeOffset.UtcNow.AddDays(10));
             var expired = CreateLeaf("api.example.test", "api.example.test", DateTimeOffset.UtcNow.AddDays(-10), DateTimeOffset.UtcNow.AddDays(-1));
+            var notYetValid = CreateLeaf("api.example.test", "api.example.test", DateTimeOffset.UtcNow.AddMinutes(10), DateTimeOffset.UtcNow.AddDays(10));
+            var nearExpiry = CreateLeaf("api.example.test", "api.example.test", DateTimeOffset.UtcNow.AddMinutes(-5), DateTimeOffset.UtcNow.AddHours(23));
+            var wrongEku = CreateLeaf("api.example.test", "api.example.test", DateTimeOffset.UtcNow.AddMinutes(-5), DateTimeOffset.UtcNow.AddDays(10),
+                serverAuthentication: false);
+
+            using var untrustedRootKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+            var untrustedRootRequest = new CertificateRequest("CN=Untrusted Rotation Test Root", untrustedRootKey, HashAlgorithmName.SHA256);
+            untrustedRootRequest.CertificateExtensions.Add(new X509BasicConstraintsExtension(true, false, 0, true));
+            untrustedRootRequest.CertificateExtensions.Add(new X509KeyUsageExtension(X509KeyUsageFlags.KeyCertSign | X509KeyUsageFlags.CrlSign, true));
+            untrustedRootRequest.CertificateExtensions.Add(new X509SubjectKeyIdentifierExtension(untrustedRootRequest.PublicKey, false));
+            using var untrustedRoot = untrustedRootRequest.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-30), DateTimeOffset.UtcNow.AddDays(30));
+            var untrustedChainLeaf = CreateLeaf("api.example.test", "api.example.test", DateTimeOffset.UtcNow.AddMinutes(-5),
+                DateTimeOffset.UtcNow.AddDays(10), untrustedRoot);
             WritePfx(pfxPath, first);
             var stagePfx = Path.Combine(rootDir, "traffic.next");
 
@@ -142,11 +159,12 @@ internal static class TrafficCertificateRotationAcceptance
             }
             Check(await GetPeerThumbprintAsync() == third.Thumbprint, "a repeated renewal switches later handshakes");
 
-            async Task AssertRejectedCandidateAndKeepsLastGoodAsync(string name, X509Certificate2? candidate)
+            async Task AssertRejectedCandidateAndKeepsLastGoodAsync(string name, X509Certificate2? candidate,
+                string expectedFailure, X509Certificate2? issuer = null)
             {
                 var lastGoodThumbprint = rotation.Current.Thumbprint;
                 var priorRejections = rotation.RejectedCandidateCount;
-                if (candidate is not null) WritePfx(stagePfx, candidate);
+                if (candidate is not null) WritePfx(stagePfx, candidate, issuer);
                 else await File.WriteAllTextAsync(stagePfx, "not-a-pkcs12-file");
                 if (OperatingSystem.IsLinux()) File.SetUnixFileMode(stagePfx, UnixFileMode.UserRead | UnixFileMode.UserWrite);
                 File.Move(stagePfx, pfxPath, overwrite: true);
@@ -155,16 +173,20 @@ internal static class TrafficCertificateRotationAcceptance
                     while (rotation.RejectedCandidateCount == priorRejections)
                         await Task.Delay(50, rejectionTimeout.Token);
                 }
-                var expectedFailure = candidate is null ? "CryptographicException" : "InvalidOperationException";
                 Check(rotation.LastRejectedCandidateFailure == expectedFailure,
                     $"{name} candidate is rejected by its expected validation path");
                 Check(rotation.Current.Thumbprint == lastGoodThumbprint, $"{name} candidate retains last-good certificate");
                 Check(await GetPeerThumbprintAsync() == lastGoodThumbprint, $"live Kestrel continues serving last-good after {name} candidate");
             }
 
-            await AssertRejectedCandidateAndKeepsLastGoodAsync("malformed", null);
-            await AssertRejectedCandidateAndKeepsLastGoodAsync("wrong-SAN", wrongName);
-            await AssertRejectedCandidateAndKeepsLastGoodAsync("expired", expired);
+            await AssertRejectedCandidateAndKeepsLastGoodAsync("malformed", null, "CryptographicException");
+            await AssertRejectedCandidateAndKeepsLastGoodAsync("wrong-SAN", wrongName, "InvalidOperationException");
+            await AssertRejectedCandidateAndKeepsLastGoodAsync("expired", expired, "InvalidOperationException");
+            await AssertRejectedCandidateAndKeepsLastGoodAsync("not-yet-valid", notYetValid, "InvalidOperationException");
+            await AssertRejectedCandidateAndKeepsLastGoodAsync("near-expiry", nearExpiry, "InvalidOperationException");
+            await AssertRejectedCandidateAndKeepsLastGoodAsync("wrong-EKU", wrongEku, "InvalidOperationException");
+            await AssertRejectedCandidateAndKeepsLastGoodAsync("untrusted-chain", untrustedChainLeaf,
+                "CryptographicException", untrustedRoot);
 
             await app.StopAsync();
             await app.DisposeAsync();
@@ -172,6 +194,7 @@ internal static class TrafficCertificateRotationAcceptance
                 Check(TrafficCertificateRotation.ActiveWindowsKeyContainerCount == keyBaseline,
                     "host shutdown removes all temporary Windows user key containers");
             first.Dispose(); second.Dispose(); third.Dispose(); wrongName.Dispose(); expired.Dispose();
+            notYetValid.Dispose(); nearExpiry.Dispose(); wrongEku.Dispose(); untrustedChainLeaf.Dispose();
             Console.WriteLine("PASS: live Kestrel TLS rotation, last-good rollback and host key cleanup");
         }
         finally
