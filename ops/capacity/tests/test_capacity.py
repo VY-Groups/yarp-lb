@@ -90,6 +90,36 @@ class CapacityEvidence(unittest.TestCase):
         r,d=self.report();self.assertEqual(r.returncode,0,r.stdout+r.stderr)
         self.assertEqual(d["decision"],"GO");self.assertEqual(len(d["window_results"]),60)
         self.assertEqual(d["overlapping_seconds"],3600)
+    def mutate_telemetry(self, key, index, value):
+        with self.csv.open(newline="") as stream:
+            reader=csv.DictReader(stream)
+            rows=list(reader)
+            fields=reader.fieldnames
+        rows[index][key]=str(value)
+        with self.csv.open("w", newline="") as stream:
+            writer=csv.DictWriter(stream, fieldnames=fields)
+            writer.writeheader()
+            writer.writerows(rows)
+    def test_nic_drop_then_reset_cannot_hide_loss(self):
+        self.mutate_telemetry("rx_dropped", 100, 7)
+        r,d=self.report()
+        self.assertNotEqual(r.returncode,0)
+        self.assertEqual(d["decision"],"NO-GO")
+        self.assertIn("NIC drops increased: rx_dropped",d["error_reasons"])
+        self.assertIn("counter decreased/reset: rx_dropped",d["error_reasons"])
+    def test_cpu_counter_rollback_fails(self):
+        self.mutate_telemetry("process_cpu_seconds", 100, 0)
+        r,d=self.report()
+        self.assertNotEqual(r.returncode,0)
+        self.assertIn("counter decreased/reset: process_cpu_seconds",d["error_reasons"])
+    def test_nonfinite_memory_or_threads_fail(self):
+        for key,value in (("rss_bytes", "nan"), ("threads", "inf")):
+            with self.subTest(key=key):
+                self.mutate_telemetry(key,100,value)
+                r,d=self.report()
+                self.assertNotEqual(r.returncode,0)
+                self.assertIn("invalid "+key,str(d["error_reasons"]))
+                self.mutate_telemetry(key,100,20 if key=="threads" else 25000000)
     def test_gbps_floor_fails_even_with_rps(self):
         self.scenario["peak_gbps"]=.04
         r,d=self.report();self.assertNotEqual(r.returncode,0)
