@@ -14,9 +14,9 @@ Configure both with identical `GATEWAY_PEER_SYNC_SECRET` (>=32 UTF-8 bytes) from
 
 Optional `GATEWAY_PEER_SYNC_CAPACITY` default 2048 (1..2048), `GATEWAY_PEER_SYNC_INTERVAL_SECONDS` default 2 (1..30). All configured values must be present and validated at startup. Peers must use a **real trusted Kestrel HTTPS listener**; HTTP, embedded URL credentials, redirects, arbitrary paths, unsigned messages and stale/replayed nonces are rejected. Never bypass server certificate verification. Disable proxying `/gateway/internal/peer-sync` from the public VIP; route this endpoint only over a private, firewall-restricted peer network.
 
-A sender emits one bounded snapshot per interval, signed by HMAC-SHA256 over sender identity, UTC timestamp, random nonce and SHA-256 of the serialized body. Protocol version 3 explicitly identifies its only supported table as `hashed-client-minute-request-count`, table schema version 1, with a 60-second entry lifetime. Unknown protocol/table/schema/TTL values fail closed; peers must be upgraded together because there is no version negotiation or mixed-version fallback. The receiver checks the expected node ID, a 30-second time window, single-use nonces, a 256 KiB body cap and monotonic per-minute sequence and counts. Client IP values are HMAC-hashed, never sent in plaintext. Received identity keys are restricted to 64 hex characters; accepted identity cardinality is capped to 2048 so a worst-case hexadecimal-key JSON snapshot stays under the signed 256 KiB transport ceiling. Local and remote table entries are collected when the minute/monotonic freshness boundary is observed; remote expiry retains epoch/sequence replay high-water marks.
+A sender emits one bounded full snapshot or acknowledged-base delta per interval, signed by HMAC-SHA256 over sender identity, UTC timestamp, random nonce and SHA-256 of the serialized body. Protocol version 4 explicitly identifies its only supported table as `hashed-client-minute-request-count`, table schema version 1, with a 60-second entry lifetime. Unknown protocol/table/schema/TTL values fail closed; peers must be upgraded together because there is no version negotiation or mixed-version fallback. The receiver checks the expected node ID, a 30-second time window, single-use nonces, a 256 KiB body cap and monotonic per-minute sequence and counts. Client IP values are HMAC-hashed, never sent in plaintext. Received identity keys are restricted to 64 hex characters; accepted identity cardinality is capped to 2048 so a worst-case hexadecimal-key JSON snapshot stays under the signed 256 KiB transport ceiling. Local and remote table entries are collected when the minute/monotonic freshness boundary is observed; remote expiry retains epoch/sequence replay high-water marks.
 
-This contract is deliberately one typed table only. It does not implement generic table negotiation, per-key updates/delta propagation, queued backpressure, or snapshot backfill. Those remain open parts of issue #101, along with operator UI/metrics and physical partition/soak acceptance.
+This contract is deliberately one typed table only. It implements absolute-counter deltas for this single table and full snapshot backfill; generic table negotiation and multi-peer fanout remain unsupported. Those remain open parts of issue #101, along with operator UI/metrics and physical partition/soak acceptance.
 
 **Availability/consistency:** best-effort telemetry gossip can diverge during partitions. It has no quorum, replay of CA requests, external mutation or leader election, and MUST NEVER be used to enforce a strict global quota. To enforce an atomic shared limit across nodes, use the independent opt-in `SharedPeerRateLimiter` single Redis writer. Its own fail-closed 503 behavior on disconnect remains unchanged. Asynchronous Redis replica promotion can also lose writes and is NOT certified for hard limits.
 
@@ -24,7 +24,7 @@ The signed protocol has deterministic unit tests; a full production mTLS/PKI pee
 
 ## Process-restart resynchronization
 
-Protocol v3 also binds every signed snapshot to a random 256-bit receiver
+Protocol v4 also binds every signed snapshot to a random 256-bit receiver
 boot challenge. A valid HMAC request with an absent or obsolete challenge
 gets HTTP 409 and a no-store `X-GC-Peer-Receiver-Epoch` response header;
 it cannot populate the receiving journal. The publisher learns that value
@@ -34,7 +34,7 @@ The first exchange after either node restarts may therefore require one
 extra interval. Captured snapshots for a previous receiver boot cannot
 be reapplied, even when that receiver starts with an empty nonce cache.
 Changing a challenge in a captured payload invalidates its HMAC. Both
-peers must upgrade together; there is no v2 fallback. Keep peer endpoints
+peers must upgrade together; there is no v2/v3 fallback. Keep peer endpoints
 firewall-restricted. This is receiver boot binding, not durable counter
 storage, persistent source epoch allocation or protection against a stolen
 shared secret.
@@ -81,3 +81,7 @@ refresh the accepted receipt's TTL.
 telemetry only. No synchronized HAProxy stick tables, request admission,
 session persistence, signed config consensus or physical HA are claimed.
 Network partitions and stale distributed quota remain production NO-GO.
+
+## Protocol v4 delta/backfill
+
+A zero BaseSequence is a full snapshot; a positive BaseSequence must match the exact currently fresh receiver sequence in the same source epoch and minute. Deltas carry absolute changed counter values, not increments; unchanged identities are retained, reductions and merged capacity overflow are rejected. The publisher keeps one bounded acknowledged full image and uses a smaller delta only after successful HTTPS delivery. Any HTTP failure, transport exception, minute change or receiver boot change forces a full snapshot on the next eligible tick. Expired state rejects deltas until full backfill. No mixed v3/v4 compatibility: upgrade both peers together and monitor recovery; rollback both together. This remains best-effort telemetry, not strict admission authority. Physical restart/partition and soak testing remain required.
