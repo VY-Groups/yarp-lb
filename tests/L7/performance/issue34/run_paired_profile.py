@@ -25,6 +25,11 @@ BACKEND_B_PORT = 18082
 MAX_TRACE_BYTES = 256 * 1024 * 1024
 
 
+def resolve_checkout(source: Path) -> Path:
+    """Make checkout paths absolute before using them with a different cwd."""
+    return source.expanduser().resolve(strict=True)
+
+
 def request_json(url: str, timeout: float = 2.0) -> dict:
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     with opener.open(url, timeout=timeout) as response:
@@ -137,14 +142,16 @@ def write_lab_config(gateway_bin: Path) -> Path:
 
 class Lab:
     def __init__(self, source: Path, output: Path):
-        self.source = source
+        # Processes run with their own binary directory as cwd. Keep DLL paths
+        # absolute so a relative CLI checkout path is not resolved twice.
+        self.source = resolve_checkout(source)
         self.output = output
         self.processes: list[subprocess.Popen] = []
         self.log_threads: dict[int, threading.Thread] = {}
         self.log_paths: dict[int, Path] = {}
         self.env = os.environ.copy()
-        gateway_bin = source / "tests/L7/GatewayLab/bin/Release/net10.0"
-        backend_bin = source / "tests/L7/BackendLab/bin/Release/net10.0"
+        gateway_bin = self.source / "tests/L7/GatewayLab/bin/Release/net10.0"
+        backend_bin = self.source / "tests/L7/BackendLab/bin/Release/net10.0"
         for binary in (gateway_bin / "GatewayLab.dll", backend_bin / "BackendLab.dll"):
             if not binary.is_file():
                 raise FileNotFoundError(f"missing built lab binary: {binary}")
@@ -370,6 +377,8 @@ def main() -> int:
     for source in (args.baseline_dir, args.candidate_dir):
         if not source.is_dir():
             raise FileNotFoundError(f"checkout does not exist: {source}")
+    args.baseline_dir = resolve_checkout(args.baseline_dir)
+    args.candidate_dir = resolve_checkout(args.candidate_dir)
     verify_checkout(args.baseline_dir, args.baseline_commit)
     verify_checkout(args.candidate_dir, args.candidate_commit)
     args.output.mkdir(parents=True, exist_ok=True)

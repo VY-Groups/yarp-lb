@@ -5,7 +5,8 @@ from tempfile import TemporaryDirectory
 
 from instrument_lab_stats import ADDITION, ANCHOR, instrument
 from report import build_report
-from run_paired_profile import _drain_bounded_log, measurement as parse_measurement
+from run_paired_profile import (_drain_bounded_log, measurement as parse_measurement,
+                               resolve_checkout)
 
 
 def measurement(alloc, *, rps=100.0, p95=30.0, p99=50.0, errors=0):
@@ -172,6 +173,15 @@ class ReportTests(unittest.TestCase):
             self.assertTrue(value.startswith(b"x" * 16))
             self.assertIn(b"truncated at 16 bytes", value)
             self.assertEqual(source.read(), b"")
+
+    def test_checkout_resolution_is_absolute_before_child_cwd_changes(self):
+        with TemporaryDirectory(dir=Path.cwd()) as tmp:
+            checkout = Path(tmp) / "checkout"
+            checkout.mkdir()
+            relative = checkout.relative_to(Path.cwd())
+            resolved = resolve_checkout(relative)
+            self.assertEqual(resolved, checkout.resolve())
+            self.assertTrue(resolved.is_absolute())
 
 
 if __name__ == "__main__":
