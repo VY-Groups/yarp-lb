@@ -23,7 +23,7 @@ public sealed record PeerStateFrame(string NodeId, long Minute, long Sequence,
     // The receiver deliberately accepts only the protocol version it knows.
     // This is a compatibility fence: rollout must keep both peers on the same
     // version until an explicit negotiation/upgrade protocol is introduced.
-    public const int CurrentProtocolVersion = 3;
+    public const int CurrentProtocolVersion = 4;
     [JsonRequired]
     public int ProtocolVersion { get; init; } = CurrentProtocolVersion;
 
@@ -43,6 +43,30 @@ public sealed record PeerStateFrame(string NodeId, long Minute, long Sequence,
     // accepted by a replacement process with an empty replay cache.
     [JsonRequired]
     public string ReceiverEpoch { get; init; } = "";
+
+    // Zero denotes a complete snapshot; a positive base requires exact receiver alignment.
+    [JsonRequired]
+    public long BaseSequence { get; init; }
+}
+
+public static class PeerDelta
+{
+    public static PeerStateFrame Select(PeerStateFrame full, PeerStateFrame? acknowledged)
+    {
+        if (acknowledged is null || full.BaseSequence != 0 || acknowledged.BaseSequence != 0 ||
+            full.NodeId != acknowledged.NodeId || full.SourceEpoch != acknowledged.SourceEpoch ||
+            full.Minute != acknowledged.Minute || full.ReceiverEpoch != acknowledged.ReceiverEpoch ||
+            full.Sequence <= acknowledged.Sequence ||
+            acknowledged.Counters.Any(kv => !full.Counters.TryGetValue(kv.Key, out var value) || value < kv.Value))
+            return full;
+
+        var changes = full.Counters.Where(kv => !acknowledged.Counters.TryGetValue(kv.Key, out var old) ||
+            kv.Value != old).ToDictionary(kv => kv.Key, kv => kv.Value, StringComparer.Ordinal);
+        // Keep full snapshots when they cost no more entries than a delta.
+        return changes.Count < full.Counters.Count
+            ? full with { BaseSequence = acknowledged.Sequence, Counters = changes }
+            : full;
+    }
 }
 
 public sealed record PeerSyncStatus(bool Enabled, string LocalNode, string RemoteNode,
@@ -161,6 +185,7 @@ public sealed class PeerStateJournal
             !PeerStateTableContract.IsSupported(frame.TableId, frame.TableVersion, frame.EntryTtlSeconds) ||
             frame.NodeId != remoteId ||
             frame.Minute != currentMinute || frame.Sequence <= 0 || frame.SourceEpoch <= 0 ||
+            frame.BaseSequence < 0 || frame.BaseSequence >= frame.Sequence ||
             frame.Counters is null || frame.Counters.Count > maxIdentities ||
             frame.Counters.Any(p => p.Key.Length != 64 ||
                 !p.Key.All(Uri.IsHexDigit) || p.Value is < 1 or > PeerStateTableContract.MaxCountPerEntry))
@@ -178,11 +203,28 @@ public sealed class PeerStateJournal
             if (sameEpoch && frame.Minute < receivedMinute) return false;
             if (sameEpoch && frame.Minute == receivedMinute && frame.Sequence <= receivedSequence)
                 return false;
-            // Within an epoch a higher sequence cannot remove counters.
-            if (sameEpoch && frame.Minute == receivedMinute &&
-                remote.Any(kv => !frame.Counters.TryGetValue(kv.Key,out var n) || n < kv.Value))
-                return false;
-            remote = new Dictionary<string,int>(frame.Counters, StringComparer.Ordinal);
+            if (frame.BaseSequence > 0)
+            {
+                // A delta is never a cold-start or restart frame. Do not merge
+                // against collected state or an unacknowledged sequence.
+                if (!sameEpoch || frame.Minute != receivedMinute ||
+                    frame.BaseSequence != receivedSequence || !RemoteFresh(currentMinute))
+                    return false;
+                if (frame.Counters.Any(kv => remote.TryGetValue(kv.Key, out var old) && kv.Value < old) ||
+                    remote.Count + frame.Counters.Keys.Count(key => !remote.ContainsKey(key)) > maxIdentities)
+                    return false;
+                var merged = new Dictionary<string,int>(remote, StringComparer.Ordinal);
+                foreach (var (key, value) in frame.Counters) merged[key] = value;
+                remote = merged;
+            }
+            else
+            {
+                // Within an epoch a higher full sequence cannot remove live counters.
+                if (sameEpoch && frame.Minute == receivedMinute &&
+                    remote.Any(kv => !frame.Counters.TryGetValue(kv.Key,out var n) || n < kv.Value))
+                    return false;
+                remote = new Dictionary<string,int>(frame.Counters, StringComparer.Ordinal);
+            }
             receivedMinute = frame.Minute;
             receivedSequence = frame.Sequence;
             receivedSourceEpoch = frame.SourceEpoch;
