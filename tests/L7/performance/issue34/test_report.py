@@ -6,7 +6,8 @@ import subprocess
 import sys
 from tempfile import TemporaryDirectory
 
-from instrument_lab_stats import ADDITION, ANCHOR, instrument
+from instrument_lab_stats import (ADDITION, ANCHOR, METRIC_CALL,
+                                 METRIC_CALL_WITH_DIMENSIONS, instrument)
 from report import build_report
 from run_paired_profile import (_drain_bounded_log, measurement as parse_measurement,
                                format_early_trace_exit, resolve_checkout)
@@ -175,12 +176,43 @@ class ReportTests(unittest.TestCase):
             source = Path(tmp)
             path = source / "tests/L7/GatewayLab/Program.cs"
             path.parent.mkdir(parents=True)
-            path.write_text("before\n" + ANCHOR + "after\n", encoding="utf-8")
+            api = source / "control-center/GatewayOpenTelemetry.cs"
+            api.parent.mkdir(parents=True)
+            api.write_text("internal static class GatewayOpenTelemetry {}\n", encoding="utf-8")
+            path.write_text("before\n" + ANCHOR + "after\n" + METRIC_CALL + "\n", encoding="utf-8")
             instrument(source)
             first = path.read_text(encoding="utf-8")
             instrument(source)
             self.assertEqual(path.read_text(encoding="utf-8"), first)
             self.assertEqual(first.count(ADDITION), 1)
+            self.assertEqual(first.count(METRIC_CALL_WITH_DIMENSIONS), 1)
+            self.assertNotIn(METRIC_CALL, first)
+
+    def test_historical_baseline_without_otel_api_keeps_gc_overlay(self):
+        with TemporaryDirectory() as tmp:
+            source = Path(tmp)
+            path = source / "tests/L7/GatewayLab/Program.cs"
+            path.parent.mkdir(parents=True)
+            historical = "before\n" + ANCHOR + "after\n"
+            path.write_text(historical, encoding="utf-8")
+            instrument(source)
+            result = path.read_text(encoding="utf-8")
+            self.assertIn(ADDITION, result)
+            self.assertNotIn("GatewayOpenTelemetry", result)
+            instrument(source)
+            self.assertEqual(path.read_text(encoding="utf-8"), result)
+
+    def test_modern_source_with_otel_api_but_missing_metric_call_fails_closed(self):
+        with TemporaryDirectory() as tmp:
+            source = Path(tmp)
+            path = source / "tests/L7/GatewayLab/Program.cs"
+            path.parent.mkdir(parents=True)
+            api = source / "control-center/GatewayOpenTelemetry.cs"
+            api.parent.mkdir(parents=True)
+            api.write_text("internal static class GatewayOpenTelemetry {}\n", encoding="utf-8")
+            path.write_text("before\n" + ANCHOR + "after\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "proxy result metric call"):
+                instrument(source)
 
     def test_diagnostic_overlay_fails_closed_on_unrecognized_source(self):
         with TemporaryDirectory() as tmp:
@@ -188,7 +220,7 @@ class ReportTests(unittest.TestCase):
             path = source / "tests/L7/GatewayLab/Program.cs"
             path.parent.mkdir(parents=True)
             path.write_text("no known anchor\n", encoding="utf-8")
-            with self.assertRaisesRegex(ValueError, "exactly one"):
+            with self.assertRaisesRegex(ValueError, "lab stats anchor"):
                 instrument(source)
 
     def test_process_log_is_capped_and_stream_is_drained(self):
