@@ -58,40 +58,46 @@ jobs:
         run: dotnet build control-center/GatewayCoreYarp.csproj --configuration Release
       - name: Install pinned Playwright test package
         run: npm install --prefix tests/E2E --no-package-lock --ignore-scripts
-      - name: Install real Chromium with OS dependencies
+      - name: Install Chromium OS dependencies without interrupting dpkg
         working-directory: tests/E2E
         shell: bash
+        timeout-minutes: 10
         run: |
           set -euo pipefail
-          # Runner image provisioning can still be finishing APT work when this
-          # job starts. Wait for the package manager instead of racing its lock.
-          wait_for_package_manager() {
-            local deadline=$((SECONDS + 300))
-            while pgrep -x apt-get >/dev/null || pgrep -x apt >/dev/null || \
-                  pgrep -x dpkg >/dev/null || pgrep -f '[u]nattended-upgrade' >/dev/null; do
-              if (( SECONDS >= deadline )); then
-                echo "::error::Timed out waiting for the runner's APT/dpkg operation to finish"
-                pgrep -af 'apt|dpkg|unattended-upgrade' || true
-                return 1
-              fi
-              echo "::notice::Runner package manager is busy; waiting for its lock"
-              sleep 5
-            done
-          }
-          # Bound retries of transient Ubuntu mirror and browser CDN failures.
-          # Keep Playwright's full dependency installation and signed APT indexes.
+          # Let apt finish or return a failure before retrying. Killing the
+          # outer Playwright process can orphan its sudo/apt/dpkg descendants.
           sudo tee /etc/apt/apt.conf.d/99-gatewaycore-ci-retry >/dev/null <<'EOF'
           Acquire::Retries "2";
           Acquire::http::Timeout "15";
           Acquire::https::Timeout "15";
           APT::Update::Error-Mode "any";
+          DPkg::Lock::Timeout "120";
           EOF
           for attempt in 1 2 3; do
-            wait_for_package_manager
-            if timeout --kill-after=15s 240s npx playwright install --with-deps chromium; then
+            if npx --no-install playwright install-deps chromium; then
               exit 0
             fi
-            echo "::warning::Chromium dependency installation attempt ${attempt}/3 failed"
+            echo "::warning::Chromium OS dependency installation attempt ${attempt}/3 failed"
+            if [ "$attempt" -eq 3 ]; then
+              exit 1
+            fi
+            # Do not delete APT indexes or lock files; retry only after the
+            # foreground installer returns. APT owns its own lock wait.
+            sleep "$((attempt * 10))"
+          done
+      - name: Install pinned Chromium browser
+        working-directory: tests/E2E
+        shell: bash
+        timeout-minutes: 8
+        run: |
+          set -euo pipefail
+          # Browser-only downloads do not invoke sudo/apt. Keep bounded
+          # retries without interrupting an OS package transaction.
+          for attempt in 1 2 3; do
+            if timeout --kill-after=15s 120s npx --no-install playwright install chromium; then
+              exit 0
+            fi
+            echo "::warning::Chromium browser download attempt ${attempt}/3 failed"
             if [ "$attempt" -eq 3 ]; then
               exit 1
             fi
