@@ -156,7 +156,7 @@ test('browser: bootstrap, navigation, onboarding, websites, route edit, users an
     await page.locator('#editor button[value="cancel"]').click();
     await expect(page.locator('#modal')).toBeHidden();
     await page.locator('#page-back').click();
-    await expect(page.locator('#page-title')).toContainText('Setup Center');
+    await expect(page.locator('#page-title')).toContainText('Backend clusters');
   });
 
   await test.step('Create account and Reset Password submit real API requests',async()=>{
