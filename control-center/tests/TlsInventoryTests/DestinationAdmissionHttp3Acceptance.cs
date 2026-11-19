@@ -138,7 +138,7 @@ internal static class DestinationAdmissionHttp3Acceptance
         using var managementClientCert = X509CertificateLoader.LoadPkcs12FromFile(
             managementPfx, password, managementClientKeyFlags);
 
-        var tlsPort = GetDualTransportPort();
+        var tlsPort = supportsHttp3 ? GetDualTransportPort() : GetTcpPort();
         var httpPort = GetTcpPort();
         var adminPort = GetTcpPort();
         var metricsPort = GetTcpPort();
@@ -235,18 +235,36 @@ internal static class DestinationAdmissionHttp3Acceptance
             };
             using var managementClient = new HttpClient(managementHandler) { Timeout = Timeout.InfiniteTimeSpan };
             var endpoint = new Uri($"https://127.0.0.1:{tlsPort}/admit/slow");
-            using (var discoveryWarmup = new HttpRequestMessage(HttpMethod.Get,
-                $"https://127.0.0.1:{tlsPort}/gateway/health")
-            { Version = HttpVersion.Version11, VersionPolicy = HttpVersionPolicy.RequestVersionExact })
+            // Process.Start does not imply Kestrel has bound its sockets.
+            // Only retry the idempotent readiness GET on connection refusal;
+            // TLS errors, wrong protocol/status and all admission failures stay fatal.
             using (var discoveryTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(12)))
-            using (var discoveryResponse = await client.SendAsync(discoveryWarmup, discoveryTimeout.Token))
             {
-                Check(discoveryResponse.IsSuccessStatusCode && discoveryResponse.Version == HttpVersion.Version11,
-                    "real GatewayCore HTTPS listener is ready over HTTP/1.1 before HTTP/3 admission traffic");
-                if (supportsHttp3)
-                    Check(discoveryResponse.Headers.TryGetValues("Alt-Svc", out var altSvc) &&
-                        altSvc.Any(value => value.Contains("h3=", StringComparison.OrdinalIgnoreCase)),
-                        "HTTP/1.1 readiness response advertises the listener's HTTP/3 endpoint");
+                while (true)
+                {
+                    if (appProcess.HasExited)
+                        throw new InvalidOperationException(
+                            $"GatewayCore exited before HTTPS readiness: {appProcess.ExitCode}");
+                    try
+                    {
+                        using var discoveryWarmup = new HttpRequestMessage(HttpMethod.Get,
+                            $"https://127.0.0.1:{tlsPort}/gateway/health")
+                        { Version = HttpVersion.Version11, VersionPolicy = HttpVersionPolicy.RequestVersionExact };
+                        using var discoveryResponse = await client.SendAsync(discoveryWarmup, discoveryTimeout.Token);
+                        Check(discoveryResponse.IsSuccessStatusCode && discoveryResponse.Version == HttpVersion.Version11,
+                            "real GatewayCore HTTPS listener is ready over HTTP/1.1");
+                        if (supportsHttp3)
+                            Check(discoveryResponse.Headers.TryGetValues("Alt-Svc", out var altSvc) &&
+                                altSvc.Any(value => value.Contains("h3=", StringComparison.OrdinalIgnoreCase)),
+                                "HTTP/1.1 readiness response advertises the listener's HTTP/3 endpoint");
+                        break;
+                    }
+                    catch (HttpRequestException ex) when (
+                        ex.InnerException is SocketException { SocketErrorCode: SocketError.ConnectionRefused })
+                    {
+                        await Task.Delay(100, discoveryTimeout.Token);
+                    }
+                }
             }
 
             if (supportsHttp3)
@@ -420,6 +438,11 @@ internal static class DestinationAdmissionHttp3Acceptance
                     "admitted WebSocket keeps the permit for bidirectional streaming");
                 await queuedWebSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "complete", echoTimeout.Token);
             }
+            // A close frame can reach the client just before the origin's
+            // finally block executes. Observe completed cleanup, not scheduling.
+            using (var drainTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(5)))
+                while (Volatile.Read(ref backendWebSocketsInFlight) != 0)
+                    await Task.Delay(10, drainTimeout.Token);
             Check(Volatile.Read(ref backendWebSocketsInFlight) == 0 &&
                 backendWebSocketAttempts.Order(StringComparer.Ordinal).SequenceEqual(new[] { "ws-active", "ws-queued" }),
                 "WebSocket drain releases all destination permits without admitting the overflow session");
