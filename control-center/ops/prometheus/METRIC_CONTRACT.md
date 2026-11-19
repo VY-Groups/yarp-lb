@@ -26,6 +26,7 @@ yarp_control_http_requests_total
 yarp_control_http_responses_total
 yarp_control_process_working_set_bytes
 yarp_logging_dropped_high_priority_total
+yarp_logging_dropped_low_priority_total
 yarp_logging_dropped_total
 yarp_logging_write_errors_total
 ```
@@ -50,8 +51,16 @@ yarp_logging_write_errors_total
 - `yarp_control_destination_admission_queue_wait_seconds_sum`
 - `yarp_control_destination_admission_queue_wait_seconds_count`
 - `yarp_logging_dropped_total`
+- `yarp_logging_dropped_low_priority_total`
 - `yarp_logging_dropped_high_priority_total`
 - `yarp_logging_write_errors_total`
+
+The logging counters are process-lifetime values and reset at restart. The
+low/high counters partition the total (`dropped_total = low_priority_total +
+high_priority_total`); writer errors are tracked separately. These series carry
+no request, client, route, or backend labels. Grafana shows all four values,
+while the critical high-priority-drop and writer-error rules remain separately
+actionable.
 
 Per-destination request counters have a process-local cap of 4,096 distinct
 IDs. Requests for additional IDs increment

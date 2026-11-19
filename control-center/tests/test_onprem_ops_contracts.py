@@ -21,6 +21,11 @@ class SourceMappedMetrics(unittest.TestCase):
             with self.subTest(metric=metric):
                 self.assertIn(metric, APP + HIST)
                 self.assertIn(metric, RULES)
+    def test_low_priority_drop_counter_is_exported_and_visible(self):
+        metric = "yarp_logging_dropped_low_priority_total"
+        dashboard = (BASE / "ops/prometheus/gateway-dashboard.json").read_text(encoding="utf-8")
+        self.assertIn(metric, APP)
+        self.assertIn(metric, dashboard)
     def test_metrics_are_restricted_to_management_mtls(self):
         self.assertIn('app.MapGet("/gateway/metrics"', APP)
         listener = (BASE / "GatewayListenerIsolation.cs").read_text(encoding="utf-8")

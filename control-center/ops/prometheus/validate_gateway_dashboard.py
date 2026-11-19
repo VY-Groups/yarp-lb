@@ -33,6 +33,7 @@ required_series = {
     "yarp_control_destination_admission_queue_wait_seconds_sum",
     "yarp_control_destination_admission_queue_wait_seconds_count",
     "yarp_logging_dropped_total",
+    "yarp_logging_dropped_low_priority_total",
     "yarp_logging_dropped_high_priority_total",
     "yarp_logging_write_errors_total",
     "yarp_control_process_working_set_bytes",

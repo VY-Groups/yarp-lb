@@ -163,14 +163,19 @@ public static class ProductLinuxStartupSmoke
                     throw new Exception("Production Linux Data Protection key XML is not certificate-wrapped");
             }
             Console.WriteLine("PASS: shipping Control Center persisted only certificate-wrapped Linux Data Protection key material");
+            using var privacyProbe=await client.GetAsync("http://127.0.0.1:"+port+"/gateway/health?token=metrics-private-canary");
+            privacyProbe.EnsureSuccessStatusCode();
             using var metrics=await client.GetAsync("http://127.0.0.1:"+port+"/gateway/metrics");
             metrics.EnsureSuccessStatusCode();
             var body=await metrics.Content.ReadAsStringAsync();
             if (!body.Contains("yarp_control_gc_collections_total{generation=\"2\"}") ||
                 !body.Contains("yarp_logging_dropped_total ") ||
-                !body.Contains("yarp_logging_dropped_high_priority_total "))
-                throw new Exception("Production monitoring metrics missing GC Gen2 or log-drop counters");
-            Console.WriteLine("PASS: real production Linux gateway exposes loopback-only Gen2 and drop counters");
+                !body.Contains("yarp_logging_dropped_low_priority_total ") ||
+                !body.Contains("yarp_logging_dropped_high_priority_total ") ||
+                !body.Contains("yarp_logging_write_errors_total ") ||
+                body.Contains("metrics-private-canary",StringComparison.Ordinal))
+                throw new Exception("Production monitoring metrics missing GC or complete privacy-safe log-drop counters");
+            Console.WriteLine("PASS: real production Linux gateway exposes loopback-only GC and privacy-safe total/low/high/write-error counters");
 
             var bootstrapPayload=JsonSerializer.Serialize(new {username="dp_restart_admin",
                 password="linux-dp-restart-test-password-123",email="dp-restart@example.invalid"});

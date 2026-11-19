@@ -86,8 +86,9 @@
       "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi"}},
       "targets": [
         {"expr": "increase(yarp_logging_dropped_total{job=~\"$job\"}[5m])", "legendFormat": "{{instance}} dropped", "refId": "A"},
-        {"expr": "increase(yarp_logging_dropped_high_priority_total{job=~\"$job\"}[5m])", "legendFormat": "{{instance}} high priority dropped", "refId": "B"},
-        {"expr": "increase(yarp_logging_write_errors_total{job=~\"$job\"}[5m])", "legendFormat": "{{instance}} writer errors", "refId": "C"}
+        {"expr": "increase(yarp_logging_dropped_low_priority_total{job=~\"$job\"}[5m])", "legendFormat": "{{instance}} low priority dropped", "refId": "B"},
+        {"expr": "increase(yarp_logging_dropped_high_priority_total{job=~\"$job\"}[5m])", "legendFormat": "{{instance}} high priority dropped", "refId": "C"},
+        {"expr": "increase(yarp_logging_write_errors_total{job=~\"$job\"}[5m])", "legendFormat": "{{instance}} writer errors", "refId": "D"}
       ],
       "title": "Logging pipeline loss and errors (5m)",
       "type": "timeseries"
