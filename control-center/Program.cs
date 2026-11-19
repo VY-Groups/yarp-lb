@@ -1115,17 +1115,25 @@ app.MapGet("/admin/api/gateway-readiness", (IProxyStateLookup proxy) =>
         collectedUtc = DateTimeOffset.UtcNow
     })).RequireAuthorization();
 
-JsonObject ReadConfig() => JsonNode.Parse(File.ReadAllText(configPath))!.AsObject();
+// Parse and hash one immutable file snapshot. Preserve the text reader's
+// BOM handling for pre-existing operator-managed configuration files.
+static JsonObject ParseConfigSnapshot(byte[] bytes)
+{
+    using var reader = new StreamReader(new MemoryStream(bytes), detectEncodingFromByteOrderMarks: true);
+    return JsonNode.Parse(reader.ReadToEnd())!.AsObject();
+}
+JsonObject ReadConfig() => ParseConfigSnapshot(File.ReadAllBytes(configPath));
 JsonObject ReadProxy() => (ReadConfig()["ReverseProxy"]?.DeepClone() as JsonObject) ?? new JsonObject();
 
 app.MapGet("/admin/api/state", () =>
 {
-    var proxy = ReadProxy();
+    var snapshot = File.ReadAllBytes(configPath);
+    var proxy = ParseConfigSnapshot(snapshot)["ReverseProxy"] as JsonObject ?? new JsonObject();
     var disabled = (proxy["AdminDisabledDestinations"] as JsonObject)?.DeepClone() as JsonObject ?? new JsonObject();
     proxy.Remove("AdminDisabledDestinations");
     return Results.Ok(new { name = "YARP Control Center", gateway = "online", time = DateTimeOffset.UtcNow,
         routes = proxy["Routes"] ?? new JsonObject(), clusters = proxy["Clusters"] ?? new JsonObject(), disabled,
-        mode = "Authenticated local management", telemetry = "Local HTTP counters only; no backend or fleet metrics", revision = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(configPath))) });
+        mode = "Authenticated local management", telemetry = "Local HTTP counters only; no backend or fleet metrics", revision = Convert.ToHexString(SHA256.HashData(snapshot)) });
 }).RequireAuthorization();
 
 app.MapGet("/admin/api/audit", () =>
@@ -1172,12 +1180,11 @@ app.MapPost("/admin/api/probe", async (IHttpClientFactory factory) =>
 var changeFolder = Path.Combine(privateDir, "change-requests");
 Directory.CreateDirectory(changeFolder);
 var changeGate = new SemaphoreSlim(1, 1);
-async Task<IResult> CommitReviewedChange(HttpContext ctx, JsonObject submitted)
+IResult? ValidateChangePayload(JsonObject submitted)
 {
     var routes = submitted["routes"] as JsonObject;
     var clusters = submitted["clusters"] as JsonObject;
     var disabled = submitted["disabled"] as JsonObject ?? new JsonObject();
-    var expectedRevision = submitted["revision"]?.ToString() ?? "";
     if (routes is null || clusters is null) return Results.BadRequest(new { error = "Routes and clusters must be objects" });
     if (routes.Count > 100 || clusters.Count > 100) return Results.BadRequest(new { error = "Too many routes/clusters" });
     foreach (var (key, clusterNode) in clusters)
@@ -1259,13 +1266,34 @@ async Task<IResult> CommitReviewedChange(HttpContext ctx, JsonObject submitted)
         if (pieces.Length != 2 || !ValidId(pieces[0]) || !ValidId(pieces[1]) || !ValidAddress(value?["Address"]?.ToString()) || !clusters.ContainsKey(pieces[0]))
             return Results.BadRequest(new { error = "Invalid disabled destination" });
     }
+    return null;
+}
+
+IResult? ValidateChangeSafely(JsonObject submitted)
+{
+    try { return ValidateChangePayload(submitted); }
+    catch (Exception ex) when (ex is InvalidOperationException or ArgumentException)
+    {
+        return Results.BadRequest(new { error = "Invalid configuration field type" });
+    }
+}
+
+async Task<IResult> CommitReviewedChange(HttpContext ctx, JsonObject submitted)
+{
+    var invalid = ValidateChangeSafely(submitted);
+    if (invalid is not null) return invalid;
+    var routes = (JsonObject)submitted["routes"]!;
+    var clusters = (JsonObject)submitted["clusters"]!;
+    var disabled = submitted["disabled"] as JsonObject ?? new JsonObject();
+    var expectedRevision = submitted["revision"]?.ToString() ?? "";
     await gate.WaitAsync();
     try
     {
-        var currentRevision = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(configPath)));
+        var snapshot = File.ReadAllBytes(configPath);
+        var currentRevision = Convert.ToHexString(SHA256.HashData(snapshot));
         if (!string.Equals(expectedRevision, currentRevision, StringComparison.Ordinal))
             return Results.Conflict(new { error = "Configuration changed since loading. Refresh before saving." });
-        var doc = ReadConfig();
+        var doc = ParseConfigSnapshot(snapshot);
         var proxy = (doc["ReverseProxy"] as JsonObject) ?? new JsonObject();
         proxy["Routes"] = routes.DeepClone();
         proxy["Clusters"] = clusters.DeepClone();
@@ -1274,7 +1302,8 @@ async Task<IResult> CommitReviewedChange(HttpContext ctx, JsonObject submitted)
         Directory.CreateDirectory(backupFolder);
         var stamp = DateTimeOffset.UtcNow.ToString("yyyyMMddTHHmmssfffffffZ");
         var backup = Path.Combine(backupFolder, $"appsettings-{stamp}.json");
-        File.Copy(configPath, backup, overwrite: false);
+        using (var backupStream = new FileStream(backup, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+            await backupStream.WriteAsync(snapshot);
         var temp = configPath + ".tmp";
         await File.WriteAllTextAsync(temp, doc.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
         File.Move(temp, configPath, overwrite: true);
@@ -1284,6 +1313,68 @@ async Task<IResult> CommitReviewedChange(HttpContext ctx, JsonObject submitted)
     catch (Exception) { return Results.Problem("Configuration write failed. Check server logs."); }
     finally { gate.Release(); }
 }
+
+// Read-only GitOps planning. Reuse the exact approval-time business
+// validator; no backup, file write, draft, audit mutation or auto-approval.
+app.MapPost("/admin/api/gitops/plan", async (HttpContext ctx) =>
+{
+    const int maxBytes = 524288;
+    if (ctx.Request.ContentLength is > maxBytes)
+        return Results.StatusCode(413);
+    JsonObject? request;
+    try
+    {
+        using var body = new MemoryStream();
+        var buffer = new byte[8192];
+        while (true)
+        {
+            var read = await ctx.Request.Body.ReadAsync(buffer.AsMemory(), ctx.RequestAborted);
+            if (read == 0) break;
+            if (body.Length + read > maxBytes) return Results.StatusCode(413);
+            body.Write(buffer, 0, read);
+        }
+        body.Position = 0;
+        request = await JsonSerializer.DeserializeAsync<JsonObject>(body, jsonOptions, ctx.RequestAborted);
+    }
+    catch (JsonException) { return Results.BadRequest(new { error = "Invalid JSON" }); }
+    if (request is null || request.Count != 2 ||
+        request["schemaVersion"] is not JsonValue version ||
+        !version.TryGetValue<int>(out var schemaVersion) || schemaVersion != 1 ||
+        request["payload"] is not JsonObject payload || payload.Count != 4 ||
+        payload["routes"] is not JsonObject routes ||
+        payload["clusters"] is not JsonObject clusters ||
+        payload["disabled"] is not JsonObject disabled ||
+        payload["revision"] is not JsonValue revisionValue ||
+        !revisionValue.TryGetValue<string>(out var revision) || revision is null ||
+        revision.Length != 64 || revision.Any(c => c is not (>= '0' and <= '9' or >= 'A' and <= 'F')))
+        return Results.BadRequest(new { error = "Expected schemaVersion 1 and routes, clusters, disabled, revision payload" });
+    var invalid = ValidateChangeSafely(payload);
+    if (invalid is not null) return invalid;
+    await gate.WaitAsync(ctx.RequestAborted);
+    try
+    {
+        var currentBytes = await File.ReadAllBytesAsync(configPath, ctx.RequestAborted);
+        var currentRevision = Convert.ToHexString(SHA256.HashData(currentBytes));
+        if (!string.Equals(revision, currentRevision, StringComparison.Ordinal))
+            return Results.Conflict(new { error = "Configuration changed since loading. Refresh before planning." });
+        var current = ParseConfigSnapshot(currentBytes)["ReverseProxy"] as JsonObject ?? new JsonObject();
+        static object Diff(JsonObject? previous, JsonObject proposed)
+        {
+            previous ??= new JsonObject();
+            var added = proposed.Select(x => x.Key).Where(k => !previous.ContainsKey(k)).Order(StringComparer.Ordinal).ToArray();
+            var removed = previous.Select(x => x.Key).Where(k => !proposed.ContainsKey(k)).Order(StringComparer.Ordinal).ToArray();
+            var updated = proposed.Select(x => x.Key).Where(k => previous.ContainsKey(k) &&
+                !JsonNode.DeepEquals(previous[k], proposed[k])).Order(StringComparer.Ordinal).ToArray();
+            return new { added, removed, updated, unchanged = proposed.Count - added.Length - updated.Length };
+        }
+        return Results.Ok(new { schemaVersion = 1, revision = currentRevision, dryRun = true,
+            approvalRequired = true, validationScope = "Control Center change payload; not YARP runtime acceptance",
+            routes = Diff(current["Routes"] as JsonObject, routes),
+            clusters = Diff(current["Clusters"] as JsonObject, clusters),
+            disabled = Diff(current["AdminDisabledDestinations"] as JsonObject, disabled) });
+    }
+    finally { gate.Release(); }
+}).RequireAuthorization(p => p.RequireRole("Administrator", "Operator"));
 
 app.MapGet("/admin/api/change-requests", () =>
 {
