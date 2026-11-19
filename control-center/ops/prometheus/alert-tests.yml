@@ -14,7 +14,7 @@ tests:
             exp_annotations:
               summary: "GatewayCore service has not recovered within the 10-second failover budget"
               description: "Independent probe probe-south has continuously observed gatewaycore-http unavailable in ap-south-1. This is user-visible outage duration; check gateway health, ingress, and DNS. The probe cannot identify which failover mechanism failed."
-              runbook_url: "https://github.com/VY-Groups/yarp-lb/blob/main/control-center/docs/AVAILABILITY_SLO.md"
+              runbook: "control-center/docs/AVAILABILITY_SLO.md"
   - interval: 5s
     input_series:
       - series: 'probe_success{job="gatewaycore-availability",instance="probe-south",service="gatewaycore-http",region="ap-south-1"}'
