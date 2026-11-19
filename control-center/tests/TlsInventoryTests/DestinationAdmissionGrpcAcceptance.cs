@@ -95,6 +95,28 @@ internal static class DestinationAdmissionGrpcAcceptance
             await context.Response.Body.WriteAsync(frame, context.RequestAborted);
             context.Response.AppendTrailer("grpc-status", "0");
         });
+        var chatAttempts = 0;
+        // Two distinct, valid protobuf messages, each with field 1 (varint).
+        byte[] chatFirst = [0, 0, 0, 0, 2, 8, 1];
+        byte[] chatSecond = [0, 0, 0, 0, 2, 8, 2];
+        backend.MapPost("/lab.Stream/Chat", async (HttpContext context) =>
+        {
+            Interlocked.Increment(ref chatAttempts);
+            Check(context.Request.Protocol == protocol &&
+                context.Request.ContentType == "application/grpc", $"real {protocol} duplex origin receives gRPC");
+            context.Response.ContentType = "application/grpc";
+            foreach (var expected in new[] { chatFirst, chatSecond })
+            {
+                var received = new byte[expected.Length];
+                await context.Request.Body.ReadExactlyAsync(received, context.RequestAborted);
+                Check(received.SequenceEqual(expected), "duplex origin reads expected protobuf message");
+                await context.Response.Body.WriteAsync(received, context.RequestAborted);
+                await context.Response.Body.FlushAsync(context.RequestAborted);
+            }
+            Check(await context.Request.Body.ReadAsync(new byte[1], context.RequestAborted) == 0,
+                "duplex origin observes request half-close");
+            context.Response.AppendTrailer("grpc-status", "0");
+        });
         await backend.StartAsync();
         var backendAddress = useHttp3 ? $"https://127.0.0.1:{backendPort}" :
             backend.Services.GetRequiredService<IServer>().Features.Get<IServerAddressesFeature>()!.Addresses.Single();
@@ -328,6 +350,39 @@ internal static class DestinationAdmissionGrpcAcceptance
             Check(backendAttempts.SequenceEqual(new[] { "active", "queued" }),
                 "only accepted gRPC POSTs reach the real backend exactly once");
             Console.WriteLine($"PASS: real {protocol} gRPC framing, trailers, admission saturation and release");
+
+            // Hold the upload open until the first echoed response is received.
+            // A buffering or half-duplex proxy cannot satisfy this handshake.
+            using var duplexDeadline = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+            var duplexToken = duplexDeadline.Token;
+            using var duplexBody = new DuplexGrpcContent(chatFirst, chatSecond, duplexToken);
+            using var duplexRequest = new HttpRequestMessage(HttpMethod.Post,
+                $"https://127.0.0.1:{tlsPort}/admit/lab.Stream/Chat")
+            {
+                Version = version, VersionPolicy = HttpVersionPolicy.RequestVersionExact,
+                Content = duplexBody
+            };
+            duplexRequest.Headers.TryAddWithoutValidation("TE", "trailers");
+            using var duplexResponse = await client.SendAsync(duplexRequest,
+                HttpCompletionOption.ResponseHeadersRead, duplexToken);
+            Check(duplexResponse.IsSuccessStatusCode && duplexResponse.Version == version,
+                $"real {protocol} bidirectional gRPC headers arrive before upload completes");
+            await using var duplexStream = await duplexResponse.Content.ReadAsStreamAsync(duplexToken);
+            var firstEcho = new byte[chatFirst.Length];
+            await duplexStream.ReadExactlyAsync(firstEcho, duplexToken);
+            Check(firstEcho.SequenceEqual(chatFirst) && !duplexBody.UploadCompleted,
+                "first echoed message arrives while client upload is still open");
+            await WaitMetric("inflight_requests", 1);
+            duplexBody.SendSecond();
+            var secondEcho = new byte[chatSecond.Length];
+            await duplexStream.ReadExactlyAsync(secondEcho, duplexToken);
+            Check(secondEcho.SequenceEqual(chatSecond), "second duplex message arrives intact");
+            Check(await duplexStream.ReadAsync(new byte[1], duplexToken) == 0 &&
+                duplexResponse.TrailingHeaders.TryGetValues("grpc-status", out var duplexStatus) &&
+                duplexStatus.Single() == "0", "duplex half-close preserves successful gRPC trailers");
+            await WaitMetric("inflight_requests", 0);
+            Check(chatAttempts == 1, "bidirectional gRPC POST reaches upstream exactly once");
+            Console.WriteLine($"PASS: real {protocol} bidirectional gRPC streaming and half-close");
         }
         finally
         {
@@ -369,6 +424,38 @@ internal static class DestinationAdmissionGrpcAcceptance
         }
 
 
+    }
+
+    private sealed class DuplexGrpcContent : HttpContent
+    {
+        private readonly byte[] first, second;
+        private readonly CancellationToken deadline;
+        private readonly TaskCompletionSource sendSecond = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int completed;
+        public bool UploadCompleted => Volatile.Read(ref completed) == 1;
+
+        public DuplexGrpcContent(byte[] first, byte[] second, CancellationToken deadline)
+        {
+            this.first = first;
+            this.second = second;
+            this.deadline = deadline;
+            Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/grpc");
+        }
+        public void SendSecond() => sendSecond.TrySetResult();
+        protected override bool TryComputeLength(out long length) { length = 0; return false; }
+        protected override Task SerializeToStreamAsync(Stream stream, TransportContext? context) =>
+            SerializeToStreamAsync(stream, context, deadline);
+        protected override async Task SerializeToStreamAsync(Stream stream, TransportContext? context,
+            CancellationToken cancellationToken)
+        {
+            using var linked = CancellationTokenSource.CreateLinkedTokenSource(deadline, cancellationToken);
+            await stream.WriteAsync(first, linked.Token);
+            await stream.FlushAsync(linked.Token);
+            await sendSecond.Task.WaitAsync(linked.Token);
+            await stream.WriteAsync(second, linked.Token);
+            await stream.FlushAsync(linked.Token);
+            Volatile.Write(ref completed, 1);
+        }
     }
 
     private static int GetDualTransportPort() => TrafficHttp3Acceptance.SelectDualTransportPort(() =>
