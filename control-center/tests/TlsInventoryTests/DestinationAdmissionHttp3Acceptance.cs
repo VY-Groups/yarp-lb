@@ -22,11 +22,9 @@ internal static class DestinationAdmissionHttp3Acceptance
 {
     public static async Task RunAsync()
     {
-        if (!QuicConnection.IsSupported)
-        {
-            Console.WriteLine("SKIP: real HTTP/3 destination-admission acceptance requires MsQuic");
-            return;
-        }
+        var supportsHttp3 = QuicConnection.IsSupported;
+        if (!supportsHttp3)
+            Console.WriteLine("SKIP: HTTP/3 admission requires MsQuic; running the real WebSocket lifecycle over HTTP/1.1 instead");
         if (Environment.GetEnvironmentVariable("GITHUB_ACTIONS") != "true" ||
             Environment.GetEnvironmentVariable("CI") != "true")
         {
@@ -157,7 +155,8 @@ internal static class DestinationAdmissionHttp3Acceptance
             TrafficPfxPath = trafficPfx, TrafficPfxPasswordFile = trafficPassword,
             ManagementPfxPath = managementPfx, ManagementPfxPasswordFile = managementPassword,
             ClientCaPemPath = caPem, ClientThumbprints = new[] { managementCert.Thumbprint },
-            AllowedAdminCidrs = new[] { "127.0.0.0/8" }, MaxConcurrentConnections = 64L, HttpVersion = "3"
+            AllowedAdminCidrs = new[] { "127.0.0.0/8" }, MaxConcurrentConnections = 64L,
+            HttpVersion = supportsHttp3 ? "3" : "1.1"
         };
         WritePrivate(listenerConfig, JsonSerializer.Serialize(listeners));
         var appSettings = new
@@ -244,30 +243,33 @@ internal static class DestinationAdmissionHttp3Acceptance
             {
                 Check(discoveryResponse.IsSuccessStatusCode && discoveryResponse.Version == HttpVersion.Version11,
                     "real GatewayCore HTTPS listener is ready over HTTP/1.1 before HTTP/3 admission traffic");
-                Check(discoveryResponse.Headers.TryGetValues("Alt-Svc", out var altSvc) &&
-                    altSvc.Any(value => value.Contains("h3=", StringComparison.OrdinalIgnoreCase)),
-                    "HTTP/1.1 readiness response advertises the listener's HTTP/3 endpoint");
+                if (supportsHttp3)
+                    Check(discoveryResponse.Headers.TryGetValues("Alt-Svc", out var altSvc) &&
+                        altSvc.Any(value => value.Contains("h3=", StringComparison.OrdinalIgnoreCase)),
+                        "HTTP/1.1 readiness response advertises the listener's HTTP/3 endpoint");
             }
 
-            using (var readinessTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(15)))
+            if (supportsHttp3)
             {
-                while (true)
+                using (var readinessTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(15)))
                 {
-                    if (appProcess.HasExited)
-                        throw new Exception($"GatewayCore exited before readiness with code {appProcess.ExitCode}");
-                    try
+                    while (true)
                     {
-                        using var readiness = new HttpRequestMessage(HttpMethod.Get,
-                            $"https://127.0.0.1:{tlsPort}/gateway/health")
-                        { Version = HttpVersion.Version30, VersionPolicy = HttpVersionPolicy.RequestVersionExact };
-                        using var response = await client.SendAsync(readiness, readinessTimeout.Token);
-                        if (response.StatusCode == HttpStatusCode.OK) break;
+                        if (appProcess.HasExited)
+                            throw new Exception($"GatewayCore exited before readiness with code {appProcess.ExitCode}");
+                        try
+                        {
+                            using var readiness = new HttpRequestMessage(HttpMethod.Get,
+                                $"https://127.0.0.1:{tlsPort}/gateway/health")
+                            { Version = HttpVersion.Version30, VersionPolicy = HttpVersionPolicy.RequestVersionExact };
+                            using var response = await client.SendAsync(readiness, readinessTimeout.Token);
+                            if (response.StatusCode == HttpStatusCode.OK) break;
+                        }
+                        catch (HttpRequestException) { }
+                        await Task.Delay(100, readinessTimeout.Token);
                     }
-                    catch (HttpRequestException) { }
-                    await Task.Delay(100, readinessTimeout.Token);
                 }
-            }
-            await Task.Delay(500); // allow the initial applied-config admission reconciliation to complete
+                await Task.Delay(500); // allow the initial applied-config admission reconciliation to complete
 
             async Task<HttpResponseMessage> Send(string id, CancellationToken cancellationToken = default)
             {
@@ -357,6 +359,7 @@ internal static class DestinationAdmissionHttp3Acceptance
                     new[] { "active", "after-cancel", "cancel-active", "queued" }),
                 "rejected and canceled non-idempotent HTTP/3 POSTs never reach or replay to an upstream backend");
             Console.WriteLine("PASS: real HTTP/3 request lifecycle exercised GatewayCore per-destination admission");
+            }
 
             async Task<ClientWebSocket> ConnectWebSocket(string id)
             {
