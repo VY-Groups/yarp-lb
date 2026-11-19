@@ -106,10 +106,11 @@ public sealed class PeerStateJournal
         var key = Convert.ToHexString(HMACSHA256.HashData(secret, bytes));
         lock (gate)
         {
-            if (minute != localMinute)
-            {
+            // A late request or backward clock correction must not reset
+            // the current minute's counters or its sequence.
+            if (minute < localMinute) return;
+            if (minute > localMinute)
                 ExpireLocalOutsideMinute(minute);
-            }
             if (!local.ContainsKey(key) && local.Count >= maxIdentities) return;
             local[key] = local.TryGetValue(key, out var count) ? Math.Min(1_000_000, count + 1) : 1;
         }
@@ -119,10 +120,13 @@ public sealed class PeerStateJournal
     {
         lock (gate)
         {
-            if (minute != localMinute)
-            {
+            // Do not publish a relabelled snapshot during a wall-clock
+            // rollback. The publisher's existing bounded interval catches
+            // this failure and resumes when the clock reaches the high-water.
+            if (minute < localMinute)
+                throw new InvalidOperationException("Peer snapshot minute regressed");
+            if (minute > localMinute)
                 ExpireLocalOutsideMinute(minute);
-            }
             sequence++;
             return new PeerStateFrame(localId, minute, sequence,
                 new Dictionary<string,int>(local, StringComparer.Ordinal)) { SourceEpoch = sourceEpoch };
@@ -190,7 +194,7 @@ public sealed class PeerStateJournal
     {
         lock (gate)
         {
-            if (localMinute != minute) ExpireLocalOutsideMinute(minute);
+            if (minute > localMinute) ExpireLocalOutsideMinute(minute);
             var validLocal = localMinute == minute;
             var validRemote = RemoteFresh(minute);
             long? lastAcceptedAgeSeconds = null;
