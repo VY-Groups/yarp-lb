@@ -1819,7 +1819,9 @@ app.MapReverseProxy(proxyPipeline =>
         }
 
         var selected = candidates[0];
-        var clusterId = feature.Cluster.Config.ClusterId;
+        var selectedConfig = selected.Model.Config;
+        var selectedClusterConfig = feature.Cluster.Config;
+        var clusterId = selectedClusterConfig.ClusterId;
         var manager = context.RequestServices.GetRequiredService<DestinationAdmissionManager>();
         if (!manager.TryAcquireHandle(clusterId, selected.DestinationId, out var registryHandle, out var policyConflict) || registryHandle is null)
         {
@@ -1911,11 +1913,14 @@ app.MapReverseProxy(proxyPipeline =>
             // long-lived HTTP/2, gRPC, WebSocket or streaming response.
             waitCancellation.CancelAfter(Timeout.Infinite);
             if (!lookup.TryGetCluster(clusterId, out var currentCluster) ||
+                !ReferenceEquals(currentCluster.Model.Config, selectedClusterConfig) ||
                 !DestinationAdmissionForwarding.IsStillEligibleAfterWait(
                     selected.DestinationId,
                     currentCluster.DestinationsState.AvailableDestinations,
                     static destination => destination.DestinationId,
-                    TrafficLifecycle.IsDraining))
+                    TrafficLifecycle.IsDraining,
+                    destination => ReferenceEquals(destination, selected) &&
+                        ReferenceEquals(destination.Model.Config, selectedConfig)))
             {
                 context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
                 context.Response.Headers["X-GatewayCore-Rejection"] = "destination_unavailable_after_queue";
