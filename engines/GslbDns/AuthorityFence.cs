@@ -177,12 +177,22 @@ internal sealed class AuthorityFenceStore : IDisposable
         lock (gate)
         {
             if (!ReplayStateIntact(replayStatePath, replayLock, replay, epochStatePath, localEpoch))
+            {
+                // Once durable fencing integrity is lost, an earlier positive
+                // peer decision must no longer authorize even a remaining lease.
+                live = null;
                 return false;
+            }
             if (snapshot.Epoch < replay.Epoch ||
                 (snapshot.Epoch == replay.Epoch && snapshot.Sequence <= replay.Sequence))
                 return false;
             var next = new PersistedReplay(1, snapshot.Epoch, snapshot.Sequence);
-            PersistReplay(replayStatePath, next);
+            try { PersistReplay(replayStatePath, next); }
+            catch
+            {
+                live = null;
+                throw;
+            }
             replay = next;
             var leaseSeconds = Math.Min(snapshot.LeaseSeconds,
                 checked((int)Math.Max(0, snapshot.IssuedAtUnixSeconds + snapshot.LeaseSeconds -
