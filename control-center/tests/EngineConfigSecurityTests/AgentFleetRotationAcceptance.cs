@@ -17,7 +17,25 @@ public static class AgentFleetRotationAcceptance
     private static readonly TimeSpan ConvergenceTimeout = TimeSpan.FromSeconds(8);
     private static readonly TimeSpan RollbackTimeout = TimeSpan.FromSeconds(5);
 
-    public static async Task RunAsync()
+    public static Task RunAsync() => RunCoreAsync(injectFailureDuringAudit: false, _ => { });
+
+    public static async Task RunCleanupFailureAcceptanceAsync()
+    {
+        string? createdDirectory = null;
+        try
+        {
+            await RunCoreAsync(injectFailureDuringAudit: true, path => createdDirectory = path);
+            throw new Exception("FAIL: injected startup failure was not raised");
+        }
+        catch (InjectedRotationFailureException) { }
+
+        if (createdDirectory is null || Directory.Exists(createdDirectory))
+            throw new Exception("FAIL: temporary PKI directory survived injected startup failure");
+        Console.WriteLine("PASS: injected audit-assertion failure killed both agents and removed temporary PKI");
+        await VerifyProbeCancellationCompletesAsync();
+    }
+
+    private static async Task RunCoreAsync(bool injectFailureDuringAudit, Action<string> directoryCreated)
     {
         var dll = Path.Combine(Directory.GetCurrentDirectory(), "GatewayAgent", "bin",
             "Release", "net10.0", "GatewayCoreGatewayAgent.dll");
@@ -25,6 +43,7 @@ public static class AgentFleetRotationAcceptance
 
         var root = Path.Combine(Path.GetTempPath(), "agent-fleet-rotation-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(root);
+        directoryCreated(root);
         var processes = new List<Process>();
         var stdoutTasks = new List<Task<string>>();
         var stderrTasks = new List<Task<string>>();
@@ -200,51 +219,73 @@ public static class AgentFleetRotationAcceptance
         }
         finally
         {
-            foreach (var process in processes)
+            try
             {
-                try
+                foreach (var process in processes)
                 {
-                    if (!process.HasExited) process.Kill(entireProcessTree: true);
-                    await process.WaitForExitAsync();
+                    await StopProcessAsync(process);
                 }
-                catch (InvalidOperationException) { }
-                process.Dispose();
+                var capturedAgentOutput = new System.Text.StringBuilder();
+                var capturedOutputByNode = new List<string>();
+                for (var i = 0; i < processes.Count; i++)
+                {
+                    var nodeOutput = new System.Text.StringBuilder();
+                    try { nodeOutput.AppendLine(await stdoutTasks[i]); } catch (IOException) { }
+                    try { nodeOutput.AppendLine(await stderrTasks[i]); } catch (IOException) { }
+                    capturedOutputByNode.Add(nodeOutput.ToString());
+                    capturedAgentOutput.AppendLine(nodeOutput.ToString());
+                }
+                var agentOutput = capturedAgentOutput.ToString();
+                if (pfxPasswords.Any(password => agentOutput.Contains(password, StringComparison.Ordinal)) ||
+                    agentOutput.Contains("PRIVATE KEY-----", StringComparison.Ordinal))
+                    throw new Exception("FAIL: captured Gateway Agent output contains a PFX password or private-key marker");
+                Console.WriteLine("PASS: captured Gateway Agent output contains no PFX password or private-key material");
+                if (injectFailureDuringAudit) throw new InjectedRotationFailureException();
+                if (!injectFailureDuringAudit)
+                {
+                    foreach (var (nodeOutput, index) in capturedOutputByNode.Select((output, index) => (output, index)))
+                    {
+                        var initialRevisionLoaded = nodeOutput.Contains(
+                            $"Controller mTLS pin-set revision loaded: {expectedPinRevisions[0]}", StringComparison.Ordinal);
+                        var overlapRevisionObserved = nodeOutput.Contains(
+                            $"Controller mTLS pin-set revision changed: {expectedPinRevisions[0]} -> {expectedPinRevisions[1]}",
+                            StringComparison.Ordinal);
+                        var finalRevisionObserved = nodeOutput.Contains(
+                            $"Controller mTLS pin-set revision changed: {expectedPinRevisions[1]} -> {expectedPinRevisions[2]}",
+                            StringComparison.Ordinal);
+                        if (!initialRevisionLoaded || !overlapRevisionObserved || !finalRevisionObserved)
+                            throw new Exception($"FAIL: agent node {index + 1} did not log expected old/overlap/final pin-set revision transitions");
+                    }
+                    Console.WriteLine("PASS: each agent logged SHA-256 pin-set revision changes for the overlap and final rotation states");
+                }
             }
-            var capturedAgentOutput = new System.Text.StringBuilder();
-            var capturedOutputByNode = new List<string>();
-            for (var i = 0; i < processes.Count; i++)
+            finally
             {
-                var nodeOutput = new System.Text.StringBuilder();
-                try { nodeOutput.AppendLine(await stdoutTasks[i]); } catch (IOException) { }
-                try { nodeOutput.AppendLine(await stderrTasks[i]); } catch (IOException) { }
-                capturedOutputByNode.Add(nodeOutput.ToString());
-                capturedAgentOutput.AppendLine(nodeOutput.ToString());
+                var cleanupErrors = new List<Exception>();
+                foreach (var process in processes)
+                {
+                    try { await StopProcessAsync(process); }
+                    catch (Exception error) { cleanupErrors.Add(error); }
+                    try { process.Dispose(); }
+                    catch (Exception error) { cleanupErrors.Add(error); }
+                }
+                foreach (var certificate in serverCertificates)
+                {
+                    try { certificate.Dispose(); }
+                    catch (Exception error) { cleanupErrors.Add(error); }
+                }
+                // This cleanup executes even when process, log, or certificate
+                // assertions fail; cleanup errors are reported after all items
+                // and the directory have been handled.
+                try { if (Directory.Exists(root)) Directory.Delete(root, recursive: true); }
+                catch (Exception error) { cleanupErrors.Add(error); }
+                if (Directory.Exists(root))
+                    cleanupErrors.Add(new Exception("Temporary rotation PKI directory was not removed"));
+                if (cleanupErrors.Count == 0)
+                    Console.WriteLine("PASS: disposable rotation PKI and PFX files were removed");
+                else
+                    throw new AggregateException("Rotation acceptance cleanup failed", cleanupErrors);
             }
-            var agentOutput = capturedAgentOutput.ToString();
-            if (pfxPasswords.Any(password => agentOutput.Contains(password, StringComparison.Ordinal)) ||
-                agentOutput.Contains("PRIVATE KEY-----", StringComparison.Ordinal))
-                throw new Exception("FAIL: captured Gateway Agent output contains a PFX password or private-key marker");
-            Console.WriteLine("PASS: captured Gateway Agent output contains no PFX password or private-key material");
-            foreach (var (nodeOutput, index) in capturedOutputByNode.Select((output, index) => (output, index)))
-            {
-                var initialRevisionLoaded = nodeOutput.Contains(
-                    $"Controller mTLS pin-set revision loaded: {expectedPinRevisions[0]}", StringComparison.Ordinal);
-                var overlapRevisionObserved = nodeOutput.Contains(
-                    $"Controller mTLS pin-set revision changed: {expectedPinRevisions[0]} -> {expectedPinRevisions[1]}",
-                    StringComparison.Ordinal);
-                var finalRevisionObserved = nodeOutput.Contains(
-                    $"Controller mTLS pin-set revision changed: {expectedPinRevisions[1]} -> {expectedPinRevisions[2]}",
-                    StringComparison.Ordinal);
-                if (!initialRevisionLoaded || !overlapRevisionObserved || !finalRevisionObserved)
-                    throw new Exception($"FAIL: agent node {index + 1} did not log expected old/overlap/final pin-set revision transitions");
-            }
-            Console.WriteLine("PASS: each agent logged SHA-256 pin-set revision changes for the overlap and final rotation states");
-            // Listener certificates hold only disposable test keys and stay
-            // alive until all clients and child processes have stopped.
-            foreach (var certificate in serverCertificates) certificate.Dispose();
-            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
-            if (Directory.Exists(root)) throw new Exception("FAIL: temporary rotation PKI directory was not removed");
-            Console.WriteLine("PASS: disposable rotation PKI and PFX files were removed");
         }
     }
 
@@ -316,6 +357,39 @@ public static class AgentFleetRotationAcceptance
         listener.Start();
         return ((IPEndPoint)listener.LocalEndpoint).Port;
     }
+
+    private static async Task StopProcessAsync(Process process)
+    {
+        try
+        {
+            if (!process.HasExited) process.Kill(entireProcessTree: true);
+        }
+        catch (Exception error) when (error is InvalidOperationException or System.ComponentModel.Win32Exception) { }
+
+        try
+        {
+            if (!process.HasExited) await process.WaitForExitAsync();
+        }
+        catch (InvalidOperationException) { }
+    }
+
+    private static async Task VerifyProbeCancellationCompletesAsync()
+    {
+        var probe = new ContinuousProbe();
+        await probe.probeGate.WaitAsync();
+        probe.Completion = Task.Run(async () =>
+        {
+            if (await probe.TryAcquireProbeGateAsync()) probe.probeGate.Release();
+        });
+        probe.Cancel();
+        probe.probeGate.Release();
+        await probe.Completion;
+        if (probe.Completion.IsFaulted)
+            throw new Exception("FAIL: cancellation while waiting for the probe gate faulted completion");
+        Console.WriteLine("PASS: cancellation while waiting for the probe gate completes without fault");
+    }
+
+    private sealed class InjectedRotationFailureException : Exception { }
 
     private static HttpClient CreateClient(Node node, X509Certificate2 controller)
     {
@@ -409,7 +483,7 @@ public static class AgentFleetRotationAcceptance
                 foreach (var node in nodes)
                 {
                     if (probe.Cancellation.IsCancellationRequested) break;
-                    await probe.probeGate.WaitAsync(probe.Cancellation.Token);
+                    if (!await probe.TryAcquireProbeGateAsync()) return;
                     try
                     {
                         await RequireStatus(node, probe.CertificateFor(node), HttpStatusCode.OK, "continuous established identity");
@@ -445,6 +519,18 @@ public static class AgentFleetRotationAcceptance
             await probeGate.WaitAsync();
             try { certificates[nodeIndex] = certificate; }
             finally { probeGate.Release(); }
+        }
+        public async Task<bool> TryAcquireProbeGateAsync()
+        {
+            try
+            {
+                await probeGate.WaitAsync(Cancellation.Token);
+                return true;
+            }
+            catch (OperationCanceledException) when (Cancellation.IsCancellationRequested)
+            {
+                return false;
+            }
         }
         public X509Certificate2 CertificateFor(Node node) => certificates[node.Index];
         public void Cancel() => Cancellation.Cancel();
