@@ -130,10 +130,12 @@ internal static class TrafficCertificateRotationAcceptance
             Check(await GetPeerThumbprintAsync() == second.Thumbprint, "new Kestrel TLS handshakes use rotated cert without restart");
             Check(rotation.RetiredCertificateCount <= 4, "retired certificate handle count remains bounded");
 
-            await Task.Delay(TimeSpan.FromSeconds(5.2));
+            // A valid update inside the minimum-rotation interval must be queued and
+            // applied after the bound, rather than left stranded on disk.
+            await Task.Delay(TimeSpan.FromMilliseconds(750));
             WritePfx(stagePfx, third);
             File.Move(stagePfx, pfxPath, overwrite: true);
-            using (var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(8)))
+            using (var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10)))
             {
                 while (rotation.Current.Thumbprint != third.Thumbprint)
                     await Task.Delay(50, timeout.Token);

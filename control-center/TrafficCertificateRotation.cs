@@ -118,11 +118,25 @@ public sealed class TrafficCertificateRotation : IDisposable
                         }
                         var now = DateTimeOffset.UtcNow;
                         RetireExpired(now);
-                        if (now - lastRotationUtc < MinimumRotationInterval ||
-                            RetiredCount >= MaximumRetiredCertificates)
+                        var rotationDelay = MinimumRotationInterval - (now - lastRotationUtc);
+                        if (rotationDelay > TimeSpan.Zero)
                         {
                             candidate.Dispose();
-                            throw new InvalidOperationException("Traffic certificate rotation is rate-limited; retaining active certificate");
+                            await Task.Delay(rotationDelay, cancellationToken).ConfigureAwait(false);
+                            continue;
+                        }
+                        if (RetiredCount >= MaximumRetiredCertificates)
+                        {
+                            candidate.Dispose();
+                            DateTimeOffset oldestRetired;
+                            lock (retired) oldestRetired = retired.Min(entry => entry.RetiredAt);
+                            var capacityDelay = RotationGrace - (now - oldestRetired);
+                            if (capacityDelay > TimeSpan.Zero)
+                            {
+                                await Task.Delay(capacityDelay, cancellationToken).ConfigureAwait(false);
+                                continue;
+                            }
+                            throw new InvalidOperationException("Traffic certificate retirement capacity remains full; retaining active certificate");
                         }
                         var previous = Interlocked.Exchange(ref current, candidate);
                         lock (retired) retired.Add((previous, now));
