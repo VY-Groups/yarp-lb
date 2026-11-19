@@ -89,8 +89,16 @@ async function api(url, method = 'GET', body, signal) { const opts = { method, c
         throw Error('Administrator session expired; please sign in again');
     }
     throw Error('Authentication failed. Check your credentials or verification code.');
-} if (r.status === 403)
-    throw Error('Access denied. This action requires an authorized role or valid CSRF token.'); if (!r.ok) {
+} if (r.status === 403) {
+    let stepUp = false;
+    try {
+        stepUp = (await r.json()).signIn === '/admin/oidc/start';
+    }
+    catch { }
+    if (stepUp)
+        throw Error('Fresh enterprise authentication required. Sign out, then sign in with Enterprise SSO / passkey. Retry only after reviewing the change.');
+    throw Error('Access denied. This action requires an authorized role or valid CSRF token.');
+} if (!r.ok) {
     let e = 'HTTP ' + r.status;
     try {
         e = (await r.json()).error ?? e;
