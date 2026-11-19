@@ -19,7 +19,8 @@ required=[
 'yarp_control_destination_admission_waiter_canceled_total',
 'yarp_control_destination_admission_queue_wait_seconds_sum','yarp_control_destination_admission_queue_wait_seconds_count',
 'yarp_logging_dropped_total','yarp_logging_dropped_low_priority_total','yarp_logging_dropped_high_priority_total',
-'yarp_logging_write_errors_total']
+'yarp_logging_write_errors_total','yarp_peer_sync_enabled','yarp_peer_sync_remote_fresh',
+'yarp_peer_sync_last_accepted_age_seconds']
 FIXTURE='\n'.join(item+' 0' for item in required)+'\n'
 class ContractTests(unittest.TestCase):
     def test_realistic_fixture_go(self): self.assertEqual(evaluate(FIXTURE,CONTRACT,ALERTS,DASH)['decision'],'GO')

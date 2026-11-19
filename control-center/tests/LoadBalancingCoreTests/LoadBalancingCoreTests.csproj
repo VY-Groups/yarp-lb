@@ -27,6 +27,7 @@
     <Compile Include="../../../src/TrafficPolicies/RiseFallCounter.cs" Link="RiseFallCounter.cs" />
     <Compile Include="RiseFallTests.cs" />
     <Compile Include="../../PeerStateProtocol.cs" Link="PeerStateProtocol.cs" />
+    <Compile Include="../../PeerSyncPrometheus.cs" Link="PeerSyncPrometheus.cs" />
     <Compile Include="../../PeerSyncTransport.cs" Link="PeerSyncTransport.cs" />
     <Compile Include="PeerSyncTests.cs" />
     <Compile Include="GatewayClientAddressTests.cs" />

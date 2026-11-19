@@ -86,12 +86,42 @@ public static class PeerSyncTests
         monotonicClock.SetUtcNow(clock);
         Check(ageLimited.Status(now).RemoteReportedInCurrentMinute,
             "wall-clock rollback does not prematurely expire monotonic peer freshness");
+        var boundaryClock = new ManualTimeProvider(DateTimeOffset.UtcNow);
+        var boundaryJournal = new PeerStateJournal("node-b", "node-a", secret, 2,
+            TimeSpan.FromSeconds(60), timeProvider: boundaryClock);
+        Check(boundaryJournal.Apply(frame, now), "peer recency boundary fixture accepts a signed frame");
+        boundaryClock.Advance(TimeSpan.FromSeconds(15));
+        Check(PeerSyncFreshness.IsRecent(boundaryJournal.Status(now), TimeSpan.FromSeconds(15)),
+            "exact recency tolerance remains recent");
+        boundaryClock.Advance(TimeSpan.FromMilliseconds(900));
+        var overTolerance = boundaryJournal.Status(now);
+        Check(overTolerance.LastAcceptedAgeSeconds == 15 &&
+              overTolerance.LastAcceptedElapsed is { } exactAge &&
+              exactAge > TimeSpan.FromSeconds(15) && exactAge < TimeSpan.FromSeconds(16) &&
+              !PeerSyncFreshness.IsRecent(overTolerance, TimeSpan.FromSeconds(15)),
+            "a 15.9-second monotonic age is not recent at a 15-second threshold despite integer display rounding");
         monotonicClock.Advance(TimeSpan.FromSeconds(7));
         clock = monotonicClock.GetUtcNow();
         Check(!ageLimited.Status(now).RemoteReportedInCurrentMinute &&
               ageLimited.Status(now).RemoteIdentities == 0 &&
               ageLimited.PeerTelemetry(now)==(0,0L) && ageLimited.RetainedRemoteEntries == 0,
             "monotonic TTL expires and collects remote frame within the same minute");
+        var expiredStatus = ageLimited.Status(now);
+        Check(expiredStatus.LastAcceptedAgeSeconds == 7,
+            "monotonic last-accepted age remains observable after stale counters are collected");
+        var peerMetricText = new StringBuilder();
+        PeerSyncPrometheus.Append(peerMetricText, configured: true, status: expiredStatus);
+        Check(peerMetricText.ToString().Contains("yarp_peer_sync_enabled 1\n", StringComparison.Ordinal) &&
+              peerMetricText.ToString().Contains("yarp_peer_sync_remote_fresh 0\n", StringComparison.Ordinal) &&
+              peerMetricText.ToString().Contains("yarp_peer_sync_last_accepted_age_seconds 7\n", StringComparison.Ordinal) &&
+              !peerMetricText.ToString().Contains("node-a", StringComparison.Ordinal),
+            "Prometheus exports peer freshness and monotonic age with no peer identity labels");
+        var disabledMetricText = new StringBuilder();
+        PeerSyncPrometheus.Append(disabledMetricText, configured: false, status: null);
+        Check(disabledMetricText.ToString().Contains("yarp_peer_sync_enabled 0\n", StringComparison.Ordinal) &&
+              disabledMetricText.ToString().Contains("yarp_peer_sync_remote_fresh 0\n", StringComparison.Ordinal) &&
+              disabledMetricText.ToString().Contains("yarp_peer_sync_last_accepted_age_seconds NaN\n", StringComparison.Ordinal),
+            "unconfigured peer metrics report disabled and unknown receipt age with NaN");
         Check(!ageLimited.Apply(frame,now),
             "expired frame cannot be replayed to revive stale counters");
         var recovered = a.Snapshot(now);

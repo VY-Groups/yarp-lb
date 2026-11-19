@@ -403,14 +403,14 @@ app.MapGet("/admin/api/peer-sync/status", () =>
         });
     var info = peerStateJournal.Status(PeerStateJournal.CurrentMinute());
     var tolerance = TimeSpan.FromSeconds(Math.Max(15, peerSyncSettings.IntervalSeconds * 3));
-    var recentExchange = info.LastAcceptedUtc.HasValue &&
-        DateTimeOffset.UtcNow - info.LastAcceptedUtc.Value <= tolerance;
+    var recentExchange = PeerSyncFreshness.IsRecent(info, tolerance);
     return Results.Ok(new {
         enabled = true, mode = "signed HTTPS peer telemetry",
         info.LocalNode, info.RemoteNode,
         info.LocalIdentities, info.LocalRequests,
         info.RemoteIdentities, info.RemoteRequests,
         info.RemoteReportedInCurrentMinute, info.LastAcceptedUtc,
+        info.LastAcceptedAgeSeconds,
         info.RemoteSequence, recentExchange,
         expectedIntervalSeconds = peerSyncSettings.IntervalSeconds,
         trackedIdentityLimit = peerSyncSettings.Capacity,
@@ -596,6 +596,9 @@ app.MapGet("/gateway/metrics", (HttpContext ctx) =>
     output.AppendLine("# HELP yarp_logging_write_errors_total Console writer failures");
     output.AppendLine("# TYPE yarp_logging_write_errors_total counter");
     output.Append("yarp_logging_write_errors_total ").Append(boundedConsole.WriteErrors).Append('\n');
+    var peerStatus = peerSyncSettings is not null && peerStateJournal is not null
+        ? peerStateJournal.Status(PeerStateJournal.CurrentMinute()) : null;
+    PeerSyncPrometheus.Append(output, peerSyncSettings is not null, peerStatus);
     output.AppendLine("# HELP yarp_control_destination_inflight_requests YARP in-flight requests by destination");
     output.AppendLine("# TYPE yarp_control_destination_inflight_requests gauge");
     output.AppendLine("# HELP yarp_control_destination_active_health YARP active health 1 healthy, 0 unknown, -1 unhealthy");

@@ -217,6 +217,7 @@ async function peerSyncPage() {
         const seen = s.lastAcceptedUtc ? new Date(s.lastAcceptedUtc).toLocaleString() : 'No accepted message';
         const rows = [['Local node', s.localNode], ['Expected peer', s.remoteNode],
             ['Last accepted message', seen], ['Expected interval', active ? String(s.expectedIntervalSeconds) + ' seconds' : '—'],
+            ['Last accepted age', s.lastAcceptedAgeSeconds == null ? 'No accepted message' : String(s.lastAcceptedAgeSeconds) + ' seconds (monotonic)'],
             ['Current-minute remote snapshot', s.remoteReportedInCurrentMinute ? 'Available' : 'Missing / expired']];
         $('content').innerHTML = `<div class="toolbar"><div><h2>Peer synchronization</h2><p class="subtle">Authenticated counter exchange for this gateway. This is not a shared rate-limit authority.</p></div>${actionBtn('Refresh', 'switch', 'peers')}</div>
         <div class="card peer-status-card"><div><p class="subtle">PEER STATE</p><h2><span class="chip ${current ? 'good' : 'warn'}">${esc(state)}</span></h2><p class="subtle">${active ? 'Last accepted exchange and observed peer counters.' : 'No peer transport is configured; this is the safe default.'}</p></div><div><p class="subtle">Strict request admission</p><h3>${esc(s.strictAdmission || 'Not reported')}</h3><p class="subtle">Peer telemetry never authorizes requests during a network partition.</p></div></div>
