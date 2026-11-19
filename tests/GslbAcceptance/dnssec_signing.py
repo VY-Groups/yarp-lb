@@ -35,8 +35,8 @@ def require(condition, message):
     print(f"PASS: {message}", flush=True)
 
 
-def query(server, port, qname, qtype, transport="udp", timeout=3):
-    request = dns.message.make_query(qname, qtype, want_dnssec=True)
+def query(server, port, qname, qtype, transport="udp", timeout=3, want_dnssec=True):
+    request = dns.message.make_query(qname, qtype, want_dnssec=want_dnssec)
     request.flags &= ~dns.flags.RD
     if transport == "udp":
         return dns.query.udp(request, server, port=port, timeout=timeout)
@@ -140,6 +140,14 @@ def main():
         rollover_public_path.write_bytes(rollover_key.public_key().public_bytes(
             serialization.Encoding.PEM,
             serialization.PublicFormat.SubjectPublicKeyInfo))
+        child_key = ec.generate_private_key(ec.SECP256R1())
+        child_pub = child_key.public_key().public_bytes(
+            serialization.Encoding.X962, serialization.PublicFormat.UncompressedPoint)
+        child_dnskey = dns.rdata.from_text(dns.rdataclass.IN, dns.rdatatype.DNSKEY,
+            "257 3 13 " + __import__("base64").b64encode(child_pub[1:]).decode("ascii"))
+        child_zone = dns.name.from_text("child.signed.integration.test.")
+        child_ds = dns.dnssec.make_ds(child_zone, child_dnskey, "SHA256")
+        unsigned_child_zone = dns.name.from_text("unsigned.signed.integration.test.")
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         tcp_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         for port in range(24000, 25000):
@@ -171,7 +179,11 @@ def main():
                 "DnssecPrepublishPublicKeyPaths": [str(rollover_public_path)],
                 "NameServers": [{"Host": "ns1.signed.integration.test", "Address": "127.0.0.1"}],
                 "Delegations": [{"Name": "child.signed.integration.test", "NameServers": [
-                    {"Host": "ns1.child.signed.integration.test", "Address": "192.0.2.53"}]}],
+                    {"Host": "ns1.child.signed.integration.test", "Address": "192.0.2.53"}],
+                    "DsRecords": [{"KeyTag": child_ds.key_tag, "Algorithm": child_ds.algorithm,
+                        "DigestType": child_ds.digest_type, "DigestHex": child_ds.digest.hex().upper()}]},
+                    {"Name": "unsigned.signed.integration.test", "NameServers": [
+                        {"Host": "ns.unsigned.signed.integration.test", "Address": "192.0.2.54"}]}],
                 "FailClosedWhenAllSitesDown": False,
                 "Sites": [{"Address": "192.0.2.80", "Weight": 1,
                            "HealthCheckType": "Tcp", "TcpPort": 9}]
@@ -191,6 +203,35 @@ def main():
             DnssecPrivateKeyPath=None)]}, "DNSSEC rollover keys require", "orphaned public key")
         reject_rollover_config({**config, "Zones": [dict(config["Zones"][0],
             DnssecAdditionalSigningKeyPaths=[str(key_path)])]}, "must be unique", "duplicate active signer")
+        malformed_ds = dict(config["Zones"][0])
+        malformed_ds["Delegations"] = [dict(malformed_ds["Delegations"][0], DsRecords=[{
+            "KeyTag": child_ds.key_tag, "Algorithm": 13, "DigestType": 1,
+            "DigestHex": child_ds.digest.hex().upper()}])]
+        reject_rollover_config({**config, "Zones": [malformed_ds]}, "SHA-256 or SHA-384",
+                               "unsupported child DS digest type")
+        malformed_ds_length = dict(config["Zones"][0])
+        malformed_ds_length["Delegations"] = [dict(malformed_ds_length["Delegations"][0], DsRecords=[{
+            "KeyTag": child_ds.key_tag, "Algorithm": 13, "DigestType": 2,
+            "DigestHex": "AB" * 31}])]
+        reject_rollover_config({**config, "Zones": [malformed_ds_length]}, "exact length",
+                               "truncated child DS digest")
+        malformed_ds_algorithm = dict(config["Zones"][0])
+        malformed_ds_algorithm["Delegations"] = [dict(malformed_ds_algorithm["Delegations"][0], DsRecords=[{
+            "KeyTag": child_ds.key_tag, "Algorithm": 0, "DigestType": 2,
+            "DigestHex": child_ds.digest.hex().upper()}])]
+        reject_rollover_config({**config, "Zones": [malformed_ds_algorithm]}, "recognized DNSKEY algorithm",
+                               "unsupported child DS DNSKEY algorithm")
+        duplicate_ds = dict(config["Zones"][0])
+        duplicate_ds["Delegations"] = [dict(duplicate_ds["Delegations"][0], DsRecords=[
+            {"KeyTag": child_ds.key_tag, "Algorithm": child_ds.algorithm,
+             "DigestType": child_ds.digest_type, "DigestHex": child_ds.digest.hex().upper()}] * 2)]
+        reject_rollover_config({**config, "Zones": [duplicate_ds]}, "Duplicate delegation DS record",
+                               "duplicate child DS record")
+        unsigned_ds_parent = dict(config["Zones"][0])
+        unsigned_ds_parent.pop("DnssecPrivateKeyPath", None)
+        unsigned_ds_parent.pop("DnssecPrepublishPublicKeyPaths", None)
+        reject_rollover_config({**config, "Zones": [unsigned_ds_parent]}, "signed parent zone",
+                               "DS records on unsigned parent")
         misplaced_private_path = temp_path / "misplaced-private-key.pem"
         shutil.copyfile(key_path, misplaced_private_path)
         misplaced_private_path.chmod(0o600)
@@ -336,11 +377,60 @@ def main():
                 assert_nsec_cover(nx, "missing.signed.integration.test.")
                 assert_nsec_cover(nx, "*.signed.integration.test.")
 
-            ds = query("127.0.0.1", port, "child.signed.integration.test.", "DS", "tcp")
-            require(ds.rcode() == dns.rcode.NOERROR and validate_signed_sections(ds, keys) >= 2,
-                    "unsigned child delegation DS absence is signed by the parent zone")
-            require(any(rrset.rdtype == dns.rdatatype.NSEC and rrset.name == dns.name.from_text("child.signed.integration.test.")
-                        for rrset in ds.authority), "DS absence proof is attached at the child cut")
+            for transport in ("udp", "tcp"):
+                ds = query("127.0.0.1", port, child_zone, "DS", transport)
+                ds_rrset = next(rrset for rrset in ds.answer if rrset.rdtype == dns.rdatatype.DS)
+                ds_sigs = ds.find_rrset(ds.answer, ds_rrset.name, ds_rrset.rdclass,
+                    dns.rdatatype.RRSIG, covers=dns.rdatatype.DS)
+                require(ds.rcode() == dns.rcode.NOERROR and len(ds_rrset) == 1 and
+                        next(iter(ds_rrset)) == child_ds and
+                        validate_signed_sections(ds, keys) == 1,
+                        f"{transport.upper()} parent DS answer matches child DNSKEY and verifies cryptographically")
+                require(len(ds_sigs) == 1,
+                        f"{transport.upper()} child DS answer contains parent signature")
+                unsigned_response = query("127.0.0.1", port, child_zone, "DS", transport,
+                                          want_dnssec=False)
+                require(any(rrset.rdtype == dns.rdatatype.DS for rrset in unsigned_response.answer) and
+                        not any(rrset.rdtype == dns.rdatatype.RRSIG for rrset in
+                                unsigned_response.answer + unsigned_response.authority),
+                        f"{transport.upper()} non-DO DS answer omits signatures without omitting DS data")
+
+                referral = query("127.0.0.1", port, "www.child.signed.integration.test.", "A", transport)
+                require(not referral.flags & dns.flags.AA and not referral.answer and
+                        any(rrset.rdtype == dns.rdatatype.NS and rrset.name == child_zone
+                            for rrset in referral.authority),
+                        f"{transport.upper()} signed-child lookup returns a non-authoritative parent referral")
+                referral_ds = next(rrset for rrset in referral.authority
+                                   if rrset.rdtype == dns.rdatatype.DS)
+                referral_sig = referral.find_rrset(referral.authority, referral_ds.name,
+                    referral_ds.rdclass, dns.rdatatype.RRSIG, covers=dns.rdatatype.DS)
+                dns.dnssec.validate(referral_ds, referral_sig, keys, now=time.time())
+                require(next(iter(referral_ds)) == child_ds,
+                        f"{transport.upper()} DO referral carries the validating child DS RRset")
+                non_do_referral = query("127.0.0.1", port,
+                    "www.child.signed.integration.test.", "A", transport, want_dnssec=False)
+                require(not any(rrset.rdtype in (dns.rdatatype.DS, dns.rdatatype.RRSIG)
+                                for rrset in non_do_referral.authority),
+                        f"{transport.upper()} non-DO referral omits DNSSEC-only DS/signature data")
+
+                insecure_referral = query("127.0.0.1", port,
+                    "www.unsigned.signed.integration.test.", "A", transport)
+                insecure_nsec = next(rrset for rrset in insecure_referral.authority
+                    if rrset.rdtype == dns.rdatatype.NSEC and rrset.name == unsigned_child_zone)
+                insecure_sig = insecure_referral.find_rrset(insecure_referral.authority,
+                    insecure_nsec.name, insecure_nsec.rdclass, dns.rdatatype.RRSIG,
+                    covers=dns.rdatatype.NSEC)
+                dns.dnssec.validate(insecure_nsec, insecure_sig, keys, now=time.time())
+                require(not insecure_referral.flags & dns.flags.AA and
+                        any(rrset.rdtype == dns.rdatatype.NS for rrset in insecure_referral.authority),
+                        f"{transport.upper()} DO referral proves an unsigned cut with parent-signed NSEC")
+
+            unsigned_ds = query("127.0.0.1", port, unsigned_child_zone, "DS", "tcp")
+            require(unsigned_ds.rcode() == dns.rcode.NOERROR and
+                    validate_signed_sections(unsigned_ds, keys) >= 2 and
+                    any(rrset.rdtype == dns.rdatatype.NSEC and rrset.name == unsigned_child_zone
+                        for rrset in unsigned_ds.authority),
+                    "unsigned child delegation DS absence remains signed by the parent zone")
 
             rrsig = query("127.0.0.1", port, ZONE, "RRSIG", "tcp")
             require(any(rrset.rdtype == dns.rdatatype.RRSIG for rrset in rrsig.answer),

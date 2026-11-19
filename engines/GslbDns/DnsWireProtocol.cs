@@ -155,10 +155,16 @@ internal static class DnsWireProtocol
                     n.Host.EndsWith("." + domain, StringComparison.OrdinalIgnoreCase));
             if (delegation is not null && domain.Equals(delegation.Name, StringComparison.OrdinalIgnoreCase) && qtype == Ds)
             {
-                // No child DS is configured. A signed parent proves DS absence
-                // with NSEC; unsigned parents retain the historical SOA-only response.
-                AddNegativeSoa();
-                denialName = delegation.Name;
+                if (delegation.DsRecords.Length > 0)
+                    answers.AddRange(delegation.DsRecords.Select(ds => new DnsResource(
+                        delegation.Name, Ds, (uint)zone.Ttl, ds.Rdata)));
+                else
+                {
+                    // No child DS is configured. A signed parent proves DS absence
+                    // with NSEC; unsigned parents retain the historical SOA-only response.
+                    AddNegativeSoa();
+                    denialName = delegation.Name;
+                }
             }
             else if (delegation is not null)
             {
@@ -170,6 +176,21 @@ internal static class DnsWireProtocol
                         server.Host.EndsWith("." + delegation.Name, StringComparison.OrdinalIgnoreCase))
                         extra.Add(new DnsResource(server.Host, server.RecordType, (uint)zone.Ttl,
                             server.Address.GetAddressBytes()));
+                }
+                // DNSSEC referrals carry the parent-signed DS RRset (or signed
+                // proof of its absence) in authority. Delegation NS itself is
+                // intentionally unsigned by the parent.
+                if (dnssecOk && zone.Dnssec is { } parentSigner)
+                {
+                    if (delegation.DsRecords.Length > 0)
+                    {
+                        var dsRrset = delegation.DsRecords.Select(ds => new DnsResource(
+                            delegation.Name, Ds, (uint)zone.Ttl, ds.Rdata)).ToArray();
+                        authority.AddRange(dsRrset);
+                        authority.AddRange(parentSigner.SignRrsets(delegation.Name, Ds,
+                            (uint)zone.Ttl, dsRrset.Select(r => r.Rdata).ToArray()));
+                    }
+                    else authority.AddRange(parentSigner.DenialProof(delegation.Name, nxDomain: false));
                 }
             }
             else if (!atApex && ns is null)
