@@ -20,6 +20,53 @@ public static class PeerSyncTests
         }
     }
 
+    private sealed class AcknowledgementPairTimeProvider(DateTimeOffset utcNow) : TimeProvider, IDisposable
+    {
+        private long timestamp;
+        private int writerThreadId;
+        private int blockWriterTimestamp;
+        public readonly ManualResetEventSlim UtcCaptured = new();
+        public readonly ManualResetEventSlim TimestampBlocked = new();
+        public readonly ManualResetEventSlim ContinueWriter = new();
+
+        public override long TimestampFrequency => TimeSpan.TicksPerSecond;
+        public override DateTimeOffset GetUtcNow() => utcNow.AddTicks(Interlocked.Read(ref timestamp));
+
+        public override long GetTimestamp()
+        {
+            var writer = Environment.CurrentManagedThreadId == Volatile.Read(ref writerThreadId);
+            if (writer && Interlocked.Exchange(ref blockWriterTimestamp, 0) == 1)
+            {
+                TimestampBlocked.Set();
+                ContinueWriter.Wait();
+            }
+            return Interlocked.Read(ref timestamp);
+        }
+
+        public void PrepareNextAcknowledgement(TimeSpan at)
+        {
+            Interlocked.Exchange(ref timestamp, at.Ticks);
+            Volatile.Write(ref writerThreadId, 0);
+            UtcCaptured.Reset();
+            TimestampBlocked.Reset();
+            ContinueWriter.Reset();
+            Volatile.Write(ref blockWriterTimestamp, 1);
+        }
+
+        public void CaptureUtcForCurrentWriter()
+        {
+            Volatile.Write(ref writerThreadId, Environment.CurrentManagedThreadId);
+            UtcCaptured.Set();
+        }
+
+        public void Dispose()
+        {
+            UtcCaptured.Dispose();
+            TimestampBlocked.Dispose();
+            ContinueWriter.Dispose();
+        }
+    }
+
     public static void Run()
     {
         static void Check(bool condition,string name)
@@ -66,6 +113,32 @@ public static class PeerSyncTests
               !publisherMetricText.ToString().Contains("yarp_peer_sync_publish_acknowledgements_total{", StringComparison.Ordinal) &&
               !publisherMetricText.ToString().Contains("node-a", StringComparison.Ordinal),
             "publisher metrics expose delivery and age with fixed cardinality and no peer identity labels");
+
+        using (var pairClock = new AcknowledgementPairTimeProvider(DateTimeOffset.UnixEpoch))
+        {
+            var pairDiagnostics = new PeerSyncPublisherDiagnostics(pairClock);
+            pairClock.PrepareNextAcknowledgement(TimeSpan.FromSeconds(10));
+            var acknowledgementTask = Task.Run(() =>
+            {
+                pairClock.CaptureUtcForCurrentWriter();
+                pairDiagnostics.RecordResponse(acknowledged: true);
+            });
+            Check(pairClock.UtcCaptured.Wait(TimeSpan.FromSeconds(5)) &&
+                  pairClock.TimestampBlocked.Wait(TimeSpan.FromSeconds(5)),
+                "concurrent acknowledgement fixture pauses between wall and monotonic clock reads");
+            var duringAcknowledgement = pairDiagnostics.Snapshot();
+            Check(duringAcknowledgement.LastAcknowledgedUtc is null &&
+                  duringAcknowledgement.LastAcknowledgedAgeSeconds is null &&
+                  duringAcknowledgement.AcknowledgementsTotal == 0,
+                "concurrent status read cannot observe half of an acknowledgement timestamp pair");
+            pairClock.ContinueWriter.Set();
+            acknowledgementTask.GetAwaiter().GetResult();
+            var afterAcknowledgement = pairDiagnostics.Snapshot();
+            Check(afterAcknowledgement.LastAcknowledgedUtc == DateTimeOffset.UnixEpoch.AddSeconds(10) &&
+                  afterAcknowledgement.LastAcknowledgedAgeSeconds == 0 &&
+                  afterAcknowledgement.AcknowledgementsTotal == 1,
+                "concurrent acknowledgement publishes a consistent UTC and monotonic timestamp pair");
+        }
 
         var deltaSource = new PeerStateJournal("delta-a", "delta-b", secret, 2);
         var deltaClock = new ManualTimeProvider(DateTimeOffset.UtcNow);

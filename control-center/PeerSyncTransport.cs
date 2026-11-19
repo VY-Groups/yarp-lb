@@ -53,10 +53,11 @@ public sealed record PeerSyncPublisherStatus(long AttemptsTotal, long Acknowledg
 
 public sealed class PeerSyncPublisherDiagnostics
 {
+    private sealed record AcknowledgementMark(long Timestamp, long UtcTicks);
+
     private readonly TimeProvider timeProvider;
     private long attempts, acknowledgements, httpFailures, transportFailures, resynchronizations;
-    private long lastAcknowledgedTimestamp = long.MinValue;
-    private long lastAcknowledgedUtcTicks = long.MinValue;
+    private AcknowledgementMark? lastAcknowledgement;
     private int inFlight;
 
     public PeerSyncPublisherDiagnostics(TimeProvider? timeProvider = null) =>
@@ -78,8 +79,10 @@ public sealed class PeerSyncPublisherDiagnostics
             return;
         }
 
-        Interlocked.Exchange(ref lastAcknowledgedUtcTicks, timeProvider.GetUtcNow().UtcDateTime.Ticks);
-        Interlocked.Exchange(ref lastAcknowledgedTimestamp, timeProvider.GetTimestamp());
+        var acknowledgedUtcTicks = timeProvider.GetUtcNow().UtcDateTime.Ticks;
+        var acknowledgedTimestamp = timeProvider.GetTimestamp();
+        var acknowledgement = new AcknowledgementMark(acknowledgedTimestamp, acknowledgedUtcTicks);
+        Interlocked.Exchange(ref lastAcknowledgement, acknowledgement);
         Interlocked.Increment(ref acknowledgements);
     }
 
@@ -88,19 +91,18 @@ public sealed class PeerSyncPublisherDiagnostics
 
     public PeerSyncPublisherStatus Snapshot()
     {
-        var acknowledgedAt = Interlocked.Read(ref lastAcknowledgedTimestamp);
+        var acknowledgedAt = Volatile.Read(ref lastAcknowledgement);
         long? ageSeconds = null;
-        if (acknowledgedAt != long.MinValue)
+        if (acknowledgedAt is not null)
         {
-            var elapsed = timeProvider.GetElapsedTime(acknowledgedAt);
+            var elapsed = timeProvider.GetElapsedTime(acknowledgedAt.Timestamp);
             if (elapsed >= TimeSpan.Zero)
                 ageSeconds = (long)Math.Floor(elapsed.TotalSeconds);
         }
 
-        var utcTicks = Interlocked.Read(ref lastAcknowledgedUtcTicks);
-        DateTimeOffset? acknowledgedUtc = utcTicks == long.MinValue
+        DateTimeOffset? acknowledgedUtc = acknowledgedAt is null
             ? null
-            : new DateTimeOffset(utcTicks, TimeSpan.Zero);
+            : new DateTimeOffset(acknowledgedAt.UtcTicks, TimeSpan.Zero);
         return new PeerSyncPublisherStatus(
             Interlocked.Read(ref attempts), Interlocked.Read(ref acknowledgements),
             Interlocked.Read(ref httpFailures), Interlocked.Read(ref transportFailures),
