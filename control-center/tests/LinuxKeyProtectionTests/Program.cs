@@ -96,6 +96,35 @@ try
         Assert(dp.Unprotect(encrypted)=="sensitive-session-value-123",
             "session value decrypts across a new service provider using persisted key ring");
     }
+    // Build a real legacy plaintext ring with ASP.NET's unwrapped file
+    // repository, then ensure protected mode refuses it without mutation.
+    var legacyState=Path.Combine(root,"legacy-plaintext-state");
+    Set("YARP_CONTROL_PLANE_DIR",legacyState);
+    LinuxKeyProtection.InitializeStateDirectory();
+    var legacyDirectory=Path.Combine(legacyState,"data-protection-keys");
+    var legacyServices=new ServiceCollection();
+    legacyServices.AddDataProtection().SetApplicationName("OnPremLinuxDpIntegration.v1")
+        .PersistKeysToFileSystem(new DirectoryInfo(legacyDirectory));
+    using(var legacyProvider=legacyServices.BuildServiceProvider())
+        _=legacyProvider.GetRequiredService<IDataProtectionProvider>()
+            .CreateProtector("session-probe").Protect("legacy-lab-only-session");
+    var legacyFile=Directory.GetFiles(legacyDirectory,"key-*.xml").Single();
+    File.SetUnixFileMode(legacyFile,PrivateFile);
+    var legacyBytes=File.ReadAllBytes(legacyFile);
+    Assert(System.Text.Encoding.UTF8.GetString(legacyBytes).Contains("<masterKey"),
+        "legacy fixture contains a real unwrapped master key");
+    Assert(Throws(()=>{using var _=Provider(legacyState);}) &&
+           File.ReadAllBytes(legacyFile).SequenceEqual(legacyBytes),
+        "protected startup refuses legacy plaintext key ring without overwriting it");
+    var protectedFile=keyFiles[0];
+    var originalMode=File.GetUnixFileMode(protectedFile);
+    File.SetUnixFileMode(protectedFile,originalMode|UnixFileMode.OtherRead);
+    Assert(Throws(()=>{using var _=Provider(state);}), "public-readable persisted key XML is refused");
+    File.SetUnixFileMode(protectedFile,originalMode);
+    var symlink=Path.Combine(Path.GetDirectoryName(protectedFile)!,"key-test-link.xml");
+    File.CreateSymbolicLink(symlink,protectedFile);
+    Assert(Throws(()=>{using var _=Provider(state);}), "symlinked persisted key XML is refused");
+    File.Delete(symlink);
     var tamperState=Path.Combine(root,"tamper-state");
     Set("YARP_CONTROL_PLANE_DIR",tamperState);
     LinuxKeyProtection.InitializeStateDirectory();
