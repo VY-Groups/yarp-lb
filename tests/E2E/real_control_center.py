@@ -534,6 +534,29 @@ def acceptance(base:str,https_base:str,origin_port:int):
     operator.request("POST","/admin/api/change-requests",change,expect=423)
     admin.request("POST","/admin/api/setup/freeze",{"frozen":False,
         "reason":"E2E completed maintenance freeze test"})
+    plan={"schemaVersion":1,"payload":payload}
+    before_drafts=admin.request("GET","/admin/api/change-requests")
+    before_backups=admin.request("GET","/admin/api/backups")
+    result=operator.request("POST","/admin/api/gitops/plan",plan)
+    check(result["dryRun"] and result["approvalRequired"] and
+          result["revision"]==initial["revision"] and result["routes"]["added"]==["e2e"] and
+          not result["clusters"]["added"],
+          "versioned GitOps plan reports route additions without returning configuration values")
+    check(operator.request("POST","/admin/api/gitops/plan",plan)==result,
+          "same revision and desired configuration produce identical deterministic plans")
+    viewer.request("POST","/admin/api/gitops/plan",plan,expect=403)
+    operator.request("POST","/admin/api/gitops/plan",plan,csrf=False,expect=403)
+    operator.request("POST","/admin/api/gitops/plan",dict(plan,schemaVersion=2),expect=400)
+    bad=json.loads(json.dumps(plan))
+    bad["payload"]["routes"]["e2e"]["ClusterId"]="missing-cluster"
+    operator.request("POST","/admin/api/gitops/plan",bad,expect=400)
+    stale=json.loads(json.dumps(plan))
+    stale["payload"]["revision"]="0"*64
+    operator.request("POST","/admin/api/gitops/plan",stale,expect=409)
+    check(admin.request("GET","/admin/api/state")["revision"]==initial["revision"] and
+          admin.request("GET","/admin/api/change-requests")==before_drafts and
+          admin.request("GET","/admin/api/backups")==before_backups,
+          "planning never modifies configuration, drafts or backups")
     pending=operator.request("POST","/admin/api/change-requests",change)
     check(pending["status"]=="Pending","operator submitted real configuration draft")
     operator.request("POST",f"/admin/api/change-requests/{pending['id']}/decision",
