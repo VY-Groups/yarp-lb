@@ -44,6 +44,12 @@ ephemeral key loading. The existing static-certificate behavior remains when
 need to be restricted to the service identity by deployment; the application
 does not change those ACLs.
 
+The Windows and Ubuntu TlsInventory acceptance runs exercise real Kestrel
+handshakes while candidate PFX files are replaced. Malformed, wrong-SAN,
+expired, not-yet-valid, less-than-one-day-valid, wrong-EKU and untrusted-chain
+candidates are rejected while the last-good certificate remains served. This
+does not exercise a live CRL/OCSP responder or ACME issuance/revocation.
+
 There is still no ACME account/key persistence, issuer/client, order/authorization
 flow, token publisher, renewal scheduler, backoff/jitter, OCSP/CRL check
 specifically at activation, revocation workflow, or failure alerting. This is a
