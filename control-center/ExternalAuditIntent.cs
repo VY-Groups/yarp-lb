@@ -94,7 +94,7 @@ internal sealed class ExternalAuditIntent : IDisposable
     internal async Task<bool> ConfirmAsync(string actor, string operation, string revision,
         string targetDigest, CancellationToken cancellationToken)
     {
-        if (actor.Length is < 1 or > 256 || operation is not ("CONFIG_APPLY_INTENT" or "CONFIG_RESTORE_INTENT") ||
+        if (cancellationToken.IsCancellationRequested || actor.Length is < 1 or > 256 || actor.Any(char.IsControl) || operation is not ("CONFIG_APPLY_INTENT" or "CONFIG_RESTORE_INTENT") ||
             !IsDigest(revision) || !IsDigest(targetDigest))
             return false;
         var id = Guid.NewGuid().ToString("N");
@@ -121,8 +121,10 @@ internal sealed class ExternalAuditIntent : IDisposable
             if (values.Length != 1 || values[0].Length > 1024) return false;
             var signature = Convert.FromBase64String(values[0]);
             lock (verifyGate)
-                return collectorKey.VerifyData(ReceiptInput(id, payload), signature,
-                    HashAlgorithmName.SHA256, RSASignaturePadding.Pss);
+                return !deadline.IsCancellationRequested &&
+                    collectorKey.VerifyData(ReceiptInput(id, payload), signature,
+                        HashAlgorithmName.SHA256, RSASignaturePadding.Pss) &&
+                    !deadline.IsCancellationRequested;
         }
         catch (Exception ex) when (ex is HttpRequestException or OperationCanceledException
                                    or FormatException or CryptographicException or IOException)

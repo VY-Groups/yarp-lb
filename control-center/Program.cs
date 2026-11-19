@@ -1298,10 +1298,15 @@ async Task<IResult> CommitReviewedChange(HttpContext ctx, JsonObject submitted)
         proxy["AdminDisabledDestinations"] = disabled.DeepClone();
         doc["ReverseProxy"] = proxy;
         var newConfig = doc.ToJsonString(new JsonSerializerOptions { WriteIndented = true });
-        if (externalAuditIntent is not null &&
-            !await externalAuditIntent.ConfirmAsync(Actor(ctx), "CONFIG_APPLY_INTENT", currentRevision,
-                Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(newConfig))), ctx.RequestAborted))
-            return Results.Json(new { error = "External audit receipt unavailable; configuration unchanged" }, statusCode: 503);
+        if (externalAuditIntent is not null)
+        {
+            if (!await externalAuditIntent.ConfirmAsync(Actor(ctx), "CONFIG_APPLY_INTENT", currentRevision,
+                    Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(newConfig))), ctx.RequestAborted) ||
+                ctx.RequestAborted.IsCancellationRequested)
+                return Results.Json(new { error = "External audit receipt unavailable; configuration unchanged" }, statusCode: 503);
+            if (!File.ReadAllBytes(configPath).AsSpan().SequenceEqual(snapshot))
+                return Results.Conflict(new { error = "Configuration changed during external audit confirmation" });
+        }
         Directory.CreateDirectory(backupFolder);
         var stamp = DateTimeOffset.UtcNow.ToString("yyyyMMddTHHmmssfffffffZ");
         var backup = Path.Combine(backupFolder, $"appsettings-{stamp}.json");
@@ -1475,11 +1480,17 @@ app.MapPost("/admin/api/restore/{name}", async (HttpContext ctx, string name) =>
     {
         var json = await File.ReadAllTextAsync(path);
         if (JsonNode.Parse(json)?["ReverseProxy"] is null) return Results.BadRequest(new { error = "Backup lacks ReverseProxy configuration" });
-        if (externalAuditIntent is not null &&
-            !await externalAuditIntent.ConfirmAsync(Actor(ctx), "CONFIG_RESTORE_INTENT",
-                Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(configPath))),
-                Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(json))), ctx.RequestAborted))
-            return Results.Json(new { error = "External audit receipt unavailable; configuration unchanged" }, statusCode: 503);
+        if (externalAuditIntent is not null)
+        {
+            var restoreSnapshot = File.ReadAllBytes(configPath);
+            if (!await externalAuditIntent.ConfirmAsync(Actor(ctx), "CONFIG_RESTORE_INTENT",
+                    Convert.ToHexString(SHA256.HashData(restoreSnapshot)),
+                    Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(json))), ctx.RequestAborted) ||
+                ctx.RequestAborted.IsCancellationRequested)
+                return Results.Json(new { error = "External audit receipt unavailable; configuration unchanged" }, statusCode: 503);
+            if (!File.ReadAllBytes(configPath).AsSpan().SequenceEqual(restoreSnapshot))
+                return Results.Conflict(new { error = "Configuration changed during external audit confirmation" });
+        }
         var safety = Path.Combine(backupFolder, $"appsettings-{DateTimeOffset.UtcNow:yyyyMMddTHHmmssfffffff}Z.json");
         File.Copy(configPath, safety);
         await File.WriteAllTextAsync(configPath + ".tmp", json);

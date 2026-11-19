@@ -50,7 +50,16 @@ internal static class ExternalAuditIntentTests
         using var cancel = new CancellationTokenSource(TimeSpan.FromMilliseconds(100));
         Check(!await gate.ConfirmAsync("reviewer", "CONFIG_APPLY_INTENT", digest, target, cancel.Token),
             "canceled external request fails closed");
+        using var race = new CancellationTokenSource();
+        handler.Mode = "valid";
+        handler.BeforeResponse = () => race.Cancel();
+        Check(!await gate.ConfirmAsync("reviewer", "CONFIG_APPLY_INTENT", digest, target, race.Token),
+            "valid receipt arriving after caller cancellation cannot authorize mutation");
+        handler.BeforeResponse = null;
         var count = handler.Calls;
+        Check(!await gate.ConfirmAsync("reviewer", "CONFIG_APPLY_INTENT", digest, target, race.Token) &&
+              !await gate.ConfirmAsync("bad\nactor", "CONFIG_APPLY_INTENT", digest, target, CancellationToken.None) &&
+              handler.Calls == count, "pre-canceled and control-character actors never sent");
         Check(!await gate.ConfirmAsync("reviewer", "UNSUPPORTED", digest, target, CancellationToken.None) &&
               handler.Calls == count, "invalid operation not submitted");
         handler.Mode = "valid";
@@ -71,6 +80,7 @@ internal static class ExternalAuditIntentTests
         public int Calls;
         public bool Authenticated, BoundIntent;
         public string Mode = "valid";
+        public Action? BeforeResponse;
         private string? previousReceipt;
 
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage req, CancellationToken ct)
@@ -106,6 +116,7 @@ internal static class ExternalAuditIntentTests
             result.Headers.TryAddWithoutValidation(ExternalAuditIntent.ReceiptSignature,
                 Mode == "duplicate" ? new[] { receipt, receipt } : new[] { receipt });
             if (Mode == "valid") previousReceipt = receipt;
+            BeforeResponse?.Invoke();
             return result;
         }
     }
