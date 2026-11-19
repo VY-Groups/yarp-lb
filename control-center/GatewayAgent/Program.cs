@@ -88,8 +88,16 @@ if (!string.IsNullOrWhiteSpace(labCaPath))
     var everyUrlIsLoopback = string.IsNullOrWhiteSpace(configuredUrls) ||
         configuredUrls.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
             .All(IsLoopbackHttpsUrl);
+    // ASPNETCORE_HTTP_PORTS / ASPNETCORE_HTTPS_PORTS are WebHost defaults that
+    // bind wildcard listeners. They do not flow through the `urls` setting, so
+    // reject them explicitly while the isolated lab trust root is enabled.
+    var configuredHttpPorts = builder.Configuration["http_ports"];
+    var configuredHttpsPorts = builder.Configuration["https_ports"];
+    var hasDefaultPortBindings = !string.IsNullOrWhiteSpace(configuredHttpPorts) ||
+        !string.IsNullOrWhiteSpace(configuredHttpsPorts);
     if (!Path.IsPathFullyQualified(labCaPath) || !File.Exists(labCaPath) ||
         !IsLoopbackHttpsUrl(listener) || !everyEndpointIsLoopback || !everyUrlIsLoopback ||
+        hasDefaultPortBindings ||
         allowConfigChanges || allowEngineConfigChanges ||
         allowActions)
         throw new InvalidOperationException(

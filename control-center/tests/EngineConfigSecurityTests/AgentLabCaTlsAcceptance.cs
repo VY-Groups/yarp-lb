@@ -72,6 +72,13 @@ public static class AgentLabCaTlsAcceptance
             while(secondaryPort==port || secondaryPort==metricsPort) secondaryPort=UnusedPort();
             var urlsPort=UnusedPort();
             while(urlsPort==port || urlsPort==metricsPort || urlsPort==secondaryPort) urlsPort=UnusedPort();
+            var defaultHttpPort=UnusedPort();
+            while(defaultHttpPort==port || defaultHttpPort==metricsPort || defaultHttpPort==secondaryPort || defaultHttpPort==urlsPort)
+                defaultHttpPort=UnusedPort();
+            var defaultHttpsPort=UnusedPort();
+            while(defaultHttpsPort==port || defaultHttpsPort==metricsPort || defaultHttpsPort==secondaryPort ||
+                defaultHttpsPort==urlsPort || defaultHttpsPort==defaultHttpPort)
+                defaultHttpsPort=UnusedPort();
             var metricsBody = ValidMetrics();
             var agentStatusBody = ValidAgentStatus();
             var metricsBuilder = WebApplication.CreateSlimBuilder();
@@ -181,6 +188,14 @@ public static class AgentLabCaTlsAcceptance
             var urlsPublic=StartAgent("https://127.0.0.1:"+port);
             urlsPublic.Environment["ASPNETCORE_URLS"]="https://0.0.0.0:"+urlsPort;
             await RequireLabListenerRejectedAsync("public ASPNETCORE_URLS binding",urlsPublic,port,urlsPort);
+            var httpPortsPublic=StartAgent("https://127.0.0.1:"+port);
+            httpPortsPublic.Environment["ASPNETCORE_HTTP_PORTS"]=defaultHttpPort.ToString();
+            await RequireLabListenerRejectedAsync("wildcard ASPNETCORE_HTTP_PORTS binding",
+                httpPortsPublic,port,defaultHttpPort);
+            var httpsPortsPublic=StartAgent("https://127.0.0.1:"+port);
+            httpsPortsPublic.Environment["ASPNETCORE_HTTPS_PORTS"]=defaultHttpsPort.ToString();
+            await RequireLabListenerRejectedAsync("wildcard ASPNETCORE_HTTPS_PORTS binding",
+                httpsPortsPublic,port,defaultHttpsPort);
 
             var info=StartAgent("https://127.0.0.1:"+port);
             using var process=Process.Start(info) ?? throw new Exception("Agent start failed");
