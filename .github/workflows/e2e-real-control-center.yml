@@ -59,7 +59,29 @@ jobs:
       - name: Install pinned Playwright test package
         run: npm install --prefix tests/E2E --no-package-lock --ignore-scripts
       - name: Install real Chromium with OS dependencies
-        run: cd tests/E2E && npx playwright install --with-deps chromium
+        working-directory: tests/E2E
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Bound retries of transient Ubuntu mirror and browser CDN failures.
+          # Keep Playwright's full dependency installation and signed APT indexes.
+          sudo tee /etc/apt/apt.conf.d/99-gatewaycore-ci-retry >/dev/null <<'EOF'
+          Acquire::Retries "2";
+          Acquire::http::Timeout "15";
+          Acquire::https::Timeout "15";
+          APT::Update::Error-Mode "any";
+          EOF
+          for attempt in 1 2 3; do
+            if timeout --kill-after=15s 240s npx playwright install --with-deps chromium; then
+              exit 0
+            fi
+            echo "::warning::Chromium dependency installation attempt ${attempt}/3 failed"
+            if [ "$attempt" -eq 3 ]; then
+              exit 1
+            fi
+            sudo rm -rf /var/lib/apt/lists/*
+            sleep "$((attempt * 10))"
+          done
       - name: Browser acceptance on real localhost GatewayCore Kestrel
         run: cd tests/E2E && npm test
       - name: Keep screenshots, traces and browser reports for failures
