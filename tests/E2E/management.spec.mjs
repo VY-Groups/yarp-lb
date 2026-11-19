@@ -129,6 +129,21 @@ test('browser: bootstrap, navigation, onboarding, websites, route edit, users an
     await page.locator('button.nav[data-view="routes"]').click();
     await expect(page.locator('#content')).toContainText('ra-browser-private-route');
     await expect(page.locator('#content')).not.toContainText('ra-browser-public-route');
+
+    await page.locator('button.nav[data-view="setup"]').click();
+    await page.locator('[data-action="setup-add-esign-pools"]').click();
+    await page.locator('#f-id').fill('ocsp-passive');
+    await page.locator('#f-service').selectOption('OCSP');
+    await page.locator('#f-scope').selectOption('public-only');
+    await page.locator('#f-health').selectOption('passive-only');
+    await page.locator('#f-publicHost').fill('ocsp.example.invalid');
+    await page.locator('#f-publicApp1').fill('https://ocsp-01.example.invalid/');
+    await page.locator('#f-publicApp2').fill('https://ocsp-02.example.invalid/');
+    await expect(page.locator('#modal-help')).toContainText('BoundedTransportFailure');
+    await page.locator('#confirm').click();
+    await expect(page.locator('#notice')).toContainText('two consecutive failures');
+    await page.locator('button.nav[data-view="clusters"]').click();
+    await expect(page.locator('#content')).toContainText('Passive only');
   });
 
   await test.step('Edit Route allows optional hostname and a visible Cancel',async()=>{

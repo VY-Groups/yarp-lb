@@ -101,7 +101,7 @@ async Task<int> InFlight(string url)
     return json.RootElement.GetProperty("count").GetInt32();
 }
 
-void Configure(string policy, int aWeight, int bWeight, bool drainA = false, int slowStartA = 0, bool drainKillA = false, bool riseFall = false, bool backupB = false, bool activeHealth = true)
+void Configure(string policy, int aWeight, int bWeight, bool drainA = false, int slowStartA = 0, bool drainKillA = false, bool riseFall = false, bool backupB = false, bool activeHealth = true, bool passiveHealth = false)
 {
     var config = new {
         ReverseProxy = new {
@@ -117,12 +117,16 @@ void Configure(string policy, int aWeight, int bWeight, bool drainA = false, int
                         Active = new {
                             Enabled = activeHealth, Interval = "00:00:01", Timeout = "00:00:01",
                             Policy = riseFall ? "RiseFall" : "ConsecutiveFailures", Path = "/health/ready"
-                        }
+                        },
+                        Passive = new { Enabled = passiveHealth, Policy = "BoundedTransportFailure", ReactivationPeriod = "00:00:15" }
                     },
                     Metadata = new Dictionary<string,string> {
                         ["ConsecutiveFailuresHealthPolicy.Threshold"] = "1",
                         ["RiseFall.Rise"] = "2",
-                        ["RiseFall.Fall"] = "3"
+                        ["RiseFall.Fall"] = "3",
+                        ["BoundedTransportFailure.MaxEjectedPercent"] = "50",
+                        ["BoundedTransportFailure.MinHealthyRemaining"] = "1",
+                        ["BoundedTransportFailure.ConsecutiveFailures"] = "2"
                     },
                     Destinations = new Dictionary<string, object> {
                         ["A"] = new { Address = aUrl + "/", Metadata = new Dictionary<string,string> { ["Weight"] = aWeight.ToString(), ["TrafficState"] = drainA ? "draining" : "active", ["SlowStartSeconds"] = slowStartA.ToString() } },
@@ -445,6 +449,7 @@ try
     await SetReady(bUrl, true);
     await WaitFor("both recovered", async () => (await Sample(100)).Nodes.Count == 2);
 
+    Configure("WeightedRandom", 80, 20, activeHealth: false, passiveHealth: true);
     var slow = client.GetAsync(proxy + "/kill/slow");
     await WaitFor("slow request started", async () => await InFlight(aUrl) > 0, 10);
     backendA.Kill(entireProcessTree: true);
@@ -454,11 +459,12 @@ try
     catch (Exception e) when (e is HttpRequestException or TaskCanceledException or IOException) { }
     Require(!falselySucceeded, "interrupted mid-request transaction did not report success");
     await WaitFor("backend B serves after process loss", () => RoutesOnly("B"));
+    Record("bounded-passive-transport-failover", new { backup = "B", activeChecksEnabled = false, consecutiveFailures = 2, maxEjectedPercent = 50, minHealthyRemaining = 1, automaticRetries = 0 });
     Record("mid-request-backend-death", new { interrupted = true });
     _ = Start(backDll, "backend-A-restarted", "18081", "A");
     await WaitFor("A restarted", () => IsStatus(aUrl + "/health/ready", HttpStatusCode.OK));
     await WaitFor("A returned to YARP pool", async () => (await Sample(100)).Nodes.ContainsKey("A"));
-    Record("backend-process-recovery", new { recovered = true });
+    Record("backend-process-recovery", new { recovered = true, passiveReactivationSeconds = 15 });
     passed = true;
     Console.WriteLine("ALL L7 ACCEPTANCE TESTS PASSED");
 }
