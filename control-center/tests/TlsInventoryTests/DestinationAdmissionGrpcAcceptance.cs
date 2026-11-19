@@ -121,6 +121,63 @@ internal static class DestinationAdmissionGrpcAcceptance
         var backendAddress = useHttp3 ? $"https://127.0.0.1:{backendPort}" :
             backend.Services.GetRequiredService<IServer>().Features.Get<IServerAddressesFeature>()!.Addresses.Single();
 
+        // Separate real TLS/QUIC origins for active-health failover. Mixed
+        // listener protocols permit an HTTP/1.1 probe without allowing
+        // application POSTs to silently downgrade.
+        var primaryHealthy = 1;
+        var backupHealthy = 1;
+        var primaryChecks = 0;
+        var backupChecks = 0;
+        var failoverPostAttempts = new ConcurrentQueue<string>();
+        int primaryPort = 0, backupPort = 0;
+        WebApplication MakeFailoverOrigin(string id, int port)
+        {
+            var builder = WebApplication.CreateBuilder();
+            builder.WebHost.ConfigureKestrel(options => options.Listen(IPAddress.Loopback, port, listen =>
+            {
+                listen.Protocols = HttpProtocols.Http1AndHttp2AndHttp3;
+                listen.UseHttps(originTrust!.ServerCertificate);
+            }));
+            var origin = builder.Build();
+            origin.MapGet("/ready", () =>
+            {
+                if (id == "primary") Interlocked.Increment(ref primaryChecks);
+                else Interlocked.Increment(ref backupChecks);
+                var healthy = id == "primary" ? Volatile.Read(ref primaryHealthy) : Volatile.Read(ref backupHealthy);
+                return Results.StatusCode(healthy == 1 ? 200 : 503);
+            });
+            origin.MapGet("/who", (HttpContext context) =>
+                context.Request.Protocol == "HTTP/3" ? Results.Text(id) : Results.StatusCode(505));
+            origin.MapPost("/work", async (HttpContext context) =>
+            {
+                Check(context.Request.Protocol == "HTTP/3", "failover origin receives exact HTTP/3 POST");
+                var transaction = context.Request.Query["id"].ToString();
+                failoverPostAttempts.Enqueue(id + ":" + transaction);
+                var received = new byte[frame.Length];
+                await context.Request.Body.ReadExactlyAsync(received, context.RequestAborted);
+                Check(received.SequenceEqual(frame), "failover origin receives intact request frame");
+                if (id == "primary" && transaction == "break-primary")
+                {
+                    Volatile.Write(ref primaryHealthy, 0);
+                    context.Abort(); // abort after the non-idempotent request was received
+                    return;
+                }
+                await context.Response.WriteAsync(id, context.RequestAborted);
+            });
+            return origin;
+        }
+        if (useHttp3)
+        {
+            primaryPort = GetDualTransportPort();
+            while (primaryPort == backendPort) primaryPort = GetDualTransportPort();
+            backupPort = GetDualTransportPort();
+            while (backupPort == primaryPort || backupPort == backendPort) backupPort = GetDualTransportPort();
+        }
+        await using var primary = useHttp3 ? MakeFailoverOrigin("primary", primaryPort) : null;
+        await using var backup = useHttp3 ? MakeFailoverOrigin("backup", backupPort) : null;
+        if (primary is not null) await primary.StartAsync();
+        if (backup is not null) await backup.StartAsync();
+
         var root = Path.Combine(Path.GetTempPath(), "gatewaycore-admission-grpc-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(root);
         if (OperatingSystem.IsLinux()) File.SetUnixFileMode(root, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
@@ -198,6 +255,26 @@ internal static class DestinationAdmissionGrpcAcceptance
                 }
             }
         };
+        if (useHttp3)
+        {
+            appSettings.ReverseProxy.Routes["failover"] = new { ClusterId = "failover",
+                Match = new { Path = "/failover/{**catch-all}" },
+                Transforms = new[] { new { PathRemovePrefix = "/failover" } } };
+            appSettings.ReverseProxy.Clusters["failover"] = new
+            {
+                LoadBalancingPolicy = "PrimaryBackup",
+                HttpRequest = new { Version = "3", VersionPolicy = "RequestVersionExact" },
+                HealthCheck = new { Active = new { Enabled = true, Path = "/ready",
+                    Interval = "00:00:01", Timeout = "00:00:01", Policy = "ConsecutiveFailures" } },
+                Destinations = new Dictionary<string, object>
+                {
+                    ["primary"] = new { Address = $"https://127.0.0.1:{primaryPort}/",
+                        Metadata = new Dictionary<string,string> { ["TrafficRole"] = "primary" } },
+                    ["backup"] = new { Address = $"https://127.0.0.1:{backupPort}/",
+                        Metadata = new Dictionary<string,string> { ["TrafficRole"] = "backup" } }
+                }
+            };
+        }
         WritePrivate(Path.Combine(root, "appsettings.json"), JsonSerializer.Serialize(appSettings));
 
         var start = new ProcessStartInfo("dotnet")
@@ -383,6 +460,58 @@ internal static class DestinationAdmissionGrpcAcceptance
             await WaitMetric("inflight_requests", 0);
             Check(chatAttempts == 1, "bidirectional gRPC POST reaches upstream exactly once");
             Console.WriteLine($"PASS: real {protocol} bidirectional gRPC streaming and half-close");
+
+            if (useHttp3)
+            {
+                using var failoverDeadline = new CancellationTokenSource(TimeSpan.FromSeconds(45));
+                var fc = failoverDeadline.Token;
+                async Task<HttpResponseMessage> FailoverRequest(HttpMethod method, string path)
+                {
+                    using var request = new HttpRequestMessage(method, $"https://127.0.0.1:{tlsPort}/failover/{path}")
+                    {
+                        Version = HttpVersion.Version30, VersionPolicy = HttpVersionPolicy.RequestVersionExact
+                    };
+                    if (method == HttpMethod.Post) request.Content = new ByteArrayContent(frame);
+                    return await client.SendAsync(request, fc);
+                }
+                async Task WaitForOrigin(string expected)
+                {
+                    // Only idempotent GETs observe route convergence.
+                    while (true)
+                    {
+                        if (appProcess.HasExited) throw new Exception("Gateway exited during failover test");
+                        try
+                        {
+                            using var response = await FailoverRequest(HttpMethod.Get, "who");
+                            if (response.IsSuccessStatusCode && response.Version == HttpVersion.Version30 &&
+                                await response.Content.ReadAsStringAsync(fc) == expected) return;
+                        }
+                        catch (HttpRequestException) { }
+                        await Task.Delay(100, fc);
+                    }
+                }
+                while (Volatile.Read(ref primaryChecks) == 0 || Volatile.Read(ref backupChecks) == 0)
+                    await Task.Delay(100, fc);
+                await WaitForOrigin("primary");
+                try
+                {
+                    using var failed = await FailoverRequest(HttpMethod.Post, "work?id=break-primary");
+                    Check(!failed.IsSuccessStatusCode, "aborted primary transaction is not reported successful");
+                }
+                catch (HttpRequestException) { Console.WriteLine("PASS: primary transaction fails at transport"); }
+                Check(failoverPostAttempts.SequenceEqual(new[] { "primary:break-primary" }),
+                    "failed non-idempotent HTTP/3 POST is not replayed to backup");
+                await WaitForOrigin("backup");
+                using (var recovered = await FailoverRequest(HttpMethod.Post, "work?id=fresh-backup"))
+                    Check(recovered.IsSuccessStatusCode && recovered.Version == HttpVersion.Version30 &&
+                        await recovered.Content.ReadAsStringAsync(fc) == "backup",
+                        "new HTTP/3 POST reaches healthy backup after active health convergence");
+                Volatile.Write(ref primaryHealthy, 1);
+                await WaitForOrigin("primary");
+                Check(failoverPostAttempts.SequenceEqual(new[] { "primary:break-primary", "backup:fresh-backup" }),
+                    "failback does not replay any transaction");
+                Console.WriteLine("PASS: real HTTP/3 upstream failure, backup selection and primary recovery without POST replay");
+            }
         }
         finally
         {
