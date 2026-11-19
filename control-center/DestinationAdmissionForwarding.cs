@@ -23,7 +23,8 @@ public static class DestinationAdmissionForwarding
         string selectedDestinationId,
         IReadOnlyList<TDestination> currentAvailable,
         Func<TDestination, string> destinationId,
-        Func<TDestination, bool> isDraining)
+        Func<TDestination, bool> isDraining,
+        Func<TDestination, bool>? matchesOriginalSelection = null)
     {
         ArgumentNullException.ThrowIfNull(selectedDestinationId);
         ArgumentNullException.ThrowIfNull(currentAvailable);
@@ -34,7 +35,8 @@ public static class DestinationAdmissionForwarding
         {
             var candidate = currentAvailable[i];
             if (string.Equals(destinationId(candidate), selectedDestinationId, StringComparison.Ordinal) &&
-                !isDraining(candidate))
+                !isDraining(candidate) &&
+                (matchesOriginalSelection is null || matchesOriginalSelection(candidate)))
                 return true;
         }
         return false;
