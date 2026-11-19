@@ -657,7 +657,7 @@ def main():
                                   "oversized agent report body")
         reject_authority_fence_frame(authority_fence_ports["b"], authorities_identity["a"],
                                      root / "ca.pem",
-                                     b'{"Version":1,"Sequence":1,"Sequence":2}', 409,
+                                     b'{"Version":1,"Sequence":1,"Sequence":2}', 400,
                                      "duplicate authority snapshot field")
         reject_authority_fence_frame(authority_fence_ports["b"], authorities_identity["a"],
                                      root / "ca.pem", b" " * (131072 + 1), 413,
