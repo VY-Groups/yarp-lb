@@ -245,6 +245,7 @@ public sealed class PeerSignedMessages
     private readonly object gate = new();
     private readonly Dictionary<string,long> nonceSeen = new(StringComparer.Ordinal);
     private const int NonceCap = 1024;
+    private long latestVerifiedNow = long.MinValue;
     public PeerSignedMessages(byte[] key)
     {
         if (key.Length < 32) throw new ArgumentException("Peer authentication secret requires 32 bytes");
@@ -270,7 +271,8 @@ public sealed class PeerSignedMessages
     public bool Verify(string sender,string expectedSender,long time,string nonce,
         string signature,byte[] payload,long now)
     {
-        if (sender != expectedSender || time < now - 30 || time > now + 30 ||
+        if (sender != expectedSender ||
+            !WithinWindow(time, now) ||
             nonce.Length != 32 || !nonce.All(Uri.IsHexDigit) ||
             signature.Length > 128 || payload.Length > 262144) return false;
         byte[] supplied;
@@ -281,11 +283,23 @@ public sealed class PeerSignedMessages
             !CryptographicOperations.FixedTimeEquals(supplied, expected)) return false;
         lock (gate)
         {
-            foreach (var old in nonceSeen.Where(p => now - p.Value > 60).Select(p=>p.Key).ToArray())
+            // A forward clock correction may collect old nonces. Never allow
+            // a later clock rollback to reopen the already collected window.
+            // Advance this fence only for authenticated, time-valid messages.
+            var effectiveNow = Math.Max(now, latestVerifiedNow);
+            if (!WithinWindow(time, effectiveNow)) return false;
+            latestVerifiedNow = effectiveNow;
+            foreach (var old in nonceSeen.Where(p => (decimal)effectiveNow - p.Value > 60)
+                         .Select(p => p.Key).ToArray())
                 nonceSeen.Remove(old);
-            if (nonceSeen.ContainsKey(nonce) || nonceSeen.Count >= NonceCap) return false;
-            nonceSeen.Add(nonce, now);
+            var canonicalNonce = nonce.ToUpperInvariant();
+            if (nonceSeen.ContainsKey(canonicalNonce) || nonceSeen.Count >= NonceCap) return false;
+            nonceSeen.Add(canonicalNonce, effectiveNow);
             return true;
         }
     }
+
+    // Decimal subtraction handles untrusted extreme Int64 timestamps without overflow.
+    private static bool WithinWindow(long time, long now) =>
+        Math.Abs((decimal)time - (decimal)now) <= 30;
 }
