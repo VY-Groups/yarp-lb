@@ -73,7 +73,8 @@ for host in s.get("hosts",[]):
             by_part={x["name"]:x for x in parts}
             if len(by_part)!=len(parts) or set(by_part)!=set(by):
                 raise ValueError("raw oha manifest profile identities mismatch")
-            reconstructed_codes={};reconstructed_errors={};max_raw_p99=0
+            reconstructed_codes={};reconstructed_errors={}
+            max_raw_latency={key:0 for key in ("p50","p95","p99")}
             raw_count=0;raw_body=0
             for configured in s["response_mix"]:
                 name=configured["name"];entry=by_part[name];got=by[name]
@@ -102,12 +103,16 @@ for host in s.get("hosts",[]):
                     raise ValueError("aggregate disagrees with raw oha bodies/counts")
                 if abs(n/raw_duration-num(raw_summary["requestsPerSec"]))>max(1,n/raw_duration*.01):
                     raise ValueError("raw oha rate inconsistent")
-                max_raw_p99=max(max_raw_p99,num(raw["latencyPercentiles"]["p99"]))
+                raw_pct={key:num(raw["latencyPercentiles"][key]) for key in max_raw_latency}
+                if not 0<=raw_pct["p50"]<=raw_pct["p95"]<=raw_pct["p99"]:
+                    raise ValueError("invalid raw oha latency ordering")
+                for key,value in raw_pct.items():
+                    max_raw_latency[key]=max(max_raw_latency[key],value)
                 raw_count+=n;raw_body+=bytes_sent
             if (reconstructed_codes!=codes or reconstructed_errors!=faults or
                 raw_count!=count or raw_body!=body or
-                abs(max_raw_p99-p99/1000)>1e-9):
-                raise ValueError("aggregate disagrees with raw oha counters/p99")
+                any(abs(max_raw_latency[key]-num(pct[key]))>1e-9 for key in max_raw_latency)):
+                raise ValueError("aggregate disagrees with raw oha counters/latency")
             if abs(count/duration-rps)>max(1,rps*.01):
                 raise ValueError("aggregate rate inconsistent with raw oha counts")
             # Rates must cover the full measured window, not a shorter
