@@ -148,7 +148,7 @@ included):
         ]
       }]
     }
-- UDP replies use complete-RR truncation (TC) when they exceed the advertised
+- UDP replies omit entire non-fitting RRsets (rather than emitting partial sets) and set TC when they exceed the advertised
   buffer or a conservative per-query amplification budget. Clients should retry
   over TCP. Source-IP response budgets are only a limited defense in depth.
   Cross-platform acceptance sends a finite corpus of malformed DNS/EDNS frames

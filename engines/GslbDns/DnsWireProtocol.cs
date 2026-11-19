@@ -431,7 +431,6 @@ internal static class DnsWireProtocol
         }
 
         // Constrain untrusted UDP response amplification and use TC for complete TCP retry.
-        // Constrain untrusted UDP response amplification and use TC for complete TCP retry.
         var signedEdnsResponse = dnssecOk && zone?.Dnssec is not null && edns && !unsupportedEdns;
         var budget = tcp ? 65535 : signedEdnsResponse
             ? payload
@@ -445,18 +444,23 @@ internal static class DnsWireProtocol
         {
             foreach (var section in new[] { answers, authority, extra })
             {
-                foreach (var record in section)
+                // RFC 2181: never emit a partial RRset. All records are IN
+                // class; owner names are case-insensitive. Preserve first-set
+                // order and member order, retaining the existing conservative
+                // TC policy and OPT reservation (including for glue).
+                foreach (var rrset in section.GroupBy(record =>
+                    (record.Owner.ToLowerInvariant(), record.Type)))
                 {
-                    var wire = WireRecord(record, domain);
-                    if (bytes.Count + wire.Length + reserve > budget)
+                    var wires = rrset.Select(record => WireRecord(record, domain)).ToArray();
+                    if (bytes.Count + wires.Sum(wire => wire.Length) + reserve > budget)
                     {
                         truncated = true;
                         break;
                     }
-                    bytes.AddRange(wire);
-                    if (ReferenceEquals(section, answers)) an++;
-                    else if (ReferenceEquals(section, authority)) nsCount++;
-                    else ar++;
+                    foreach (var wire in wires) bytes.AddRange(wire);
+                    if (ReferenceEquals(section, answers)) an += wires.Length;
+                    else if (ReferenceEquals(section, authority)) nsCount += wires.Length;
+                    else ar += wires.Length;
                 }
                 if (truncated) break;
             }
