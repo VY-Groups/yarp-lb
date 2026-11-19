@@ -60,3 +60,4 @@ await TrafficHttp3Acceptance.RunAsync();
 await DestinationAdmissionHttp3Acceptance.RunAsync();
 await DestinationAdmissionGrpcAcceptance.RunAsync();
 await TrafficCertificateRotationAcceptance.RunAsync();
+await AcmeRenewalAcceptance.RunAsync();

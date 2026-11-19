@@ -203,6 +203,11 @@ public sealed class GatewayListenerIsolation : IDisposable
 
     private bool OnSocket(HttpContext ctx, IPAddress local, int port) =>
         ctx.Connection.LocalIpAddress?.Equals(local) == true && ctx.Connection.LocalPort == port;
+    /// <summary>Returns true only after the live isolated listener has selected this certificate.</summary>
+    public bool IsTrafficCertificateActive(string thumbprint) =>
+        _trafficCertificateRotation is not null &&
+        string.Equals(_trafficCertificateRotation.Current.Thumbprint, thumbprint, StringComparison.OrdinalIgnoreCase);
+
     public bool OnData(HttpContext ctx) => OnSocket(ctx, _traffic, Config.TrafficHttpPort) ||
                                             OnSocket(ctx, _traffic, Config.TrafficHttpsPort);
     public bool OnTrafficHttp(HttpContext ctx) =>
