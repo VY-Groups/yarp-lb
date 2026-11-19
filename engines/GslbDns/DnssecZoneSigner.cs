@@ -4,18 +4,26 @@ using System.Security.Cryptography;
 using System.Text;
 using GatewayCore.Gslb.Contracts;
 
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// NSEC3 hash encoding adapted from OpenGSLB pkg/dnssec/nsec3.go.
+// Original copyright: Copyright 2025 Logan Ross.
+// Original SPDX: AGPL-3.0-or-later OR LicenseRef-OpenGSLB-Commercial.
+// This adaptation uses the AGPL option; see repository THIRD_PARTY_NOTICES.md.
+
 internal sealed record DnsResource(string Owner, ushort Type, uint Ttl, byte[] Rdata);
 
 /// <summary>
 /// Narrow RFC 4034/4035 signer for GatewayCore's deliberately small GSLB zone model.
 /// Uses a pre-provisioned P-256 ECDSA private key in PEM form (algorithm 13).
-/// It does not implement TSIG, NSEC3, automated rollover, or child-zone signing.
+/// It does not implement TSIG, automated rollover, or child-zone signing.
 /// </summary>
 internal sealed class DnssecZoneSigner : IDisposable
 {
     internal const ushort RrsigType = 46;
     internal const ushort NsecType = 47;
     internal const ushort DnskeyType = 48;
+    internal const ushort Nsec3Type = 50;
+    internal const ushort Nsec3ParamType = 51;
     private const ushort DsType = 43;
     private readonly string apex;
     private readonly uint ttl;
@@ -24,8 +32,16 @@ internal sealed class DnssecZoneSigner : IDisposable
     private readonly List<DnsResource> staticRecords = [];
     private readonly Dictionary<(string Owner, ushort Type), List<DnsResource>> staticSignatures = [];
     private readonly Dictionary<string, DnsResource> nsecByOwner = new(StringComparer.Ordinal);
-    private readonly List<string> owners;
+    private readonly Dictionary<string, DnsResource> nsec3ByHash = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, string> hashByOwner = new(StringComparer.Ordinal);
+    private readonly List<DnsResource> nsec3Ring = [];
+    private readonly bool useNsec3;
+    private readonly byte[] nsec3Salt;
+    private readonly ushort nsec3Iterations;
+    private DnsResource? nsec3Param;
+    private readonly List<string> owners = [];
     private readonly Dictionary<string, SortedSet<ushort>> types;
+    private readonly HashSet<string> unsignedDelegationOwners = new(StringComparer.Ordinal);
     private DateTime signedUntilUtc;
     private readonly object signingLock = new();
 
@@ -33,10 +49,23 @@ internal sealed class DnssecZoneSigner : IDisposable
         string soaContact, uint soaSerial, IReadOnlyList<DnsNameServer> nameServers,
         IReadOnlyList<DnsDelegation> delegations, bool hasA, bool hasAaaa,
         IReadOnlyList<string>? prepublishPublicKeyPaths = null,
-        IReadOnlyList<string>? additionalSigningKeyPaths = null)
+        IReadOnlyList<string>? additionalSigningKeyPaths = null,
+        string denialMode = "Nsec", string? nsec3SaltHex = null, int nsec3Iterations = 0)
     {
         this.apex = Canonical(apex);
         this.ttl = ttl;
+        if (!string.Equals(denialMode, "Nsec", StringComparison.OrdinalIgnoreCase) &&
+            !string.Equals(denialMode, "Nsec3", StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException("DNSSEC denial mode must be Nsec or Nsec3");
+        useNsec3 = string.Equals(denialMode, "Nsec3", StringComparison.OrdinalIgnoreCase);
+        if (useNsec3 && (nsec3Iterations is < 0 or > 50 || string.IsNullOrWhiteSpace(nsec3SaltHex) ||
+            nsec3SaltHex.Length is < 16 or > 64 || nsec3SaltHex.Length % 2 != 0 ||
+            !nsec3SaltHex.All(Uri.IsHexDigit)))
+            throw new InvalidDataException("NSEC3 requires an explicit 8..32 byte hex salt and 0..50 iterations");
+        if (!useNsec3 && (nsec3SaltHex is not null || nsec3Iterations != 0))
+            throw new InvalidDataException("NSEC3 salt and iterations require DnssecDenialMode=Nsec3");
+        nsec3Salt = useNsec3 ? Convert.FromHexString(nsec3SaltHex!) : [];
+        this.nsec3Iterations = checked((ushort)nsec3Iterations);
         try
         {
             var active = LoadPrivateKey(privateKeyPath, "active DNSSEC signing key", this.apex, isActive: true);
@@ -78,6 +107,7 @@ internal sealed class DnssecZoneSigner : IDisposable
         foreach (var delegation in delegations)
         {
             var cut = Canonical(delegation.Name);
+            unsignedDelegationOwners.Add(cut);
             AddOwner(cut, 2);
             foreach (var server in delegation.NameServers)
             {
@@ -92,14 +122,49 @@ internal sealed class DnssecZoneSigner : IDisposable
                 staticRecords.Add(new DnsResource(host, server.RecordType, ttl, server.Address.GetAddressBytes()));
             }
         }
-        owners = types.Keys.OrderBy(x => x, DnssecNameComparer.Instance).ToList();
-        for (var i = 0; i < owners.Count; i++)
+        if (useNsec3)
         {
-            var owner = owners[i];
-            var next = owners[(i + 1) % owners.Count];
-            var bitmap = EncodeTypeBitmap(types[owner]);
-            var rdata = WireName(next).Concat(bitmap).ToArray();
-            nsecByOwner.Add(owner, new DnsResource(owner, NsecType, ttl, rdata));
+            if (types.Count > 4096)
+                throw new InvalidDataException("NSEC3 zones may contain at most 4096 authoritative names");
+            // Parent-side delegation NS RRsets are intentionally unsigned; the
+            // NSEC3 bitmap records their actual types, not a fabricated RRSIG.
+            foreach (var cut in unsignedDelegationOwners)
+                types[cut].Remove(RrsigType);
+            AddType(this.apex, Nsec3ParamType);
+            nsec3Param = new DnsResource(this.apex, Nsec3ParamType, ttl,
+                EncodeNsec3Param(this.nsec3Iterations, nsec3Salt));
+            var rows = types.OrderBy(pair => HashName(pair.Key), ByteArrayComparer.Instance).ToArray();
+            for (var i = 0; i < rows.Length; i++)
+            {
+                var hash = HashName(rows[i].Key);
+                var encoded = Base32Hex(hash);
+                if (i > 0 && string.Equals(encoded, Base32Hex(HashName(rows[i - 1].Key)), StringComparison.Ordinal))
+                    throw new InvalidDataException("NSEC3 owner hash collision prevents a safe denial ring");
+                hashByOwner.Add(rows[i].Key, encoded);
+            }
+            for (var i = 0; i < rows.Length; i++)
+            {
+                var currentHash = HashName(rows[i].Key);
+                var nextHash = HashName(rows[(i + 1) % rows.Length].Key);
+                var owner = Base32Hex(currentHash) + "." + this.apex;
+                var rdata = EncodeNsec3Rdata(this.nsec3Iterations, nsec3Salt, nextHash,
+                    EncodeTypeBitmap(rows[i].Value));
+                var record = new DnsResource(owner, Nsec3Type, ttl, rdata);
+                nsec3ByHash.Add(Base32Hex(currentHash), record);
+                nsec3Ring.Add(record);
+            }
+        }
+        else
+        {
+            owners = types.Keys.OrderBy(x => x, DnssecNameComparer.Instance).ToList();
+            for (var i = 0; i < owners.Count; i++)
+            {
+                var owner = owners[i];
+                var next = owners[(i + 1) % owners.Count];
+                var bitmap = EncodeTypeBitmap(types[owner]);
+                var rdata = WireName(next).Concat(bitmap).ToArray();
+                nsecByOwner.Add(owner, new DnsResource(owner, NsecType, ttl, rdata));
+            }
         }
 
         var soaRdata = WireName(Canonical(nameServers[0].Host))
@@ -115,6 +180,8 @@ internal sealed class DnssecZoneSigner : IDisposable
         foreach (var publishedKey in publishedKeys)
             staticRecords.Add(new DnsResource(this.apex, DnskeyType, ttl, publishedKey.DnskeyRdata));
         staticRecords.AddRange(nsecByOwner.Values);
+        if (nsec3Param is not null) staticRecords.Add(nsec3Param);
+        staticRecords.AddRange(nsec3ByHash.Values);
         ResignStatic(DateTime.UtcNow);
     }
 
@@ -134,7 +201,8 @@ internal sealed class DnssecZoneSigner : IDisposable
             value.IsActive ? "active" : value.IsSigning ? "dual-sign" : "prepublish")).ToArray();
     public ushort KeyTag => publishedKeys[0].KeyTag;
     public IReadOnlyList<DnsResource> StaticRecords => staticRecords;
-    public IReadOnlyList<string> Owners => owners;
+    public IReadOnlyList<string> Owners => types.Keys.OrderBy(x => x, DnssecNameComparer.Instance).ToArray();
+    public bool UsesNsec3 => useNsec3;
 
     public DnsResource SignRrset(string owner, ushort type, uint originalTtl, IReadOnlyList<byte[]> rdata) =>
         SignRrsets(owner, type, originalTtl, rdata)[0];
@@ -184,14 +252,73 @@ internal sealed class DnssecZoneSigner : IDisposable
     }
 
     public DnsResource? NsecAt(string owner) => nsecByOwner.GetValueOrDefault(Canonical(owner));
+    public DnsResource? Nsec3At(string owner)
+    {
+        if (!useNsec3) return null;
+        var canonical = Canonical(owner);
+        if (canonical == apex) return null;
+        var suffix = "." + apex;
+        if (!canonical.EndsWith(suffix, StringComparison.Ordinal)) return null;
+        var label = canonical[..^suffix.Length];
+        return nsec3ByHash.GetValueOrDefault(label.ToUpperInvariant());
+    }
+    public DnsResource? Nsec3Param => nsec3Param;
 
     public IReadOnlyList<DnsResource> DenialProof(string name, bool nxDomain)
     {
         lock (signingLock)
         {
             EnsureCurrentSignatures(DateTime.UtcNow);
-            return BuildDenialProof(name, nxDomain);
+            return useNsec3 ? BuildNsec3DenialProof(name, nxDomain) : BuildDenialProof(name, nxDomain);
         }
+    }
+
+    private IReadOnlyList<DnsResource> BuildNsec3DenialProof(string name, bool nxDomain)
+    {
+        var query = Canonical(name);
+        var proof = new Dictionary<string, DnsResource>(StringComparer.Ordinal);
+        if (!nxDomain && hashByOwner.TryGetValue(query, out var exactHash))
+            proof[exactHash] = nsec3ByHash[exactHash];
+        else if (!nxDomain)
+            proof[FindNsec3Cover(HashName(query)).Owner] = FindNsec3Cover(HashName(query));
+        else
+        {
+            var closest = query;
+            while (!hashByOwner.ContainsKey(closest) && closest != apex) closest = Parent(closest);
+            if (!hashByOwner.TryGetValue(closest, out var closestHash))
+                throw new InvalidDataException("NSEC3 proof has no authoritative closest encloser");
+            proof[closestHash] = nsec3ByHash[closestHash];
+            var nextCloser = query;
+            while (Parent(nextCloser) != closest && nextCloser != closest) nextCloser = Parent(nextCloser);
+            var nextCloserProof = FindNsec3Cover(HashName(nextCloser));
+            proof[nextCloserProof.Owner] = nextCloserProof;
+            var wildcard = "*." + closest;
+            if (hashByOwner.TryGetValue(wildcard, out var wildcardHash))
+                proof[wildcardHash] = nsec3ByHash[wildcardHash];
+            else
+            {
+                var wildcardProof = FindNsec3Cover(HashName(wildcard));
+                proof[wildcardProof.Owner] = wildcardProof;
+            }
+        }
+        return proof.Values.SelectMany(record => new[] { record }.Concat(SignaturesFor(record))).ToArray();
+    }
+
+    private DnsResource FindNsec3Cover(byte[] hash)
+    {
+        // Ring records are created in binary hash order. Find the predecessor
+        // in O(log n); a DNS query never re-sorts the zone's denial database.
+        var low = 0;
+        var high = nsec3Ring.Count;
+        while (low < high)
+        {
+            var middle = low + (high - low) / 2;
+            var label = nsec3Ring[middle].Owner[..nsec3Ring[middle].Owner.IndexOf('.')];
+            var start = DecodeBase32Hex(label);
+            if (start.AsSpan().SequenceCompareTo(hash) <= 0) low = middle + 1;
+            else high = middle;
+        }
+        return nsec3Ring[(low - 1 + nsec3Ring.Count) % nsec3Ring.Count];
     }
 
     private IReadOnlyList<DnsResource> BuildDenialProof(string name, bool nxDomain)
@@ -269,10 +396,20 @@ internal sealed class DnssecZoneSigner : IDisposable
     private void AddOwner(string owner, params ushort[] recordTypes)
     {
         owner = Canonical(owner);
+        if (useNsec3 && !IsValidNsec3Name(owner))
+            throw new InvalidDataException("NSEC3 owner names must use bounded ASCII DNS labels; use punycode for international names");
         if (!types.TryGetValue(owner, out var set)) types.Add(owner, set = new SortedSet<ushort>());
         foreach (var type in recordTypes) set.Add(type);
-        set.Add(NsecType);
-        set.Add(RrsigType);
+        if (!useNsec3)
+        {
+            set.Add(NsecType);
+            set.Add(RrsigType);
+        }
+        else
+        {
+            if (recordTypes.Length > 0) set.Add(RrsigType);
+            if (owner == apex && nsec3Param is not null) set.Add(Nsec3ParamType);
+        }
     }
 
     private void AddType(string owner, ushort type) => AddOwner(owner, type);
@@ -295,7 +432,8 @@ internal sealed class DnssecZoneSigner : IDisposable
             : comparer.Compare(value, start) > 0 || comparer.Compare(value, end) < 0;
     }
 
-    private static string Canonical(string name) => name.TrimEnd('.').ToLowerInvariant();
+    private static string Canonical(string name) =>
+        (name.EndsWith(".", StringComparison.Ordinal) ? name[..^1] : name).ToLowerInvariant();
 
     private static byte[] EncodeTypeBitmap(IEnumerable<ushort> values)
     {
@@ -314,6 +452,103 @@ internal sealed class DnssecZoneSigner : IDisposable
             output.AddRange(window.Take(length));
         }
         return output.ToArray();
+    }
+
+    /// <summary>
+    /// RFC 5155 hash: SHA-1(canonical wire name || salt), followed by the
+    /// configured number of SHA-1(previous digest || salt) rounds.
+    /// Adapted only for hash encoding from OpenGSLB pkg/dnssec/nsec3.go.
+    /// </summary>
+    internal static byte[] Nsec3Hash(string name, byte[] salt, ushort iterations)
+    {
+        var canonical = Canonical(name);
+        var wireName = WireName(canonical);
+        if (!IsValidNsec3Name(canonical) || wireName.Length > 255)
+            throw new InvalidDataException("NSEC3 owner names must use bounded ASCII DNS labels; use punycode for international names");
+        var input = wireName.Concat(salt).ToArray();
+        var digest = SHA1.HashData(input);
+        for (var i = 0; i < iterations; i++)
+            digest = SHA1.HashData(digest.Concat(salt).ToArray());
+        return digest;
+    }
+
+    private byte[] HashName(string name) => Nsec3Hash(name, nsec3Salt, nsec3Iterations);
+
+    private static bool IsValidNsec3Name(string canonical)
+    {
+        // Wildcard proof names are synthesized by the signer, even though the
+        // configured authoritative owner model does not permit wildcard input.
+        var valid = canonical.StartsWith("*.", StringComparison.Ordinal)
+            ? DnsWireProtocol.ValidName(canonical[2..])
+            : DnsWireProtocol.ValidName(canonical);
+        return valid && WireName(canonical).Length <= 255;
+    }
+
+    internal static string Base32Hex(byte[] bytes)
+    {
+        const string alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUV";
+        var output = new StringBuilder((bytes.Length * 8 + 4) / 5);
+        var accumulator = 0;
+        var bits = 0;
+        foreach (var value in bytes)
+        {
+            accumulator = (accumulator << 8) | value;
+            bits += 8;
+            while (bits >= 5)
+            {
+                bits -= 5;
+                output.Append(alphabet[(accumulator >> bits) & 31]);
+            }
+        }
+        if (bits > 0) output.Append(alphabet[(accumulator << (5 - bits)) & 31]);
+        return output.ToString();
+    }
+
+    private static byte[] DecodeBase32Hex(string value)
+    {
+        const string alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUV";
+        var output = new List<byte>();
+        var accumulator = 0;
+        var bits = 0;
+        foreach (var character in value.ToUpperInvariant())
+        {
+            var digit = alphabet.IndexOf(character);
+            if (digit < 0) throw new InvalidDataException("Invalid internal NSEC3 owner hash");
+            accumulator = (accumulator << 5) | digit;
+            bits += 5;
+            if (bits >= 8)
+            {
+                bits -= 8;
+                output.Add((byte)(accumulator >> bits));
+            }
+        }
+        return output.ToArray();
+    }
+
+    private static byte[] EncodeNsec3Param(ushort iterations, byte[] salt)
+    {
+        var result = new byte[5 + salt.Length];
+        result[0] = 1;
+        result[1] = 0;
+        BinaryPrimitives.WriteUInt16BigEndian(result.AsSpan(2), iterations);
+        result[4] = checked((byte)salt.Length);
+        salt.CopyTo(result, 5);
+        return result;
+    }
+
+    private static byte[] EncodeNsec3Rdata(ushort iterations, byte[] salt, byte[] nextHash, byte[] bitmap)
+    {
+        var result = new byte[6 + salt.Length + nextHash.Length + bitmap.Length];
+        result[0] = 1;
+        result[1] = 0; // Opt-Out is deliberately disabled.
+        BinaryPrimitives.WriteUInt16BigEndian(result.AsSpan(2), iterations);
+        result[4] = checked((byte)salt.Length);
+        salt.CopyTo(result, 5);
+        var hashLengthOffset = 5 + salt.Length;
+        result[hashLengthOffset] = checked((byte)nextHash.Length);
+        nextHash.CopyTo(result, hashLengthOffset + 1);
+        bitmap.CopyTo(result, hashLengthOffset + 1 + nextHash.Length);
+        return result;
     }
 
     private static byte[] CreateDsRdata(string owner, byte[] dnskey, ushort tag)

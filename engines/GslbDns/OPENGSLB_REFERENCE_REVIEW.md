@@ -10,16 +10,35 @@ It has been replaced by Logan Ross's **OpenGSLB v1.1.10** (Go).
 The exact new branch includes the source and examples below; it is a distinct
 product, not a compatible GatewayCore engine.
 
-## Licensing boundary (critical)
+## Historical licensing review (2026-11-16)
 
 `gslb:LICENSE` and Go SPDX headers: **AGPL-3.0-or-later OR
 LicenseRef-OpenGSLB-Commercial**. The reference README says commercial
 licensing is available. The user intends a commercial enterprise ADC.
-This review is for architecture and behavior only; no OpenGSLB code,
-algorithms verbatim, source files, test fixtures, or Go dependencies were
-copied into the .NET repo. Do not merge the `gslb` branch into `main`.
-Distribution, remote-service and derivative-work obligations require legal
-review if direct reuse is ever contemplated.
+At the time of this review, no OpenGSLB code, source files, test fixtures, or
+Go dependencies had been copied into the .NET repo. The no-copy decision below
+describes that historical review and is superseded only by the narrow,
+user-authorized NSEC3 hash adaptation recorded here. Do not merge the `gslb`
+branch into `main`.
+
+## Subsequent licensing and NSEC3 update (2026-11-19)
+
+The user explicitly authorized reuse under AGPL-3.0-or-later on 2026-11-19.
+The dedicated `codex/issue52-nsec3-denial` change adds root `LICENSE` under
+AGPL-3.0-or-later, applying the license to the repository as a whole, and
+adds `THIRD_PARTY_NOTICES.md`. It adapts only the canonical name + salt SHA-1
+rounds and base32hex encoding from `pkg/dnssec/nsec3.go`, preserving Logan
+Ross's 2025 copyright and the original
+`AGPL-3.0-or-later OR LicenseRef-OpenGSLB-Commercial` SPDX notice. GatewayCore
+uses the AGPL option. The original OpenGSLB synthetic NXDOMAIN/NODATA proof
+generation is not used; GatewayCore builds an RFC 5155 hash ring from its own
+authoritative names and derives closest-encloser, next-closer, wildcard, and
+exact-owner denial proofs from that ring. NSEC remains the default.
+
+The license and attribution change is project-wide and has legal/distribution
+consequences beyond the DNSSEC engine. Issue #52 remains open pending its full
+criteria and deployment/public-authority evidence; this implementation is a
+bounded software increment, not production readiness.
 
 ## Reviewed components (source, not README assertions alone)
 

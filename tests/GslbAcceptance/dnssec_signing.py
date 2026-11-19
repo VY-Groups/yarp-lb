@@ -457,3 +457,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    subprocess.run([sys.executable, str(Path(__file__).with_name("dnssec_nsec3.py"))], check=True)

@@ -4,13 +4,13 @@ using System.Net;
 using System.Net.Sockets;
 using System.Text;
 
-// Independent DNS wire-format implementation. External GSLB references are reviewed
-// only as architectural context; no AGPL source is included. No recursion,
-// zone transfer, or EDNS Client Subnet routing by default.
+// Independent DNS wire-format implementation. The opt-in DNSSEC NSEC3 hash
+// encoder is attributed in THIRD_PARTY_NOTICES.md. No recursion, zone transfer,
+// or EDNS Client Subnet routing by default.
 internal static class DnsWireProtocol
 {
     private const ushort A = 1, Ns = 2, Soa = 6, Aaaa = 28, Ds = 43, Opt = 41, EcsOption = 8;
-    private const ushort Rrsig = 46, Nsec = 47, Dnskey = 48;
+    private const ushort Rrsig = 46, Nsec = 47, Dnskey = 48, Nsec3 = 50, Nsec3Param = 51;
     private const ushort ClassIn = 1;
     // RFC 6891 response OPT CLASS reports this server's receive capability,
     // while the request's advertised size separately limits UDP response data.
@@ -186,6 +186,16 @@ internal static class DnsWireProtocol
             else if (zone.Dnssec is { } nsecSigner && qtype == Nsec && nsecSigner.NsecAt(domain) is { } nsec)
             {
                 answers.Add(nsec);
+            }
+            else if (zone.Dnssec is { UsesNsec3: true } nsec3Signer &&
+                qtype == Nsec3 && nsec3Signer.Nsec3At(domain) is { } nsec3)
+            {
+                answers.Add(nsec3);
+            }
+            else if (zone.Dnssec is { UsesNsec3: true, Nsec3Param: { } nsec3param } &&
+                qtype == Nsec3Param && atApex)
+            {
+                answers.Add(nsec3param);
             }
             else if (zone.Dnssec is { } sigSigner && qtype == Rrsig)
             {
@@ -373,9 +383,10 @@ internal static class DnsWireProtocol
                 if (denialName is not null)
                     authority.AddRange(dnssec.DenialProof(denialName, denialIsNxDomain));
             }
-            else if (qtype == Nsec && answers.Count > 0)
+            else if (qtype is Nsec or Nsec3 or Nsec3Param && answers.Count > 0)
             {
-                // NSEC is an explicit DNSSEC RR query and remains available without DO.
+                // Denial-chain records remain queryable without DO; RRSIGs are only
+                // added when the client explicitly requests DNSSEC with DO.
             }
         }
 
