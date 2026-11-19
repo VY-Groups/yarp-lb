@@ -8,6 +8,7 @@ The default eSign profile creates both a public and a private API pool. SSCA Adm
 
 - **Active-active equal share** uses RoundRobin between both servers.
 - **Active-active weighted** uses the entered destination weights. Weights split requests; they do not select by geography or provide failover guarantees.
+- YARP's `HealthyAndUnknown` availability setting preserves the existing bootstrap behavior for active-active pools: a destination can receive traffic before its first successful active health check. Use Primary/DR mode when traffic must fail closed until a successful readiness check; otherwise configure and monitor a real readiness endpoint and understand that early requests may reach an unverified destination.
 - **Primary plus DR standby** uses PrimaryBackup. The second server is marked backup. Active readiness checks are mandatory for this mode; passive-only health cannot promote the standby safely. YARP's standard `HealthyAndUnknown` candidate policy is retained for compatibility, while the custom PrimaryBackup selector excludes every destination whose active health state is still `Unknown` or `Unhealthy`. The service therefore returns 503 rather than sending early traffic to an unverified standby; failover waits for a successful active check.
 - **Active checks** poll the configured readiness path. **Passive-only** learns from real traffic failures, so requests may fail before the destination is ejected. This is a reduced-capability fallback, not equivalent health validation.
 

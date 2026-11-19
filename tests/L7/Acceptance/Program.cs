@@ -101,7 +101,7 @@ async Task<int> InFlight(string url)
     return json.RootElement.GetProperty("count").GetInt32();
 }
 
-void Configure(string policy, int aWeight, int bWeight, bool drainA = false, int slowStartA = 0, bool drainKillA = false, bool riseFall = false, bool backupB = false)
+void Configure(string policy, int aWeight, int bWeight, bool drainA = false, int slowStartA = 0, bool drainKillA = false, bool riseFall = false, bool backupB = false, bool activeHealth = true)
 {
     var config = new {
         ReverseProxy = new {
@@ -115,7 +115,7 @@ void Configure(string policy, int aWeight, int bWeight, bool drainA = false, int
                     HealthCheck = new {
                         AvailableDestinationsPolicy = "HealthyAndUnknown",
                         Active = new {
-                            Enabled = true, Interval = "00:00:01", Timeout = "00:00:01",
+                            Enabled = activeHealth, Interval = "00:00:01", Timeout = "00:00:01",
                             Policy = riseFall ? "RiseFall" : "ConsecutiveFailures", Path = "/health/ready"
                         }
                     },
@@ -274,13 +274,22 @@ try
         await Task.Delay(TimeSpan.FromMinutes(holdMinutes));
         return 0;
     }
-    Configure("WeightedRandom", 80, 20);
+    // HealthyAndUnknown intentionally exposes bootstrap candidates. The
+    // PrimaryBackup selector must still fail closed until an active check has
+    // succeeded, even when both HTTP backends are already reachable.
+    Configure("PrimaryBackup", 80, 20, backupB: true, activeHealth: false);
     var backendA = Start(backDll, "backend-A", "18081", "A");
     _ = Start(backDll, "backend-B", "18082", "B");
     await WaitFor("backend A", () => IsStatus(aUrl + "/health/ready", HttpStatusCode.OK));
     await WaitFor("backend B", () => IsStatus(bUrl + "/health/ready", HttpStatusCode.OK));
     _ = Start(gateDll, "gateway");
     await WaitFor("gateway", () => IsStatus(proxy + "/lab/ping", HttpStatusCode.OK));
+    await WaitFor("unknown active health fails closed", () =>
+        IsStatus(proxy + "/api/identity", HttpStatusCode.ServiceUnavailable));
+    Record("primary-backup-unknown-fails-closed", new { status = 503, activeChecks = false });
+    Configure("WeightedRandom", 80, 20);
+    await WaitFor("initial weighted route recovers after active checks enable",
+        () => IsStatus(proxy + "/api/identity", HttpStatusCode.OK));
     await VerifySharedProductLogger();
     // Acceptance trusts only a loopback ephemeral certificate. This is NOT
     // production chain validation and is deliberately confined to the lab.
@@ -407,6 +416,11 @@ try
     Configure("PrimaryBackup", 80, 20, backupB: true);
     await WaitFor("primary selected while healthy", () => RoutesOnly("A"), 25);
     Record("primary-backup-primary", new { policy = "PrimaryBackup", primary = "A", backup = "B" });
+    Configure("PrimaryBackup", 80, 20, drainA: true, backupB: true);
+    await WaitFor("drained primary excluded and healthy standby selected", () => RoutesOnly("B"), 25);
+    Record("primary-backup-drain", new { drainedPrimary = "A", selectedBackup = "B" });
+    Configure("PrimaryBackup", 80, 20, backupB: true);
+    await WaitFor("restored primary preferred before failure", () => RoutesOnly("A"), 25);
     await SetReady(aUrl, false);
     await WaitFor("primary unhealthy triggers standby", () => RoutesOnly("B"), 30);
     var standbyTraffic = await Sample(120);
