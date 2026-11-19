@@ -28,6 +28,52 @@ public static class PeerSyncTests
             Console.WriteLine("PASS: " + name);
         }
         var secret=Enumerable.Repeat((byte)0x42,32).ToArray();
+        var deltaSource = new PeerStateJournal("delta-a", "delta-b", secret, 2);
+        var deltaClock = new ManualTimeProvider(DateTimeOffset.UtcNow);
+        var deltaReceiver = new PeerStateJournal("delta-b", "delta-a", secret, 2,
+            TimeSpan.FromSeconds(3), timeProvider: deltaClock);
+        var dm = PeerStateJournal.CurrentMinute();
+        var ip1 = IPAddress.Parse("192.0.2.1");
+        var ip2 = IPAddress.Parse("192.0.2.2");
+        deltaSource.Observe(ip1, dm);
+        deltaSource.Observe(ip2, dm);
+        var full = deltaSource.Snapshot(dm) with { ReceiverEpoch = deltaReceiver.ReceiverEpoch };
+        Check(deltaReceiver.ApplyBoundFrame(full, dm), "delta baseline full snapshot accepted");
+        deltaSource.Observe(ip1, dm);
+        var nextFull = deltaSource.Snapshot(dm) with { ReceiverEpoch = deltaReceiver.ReceiverEpoch };
+        var delta = PeerDelta.Select(nextFull, full);
+        Check(delta.BaseSequence == full.Sequence && delta.Counters.Count == 1,
+            "only changed absolute counters are sent in delta");
+        Check(!deltaReceiver.ApplyBoundFrame(delta with { BaseSequence = full.Sequence + 1 }, dm),
+            "wrong delta base does not mutate receiver");
+        var changedKey = delta.Counters.Keys.Single();
+        var lowerDeltaKey = changedKey.ToLowerInvariant();
+        Check(lowerDeltaKey != changedKey, "delta fixture contains a hexadecimal letter");
+        Check(!deltaReceiver.ApplyBoundFrame(delta with { Counters = new Dictionary<string,int>
+            { [lowerDeltaKey] = delta.Counters[changedKey] } }, dm) &&
+            deltaReceiver.PeerTelemetry(dm) == (2, 2L),
+            "noncanonical delta cannot inflate identity cardinality or change the accepted baseline");
+        Check(deltaReceiver.ApplyBoundFrame(delta, dm) &&
+              deltaReceiver.PeerTelemetry(dm) == (2, 3L) && !deltaReceiver.ApplyBoundFrame(delta, dm),
+            "delta merges once without discarding unchanged keys");
+        var lostFull = deltaSource.Snapshot(dm) with { ReceiverEpoch = deltaReceiver.ReceiverEpoch };
+        deltaSource.Observe(ip2, dm);
+        var latestFull = deltaSource.Snapshot(dm) with { ReceiverEpoch = deltaReceiver.ReceiverEpoch };
+        Check(!deltaReceiver.ApplyBoundFrame(PeerDelta.Select(latestFull, lostFull), dm),
+            "missing predecessor forces full snapshot resynchronization");
+        Check(deltaReceiver.ApplyBoundFrame(PeerDelta.Select(latestFull, null), dm) &&
+              deltaReceiver.PeerTelemetry(dm) == (2, 4L), "full backfill repairs sequence gap");
+        var freshFull = deltaSource.Snapshot(dm) with { ReceiverEpoch = deltaReceiver.ReceiverEpoch };
+        deltaClock.Advance(TimeSpan.FromSeconds(4));
+        Check(!deltaReceiver.ApplyBoundFrame(PeerDelta.Select(freshFull, latestFull), dm) &&
+              deltaReceiver.PeerTelemetry(dm) == (0, 0L), "expired baseline cannot be revived by delta");
+        Check(deltaReceiver.ApplyBoundFrame(freshFull, dm) && deltaReceiver.PeerTelemetry(dm) == (2, 4L),
+            "fresh full snapshot restores expired receiver");
+        var replacementReceiver = new PeerStateJournal("delta-b", "delta-a", secret, 2);
+        var replacementFull = deltaSource.Snapshot(dm) with { ReceiverEpoch = replacementReceiver.ReceiverEpoch };
+        Check(PeerDelta.Select(replacementFull, freshFull).BaseSequence == 0 &&
+              replacementReceiver.ApplyBoundFrame(replacementFull, dm), "receiver restart forces full backfill");
+
         var a=new PeerStateJournal("node-a","node-b",secret,2);
         var b=new PeerStateJournal("node-b","node-a",secret,2);
         var now=PeerStateJournal.CurrentMinute();
@@ -101,6 +147,13 @@ public static class PeerSyncTests
         Check(frame.Counters.Count==1 && frame.Counters.Values.Single()==2,
             "IPv4 and mapped IPv6 share one hashed identity");
         Check(!frame.Counters.Keys.Single().Contains("10.123"),"no plaintext peer IP transmitted");
+        var lower = new string('a',64);
+        var upper = lower.ToUpperInvariant();
+        Check(!b.Apply(frame with { Counters = new Dictionary<string,int>
+            { [upper] = 1, [lower] = 1 } }, now) && b.PeerTelemetry(now) == (0, 0L),
+            "case aliases cannot create two identities for one digest");
+        Check(!b.Apply(frame with { Counters = new Dictionary<string,int> { [lower] = 1 } }, now),
+            "noncanonical lowercase full frame rejected without advancing replay state");
         Check(b.Apply(frame,now),"accept first bounded peer snapshot");
         Check(b.PeerTelemetry(now)==(1,2L),"peer telemetry matches signed source counts");
         // Accepted snapshots must have a recent receipt time, not merely
