@@ -17,14 +17,12 @@ internal sealed class DnssecZoneSigner : IDisposable
     internal const ushort NsecType = 47;
     internal const ushort DnskeyType = 48;
     private const ushort DsType = 43;
-    private readonly ECDsa key;
     private readonly string apex;
     private readonly uint ttl;
-    private readonly ushort keyTag;
-    private readonly byte[] dnskeyRdata;
-    private readonly byte[] dsRdata;
+    private readonly List<SigningKey> publishedKeys = [];
+    private readonly List<SigningKey> signingKeys = [];
     private readonly List<DnsResource> staticRecords = [];
-    private readonly Dictionary<(string Owner, ushort Type), DnsResource> staticSignatures = [];
+    private readonly Dictionary<(string Owner, ushort Type), List<DnsResource>> staticSignatures = [];
     private readonly Dictionary<string, DnsResource> nsecByOwner = new(StringComparer.Ordinal);
     private readonly List<string> owners;
     private readonly Dictionary<string, SortedSet<ushort>> types;
@@ -33,31 +31,34 @@ internal sealed class DnssecZoneSigner : IDisposable
 
     public DnssecZoneSigner(string apex, uint ttl, string privateKeyPath,
         string soaContact, uint soaSerial, IReadOnlyList<DnsNameServer> nameServers,
-        IReadOnlyList<DnsDelegation> delegations, bool hasA, bool hasAaaa)
+        IReadOnlyList<DnsDelegation> delegations, bool hasA, bool hasAaaa,
+        IReadOnlyList<string>? prepublishPublicKeyPaths = null,
+        IReadOnlyList<string>? additionalSigningKeyPaths = null)
     {
         this.apex = Canonical(apex);
         this.ttl = ttl;
-        key = ECDsa.Create();
         try
         {
-            key.ImportFromPem(PrivateKeyFileSecurity.ReadPrivateKeyPem(
-                privateKeyPath, "DNSSEC signing private key"));
-            var parameters = key.ExportParameters(true);
-            if (key.KeySize != 256 || parameters.Q.X is not { Length: 32 } x ||
-                parameters.Q.Y is not { Length: 32 } y)
-                throw new InvalidDataException("DNSSEC signing key must be an ECDSA P-256 private key");
-            dnskeyRdata = new byte[68];
-            BinaryPrimitives.WriteUInt16BigEndian(dnskeyRdata, 257); // KSK/CSK, Zone Key, Secure Entry Point
-            dnskeyRdata[2] = 3; // DNSSEC protocol
-            dnskeyRdata[3] = 13; // ECDSA P-256 with SHA-256
-            x.CopyTo(dnskeyRdata, 4);
-            y.CopyTo(dnskeyRdata, 36);
-            keyTag = CalculateKeyTag(dnskeyRdata);
-            dsRdata = CreateDsRdata(this.apex, dnskeyRdata, keyTag);
+            var active = LoadPrivateKey(privateKeyPath, "active DNSSEC signing key", this.apex, isActive: true);
+            publishedKeys.Add(active);
+            signingKeys.Add(active);
+            foreach (var path in additionalSigningKeyPaths ?? [])
+            {
+                var additional = LoadPrivateKey(path, "additional DNSSEC rollover signing key", this.apex, isActive: false);
+                EnsureUniquePublicKey(additional);
+                publishedKeys.Add(additional);
+                signingKeys.Add(additional);
+            }
+            foreach (var path in prepublishPublicKeyPaths ?? [])
+            {
+                var prepublished = LoadPublicKey(path, this.apex);
+                EnsureUniquePublicKey(prepublished);
+                publishedKeys.Add(prepublished);
+            }
         }
         catch
         {
-            key.Dispose();
+            Dispose();
             throw;
         }
 
@@ -111,18 +112,34 @@ internal sealed class DnssecZoneSigner : IDisposable
         staticRecords.Add(new DnsResource(this.apex, 6, ttl, soaRdata.ToArray()));
         foreach (var server in nameServers)
             staticRecords.Add(new DnsResource(this.apex, 2, ttl, WireName(Canonical(server.Host))));
-        staticRecords.Add(new DnsResource(this.apex, DnskeyType, ttl, dnskeyRdata));
+        foreach (var publishedKey in publishedKeys)
+            staticRecords.Add(new DnsResource(this.apex, DnskeyType, ttl, publishedKey.DnskeyRdata));
         staticRecords.AddRange(nsecByOwner.Values);
         ResignStatic(DateTime.UtcNow);
     }
 
-    public DnsResource DnsKey => new(apex, DnskeyType, ttl, dnskeyRdata);
-    public DnsResource Ds => new(apex, DsType, ttl, dsRdata);
-    public ushort KeyTag => keyTag;
+    public DnsResource DnsKey => DnsKeys[0];
+    public IReadOnlyList<DnsResource> DnsKeys => publishedKeys
+        .Select(value => new DnsResource(apex, DnskeyType, ttl, value.DnskeyRdata)).ToArray();
+    public DnsResource Ds => new(apex, DsType, ttl, publishedKeys.First(value => value.IsActive).DsRdata);
+    public IReadOnlyList<DnsResource> DsRecords => publishedKeys
+        .OrderBy(value => value.KeyTag)
+        .ThenBy(value => Convert.ToHexString(value.DsRdata), StringComparer.Ordinal)
+        .Select(value => new DnsResource(apex, DsType, ttl, value.DsRdata)).ToArray();
+    public IReadOnlyList<(ushort KeyTag, DnsResource Ds, string Phase)> ParentDsMaterial => publishedKeys
+        .OrderBy(value => value.IsActive ? 0 : value.IsSigning ? 1 : 2)
+        .ThenBy(value => value.KeyTag)
+        .ThenBy(value => Convert.ToHexString(value.DsRdata), StringComparer.Ordinal)
+        .Select(value => (value.KeyTag, new DnsResource(apex, DsType, ttl, value.DsRdata),
+            value.IsActive ? "active" : value.IsSigning ? "dual-sign" : "prepublish")).ToArray();
+    public ushort KeyTag => publishedKeys[0].KeyTag;
     public IReadOnlyList<DnsResource> StaticRecords => staticRecords;
     public IReadOnlyList<string> Owners => owners;
 
-    public DnsResource SignRrset(string owner, ushort type, uint originalTtl, IReadOnlyList<byte[]> rdata)
+    public DnsResource SignRrset(string owner, ushort type, uint originalTtl, IReadOnlyList<byte[]> rdata) =>
+        SignRrsets(owner, type, originalTtl, rdata)[0];
+
+    public IReadOnlyList<DnsResource> SignRrsets(string owner, ushort type, uint originalTtl, IReadOnlyList<byte[]> rdata)
     {
         if (rdata.Count == 0) throw new ArgumentException("DNSSEC cannot sign an empty RRset", nameof(rdata));
         lock (signingLock)
@@ -140,22 +157,29 @@ internal sealed class DnssecZoneSigner : IDisposable
             Add32(covered, originalTtl);
             Add32(covered, expiration);
             Add32(covered, inception);
-            Add16(covered, keyTag);
-            covered.AddRange(WireName(apex));
 
-            var signedData = new List<byte>(covered);
-            foreach (var recordData in rdata.OrderBy(x => x, ByteArrayComparer.Instance))
+            var result = new List<DnsResource>(signingKeys.Count);
+            foreach (var signer in signingKeys)
             {
-                signedData.AddRange(WireName(canonicalOwner));
-                Add16(signedData, type);
-                Add16(signedData, 1);
-                Add32(signedData, originalTtl);
-                Add16(signedData, checked((ushort)recordData.Length));
-                signedData.AddRange(recordData);
+                var signedHeader = new List<byte>(covered);
+                Add16(signedHeader, signer.KeyTag);
+                signedHeader.AddRange(WireName(apex));
+                var signedData = new List<byte>(signedHeader);
+                foreach (var recordData in rdata.OrderBy(x => x, ByteArrayComparer.Instance))
+                {
+                    signedData.AddRange(WireName(canonicalOwner));
+                    Add16(signedData, type);
+                    Add16(signedData, 1);
+                    Add32(signedData, originalTtl);
+                    Add16(signedData, checked((ushort)recordData.Length));
+                    signedData.AddRange(recordData);
+                }
+                var signature = signer.PrivateKey!.SignData(signedData.ToArray(), HashAlgorithmName.SHA256,
+                    DSASignatureFormat.IeeeP1363FixedFieldConcatenation);
+                result.Add(new DnsResource(canonicalOwner, RrsigType, originalTtl,
+                    signedHeader.Concat(signature).ToArray()));
             }
-            var signature = key.SignData(signedData.ToArray(), HashAlgorithmName.SHA256,
-                DSASignatureFormat.IeeeP1363FixedFieldConcatenation);
-            return new DnsResource(canonicalOwner, RrsigType, originalTtl, covered.Concat(signature).ToArray());
+            return result;
         }
     }
 
@@ -173,7 +197,8 @@ internal sealed class DnssecZoneSigner : IDisposable
     private IReadOnlyList<DnsResource> BuildDenialProof(string name, bool nxDomain)
     {
         var query = Canonical(name);
-        if (!nxDomain && nsecByOwner.TryGetValue(query, out var exact)) return [exact, SignatureFor(exact)];
+        if (!nxDomain && nsecByOwner.TryGetValue(query, out var exact))
+            return new[] { exact }.Concat(SignaturesFor(exact)).ToArray();
         var proofs = new Dictionary<string, DnsResource>(StringComparer.Ordinal);
         if (!nxDomain)
         {
@@ -194,7 +219,7 @@ internal sealed class DnssecZoneSigner : IDisposable
                 proofs[proof.Owner] = proof;
             }
         }
-        return proofs.Values.SelectMany(record => new[] { record, SignatureFor(record) }).ToArray();
+        return proofs.Values.SelectMany(record => new[] { record }.Concat(SignaturesFor(record))).ToArray();
     }
 
     public IReadOnlyList<DnsResource> SignaturesAt(string owner)
@@ -203,7 +228,7 @@ internal sealed class DnssecZoneSigner : IDisposable
         lock (signingLock)
         {
             EnsureCurrentSignatures(DateTime.UtcNow);
-            return staticSignatures.Where(x => x.Key.Owner == canonical).Select(x => x.Value).ToArray();
+            return staticSignatures.Where(x => x.Key.Owner == canonical).SelectMany(x => x.Value).ToArray();
         }
     }
 
@@ -220,10 +245,10 @@ internal sealed class DnssecZoneSigner : IDisposable
         return nsecByOwner[owners[0]];
     }
 
-    private DnsResource SignatureFor(DnsResource record)
+    private IReadOnlyList<DnsResource> SignaturesFor(DnsResource record)
     {
         if (staticSignatures.TryGetValue((record.Owner, record.Type), out var signature)) return signature;
-        return SignRrset(record.Owner, record.Type, record.Ttl, [record.Rdata]);
+        return SignRrsets(record.Owner, record.Type, record.Ttl, [record.Rdata]);
     }
 
     private void EnsureCurrentSignatures(DateTime now)
@@ -237,8 +262,8 @@ internal sealed class DnssecZoneSigner : IDisposable
         signedUntilUtc = now.AddDays(7);
         staticSignatures.Clear();
         foreach (var group in staticRecords.GroupBy(r => (r.Owner, r.Type)))
-            staticSignatures[group.Key] = SignRrset(group.Key.Owner, group.Key.Type,
-                group.First().Ttl, group.Select(x => x.Rdata).ToArray());
+            staticSignatures[group.Key] = SignRrsets(group.Key.Owner, group.Key.Type,
+                group.First().Ttl, group.Select(x => x.Rdata).ToArray()).ToList();
     }
 
     private void AddOwner(string owner, params ushort[] recordTypes)
@@ -347,7 +372,78 @@ internal sealed class DnssecZoneSigner : IDisposable
         bytes.Add((byte)(value >> 24)); bytes.Add((byte)(value >> 16)); bytes.Add((byte)(value >> 8)); bytes.Add((byte)value);
     }
 
-    public void Dispose() => key.Dispose();
+    public void Dispose()
+    {
+        foreach (var privateKey in publishedKeys.Select(item => item.PrivateKey).OfType<ECDsa>())
+            privateKey.Dispose();
+    }
+
+    private static SigningKey LoadPrivateKey(string path, string purpose, string apex, bool isActive)
+    {
+        var key = ECDsa.Create();
+        try
+        {
+            key.ImportFromPem(PrivateKeyFileSecurity.ReadPrivateKeyPem(path, purpose));
+            var parameters = key.ExportParameters(true);
+            if (parameters.D is null)
+                throw new InvalidDataException("DNSSEC signing key must contain a private key");
+            return CreateKeyMaterial(apex, parameters, key, isActive, isSigning: true);
+        }
+        catch
+        {
+            key.Dispose();
+            throw;
+        }
+    }
+
+    private static SigningKey LoadPublicKey(string path, string apex)
+    {
+        if (!Path.IsPathFullyQualified(path))
+            throw new InvalidDataException("DNSSEC prepublish public-key paths must be absolute");
+        var fileInfo = new FileInfo(path);
+        if (!fileInfo.Exists || fileInfo.Length is < 1 or > 16_384)
+            throw new InvalidDataException("DNSSEC prepublish public key must be a bounded PEM file");
+        var pem = File.ReadAllText(path);
+        if (pem.Length is < 1 or > 16_384 ||
+            !pem.Contains("-----BEGIN PUBLIC KEY-----", StringComparison.Ordinal) ||
+            pem.Contains("PRIVATE KEY", StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException("DNSSEC prepublish key must be a bounded public SubjectPublicKeyInfo PEM");
+        using var key = ECDsa.Create();
+        key.ImportFromPem(pem);
+        return CreateKeyMaterial(apex, key.ExportParameters(false), null,
+            isActive: false, isSigning: false);
+    }
+
+    private static SigningKey CreateKeyMaterial(string apex, ECParameters parameters, ECDsa? privateKey,
+        bool isActive, bool isSigning)
+    {
+        if (parameters.Q.X is not { Length: 32 } x || parameters.Q.Y is not { Length: 32 } y ||
+            privateKey is not null && privateKey.KeySize != 256 ||
+            !string.Equals(parameters.Curve.Oid.Value,
+                ECCurve.NamedCurves.nistP256.Oid.Value, StringComparison.Ordinal))
+            throw new InvalidDataException("DNSSEC rollover keys must use ECDSA P-256/SHA-256");
+        var dnskey = new byte[68];
+        BinaryPrimitives.WriteUInt16BigEndian(dnskey, 257); // KSK/CSK, Zone Key, Secure Entry Point
+        dnskey[2] = 3; // DNSSEC protocol
+        dnskey[3] = 13; // ECDSA P-256 with SHA-256
+        x.CopyTo(dnskey, 4);
+        y.CopyTo(dnskey, 36);
+        var tag = CalculateKeyTag(dnskey);
+        return new SigningKey(privateKey, dnskey, CreateDsRdata(apex, dnskey, tag), tag,
+            isActive, isSigning);
+    }
+
+    private void EnsureUniquePublicKey(SigningKey candidate)
+    {
+        if (publishedKeys.Any(existing => existing.DnskeyRdata.AsSpan().SequenceEqual(candidate.DnskeyRdata)))
+        {
+            candidate.PrivateKey?.Dispose();
+            throw new InvalidDataException("DNSSEC active, rollover and prepublish key material must be unique");
+        }
+    }
+
+    private sealed record SigningKey(ECDsa? PrivateKey, byte[] DnskeyRdata,
+        byte[] DsRdata, ushort KeyTag, bool IsActive, bool IsSigning);
 
     private sealed class ByteArrayComparer : IComparer<byte[]>
     {
