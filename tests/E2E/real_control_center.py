@@ -567,6 +567,15 @@ def acceptance(base:str,https_base:str,origin_port:int):
     check("e2e" in approved["routes"] and approved["revision"]!=initial["revision"],
         "second admin applied approved route with revision bump")
     eventually(anonymous,"/e2e/real-proxy","e2e-origin:/real-proxy")
+    operator.request("POST","/admin/api/gitops/plan",plan,expect=409)
+    unchanged={"schemaVersion":1,"payload":{key:approved[key] for key in ("routes","clusters","disabled","revision")}}
+    unchanged_plan=operator.request("POST","/admin/api/gitops/plan",unchanged)
+    check(all(not unchanged_plan[section][kind]
+              for section in ("routes","clusters","disabled")
+              for kind in ("added","removed","updated")) and
+          all(unchanged_plan[section]["unchanged"]==len(approved[section])
+              for section in ("routes","clusters","disabled")),
+          "fresh post-approval GitOps plan converges to empty diff and old revision is stale")
     rollback_backup=admin.request("GET","/admin/api/backups")[0]
     verify_destination_admission(base,https_base,admin,reviewer,approved)
     verify_max_connections_per_server(base,admin,reviewer)
