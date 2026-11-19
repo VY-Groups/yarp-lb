@@ -10,6 +10,15 @@ static void Check(bool condition, string message)
     if (!condition) throw new Exception("FAIL: " + message);
     Console.WriteLine("PASS: " + message);
 }
+static byte[] ReadShared(string path)
+{
+    // Allow the ledger's already-open writer on Windows without weakening
+    // the production collector's exclusive write ownership.
+    using var file = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+    using var output = new MemoryStream();
+    file.CopyTo(output);
+    return output.ToArray();
+}
 static (string Id, byte[] Body) Intent()
 {
     var eventId = Guid.NewGuid().ToString("N");
@@ -36,16 +45,16 @@ try
         Check(store.Append(first.Id, first.Body).Status == 503 && store.Count == 0 &&
             new FileInfo(path).Length == 0 && new FileInfo(pending).Length > 0,
             "outage retains durable pending record and withholds receipt");
-        saved = File.ReadAllBytes(pending);
+        saved = ReadShared(pending);
         Check(store.Append(second.Id, second.Body).Status == 503 &&
-            File.ReadAllBytes(pending).SequenceEqual(saved),
+            ReadShared(pending).SequenceEqual(saved),
             "new intent cannot overtake or replace pending record");
     }
     retention.Available = true;
     using (var store = new AuditLedger(path, signer, retention, pending))
     {
         Check(store.RetryPending() && store.Count == 1 &&
-            File.ReadAllBytes(path).SequenceEqual(saved) && new FileInfo(pending).Length == 0,
+            ReadShared(path).SequenceEqual(saved) && new FileInfo(pending).Length == 0,
             "restart retries exactly the original signed record");
         Check(store.Append(first.Id, first.Body).Status == 409,
             "background persistence cannot retroactively authorize original request");
@@ -56,12 +65,12 @@ try
                 Convert.FromBase64String(accepted.Receipt!), HashAlgorithmName.SHA256, RSASignaturePadding.Pss),
             "new receipt only after retained record and durable local append");
     }
-    var committed = File.ReadAllBytes(path);
+    var committed = ReadShared(path);
     var last = committed.AsSpan(committed.AsSpan(0, committed.Length-1).LastIndexOf((byte)'\n')+1).ToArray();
     File.WriteAllBytes(pending, last);
     using (var store = new AuditLedger(path, signer, retention, pending))
         Check(store.RetryPending() && store.Count == 2 && new FileInfo(pending).Length == 0 &&
-            File.ReadAllBytes(path).SequenceEqual(committed),
+            ReadShared(path).SequenceEqual(committed),
             "crash after local append but before journal clear does not append again");
     File.WriteAllBytes(pending, saved[..^1]);
     bool invalid = false;
