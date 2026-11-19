@@ -354,7 +354,7 @@ def verify_destination_admission(base:str,admin:Client,reviewer:Client,initial:d
     wait_metric(admin,"yarp_control_destination_admission_queued_requests",0)
     wait_metric(admin,"yarp_control_destination_admission_inflight_requests",0)
     metrics=admin.request("GET","/gateway/metrics")
-    check('yarp_control_destination_admission_rejected_total{destination="fixture/origin"} 1' in metrics,
+    check('yarp_control_destination_admission_rejected_total{destination="fixture/origin"} 2' in metrics,
         "destination admission rejection counter is exposed with bounded destination labels")
     check('yarp_control_destination_admission_queue_timeouts_total{destination="fixture/origin"} 1' in metrics,
         "destination admission queue timeout counter is exposed")
