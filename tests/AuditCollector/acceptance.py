@@ -200,6 +200,24 @@ def main():
                 fleet=gateway_root/"state"/"fleet-gateways.json"
                 fleet_body={"id":"lab-node","url":"https://127.0.0.1:19443/",
                     "clientCertificateThumbprint":"A"*64}
+                # Fleet mutations require a confirmed multi-gateway design.
+                # First prove that the real onboarding gate still denies the
+                # request; then satisfy it through the public management API.
+                admin.request("POST","/admin/api/fleet",fleet_body,expect=409)
+                check(not fleet.exists(),"unconfirmed topology cannot register fleet node")
+                topology=admin.request("GET","/admin/api/onboarding")
+                plan={"mode":"ha-pair","controlPlane":"single-controller","dataStore":"local-file",
+                      "accessPattern":"segmented","publicVip":"fixture-vip.example.invalid",
+                      "upstreamHealthAware":True,"requireIndependentApproval":True,
+                      "gateways":[{"id":"lab-node","hostname":"gateway-a.example.invalid","agentUrl":fleet_body["url"]},
+                                  {"id":"lab-node-b","hostname":"gateway-b.example.invalid","agentUrl":"https://127.0.0.1:19444/"}],
+                      "workloads":[{"id":"origin-a","application":"fixture","zone":"restricted","hostingEngine":"http","url":f"http://127.0.0.1:{upstream}/"},
+                                   {"id":"origin-b","application":"fixture","zone":"restricted","hostingEngine":"http","url":f"http://127.0.0.1:{upstream}/"}]}
+                validation=admin.request("POST","/admin/api/onboarding/validate",{"plan":plan})
+                check(validation["issues"]==[],"valid HA design before fleet registration audit acceptance")
+                saved=admin.request("POST","/admin/api/onboarding",{"plan":plan,"confirmDesign":True,
+                      "expectedRevision":topology["revision"]})
+                check(saved["status"]=="design-confirmed","real onboarding API confirms HA design")
                 # An operator must not be able to register a fleet node even
                 # if the collector is available. Preserve the existing RBAC.
                 operator.request("POST","/admin/api/fleet",fleet_body,expect=403)
