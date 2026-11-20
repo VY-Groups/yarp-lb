@@ -371,6 +371,7 @@ def main():
                 bad_hp,bad_tlsport=port(),port()
                 while bad_hp==bad_tlsport: bad_tlsport=port()
                 bad_origin=f"https://127.0.0.1:{bad_tlsport}"
+                idp.gateway_origin=bad_origin
                 oidc_config=json.loads(config.read_text())
                 oidc_config["ManagementOrigin"]=bad_origin
                 config.write_text(json.dumps(oidc_config))
