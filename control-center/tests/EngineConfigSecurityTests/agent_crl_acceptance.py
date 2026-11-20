@@ -93,6 +93,7 @@ def verify_termination_contract() -> None:
 
 def request_status(port: int, cert: Path, key: Path, root: Path) -> int:
     context = ssl.create_default_context(cafile=str(root))
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
     context.load_cert_chain(str(cert), str(key))
     context.check_hostname = False
     # Leave room for the agent's bounded five-second online CRL retrieval.
@@ -107,6 +108,7 @@ def request_status(port: int, cert: Path, key: Path, root: Path) -> int:
 def require_no_http_response(port: int, cert: Path, key: Path, root: Path, reason: str) -> None:
     """Ensure a rejected certificate cannot obtain any HTTP response."""
     context = ssl.create_default_context(cafile=str(root))
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
     context.load_cert_chain(str(cert), str(key))
     context.check_hostname = False
     raw = socket.create_connection(("127.0.0.1", port), timeout=10)

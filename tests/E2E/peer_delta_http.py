@@ -82,6 +82,7 @@ class Relay:
         self.lock=threading.Lock()
         self.drop_next=False
         ctx=ssl.create_default_context(cafile=str(receiver_cert))
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
         owner=self
         class Handler(BaseHTTPRequestHandler):
             def do_POST(self):
@@ -116,6 +117,7 @@ class Relay:
             def log_message(self,*_): pass
         self.server=ThreadingHTTPServer(("127.0.0.1",0),Handler)
         tls=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        tls.minimum_version = ssl.TLSVersion.TLSv1_2
         tls.load_cert_chain(str(cert),str(key))
         self.server.socket=tls.wrap_socket(self.server.socket,server_side=True)
         self.thread=threading.Thread(target=self.server.serve_forever,daemon=True)
@@ -179,6 +181,7 @@ def main():
         receiver_cfg.update({"GATEWAY_PEER_SYNC_SIGNING_SECRET":active_signing.decode(),
                              "GATEWAY_PEER_SYNC_PREVIOUS_SIGNING_SECRET":secret.decode()})
         receiver_context=ssl.create_default_context(cafile=str(receiver_cert))
+        receiver_context.minimum_version = ssl.TLSVersion.TLSv1_2
         with Relay(receiver_tls,receiver_cert,relay_key,relay_cert) as relay:
             sender_cfg=config("sender","receiver",
                 f"https://127.0.0.1:{relay.server.server_address[1]}{PATH}",secret,relay_cert)

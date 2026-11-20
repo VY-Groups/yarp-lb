@@ -77,7 +77,9 @@ rollover and multi-authority acceptance remain open.
 - Empty non-terminals above configured in-zone NS address records return
   NODATA with negative SOA (RFC 8020 section 3.1), preserving resolution of
   their descendants. Label-boundary matching does not invent sibling names.
-  This is static-name correctness, not delegation/zone-cut support.
+  Configured static child delegations also return referrals (see below), but
+  the engine does not load or serve child-zone data and is not a full
+  parent/child authoritative DNS implementation.
 - In-zone missing names return NXDOMAIN with an SOA negative-cache record;
   existing names with unsupported types return NODATA with SOA; names outside
   the configured zones are REFUSED.
@@ -407,14 +409,15 @@ winner based on small probe jitter. A failed or drained backend is never
 made eligible by an apparently favorable latency score.
 
 `Weighted`, `Failover`, and `CidrRegion` still behave exactly as before.
-No external telemetry, service probes on your infrastructure, or
-client IP/ECS geolocation is enabled. A multi-region RTT architecture needs
+RTT routing is opt-in and uses only configured active probes; ECS and GeoIP
+routing are separately opt-in as described above. No external telemetry is
+sent by these routing policies. A multi-region RTT architecture needs
 licensed geographic data, independently authenticated vantage-point agents,
 sample freshness/replay fencing, privacy and failover acceptance before GO.
 
 ## Remaining NO-GO areas
 
-TLS/DoT/DoH, TSIG, DNS NOTIFY, zone transfer, true
+TLS/DoT/DoH, TSIG, DNS NOTIFY, zone transfer, full
 zone-cut/delegation conformance, CNAME/MX, geographic/ASN policy with licensed data and privacy, verified multi-site
 health quorum and authenticated state propagation, split-brain protection,
 ECMP/multi-NS physical hosting, public resolver interoperability and

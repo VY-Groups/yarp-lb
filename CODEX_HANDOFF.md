@@ -1,5 +1,68 @@
 # GatewayCore — Codex handoff, verified repository snapshot
 
+## Continuation snapshot — DNS documentation and security review (2026-11-20)
+
+This is the latest verified continuation state; older same-day snapshots below
+are historical when their branch, issue, or CI state differs.
+
+- `main` is `77fb20fa983bc988aaa05cade5dba5a8740439de`, including merged PR
+  #321 (L4 acceptance) and #323 (DNS capability documentation correction).
+  Both PRs passed exact-head Windows/Linux Actions before merge. #323 does not
+  implement missing DNSSEC, licensed GeoIP/ASN operations, or public DNS
+  acceptance; issue #52 remains open.
+- At this snapshot, 10 issues remain open: #34, #36, #37, #38, #48, #49, #51,
+  #52, #53, and #109. PR #324 is the only open development PR; its revised
+  head adds a direct CR/LF receipt-rejection regression check and merges the
+  latest `main`. Its complete exact-head CI must pass before merge.
+- PR #324 changes test TLS fixtures to TLS 1.2+, escapes request-derived
+  GatewayAgent log fields, and rejects malformed signed audit receipts rather
+  than transforming them. CodeQL alerts #1–#6 (test-fixture secret-file writes)
+  and #14 (pinned client-certificate authorization path) are still open and
+  have not been declared remediated.
+- #53 remains open for Windows console/service graceful-stop acceptance;
+  physical WAN/loss/soak/capacity acceptance is consolidated in #36. #109
+  requires real multi-node partition/fencing evidence. No issue is closed by
+  documentation alone.
+- The latest release remains `v0.1.0-test.12` (2026-11-14). A verified release
+  with SHA-256 checksums, offline install, upgrade, and rollback evidence has
+  not been published. Production remains **NO-GO**; annual 99.9% availability is
+  unmeasured.
+
+
+## Current continuation update — L4 acceptance and open security work (2026-11-20)
+
+This section supersedes older “current state” statements below where they
+conflict. Live GitHub was refreshed after PR #321 merged:
+
+- `main` is `7f5afa9f7184987522f79eb959c5acba1a43b751` (squash merge of PR #321).
+  At this snapshot there are **10 open issues**: #34, #36, #37, #38, #48, #49,
+  #51, #52, #53 and #109. PR #321 is closed by merge; PRs #318–#320 and #322
+  were closed as superseded. PRs #323 and #324 remain open.
+- PR #321 adds L4 process-failure containment and real-socket acceptance for
+  refused backend connects, all-drained TCP, no replay after TCP reset and UDP
+  response loss, partial listener bind failure, and bounded Linux SIGTERM
+  drain/cancellation. Exact-head Windows/Linux Actions passed; local Windows and
+  Ubuntu WSL real-process acceptance also passed. Post-merge L4 Actions passed
+  on this exact `main`; post-merge L7 and CodeQL were still running at update
+  time.
+- **#53 remains OPEN.** The Linux shutdown test does not cover Windows
+  console/service stop; the required Windows graceful-stop test remains
+  outstanding. Physical WAN/loss/soak/capacity acceptance is tracked only in
+  #36. No L4 production certification is implied.
+- PR #323 corrects stale DNS capability documentation about configured child
+  referrals and opt-in routing. Its prior-head CI had one Windows authority
+  HTTP timeout; rerun passed. The branch is being refreshed on current `main`
+  and requires fresh exact-head checks before merge.
+- PR #324 addresses selected CodeQL TLS/logging/response-splitting findings.
+  It is still open and requires exact-head CI/review. CodeQL alerts #1–#6
+  (disposable test-secret file writes) and #14 (pinned client-certificate
+  authentication path) are not claimed fixed; review/remediation remains open.
+- The latest listed release remains `v0.1.0-test.12` from 2026-11-14, not a
+  verified current release. No new verified release with current artifacts,
+  SHA-256 checksums, offline installation, upgrade and rollback evidence has
+  been published. Production remains **NO-GO** and annual 99.9% availability is
+  unmeasured. #36 remains the sole physical/environment acceptance tracker.
+
 ## Current continuation update — physical GSLB acceptance (2026-11-20)
 
 This update supersedes the earlier same-date snapshot below for physical
