@@ -447,8 +447,14 @@ internal static class AuthorityFenceTests
                     "mTLS authority ingress rejects valid signed snapshot with conflicting case-alias before signed property");
                 Check(Post(duplicateAfter) == 400,
                     "mTLS authority ingress rejects valid signed snapshot with duplicate property after signed value");
+                // An oversized authenticated frame must be rejected before it can
+                // advance the durable replay high-water mark. Keep the payload
+                // bounded above the contract without constructing a large fixture.
+                var oversized = json + new string(' ', AuthorityFenceContract.MaximumSerializedBytes);
+                Check(Post(oversized) == 413,
+                    "mTLS authority ingress rejects oversized snapshot without accepting it");
                 Check(Post(json) == 204,
-                    "mTLS authority ingress accepts clean signed snapshot after duplicate frames without advancing replay state");
+                    "mTLS authority ingress accepts clean signed snapshot after malformed and oversized frames without advancing replay state");
                 Check(Post(json) == 409, "mTLS authority ingress rejects replay of accepted signed snapshot");
             }
             finally
