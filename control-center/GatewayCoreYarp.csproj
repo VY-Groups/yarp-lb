@@ -7,6 +7,7 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Remove="GatewayAgent/**/*.cs;tests/**/*.cs;tools/**/*.cs" />
+    <Compile Include="../engines/GslbHealthContracts/PrivateKeyFileSecurity.cs" Link="PrivateKeyFileSecurity.cs" />
     <Compile Include="../src/TrafficPolicies/BoundedTransportFailureHealthPolicy.cs" Link="BoundedTransportFailureHealthPolicy.cs" />
     <Compile Include="../src/TrafficPolicies/EjectionBudget.cs" Link="EjectionBudget.cs" />
     <Compile Include="../src/TrafficPolicies/PrimaryBackupCore.cs" Link="PrimaryBackupCore.cs" />

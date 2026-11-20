@@ -8,5 +8,6 @@
   <ItemGroup>
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
     <Compile Include="../../LinuxKeyProtection.cs" Link="LinuxKeyProtection.cs" />
+    <Compile Include="../../../engines/GslbHealthContracts/PrivateKeyFileSecurity.cs" Link="PrivateKeyFileSecurity.cs" />
   </ItemGroup>
 </Project>
