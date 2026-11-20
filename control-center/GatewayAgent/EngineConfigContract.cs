@@ -67,6 +67,10 @@ public static class EngineConfigContract
                 Num(config["ListenPort"],53,53) && allowPublicBind && publicOptIn && !IPAddress.IsLoopback(bind);
             if (!listenPortAllowed ||
                 !Num(config["ProbeIntervalSeconds"],1,60) ||
+                (config.TryGetPropertyValue("MaxUdpQueriesPerSecond", out var aggregate) &&
+                 !Num(aggregate,0,0) && !Num(aggregate,20,200000)) ||
+                (config.TryGetPropertyValue("GroupIpv6UdpClientsByPrefix", out var groupIpv6) &&
+                 !Bool(groupIpv6)) ||
                 (config["MaxResponsesPerSecondPerClient"] is not null &&
                  !Num(config["MaxResponsesPerSecondPerClient"],20,20000)) ||
                 (!IPAddress.IsLoopback(bind) && (!allowPublicBind || !publicOptIn)) ||

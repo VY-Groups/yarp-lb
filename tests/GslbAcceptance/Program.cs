@@ -442,6 +442,21 @@ if(!rate.Allow(ip1,0) || !rate.Allow(ip1,100) || rate.Allow(ip1,200) ||
    !rate.Allow(ip3,3000))
     throw new Exception("FAIL: bounded UDP per-source rate limiter or recovery");
 Console.WriteLine("PASS: UDP response rate limit, table capacity, expiry and recovery");
+var aggregateRate = new DnsResponseRateLimiter(2, 4, totalPerSecond: 3, groupIpv6: true);
+var v6a = IPAddress.Parse("2001:db8:1:2::1");
+var v6b = IPAddress.Parse("2001:db8:1:2::2");
+var v6c = IPAddress.Parse("2001:db8:1:3::1");
+if (!aggregateRate.Allow(v6a,0) || !aggregateRate.Allow(v6b,10) ||
+    aggregateRate.Allow(v6a,20) || !aggregateRate.Allow(v6c,30) ||
+    aggregateRate.Allow(ip1,40) || aggregateRate.Allow(v6c,999) ||
+    !aggregateRate.Allow(ip1,1000) || !aggregateRate.Allow(IPAddress.Parse("::ffff:127.0.0.31"),1010) ||
+    aggregateRate.Allow(ip1,1020) || !aggregateRate.Allow(ip2,1030) ||
+    aggregateRate.Allow(ip3,1040) || !aggregateRate.Allow(ip3,2000))
+    throw new Exception("FAIL: aggregate budget, shared IPv6 prefix, IPv4 canonicalization or recovery");
+var ungrouped = new DnsResponseRateLimiter(1,4);
+if (!ungrouped.Allow(v6a,0) || !ungrouped.Allow(v6b,0) || ungrouped.Allow(v6a,1))
+    throw new Exception("FAIL: default IPv6 per-address behavior changed");
+Console.WriteLine("PASS: optional aggregate UDP budget, IPv6 prefix limits, default compatibility");
 var repo=args.Length==1?Path.GetFullPath(args[0]):Directory.GetCurrentDirectory();
 var dll=Path.Combine(repo,"engines","GslbDns","bin","Release","net10.0","GslbDns.dll");
 var countryFixture = Path.Combine(repo, "tests", "GslbAcceptance", "testdata", "GeoIP2-Country-Test.mmdb");
