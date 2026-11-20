@@ -22,7 +22,7 @@ public static class AgentCrlAcceptance
             ?? throw new InvalidOperationException("Could not start disposable CRL acceptance");
         var stdout = process.StandardOutput.ReadToEndAsync();
         var stderr = process.StandardError.ReadToEndAsync();
-        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(150));
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(240));
         try
         {
             await process.WaitForExitAsync(timeout.Token);
@@ -33,7 +33,7 @@ public static class AgentCrlAcceptance
             await process.WaitForExitAsync();
             _ = await stdout;
             _ = await stderr;
-            throw new TimeoutException("Disposable CRL acceptance exceeded 150 seconds");
+            throw new TimeoutException("Disposable CRL acceptance exceeded 240 seconds");
         }
         var output = await stdout;
         var errors = await stderr;

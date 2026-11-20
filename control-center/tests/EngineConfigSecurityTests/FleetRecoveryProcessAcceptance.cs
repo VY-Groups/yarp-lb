@@ -10,13 +10,25 @@ internal static class FleetRecoveryProcessAcceptance
     // Production helper and normal HTTPS transport; no product test bypass.
     internal static async Task RunAsync(string[] args)
     {
-        if (args.Length != 8 || args[0] is not ("prepare" or "recover"))
+        if (args.Length != 8 || args[0] is not ("prepare" or "recover" or "verify" or "install-client" or "remove-client"))
             throw new ArgumentException("Expected operation, root, cert, key, server cert, two ports and journal path");
         var (mode, root, certPath, keyPath, serverPath, firstPort, secondPort, path) =
             (args[0],args[1],args[2],args[3],args[4],int.Parse(args[5]),int.Parse(args[6]),args[7]);
         using var pem = X509Certificate2.CreateFromPemFile(certPath,keyPath);
         using var controller = X509CertificateLoader.LoadPkcs12(pem.Export(X509ContentType.Pkcs12),null,
-            X509KeyStorageFlags.EphemeralKeySet);
+            OperatingSystem.IsWindows() ? X509KeyStorageFlags.UserKeySet : X509KeyStorageFlags.EphemeralKeySet);
+        if (mode is "install-client" or "remove-client")
+        {
+            // Only the disposable Linux runner's current-user certificate store.
+            if (!OperatingSystem.IsLinux() || Environment.GetEnvironmentVariable("GITHUB_ACTIONS") != "true")
+                throw new InvalidOperationException("Fixture store provisioning is restricted to Linux CI");
+            using var store = new X509Store(StoreName.My,StoreLocation.CurrentUser);
+            store.Open(OpenFlags.ReadWrite);
+            if (mode == "install-client") store.Add(controller);
+            else foreach (var match in store.Certificates.Find(X509FindType.FindByThumbprint,controller.Thumbprint,false))
+                using (match) store.Remove(match);
+            return;
+        }
         using var server = X509CertificateLoader.LoadCertificateFromFile(serverPath);
         (Uri Origin,HttpClient Client) Connect(string id)
         {
@@ -46,7 +58,8 @@ internal static class FleetRecoveryProcessAcceptance
             Console.WriteLine("PASS: "+message);
         }
         const string tx = "rollout_AAAAAAAAAAAAAAAAAAAAAAAA";
-        var digest = new string('D',64);
+        var inventory = Path.Combine(root,"fleet-controller","state","fleet-gateways.json");
+        var digest = File.Exists(inventory) ? Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(inventory))) : new string('D',64);
         if(mode == "prepare")
         {
             var rows = new JsonArray();
@@ -85,9 +98,10 @@ internal static class FleetRecoveryProcessAcceptance
             return;
         }
         var recovered=FleetRolloutJournal.Read(path);
-        Must(FleetRolloutJournal.HasUnresolved(Path.GetDirectoryName(path)!) &&
-            FleetRolloutJournal.RecoveryAllowed(recovered,tx,digest),"restarted recovery reads persisted unfinished plan");
-        var errors=await FleetRolloutJournal.RollbackAttemptedAsync(path,recovered,Connect);
+        if (mode == "recover")
+            Must(FleetRolloutJournal.HasUnresolved(Path.GetDirectoryName(path)!) &&
+                FleetRolloutJournal.RecoveryAllowed(recovered,tx,digest),"restarted recovery reads persisted unfinished plan");
+        var errors = mode == "recover" ? await FleetRolloutJournal.RollbackAttemptedAsync(path,recovered,Connect) : new List<string>();
         var targets=FleetRolloutJournal.Targets(recovered);
         if(errors.Count!=0)
         {

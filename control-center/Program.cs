@@ -2009,7 +2009,9 @@ app.MapGet("/admin/api/fleet/status", async () =>
         {
             using var store = new System.Security.Cryptography.X509Certificates.X509Store(
                 System.Security.Cryptography.X509Certificates.StoreName.My,
-                System.Security.Cryptography.X509Certificates.StoreLocation.LocalMachine);
+                OperatingSystem.IsWindows()
+                    ? System.Security.Cryptography.X509Certificates.StoreLocation.LocalMachine
+                    : System.Security.Cryptography.X509Certificates.StoreLocation.CurrentUser);
             store.Open(System.Security.Cryptography.X509Certificates.OpenFlags.ReadOnly);
             var matches = store.Certificates.Find(
                 System.Security.Cryptography.X509Certificates.X509FindType.FindByThumbprint,
@@ -2252,7 +2254,9 @@ HttpClient CreateFleetClient(FleetGateway row)
 {
     using var store = new System.Security.Cryptography.X509Certificates.X509Store(
         System.Security.Cryptography.X509Certificates.StoreName.My,
-        System.Security.Cryptography.X509Certificates.StoreLocation.LocalMachine);
+        OperatingSystem.IsWindows()
+                    ? System.Security.Cryptography.X509Certificates.StoreLocation.LocalMachine
+                    : System.Security.Cryptography.X509Certificates.StoreLocation.CurrentUser);
     store.Open(System.Security.Cryptography.X509Certificates.OpenFlags.ReadOnly);
     var matches=store.Certificates.Find(System.Security.Cryptography.X509Certificates.X509FindType.FindByThumbprint,
         row.ClientCertificateThumbprint, validOnly:true);
