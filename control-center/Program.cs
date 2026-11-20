@@ -891,6 +891,12 @@ async Task<(IResult? Error, string? IntentId)> ConfirmAccountMutation(HttpContex
         return (Results.Conflict(new { error = "Account state changed during audit preparation" }), null);
     if (!await AuditActorCurrent(ctx, administratorOnly: true))
         return (Results.StatusCode(403), null);
+    // The shared authority read may yield. Check cancellation and the exact
+    // prior bytes again after the final awaited authorization before writing.
+    if (ctx.RequestAborted.IsCancellationRequested)
+        return (Results.Json(new { error = "Account mutation cancelled; state unchanged" }, statusCode: 503), null);
+    if (!AccountSnapshot().AsSpan().SequenceEqual(before))
+        return (Results.Conflict(new { error = "Account state changed during final authorization" }), null);
     return (null, intentId);
 }
 // Call only under the writer lock for the target file. The proposed bytes
@@ -955,6 +961,8 @@ async Task<IResult?> ConfirmAndWriteResourceMutation(HttpContext ctx, string pat
         if (ctx.RequestAborted.IsCancellationRequested)
             return Results.Json(new { error = "Account mutation commit cancelled; state unchanged" }, statusCode: 503);
         if (!await AuditActorCurrent(ctx, administratorOnly)) return Results.StatusCode(403);
+        if (ctx.RequestAborted.IsCancellationRequested)
+            return Results.Json(new { error = "Resource mutation commit cancelled; state unchanged" }, statusCode: 503);
         if (!AuditStateBytes(path).AsSpan().SequenceEqual(before))
             return Results.Conflict(new { error = "State changed during external audit confirmation" });
         WriteAuditedState(path, proposed);
@@ -2070,40 +2078,12 @@ app.MapGet("/admin/api/fleet/status", async () =>
 // approved two-person local change request. Every agent validates its revision.
 // No general-purpose remote shell or arbitrary filesystem access is exposed.
 string FleetDigest() => Convert.ToHexString(SHA256.HashData(AuditStateBytes(fleetPath)));
-async Task<List<string>> RollbackAttempted(string logPath, JsonObject journal, List<FleetGateway> gateways)
-{
-    var errors = new List<string>();
-    foreach (var target in FleetRolloutJournal.Targets(journal).Where(FleetRolloutJournal.NeedsRollback))
+Task<List<string>> RollbackAttempted(string logPath, JsonObject journal, List<FleetGateway> gateways) =>
+    FleetRolloutJournal.RollbackAttemptedAsync(logPath, journal, id =>
     {
-        var id = target["id"]!.GetValue<string>();
-        try
-        {
-            var row = gateways.Single(x => x.Id == id);
-            FleetRolloutJournal.Log(logPath, journal, id, "rollback", "dispatching");
-            using var client = CreateFleetClient(row);
-            using var response = await client.PostAsJsonAsync(new Uri(new Uri(row.Url), "agent/v1/config/rollback"),
-                new { TransactionId = journal["id"]!.GetValue<string>() });
-            response.EnsureSuccessStatusCode();
-            var reply = JsonNode.Parse(await response.Content.ReadAsStringAsync());
-            using var status = await client.GetAsync(new Uri(new Uri(row.Url), "agent/v1/status"));
-            status.EnsureSuccessStatusCode();
-            var observed = JsonNode.Parse(await status.Content.ReadAsStringAsync())?["revision"]?.ToString();
-            if (reply?["state"]?.ToString() != "rolled-back" || reply["rollbackFenced"]?.GetValue<bool>() != true ||
-                reply["revision"]?.ToString() != observed ||
-                !FleetRolloutJournal.CompleteRollback(target, observed))
-                throw new InvalidOperationException("Rollback revision not independently confirmed");
-            FleetRolloutJournal.Log(logPath, journal, id, "rollback", "verified", observed);
-        }
-        catch (Exception ex)
-        {
-            errors.Add(id + ": " + ex.GetType().Name);
-            FleetRolloutJournal.Log(logPath, journal, id, "rollback", "unresolved", ex.GetType().Name);
-        }
-    }
-    journal["status"] = errors.Count == 0 ? "rollback-verified" : "manual-intervention-required";
-    FleetRolloutJournal.Log(logPath, journal, "fleet", "finish", journal["status"]!.GetValue<string>());
-    return errors;
-}
+        var row = gateways.Single(x => x.Id == id);
+        return (new Uri(row.Url), CreateFleetClient(row));
+    });
 app.MapPost("/admin/api/fleet/rollout/{changeId}", async (HttpContext ctx, string changeId) =>
 {
     if (!Regex.IsMatch(changeId, "^change-[0-9]{8}T[0-9]{13,}Z-[A-F0-9]{10}$"))

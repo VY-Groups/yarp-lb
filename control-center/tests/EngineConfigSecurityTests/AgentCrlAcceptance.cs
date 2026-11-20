@@ -17,11 +17,12 @@ public static class AgentCrlAcceptance
             WorkingDirectory = Directory.GetCurrentDirectory()
         };
         start.ArgumentList.Add(script);
+        start.Environment["GATEWAY_FLEET_RECOVERY_TEST_DLL"] = typeof(AgentCrlAcceptance).Assembly.Location;
         using var process = Process.Start(start)
             ?? throw new InvalidOperationException("Could not start disposable CRL acceptance");
         var stdout = process.StandardOutput.ReadToEndAsync();
         var stderr = process.StandardError.ReadToEndAsync();
-        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(90));
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(150));
         try
         {
             await process.WaitForExitAsync(timeout.Token);
@@ -32,7 +33,7 @@ public static class AgentCrlAcceptance
             await process.WaitForExitAsync();
             _ = await stdout;
             _ = await stderr;
-            throw new TimeoutException("Disposable CRL acceptance exceeded 90 seconds");
+            throw new TimeoutException("Disposable CRL acceptance exceeded 150 seconds");
         }
         var output = await stdout;
         var errors = await stderr;

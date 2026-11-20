@@ -381,6 +381,79 @@ authorityKeyIdentifier = keyid,issuer
                 if not was_stopped_by_test(process.returncode, terminated_by_test):
                     raise RuntimeError(f"GatewayAgent exited {process.returncode}; logs:\n" + logs)
 
+            # Only Linux can use the production OS chain here without adding
+            # trust to a Windows host store. Never enable mutations in lab CA mode.
+            if os.name != "nt":
+                recovery_dll = os.environ.get("GATEWAY_FLEET_RECOVERY_TEST_DLL")
+                if not recovery_dll or not Path(recovery_dll).is_file():
+                    raise AssertionError("missing shared recovery helper fixture executable")
+                run(openssl,"ecparam","-name","prime256v1","-genkey","-noout","-out",str(temp/"fleet-private.pem"))
+                run(openssl,"ec","-in",str(temp/"fleet-private.pem"),"-pubout","-out",str(temp/"fleet-public.pem"))
+                recovery_ports = [free_port(),free_port()]
+                while recovery_ports[0] == recovery_ports[1]:
+                    recovery_ports[1] = free_port()
+                processes = [None,None]
+                streams = []
+                journal_dir = temp/"fleet-journals"
+                journal_dir.mkdir()
+                journal_path = journal_dir/"rollout_AAAAAAAAAAAAAAAAAAAAAAAA.json"
+                def start_node(i):
+                    node = temp/f"recovery-node-{i}"
+                    node.mkdir(exist_ok=True)
+                    config_file = node/"gateway.json"
+                    if not config_file.exists():
+                        config_file.write_text('{"ReverseProxy":{"Routes":{},"Clusters":{}},"fixture":"original"}')
+                    child = dict(env, Agent__EnableConfigChanges="true",
+                        Agent__GatewayConfigPath=str(config_file), Agent__StageDirectory=str(node/"stage"),
+                        Agent__ControllerSigningPublicKeyPath=str(temp/"fleet-public.pem"),
+                        Kestrel__Endpoints__AgentHttps__Url=f"https://127.0.0.1:{recovery_ports[i]}")
+                    for key in tuple(child):
+                        if key.startswith("Agent__TrustedClientThumbprints__") and key != "Agent__TrustedClientThumbprints__0":
+                            del child[key]
+                    stream = (node/"agent.log").open("a",encoding="utf-8")
+                    streams.append(stream)
+                    processes[i]=subprocess.Popen(["dotnet",str(AGENT)],cwd=node,env=child,stdout=stream,stderr=subprocess.STDOUT)
+                    wait_for_listener(recovery_ports[i],processes[i],"fleet recovery agent")
+                    deadline=time.monotonic()+12
+                    while True:
+                        try:
+                            if request_status(recovery_ports[i],good_cert,good_key,temp/"root.pem")==200:
+                                break
+                        except (OSError,http.client.HTTPException):
+                            pass
+                        if time.monotonic()>=deadline:
+                            raise TimeoutError("fleet recovery agent did not admit production mTLS")
+                        time.sleep(.1)
+                def stop_node(i):
+                    proc=processes[i]
+                    if proc is not None and proc.poll() is None:
+                        proc.kill()
+                        proc.wait(timeout=5)
+                def invoke(mode):
+                    result=subprocess.run(["dotnet",recovery_dll,"--fleet-recovery-fixture",mode,str(temp),
+                        str(good_cert),str(good_key),str(temp/"server.pem"),
+                        str(recovery_ports[0]),str(recovery_ports[1]),str(journal_path)],
+                        check=True,capture_output=True,text=True,timeout=35)
+                    print(result.stdout,flush=True)
+                    return result.stdout
+                try:
+                    start_node(0);start_node(1)
+                    invoke("prepare")
+                    # Controller fixture exited without recording activation ACK.
+                    # Kill the second real agent and restart the recovery helper.
+                    stop_node(1)
+                    if "FLEET_RECOVERY_PARTIAL" not in invoke("recover"):
+                        raise AssertionError("expected partial recovery while second agent unavailable")
+                    start_node(1)
+                    if "FLEET_RECOVERY_COMPLETE" not in invoke("recover"):
+                        raise AssertionError("expected resumed verified recovery")
+                    print("PASS: interrupted signed rollout recovered across two real agents and separate recovery processes",flush=True)
+                finally:
+                    for i in range(2): stop_node(i)
+                    for stream in streams: stream.close()
+            else:
+                print("NOTICE: Windows mutating fleet recovery fixture not run; production trust provisioning required",flush=True)
+
             # Windows caches CRLs by issuer. Use a distinct one-use CA and agent
             # for the outage case so the good CRL above cannot satisfy it from cache.
             offline_dir = temp / "offline"

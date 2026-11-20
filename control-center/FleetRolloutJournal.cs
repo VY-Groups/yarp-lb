@@ -1,3 +1,4 @@
+using System.Net.Http.Json;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
@@ -88,4 +89,40 @@ internal static class FleetRolloutJournal
         target["rollbackVerified"] = true;
         return true;
     }
+
+    internal static async Task<List<string>> RollbackAttemptedAsync(string logPath, JsonObject journal,
+        Func<string, (Uri Origin, HttpClient Client)> connect)
+{
+    var errors = new List<string>();
+    foreach (var target in FleetRolloutJournal.Targets(journal).Where(FleetRolloutJournal.NeedsRollback))
+    {
+        var id = target["id"]!.GetValue<string>();
+        try
+        {
+            FleetRolloutJournal.Log(logPath, journal, id, "rollback", "dispatching");
+            var (origin, connection) = connect(id);
+            using var client = connection;
+            using var response = await client.PostAsJsonAsync(new Uri(origin, "agent/v1/config/rollback"),
+                new { TransactionId = journal["id"]!.GetValue<string>() });
+            response.EnsureSuccessStatusCode();
+            var reply = JsonNode.Parse(await response.Content.ReadAsStringAsync());
+            using var status = await client.GetAsync(new Uri(origin, "agent/v1/status"));
+            status.EnsureSuccessStatusCode();
+            var observed = JsonNode.Parse(await status.Content.ReadAsStringAsync())?["revision"]?.ToString();
+            if (reply?["state"]?.ToString() != "rolled-back" || reply["rollbackFenced"]?.GetValue<bool>() != true ||
+                reply["revision"]?.ToString() != observed ||
+                !FleetRolloutJournal.CompleteRollback(target, observed))
+                throw new InvalidOperationException("Rollback revision not independently confirmed");
+            FleetRolloutJournal.Log(logPath, journal, id, "rollback", "verified", observed);
+        }
+        catch (Exception ex)
+        {
+            errors.Add(id + ": " + ex.GetType().Name);
+            FleetRolloutJournal.Log(logPath, journal, id, "rollback", "unresolved", ex.GetType().Name);
+        }
+    }
+    journal["status"] = errors.Count == 0 ? "rollback-verified" : "manual-intervention-required";
+    FleetRolloutJournal.Log(logPath, journal, "fleet", "finish", journal["status"]!.GetValue<string>());
+    return errors;
+}
 }
