@@ -384,6 +384,37 @@ def main():
                     admin2.request("DELETE","/admin/api/inventory/race-service",{})
                     check(json.loads(inventory.read_bytes())==[],
                         "race fixture resource removed through the signed receipt gate")
+
+                    # Same actor must be revalidated after a signed receipt
+                    # returns: hold reviewer2's inventory receipt, reset that
+                    # account as administrator, then release the stale receipt.
+                    revocation_before_exists=inventory.exists()
+                    revocation_before=inventory.read_bytes() if revocation_before_exists else b""
+                    receipt_proxy.hold_once("INVENTORY_ADD_INTENT")
+                    revoked_done=threading.Event()
+                    revoked_errors={}
+                    def add_after_revocation():
+                        try:
+                            admin2.request("POST","/admin/api/inventory",
+                                {"id":"revoked-service","name":"Revoked service","type":"Service",
+                                 "address":"fixture.example.invalid","notes":"must not persist"},expect=403)
+                        except Exception as ex: revoked_errors["revoked"]=repr(ex)
+                        finally: revoked_done.set()
+                    revoked_thread=threading.Thread(target=add_after_revocation,daemon=True)
+                    revoked_thread.start()
+                    check(receipt_proxy.hold_entered.wait(10),
+                        "collector accepted reviewer2 inventory receipt before revocation")
+                    admin.request("POST","/admin/api/users/reviewer2/password",
+                        {"password":"Reviewer-two-reset-fixture-789!"})
+                    receipt_proxy.release_held.set()
+                    revoked_thread.join(timeout=15)
+                    check(revoked_done.is_set() and not revoked_errors,
+                        "same-actor password reset revokes pending inventory mutation with HTTP 403")
+                    check(inventory.exists()==revocation_before_exists and
+                          (not inventory.exists() or inventory.read_bytes()==revocation_before),
+                        "revoked receipt leaves inventory byte-for-byte unchanged")
+                    check(not admin2.session()["authenticated"],
+                        "password reset invalidates reviewer2's previously authenticated session")
                 finally:
                     receipt_proxy.release_held.set()
                     stop(proc)
