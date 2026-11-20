@@ -94,7 +94,7 @@ internal sealed class ExternalAuditIntent : IDisposable
     internal async Task<bool> ConfirmAsync(string actor, string operation, string revision,
         string targetDigest, CancellationToken cancellationToken)
     {
-        if (cancellationToken.IsCancellationRequested || actor.Length is < 1 or > 256 || actor.Any(char.IsControl) || operation is not ("CONFIG_APPLY_INTENT" or "CONFIG_RESTORE_INTENT" or "USER_CREATE_INTENT" or "USER_PASSWORD_RESET_INTENT" or "USER_DISABLE_INTENT" or "USER_ENABLE_INTENT" or "INVENTORY_ADD_INTENT" or "INVENTORY_DELETE_INTENT" or "FLEET_REGISTER_INTENT" or "FLEET_UNREGISTER_INTENT") ||
+        if (cancellationToken.IsCancellationRequested || actor.Length is < 1 or > 256 || actor.Any(char.IsControl) || operation is not ("CONFIG_APPLY_INTENT" or "CONFIG_RESTORE_INTENT" or "USER_CREATE_INTENT" or "USER_PASSWORD_RESET_INTENT" or "USER_DISABLE_INTENT" or "USER_ENABLE_INTENT" or "INVENTORY_ADD_INTENT" or "INVENTORY_DELETE_INTENT" or "FLEET_REGISTER_INTENT" or "FLEET_UNREGISTER_INTENT" or "MAIL_SETTINGS_INTENT" or "MAIL_PROOF_INTENT" or "DIRECTORY_SETTINGS_INTENT") ||
             !IsDigest(revision) || !IsDigest(targetDigest))
             return false;
         var id = Guid.NewGuid().ToString("N");
