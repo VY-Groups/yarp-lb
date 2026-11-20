@@ -130,6 +130,17 @@ try
     var first=await UdpRoundTrip(c1,"one");
     var second=await UdpRoundTrip(c2,"two");
     Assert(first[..1] != second[..1], "two UDP sessions distributed across both backends");
+    using (var malformed = new UdpClient(AddressFamily.InterNetwork))
+    {
+        malformed.Connect(IPAddress.Loopback, 19021);
+        var payload = new byte[] { 0xff, 0x00, 0x80, 0x41, 0x0d, 0x0a };
+        await malformed.SendAsync(payload);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+        var response = await malformed.ReceiveAsync(timeout.Token);
+        Assert(response.Buffer.Length == payload.Length + 2 &&
+               response.Buffer.AsSpan(2).SequenceEqual(payload),
+            "opaque malformed UDP payload bytes pass unchanged through the relay");
+    }
     for(int i=0;i<12;i++)
     {
         var reply=await UdpRoundTrip(c1,"repeat"+i);
@@ -329,7 +340,9 @@ async Task<bool> ValidateTcpHalfClose()
     using var client = new TcpClient(AddressFamily.InterNetwork);
     await client.ConnectAsync(IPAddress.Loopback,19015);
     var stream = client.GetStream();
-    await stream.WriteAsync(Encoding.UTF8.GetBytes("request-body"));
+    await stream.WriteAsync(Encoding.UTF8.GetBytes("request-"));
+    await Task.Delay(150);
+    await stream.WriteAsync(Encoding.UTF8.GetBytes("body"));
     client.Client.Shutdown(SocketShutdown.Send);
     using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(3));
     using var response = new MemoryStream();
@@ -416,6 +429,15 @@ static async Task UdpEcho(UdpClient listener,string id,CancellationToken token,A
         while(!token.IsCancellationRequested)
         {
             var packet=await listener.ReceiveAsync(token);
+            if (packet.Buffer.Length > 0 && packet.Buffer[0] == 0xff)
+            {
+                var prefix = Encoding.ASCII.GetBytes(id + "|");
+                var opaqueReply = new byte[prefix.Length + packet.Buffer.Length];
+                prefix.CopyTo(opaqueReply, 0);
+                packet.Buffer.CopyTo(opaqueReply, prefix.Length);
+                await listener.SendAsync(opaqueReply, packet.RemoteEndPoint, token);
+                continue;
+            }
             var request = Encoding.UTF8.GetString(packet.Buffer);
             if (request == "health-check")
             {
