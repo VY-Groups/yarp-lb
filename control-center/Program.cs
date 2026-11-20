@@ -41,13 +41,19 @@ var keyDir = Path.Combine(privateDir, "data-protection-keys");
 if (!OperatingSystem.IsLinux() || ec2Lab)
     Directory.CreateDirectory(keyDir);
 var oidcPolicy = EnterpriseOidcPolicy.FromFile(Environment.GetEnvironmentVariable("GATEWAY_OIDC_CONFIG_FILE"));
-var localAudit = new LocalAdminAudit(Path.Combine(privateDir, "admin-audit.jsonl"));
 using var externalAuditIntent = ExternalAuditIntent.FromEnvironment(
     Environment.GetEnvironmentVariable("GATEWAY_AUDIT_INTENT_URL"),
     Environment.GetEnvironmentVariable("GATEWAY_AUDIT_NODE_ID"),
     Environment.GetEnvironmentVariable("GATEWAY_AUDIT_SENDER_KEY_FILE"),
     Environment.GetEnvironmentVariable("GATEWAY_AUDIT_COLLECTOR_PUBLIC_KEY_FILE"));
+var auditOutboxPath = Environment.GetEnvironmentVariable("GATEWAY_AUDIT_OUTBOX_DIR");
+if (auditOutboxPath is not null && externalAuditIntent is null)
+    throw new InvalidOperationException("Audit outbox requires the external audit collector configuration");
+using var auditOutbox = auditOutboxPath is null ? null : new DurableAuditOutbox(auditOutboxPath, externalAuditIntent!);
+var localAudit = new LocalAdminAudit(Path.Combine(privateDir, "admin-audit.jsonl"), auditOutbox);
 var builder = WebApplication.CreateBuilder(args);
+if (auditOutbox is not null)
+    builder.Services.AddHostedService(sp => new AuditOutboxWorker(auditOutbox, sp.GetRequiredService<ILogger<AuditOutboxWorker>>()));
 GatewayOpenTelemetry.Configure(builder.Services);
 // Explicit v0.1 multi-socket mode; legacy loopback remains CI migration-only.
 var isolatedListeners = GatewayListenerIsolation.FromEnvironment();
@@ -1399,6 +1405,13 @@ app.MapGet("/admin/api/state", () =>
 
 app.MapGet("/admin/api/audit", async () =>
     Results.Ok(await localAudit.ReadRecentAsync())).RequireAuthorization();
+app.MapGet("/admin/api/audit/delivery", () =>
+{
+    if (auditOutbox is null) return Results.Ok(new { enabled = false, pending = 0, storageFault = false, deliveryBlocked = false });
+    var status = auditOutbox.Status();
+    return Results.Ok(new { enabled = true, pending = status.Pending, storageFault = status.StorageFault,
+        deliveryBlocked = status.DeliveryBlocked });
+}).RequireAuthorization(p => p.RequireRole("Administrator"));
 
 // Explicit, on-demand connectivity probes: these are not YARP's own destination health states.
 app.MapPost("/admin/api/probe", async (IHttpClientFactory factory) =>
