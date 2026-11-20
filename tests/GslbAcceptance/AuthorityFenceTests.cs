@@ -453,8 +453,18 @@ internal static class AuthorityFenceTests
             }
             finally
             {
-                cancellation.Cancel();
-                runtime.DisposeAsync().AsTask().GetAwaiter().GetResult();
+                // The publisher must stop on disposal even if the caller's
+                // startup token is still live (as with service shutdown).
+                var stop = runtime.DisposeAsync().AsTask();
+                if (!stop.Wait(TimeSpan.FromSeconds(4)))
+                {
+                    cancellation.Cancel(); // unblock an older broken runtime
+                    stop.GetAwaiter().GetResult();
+                    throw new Exception("FAIL: authority publisher disposal requires external cancellation");
+                }
+                stop.GetAwaiter().GetResult();
+                Check(!cancellation.IsCancellationRequested,
+                    "authority HTTPS publisher shuts down without caller cancellation");
             }
         }
     }
