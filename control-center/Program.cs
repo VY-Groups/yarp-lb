@@ -20,6 +20,7 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.RateLimiting;
 using System.Threading.RateLimiting;
+using Certes.Acme.Resource;
 using Yarp.ReverseProxy.LoadBalancing;
 
 // Windows neutral-identity deployments use a new ProgramData root. Refuse
@@ -88,6 +89,8 @@ else
     throw new PlatformNotSupportedException("Unsupported OS Data Protection mode");
 if (acmeRenewalSettings is { } renewalSettings)
 {
+    var activeListeners = isolatedListeners ?? throw new InvalidOperationException(
+        "ACME requires the isolated traffic listener certificate rotator.");
     var accountKeyPath = Path.Combine(privateDir, "acme-account.encrypted");
     builder.Services.AddSingleton<IAcmeCertificateIssuer>(services => new CertesAcmeCertificateIssuer(
         new AcmeAccountKeyStore(accountKeyPath,
@@ -96,7 +99,10 @@ if (acmeRenewalSettings is { } renewalSettings)
     builder.Services.AddSingleton<AcmeRenewalCoordinator>(services => new AcmeRenewalCoordinator(
         services.GetRequiredService<IAcmeCertificateIssuer>(),
         services.GetRequiredService<AcmeHttp01ChallengeStore>(),
-        isCertificateActive: isolatedListeners.IsTrafficCertificateActive));
+        isCertificateActive: activeListeners.IsTrafficCertificateActive));
+    builder.Services.AddSingleton<AcmeRevocationCoordinator>(services => new AcmeRevocationCoordinator(
+        services.GetRequiredService<IAcmeCertificateIssuer>(), renewalSettings.DirectoryUrl,
+        renewalSettings.DnsName, renewalSettings.ContactEmail, activeListeners.IsTrafficCertificateActive));
     builder.Services.AddHostedService(services => new AcmeRenewalBackgroundService(renewalSettings,
         services.GetRequiredService<AcmeRenewalCoordinator>(), null,
         services.GetRequiredService<ILogger<AcmeRenewalBackgroundService>>()));
@@ -204,6 +210,7 @@ builder.Services.AddRateLimiter(options =>
     { cfg.PermitLimit = 32; cfg.Window = TimeSpan.FromMinutes(1); cfg.QueueLimit = 0; });
     options.AddFixedWindowLimiter("mailtest", cfg => { cfg.PermitLimit = 3; cfg.Window = TimeSpan.FromMinutes(5); cfg.QueueLimit = 0; });
     options.AddFixedWindowLimiter("ldaptest", cfg => { cfg.PermitLimit = 4; cfg.Window = TimeSpan.FromMinutes(5); cfg.QueueLimit = 0; });
+    options.AddFixedWindowLimiter("acme-revoke", cfg => { cfg.PermitLimit = 2; cfg.Window = TimeSpan.FromMinutes(5); cfg.QueueLimit = 0; });
     options.AddFixedWindowLimiter("login", cfg =>
     {
         cfg.PermitLimit = 8;
@@ -1361,6 +1368,55 @@ app.MapGet("/dashboard/style.css", () => Results.File(Path.Combine(root, "wwwroo
 app.MapGet("/gateway/health", () => Results.Ok(new { status = "healthy", gateway = Environment.MachineName, utc = DateTimeOffset.UtcNow }));
 app.MapHttp01Challenge(acmeHttp01PublicEntrypointEnabled,
     ctx => isolatedListeners?.OnTrafficHttp(ctx) == true);
+if (acmeRenewalSettings is { } revokeSettings)
+{
+    app.MapPost("/admin/api/tls/acme/revoke", async (HttpContext ctx, AcmeRevocationRequest input,
+        AcmeRevocationCoordinator coordinator) =>
+    {
+        if (ctx.Request.ContentLength is > 32_768)
+            return Results.BadRequest(new { error = "Revocation request exceeds 32 KiB." });
+        if (input.CertificateDerBase64?.Length is > 1_400_000)
+            return Results.BadRequest(new { error = "Certificate payload exceeds its bound." });
+        await Audit(Actor(ctx), "ACME_CERTIFICATE_REVOCATION_REQUEST", new
+        {
+            thumbprint = input.Thumbprint,
+            reason = input.Reason,
+            dnsName = revokeSettings.DnsName
+        });
+        try
+        {
+            var result = await coordinator.RevokeAsync(input, ctx.RequestAborted);
+            await Audit(Actor(ctx), "ACME_CERTIFICATE_REVOKED", new
+            {
+                result.Thumbprint, result.DnsName, reason = result.Reason.ToString()
+            });
+            return Results.Ok(new { revoked = true, result.Thumbprint, result.DnsName, reason = result.Reason.ToString() });
+        }
+        catch (AcmeActiveCertificateRevocationException)
+        {
+            await Audit(Actor(ctx), "ACME_CERTIFICATE_REVOCATION_REJECTED_ACTIVE", new { thumbprint = input.Thumbprint });
+            return Results.Conflict(new { error = "The currently served traffic certificate cannot be revoked." });
+        }
+        catch (Exception ex) when (ex is ArgumentException or CryptographicException or InvalidOperationException)
+        {
+            await Audit(Actor(ctx), "ACME_CERTIFICATE_REVOCATION_REJECTED", new
+            {
+                thumbprint = input.Thumbprint, failureType = ex.GetType().Name
+            });
+            return Results.BadRequest(new { error = "Certificate revocation request was rejected." });
+        }
+        catch (Exception ex)
+        {
+            await Audit(Actor(ctx), "ACME_CERTIFICATE_REVOCATION_FAILED", new
+            {
+                thumbprint = input.Thumbprint, failureType = ex.GetType().Name
+            });
+            return Results.Json(new { error = "ACME certificate revocation is unavailable." }, statusCode: 503);
+        }
+    })
+    .RequireAuthorization(policy => policy.RequireRole("Administrator"))
+    .RequireRateLimiting("acme-revoke");
+}
 // Readiness is on the DATA listener only in isolated mode; unknown/empty backends fail closed.
 app.MapGet("/gateway/health/ready", (IProxyStateLookup proxy) =>
     !app.Lifetime.ApplicationStopping.IsCancellationRequested && GatewayListenerIsolation.AnyDestinationHealthy(proxy)

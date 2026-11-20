@@ -5,6 +5,8 @@ using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using Certes;
+using Certes.Acme.Resource;
+using Directory = System.IO.Directory;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.Hosting;
@@ -181,6 +183,54 @@ internal static class AcmeRenewalAcceptance
             Check(!notDue.Renewed && fakeCa.IssuanceCount == callsBeforeNotDue,
                 "a certificate outside its renewal window does not create another ACME order");
 
+            var revocation = new AcmeRevocationCoordinator(fakeCa, DirectoryUrl, DnsName,
+                "admin@example.com", thumbprint => string.Equals(rotation.Current.Thumbprint,
+                    thumbprint, StringComparison.OrdinalIgnoreCase));
+            static AcmeRevocationRequest RevocationInput(X509Certificate2 certificate, string reason,
+                string? confirmation = null) =>
+                new(Convert.ToBase64String(certificate.Export(X509ContentType.Cert)),
+                    certificate.Thumbprint.ToUpperInvariant(),
+                    confirmation ?? "REVOKE " + certificate.Thumbprint.ToUpperInvariant(), reason);
+
+            var currentCertificateRejected = false;
+            try
+            {
+                await revocation.RevokeAsync(RevocationInput(replacementLeaf, "Superseded"), CancellationToken.None);
+            }
+            catch (AcmeActiveCertificateRevocationException) { currentCertificateRejected = true; }
+            Check(currentCertificateRejected && fakeCa.RevocationCount == 0,
+                "currently served certificate cannot be revoked");
+
+            var wrongConfirmationRejected = false;
+            try
+            {
+                await revocation.RevokeAsync(RevocationInput(activeLeaf, "Superseded", "REVOKE WRONG"),
+                    CancellationToken.None);
+            }
+            catch (ArgumentException) { wrongConfirmationRejected = true; }
+            Check(wrongConfirmationRejected && fakeCa.RevocationCount == 0,
+                "prior certificate revocation requires exact typed thumbprint confirmation");
+
+            var wrongNameRejected = false;
+            try { await revocation.RevokeAsync(RevocationInput(wrongNameLeaf, "Superseded"), CancellationToken.None); }
+            catch (ArgumentException) { wrongNameRejected = true; }
+            Check(wrongNameRejected && fakeCa.RevocationCount == 0,
+                "certificate for a different DNS name cannot be revoked through this endpoint");
+
+            var unsupportedReasonRejected = false;
+            try { await revocation.RevokeAsync(RevocationInput(activeLeaf, "CACompromise"), CancellationToken.None); }
+            catch (ArgumentException) { unsupportedReasonRejected = true; }
+            Check(unsupportedReasonRejected && fakeCa.RevocationCount == 0,
+                "unsupported high-impact revocation reasons are rejected");
+
+            var revoked = await revocation.RevokeAsync(RevocationInput(activeLeaf, "Superseded"),
+                CancellationToken.None);
+            Check(fakeCa.RevocationCount == 1 &&
+                  fakeCa.LastRevokedThumbprint == activeLeaf.Thumbprint.ToUpperInvariant() &&
+                  fakeCa.LastRevocationReason == RevocationReason.Superseded &&
+                  revoked.Thumbprint == activeLeaf.Thumbprint.ToUpperInvariant(),
+                "confirmed prior TLS leaf is sent once to the deterministic ACME issuer with the selected reason");
+
             clock.Advance(TimeSpan.FromDays(61));
             var beforeIssuerFailure = await File.ReadAllBytesAsync(activePfxPath);
             var timestampBeforeIssuerFailure = File.GetLastWriteTimeUtc(activePfxPath);
@@ -226,7 +276,7 @@ internal static class AcmeRenewalAcceptance
                 "wrong-SAN fake CA response fails closed without replacing the active certificate");
             Check(!Directory.EnumerateFiles(rootDir, ".gatewaycore-acme-*.pfx").Any(),
                 "failed candidate validation removes staged PFX files");
-            Console.WriteLine("PASS: deterministic fake-CA HTTP-01 renewal, protected account key and live TLS rotation");
+            Console.WriteLine("PASS: deterministic fake-CA HTTP-01 renewal, guarded certificate revocation, protected account key and live TLS rotation");
         }
         finally
         {
@@ -257,6 +307,10 @@ internal static class AcmeRenewalAcceptance
             string contactEmail, string pfxPassword, AcmeHttp01ChallengeStore challenges,
             CancellationToken cancellationToken) =>
             throw new HttpRequestException("simulated ACME service unavailable");
+
+        public Task RevokeCertificateAsync(string directoryUrl, string contactEmail, byte[] certificateDer,
+            RevocationReason reason, CancellationToken cancellationToken) =>
+            throw new HttpRequestException("simulated ACME service unavailable");
     }
 
     private sealed class ManualTimeProvider(DateTimeOffset utcNow) : TimeProvider
@@ -270,7 +324,11 @@ internal static class AcmeRenewalAcceptance
         : IAcmeCertificateIssuer
     {
         private int issuanceCount;
+        private int revocationCount;
         public int IssuanceCount => Volatile.Read(ref issuanceCount);
+        public int RevocationCount => Volatile.Read(ref revocationCount);
+        public string LastRevokedThumbprint { get; private set; } = string.Empty;
+        public RevocationReason LastRevocationReason { get; private set; }
         public bool ChallengeServed { get; private set; }
         public string LastToken { get; private set; } = string.Empty;
         public byte[] NextPfx { get; set; } = initialPfx;
@@ -300,6 +358,17 @@ internal static class AcmeRenewalAcceptance
                 return new AcmeIssuedCertificate(NextPfx.ToArray(), dnsName);
             }
             finally { challenges.Remove(dnsName, token); }
+        }
+
+        public Task RevokeCertificateAsync(string directoryUrl, string contactEmail, byte[] certificateDer,
+            RevocationReason reason, CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            using var certificate = new X509Certificate2(certificateDer);
+            LastRevokedThumbprint = certificate.Thumbprint.ToUpperInvariant();
+            LastRevocationReason = reason;
+            Interlocked.Increment(ref revocationCount);
+            return Task.CompletedTask;
         }
     }
 }

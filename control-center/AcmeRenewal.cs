@@ -16,6 +16,8 @@ public interface IAcmeCertificateIssuer
     Task<AcmeIssuedCertificate> IssueHttp01Async(string directoryUrl, string dnsName,
         string contactEmail, string pfxPassword, AcmeHttp01ChallengeStore challenges,
         CancellationToken cancellationToken);
+    Task RevokeCertificateAsync(string directoryUrl, string contactEmail, byte[] certificateDer,
+        RevocationReason reason, CancellationToken cancellationToken);
 }
 
 /// <summary>
@@ -81,6 +83,24 @@ public sealed class CertesAcmeCertificateIssuer(AcmeAccountKeyStore accountKeys,
             return new AcmeIssuedCertificate(pfx, dnsName);
         }
         finally { challenges.Remove(dnsName, challenge.Token); }
+    }
+
+    public async Task RevokeCertificateAsync(string directoryUrl, string contactEmail,
+        byte[] certificateDer, RevocationReason reason, CancellationToken cancellationToken)
+    {
+        if (!Uri.TryCreate(directoryUrl, UriKind.Absolute, out var directory) ||
+            directory.Scheme != Uri.UriSchemeHttps || directory.UserInfo.Length != 0 ||
+            directory.Fragment.Length != 0)
+            throw new InvalidOperationException("ACME revocation requires an absolute HTTPS directory URL.");
+        if (string.IsNullOrWhiteSpace(contactEmail) || contactEmail.Length > 254 ||
+            !contactEmail.Contains('@') || contactEmail.Any(char.IsControl) ||
+            certificateDer is not { Length: >= 128 and <= 1_048_576 })
+            throw new InvalidOperationException("ACME revocation request is outside its accepted bounds.");
+        var context = new AcmeContext(directory, accountKeys.LoadOrCreate());
+        _ = await context.NewAccount(contactEmail, termsOfServiceAgreed: agreeToTermsOfService)
+            .WaitAsync(cancellationToken);
+        await context.RevokeCertificate(certificateDer, reason, certificatePrivateKey: null)
+            .WaitAsync(cancellationToken);
     }
 }
 
@@ -382,6 +402,90 @@ public sealed class AcmeRenewalBackgroundService(AcmeRenewalSettings settings,
                     backoff.TotalMilliseconds * 2));
             }
             await Task.Delay(nextDelay, clock, stoppingToken);
+        }
+    }
+}
+
+/// <summary>Bounded operator-triggered revocation of a prior GatewayCore traffic certificate.</summary>
+public sealed record AcmeRevocationRequest(string CertificateDerBase64, string Thumbprint,
+    string Confirmation, string Reason);
+
+public sealed record AcmeRevocationResult(string Thumbprint, string DnsName,
+    RevocationReason Reason);
+
+public sealed class AcmeActiveCertificateRevocationException()
+    : InvalidOperationException("The currently served traffic certificate cannot be revoked.");
+
+public sealed class AcmeRevocationCoordinator(IAcmeCertificateIssuer issuer,
+    string directoryUrl, string dnsName, string contactEmail,
+    Func<string, bool> isCertificateActive)
+{
+    private const string ServerAuthOid = "1.3.6.1.5.5.7.3.1";
+    private readonly SemaphoreSlim gate = new(1, 1);
+
+    public async Task<AcmeRevocationResult> RevokeAsync(AcmeRevocationRequest request,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        var target = AcmeTargetPolicy.Validate(directoryUrl, dnsName, http01: true,
+            publicChallengeEntrypointEnabled: true);
+        if (!target.Allowed || !Uri.TryCreate(directoryUrl, UriKind.Absolute, out var directory) ||
+            directory.Scheme != Uri.UriSchemeHttps || directory.UserInfo.Length != 0 ||
+            directory.Fragment.Length != 0)
+            throw new ArgumentException("ACME directory or configured DNS target is invalid.");
+        if (string.IsNullOrWhiteSpace(contactEmail) || contactEmail.Length > 254 ||
+            !contactEmail.Contains('@') || contactEmail.Any(char.IsControl))
+            throw new InvalidOperationException("ACME contact configuration is invalid.");
+        if (request.CertificateDerBase64 is not { Length: > 0 and <= 1_400_000 } ||
+            request.Thumbprint is not { Length: 40 } ||
+            request.Thumbprint.Any(c => !Uri.IsHexDigit(c)) ||
+            !string.Equals(request.Thumbprint, request.Thumbprint.ToUpperInvariant(), StringComparison.Ordinal))
+            throw new ArgumentException("Certificate DER or thumbprint is invalid or outside its bound.");
+        if (!Enum.TryParse<RevocationReason>(request.Reason, ignoreCase: false, out var reason) ||
+            reason is not (RevocationReason.Unspecified or RevocationReason.KeyCompromise or
+                RevocationReason.Superseded or RevocationReason.CessationOfOperation))
+            throw new ArgumentException("Revocation reason is unsupported.");
+        byte[]? der = null;
+        try
+        {
+            try { der = Convert.FromBase64String(request.CertificateDerBase64); }
+            catch (FormatException ex) { throw new ArgumentException("Certificate DER is not valid base64.", ex); }
+            if (der.Length is < 128 or > 1_048_576)
+                throw new ArgumentException("Certificate DER is outside its accepted size bound.");
+            using var certificate = new X509Certificate2(der);
+            var thumbprint = certificate.Thumbprint.ToUpperInvariant();
+            if (!CryptographicOperations.FixedTimeEquals(
+                    Encoding.ASCII.GetBytes(thumbprint), Encoding.ASCII.GetBytes(request.Thumbprint)))
+                throw new ArgumentException("Certificate does not match the supplied thumbprint.");
+            if (!string.Equals(certificate.GetNameInfo(X509NameType.DnsName, forIssuer: false),
+                    target.NormalizedDnsName, StringComparison.OrdinalIgnoreCase))
+                throw new ArgumentException("Certificate DNS name does not match the configured traffic hostname.");
+            var eku = certificate.Extensions.OfType<X509EnhancedKeyUsageExtension>()
+                .SelectMany(extension => extension.EnhancedKeyUsages.Cast<Oid>())
+                .Any(oid => oid.Value == ServerAuthOid);
+            if (!eku) throw new ArgumentException("Only a TLS server-auth certificate can be revoked.");
+            if (request.Confirmation != "REVOKE " + thumbprint)
+                throw new ArgumentException("Typed revocation confirmation does not match the certificate thumbprint.");
+            if (isCertificateActive(thumbprint))
+                throw new AcmeActiveCertificateRevocationException();
+
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeout.CancelAfter(TimeSpan.FromSeconds(30));
+            await gate.WaitAsync(timeout.Token);
+            try
+            {
+                // Recheck after serialization so a certificate activated while this
+                // request waited cannot be revoked by a stale operator request.
+                if (isCertificateActive(thumbprint))
+                    throw new AcmeActiveCertificateRevocationException();
+                await issuer.RevokeCertificateAsync(directoryUrl, contactEmail, der, reason, timeout.Token);
+            }
+            finally { gate.Release(); }
+            return new AcmeRevocationResult(thumbprint, target.NormalizedDnsName!, reason);
+        }
+        finally
+        {
+            if (der is not null) CryptographicOperations.ZeroMemory(der);
         }
     }
 }
