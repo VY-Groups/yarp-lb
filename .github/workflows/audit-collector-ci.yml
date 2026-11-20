@@ -2,9 +2,9 @@ name: Independent audit collector HTTPS acceptance
 on:
   push:
     branches: [main]
-    paths: ["engines/AuditCollector/**", "tests/AuditCollector/**", ".github/workflows/audit-collector-ci.yml"]
+    paths: ["engines/AuditCollector/**", "tests/AuditCollector/**", "control-center/**", "tests/E2E/real_control_center.py", ".github/workflows/audit-collector-ci.yml"]
   pull_request:
-    paths: ["engines/AuditCollector/**", "tests/AuditCollector/**", ".github/workflows/audit-collector-ci.yml"]
+    paths: ["engines/AuditCollector/**", "tests/AuditCollector/**", "control-center/**", "tests/E2E/real_control_center.py", ".github/workflows/audit-collector-ci.yml"]
   workflow_dispatch:
 permissions:
   contents: read
@@ -24,6 +24,9 @@ jobs:
       - run: dotnet build engines/AuditCollector/AuditCollector.csproj -c Release
       - name: Verify durable retention journal and SDK contract
         run: dotnet run --project tests/AuditCollector/RetentionTests.csproj -c Release
-      - name: Real TLS receiver, signed chain, restart and replay checks
+      - name: Build shipping gateway for real receipt acceptance
+        if: runner.os == 'Linux'
+        run: dotnet build control-center/GatewayCoreYarp.csproj -c Release
+      - name: Real TLS receiver, signed chain, restart, replay and gateway account receipts
         if: runner.os == 'Linux'
         run: python3 tests/AuditCollector/acceptance.py engines/AuditCollector/bin/Release/net10.0/AuditCollector.dll
