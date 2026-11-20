@@ -1,5 +1,39 @@
 # GatewayCore — Codex handoff, verified repository snapshot
 
+## Current continuation update — L4 acceptance and open security work (2026-11-20)
+
+This section supersedes older “current state” statements below where they
+conflict. Live GitHub was refreshed after PR #321 merged:
+
+- `main` is `7f5afa9f7184987522f79eb959c5acba1a43b751` (squash merge of PR #321).
+  At this snapshot there are **10 open issues**: #34, #36, #37, #38, #48, #49,
+  #51, #52, #53 and #109. PR #321 is closed by merge; PRs #318–#320 and #322
+  were closed as superseded. PRs #323 and #324 remain open.
+- PR #321 adds L4 process-failure containment and real-socket acceptance for
+  refused backend connects, all-drained TCP, no replay after TCP reset and UDP
+  response loss, partial listener bind failure, and bounded Linux SIGTERM
+  drain/cancellation. Exact-head Windows/Linux Actions passed; local Windows and
+  Ubuntu WSL real-process acceptance also passed. Post-merge L4 Actions passed
+  on this exact `main`; post-merge L7 and CodeQL were still running at update
+  time.
+- **#53 remains OPEN.** The Linux shutdown test does not cover Windows
+  console/service stop; the required Windows graceful-stop test remains
+  outstanding. Physical WAN/loss/soak/capacity acceptance is tracked only in
+  #36. No L4 production certification is implied.
+- PR #323 corrects stale DNS capability documentation about configured child
+  referrals and opt-in routing. Its prior-head CI had one Windows authority
+  HTTP timeout; rerun passed. The branch is being refreshed on current `main`
+  and requires fresh exact-head checks before merge.
+- PR #324 addresses selected CodeQL TLS/logging/response-splitting findings.
+  It is still open and requires exact-head CI/review. CodeQL alerts #1–#6
+  (disposable test-secret file writes) and #14 (pinned client-certificate
+  authentication path) are not claimed fixed; review/remediation remains open.
+- The latest listed release remains `v0.1.0-test.12` from 2026-11-14, not a
+  verified current release. No new verified release with current artifacts,
+  SHA-256 checksums, offline installation, upgrade and rollback evidence has
+  been published. Production remains **NO-GO** and annual 99.9% availability is
+  unmeasured. #36 remains the sole physical/environment acceptance tracker.
+
 ## Current continuation update — physical GSLB acceptance (2026-11-20)
 
 This update supersedes the earlier same-date snapshot below for physical
