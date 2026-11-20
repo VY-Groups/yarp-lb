@@ -239,6 +239,142 @@ def insecure_logout_endpoint_is_rejected(client,idp):
     check(status==502 and idp.insecure_logout_hits==0,
         "HTTP end-session metadata fails closed without contacting its endpoint")
 
+def distributed_revocation(cwd,dll):
+    with tempfile.TemporaryDirectory(prefix="gatewaycore-oidc-shared-") as td, backend() as upstream:
+        root=Path(td)
+        first,second=root/"first",root/"second"
+        for node in (first,second):
+            openssl_state(node,upstream)
+        key,cert=make_tls(root,"shared-tls","127.0.0.1")
+        idp_key,idp_cert=make_tls(root,"shared-idp","127.0.0.2")
+        trust=root/"trust.pem"
+        trust.write_bytes(cert.read_bytes()+idp_cert.read_bytes())
+        ctx=ssl.create_default_context(cafile=str(trust))
+        ports=[]
+        while len(ports)<5:
+            candidate=port()
+            if candidate not in ports: ports.append(candidate)
+        hp1,tls1,hp2,tls2,redis_port=ports
+        origin1,origin2=f"https://127.0.0.1:{tls1}",f"https://127.0.0.1:{tls2}"
+        for node,hp,tlsport in ((first,hp1,tls1),(second,hp2,tls2)):
+            pfx=node/"secrets"/"dp.pfx"
+            cmd("openssl","pkcs12","-export","-out",str(pfx),"-inkey",str(key),"-in",str(cert),
+                "-passout","pass:temporary-e2e-only-password")
+            pfx.chmod(0o600)
+            with gateway(cwd,dll,node,hp,tlsport) as base:
+                recovery=Client(base)
+                recovery.bootstrap("recovery","Recovery-fixture-password!","recovery@example.invalid")
+                recovery.request("POST","/admin/api/users",{"username":"operator",
+                    "password":"Operator-fixture-password!","email":"operator@example.invalid","role":"Operator"})
+        password=secrets.token_hex(32)
+        redis_file=root/"redis-connection"
+        redis_file.write_text(f"127.0.0.1:{redis_port},ssl=true,sslHost=127.0.0.1,password={password}")
+        redis_file.chmod(0o600)
+        redis_args=["redis-server","--bind","127.0.0.1","--port","0","--tls-port",str(redis_port),
+            "--tls-cert-file",str(cert),"--tls-key-file",str(key),"--tls-ca-cert-file",str(cert),
+            "--tls-auth-clients","no","--requirepass",password,"--dir",str(root),
+            "--appendonly","yes","--appendfsync","always","--save",""]
+        def cli(*args):
+            return subprocess.run(["redis-cli","--tls","--cacert",str(cert),"-h","127.0.0.1",
+                "-p",str(redis_port),*args],env=dict(os.environ,REDISCLI_AUTH=password),
+                check=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=5).stdout.decode().strip()
+        def start_redis():
+            proc=subprocess.Popen(redis_args,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+            try:
+                for _ in range(100):
+                    if proc.poll() is not None: raise AssertionError("TLS Redis exited")
+                    try:
+                        if cli("PING")=="PONG": return proc
+                    except (subprocess.SubprocessError,OSError): pass
+                    time.sleep(.05)
+                raise AssertionError("TLS Redis failed to start")
+            except BaseException:
+                proc.terminate();proc.wait(timeout=5)
+                raise
+        def stop_redis(proc):
+            if proc.poll() is None:
+                proc.terminate()
+                try: proc.wait(timeout=5)
+                except subprocess.TimeoutExpired: proc.kill();proc.wait(timeout=5)
+        with Idp(root,origin1,idp_key,idp_cert) as idp:
+            configs=[]
+            secret=root/"shared-secret"
+            secret.write_text(idp.secret);secret.chmod(0o600)
+            for node,origin in ((first,origin1),(second,origin2)):
+                config=node/"oidc.json"
+                config.write_text(json.dumps({"Issuer":idp.issuer,"ClientId":idp.client,
+                    "ClientSecretFile":str(secret),"ManagementOrigin":origin,"RequiredAcr":"urn:fixture:fido",
+                    "RequiredAmr":"fido2","BreakGlassUsername":"recovery","Accounts":[{"Subject":"operator-subject",
+                    "Username":"operator","Group":"gateway-operators","Role":"Operator"}]}))
+                config.chmod(0o600);configs.append(config)
+            cutoff_key="gatewaycore:oidc:cutoff:v1:"+hashlib.sha256(
+                (idp.issuer+"\n"+idp.client+"\noperator-subject").encode()).hexdigest().upper()
+            redis_proc=start_redis()
+            try:
+                check(cli("SET",cutoff_key,"0","NX")=="OK","explicit shared cutoff initialization")
+                shared={"SSL_CERT_FILE":str(trust),"GATEWAY_OIDC_REVOCATION_REDIS_FILE":str(redis_file)}
+                with patch.dict(os.environ,dict(shared,GATEWAY_OIDC_CONFIG_FILE=str(configs[0]))), gateway(cwd,dll,first,hp1,tls1):
+                    with patch.dict(os.environ,dict(shared,GATEWAY_OIDC_CONFIG_FILE=str(configs[1]))), gateway(cwd,dll,second,hp2,tls2):
+                        idp.gateway_origin=origin1
+                        a,_=browser(origin1,ctx);a.request("GET","/admin/oidc/start")
+                        idp.gateway_origin=origin2
+                        b,_=browser(origin2,ctx);b.request("GET","/admin/oidc/start")
+                        check(a.session()["authenticated"] and b.session()["authenticated"],
+                            "two independent shipping gateways establish federated sessions")
+                        notice,stamp=idp.logout_notice()
+                        backchannel(origin1,ctx,notice,200)
+                        check(not a.session()["authenticated"] and not b.session()["authenticated"],
+                            "one provider notice revokes both management replicas")
+                        idp.auth_override=stamp
+                        stale,_=browser(origin2,ctx);stale.request("GET","/admin/oidc/start",expect=403)
+                        check(not stale.session()["authenticated"],"shared authority rejects stale callback on other replica")
+                        idp.auth_override=None
+                        while int(time.time())<=stamp: time.sleep(.05)
+                        fresh,_=browser(origin2,ctx);fresh.request("GET","/admin/oidc/start")
+                        backchannel(origin2,ctx,notice,200)
+                        check(fresh.session()["authenticated"],"late replay on second replica preserves newer authentication")
+                        check(cli("GET",cutoff_key)==str(stamp),"shared cutoff persisted monotonically")
+                        # Simulate an unsafe stale restore while both running
+                        # nodes have observed the newer cutoff. Never permit
+                        # fresh login or a replay to repair an older authority.
+                        check(cli("SET",cutoff_key,"0")=="OK","stale authority rollback fixture")
+                        check(not fresh.session()["authenticated"],"observed cutoff rollback denies existing session")
+                        backchannel(origin1,ctx,notice,503)
+                        backchannel(origin2,ctx,notice,503)
+                        check(cli("GET",cutoff_key)=="0","rejected replay does not overwrite rolled-back cutoff")
+                        rollback_browser,_=browser(origin2,ctx)
+                        rollback_browser.request("GET","/admin/oidc/start",expect=403)
+                        check(not rollback_browser.session()["authenticated"],"rolled-back authority denies fresh callback")
+                        # Explicitly restore the exact known good cutoff in the
+                        # disposable fixture only; never auto-repair production.
+                        check(cli("SET",cutoff_key,str(stamp))=="OK","fixture restores known cutoff")
+                        fresh,_=browser(origin2,ctx);fresh.request("GET","/admin/oidc/start")
+                        check(fresh.session()["authenticated"],"known cutoff restoration permits fresh authentication")
+                        stop_redis(redis_proc)
+                        check(not fresh.session()["authenticated"],"authority outage denies existing federated cookie")
+                        backchannel(origin1,ctx,notice,503)
+                        redis_proc=start_redis()
+                        check(cli("GET",cutoff_key)==str(stamp),"authority restart recovers durable cutoff")
+                        # Multiplexers reconnect independently. Check that each
+                        # actually accepts the same signed, idempotent notice
+                        # before attempting a new browser login (no login retry).
+                        for origin in (origin1,origin2):
+                            deadline=time.monotonic()+15
+                            while True:
+                                try:
+                                    backchannel(origin,ctx,notice,200);break
+                                except AssertionError:
+                                    if time.monotonic()>=deadline: raise
+                                    time.sleep(.25)
+                        fresh2,_=browser(origin2,ctx);fresh2.request("GET","/admin/oidc/start")
+                        check(fresh2.session()["authenticated"],"fresh authentication after durable authority recovery")
+                        cli("DEL",cutoff_key)
+                        check(not fresh2.session()["authenticated"],"missing authority record denies cookie")
+                        backchannel(origin1,ctx,notice,503)
+                        check(cli("EXISTS",cutoff_key)=="0","missing cutoff is never recreated implicitly")
+            finally: stop_redis(redis_proc)
+    print("DISTRIBUTED_OIDC_REVOCATION_HTTPS_SUCCESS",flush=True)
+
 def main():
     parser=argparse.ArgumentParser()
     parser.add_argument("--root",type=Path,default=Path("control-center"))
@@ -383,5 +519,6 @@ def main():
                         "HTTP end-session fixture establishes an otherwise valid OIDC session")
                     insecure_logout_endpoint_is_rejected(bad_admin,idp)
             print("ENTERPRISE_OIDC_HTTPS_SUCCESS",flush=True)
+    distributed_revocation(cwd,dll)
 
 if __name__=="__main__": main()

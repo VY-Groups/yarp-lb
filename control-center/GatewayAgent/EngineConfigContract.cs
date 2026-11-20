@@ -67,6 +67,10 @@ public static class EngineConfigContract
                 Num(config["ListenPort"],53,53) && allowPublicBind && publicOptIn && !IPAddress.IsLoopback(bind);
             if (!listenPortAllowed ||
                 !Num(config["ProbeIntervalSeconds"],1,60) ||
+                (config.TryGetPropertyValue("MaxUdpQueriesPerSecond", out var aggregate) &&
+                 !Num(aggregate,0,0) && !Num(aggregate,20,200000)) ||
+                (config.TryGetPropertyValue("GroupIpv6UdpClientsByPrefix", out var groupIpv6) &&
+                 !Bool(groupIpv6)) ||
                 (config["MaxResponsesPerSecondPerClient"] is not null &&
                  !Num(config["MaxResponsesPerSecondPerClient"],20,20000)) ||
                 (!IPAddress.IsLoopback(bind) && (!allowPublicBind || !publicOptIn)) ||
@@ -115,6 +119,10 @@ public static class EngineConfigContract
                 !used.Add(name) || !Ip(listener["ListenHost"],out var address) ||
                 !Num(listener["ListenPort"],1025,65535) ||
                 (!IPAddress.IsLoopback(address) && (!allowPublicBind || !publicOptIn)) ||
+                (listener.TryGetPropertyValue("TcpMaxConnections", out var tcpLimit) &&
+                 !Num(tcpLimit,1,4096)) ||
+                (listener.TryGetPropertyValue("UdpMaxSessions", out var udpLimit) &&
+                 !Num(udpLimit,1,4096)) ||
                 (listener["TcpIdleTimeoutSeconds"] is not null &&
                  !Num(listener["TcpIdleTimeoutSeconds"],1,3600)) ||
                 (listener.TryGetPropertyValue("UdpIdleTimeoutSeconds", out var udpIdle) &&

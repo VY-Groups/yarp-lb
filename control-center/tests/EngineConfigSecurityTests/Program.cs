@@ -3,6 +3,12 @@ using System.Security.Cryptography.X509Certificates;
 using Microsoft.AspNetCore.Http;
 using System.Text.Json.Nodes;
 
+if (args.Length > 0 && args[0] == "--fleet-recovery-fixture")
+{
+    await FleetRecoveryProcessAcceptance.RunAsync(args[1..]);
+    return;
+}
+
 await GatewayLogFilteringAcceptance.RunAsync();
 
 static void Must(bool condition, string name)
@@ -179,6 +185,28 @@ Must(EngineConfigContract.Validate("l4",remote,true),
 var invalid=l4.DeepClone().AsObject();
 invalid["Tcp"]![0]!["Backends"]![0]!["Port"]=0;
 Must(!EngineConfigContract.Validate("l4",invalid,false), "invalid backend port rejected");
+var admissionConfig = l4.DeepClone().AsObject();
+var admissionListener = admissionConfig["Tcp"]![0]!.AsObject();
+foreach (var field in new[] { "TcpMaxConnections", "UdpMaxSessions" })
+{
+    foreach (var value in new[] { 1, 1024, 4096 })
+    {
+        admissionListener[field] = value;
+        Must(EngineConfigContract.Validate("l4",admissionConfig,false),
+            "signed L4 admission accepts " + field + "=" + value);
+    }
+    foreach (var value in new[] { 0, -1, 4097 })
+    {
+        admissionListener[field] = value;
+        Must(!EngineConfigContract.Validate("l4",admissionConfig,false),
+            "signed L4 admission rejects " + field + "=" + value);
+    }
+    admissionListener[field] = null;
+    Must(!EngineConfigContract.Validate("l4",admissionConfig,false), "signed L4 admission rejects null");
+    admissionListener[field] = "2";
+    Must(!EngineConfigContract.Validate("l4",admissionConfig,false), "signed L4 admission rejects strings");
+    admissionListener.Remove(field);
+}
 var udpIdleConfig = l4.DeepClone().AsObject();
 var udpIdleListener = udpIdleConfig["Tcp"]![0]!.DeepClone().AsObject();
 udpIdleListener.Remove("TcpIdleTimeoutSeconds");
@@ -201,6 +229,28 @@ udpIdleListener["UdpIdleTimeoutSeconds"] = "30";
 Must(!EngineConfigContract.Validate("l4",udpIdleConfig,false), "signed UDP configuration rejects string idle timeout");
 udpIdleListener["UdpIdleTimeoutSeconds"] = null;
 Must(!EngineConfigContract.Validate("l4",udpIdleConfig,false), "signed UDP configuration rejects explicit null idle timeout");
+var dnsBudget = dns.DeepClone().AsObject();
+foreach (var value in new[] {0,20,200000})
+{
+    dnsBudget["MaxUdpQueriesPerSecond"] = value;
+    Must(EngineConfigContract.Validate("gslb",dnsBudget,false), "signed DNS UDP aggregate bound accepts " + value);
+}
+foreach (var value in new[] {-1,1,19,200001})
+{
+    dnsBudget["MaxUdpQueriesPerSecond"] = value;
+    Must(!EngineConfigContract.Validate("gslb",dnsBudget,false), "signed DNS UDP aggregate bound rejects " + value);
+}
+dnsBudget["MaxUdpQueriesPerSecond"] = null;
+Must(!EngineConfigContract.Validate("gslb",dnsBudget,false), "signed DNS aggregate null rejected");
+dnsBudget["MaxUdpQueriesPerSecond"] = "20";
+Must(!EngineConfigContract.Validate("gslb",dnsBudget,false), "signed DNS aggregate string rejected");
+dnsBudget["MaxUdpQueriesPerSecond"] = 20;
+dnsBudget["GroupIpv6UdpClientsByPrefix"] = true;
+Must(EngineConfigContract.Validate("gslb",dnsBudget,false), "signed IPv6 prefix grouping accepted");
+dnsBudget["GroupIpv6UdpClientsByPrefix"] = "true";
+Must(!EngineConfigContract.Validate("gslb",dnsBudget,false), "signed IPv6 grouping rejects string");
+dnsBudget["GroupIpv6UdpClientsByPrefix"] = null;
+Must(!EngineConfigContract.Validate("gslb",dnsBudget,false), "signed IPv6 grouping rejects null");
 var badDns=dns.DeepClone().AsObject();
 badDns["Zones"]![0]!["Sites"]![0]!["HealthUrl"]="file:///etc/passwd";
 Must(!EngineConfigContract.Validate("gslb",badDns,false),

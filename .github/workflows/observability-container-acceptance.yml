@@ -73,6 +73,9 @@ jobs:
             sleep 2
           done
 
+          # The security suite now starts a real shipping controller during
+          # fleet recovery acceptance; build both executables before running it.
+          dotnet build control-center/GatewayCoreYarp.csproj -c Release
           dotnet build control-center/GatewayAgent/GatewayCoreGatewayAgent.csproj -c Release
           (cd control-center && dotnet run --project tests/EngineConfigSecurityTests/EngineConfigSecurityTests.csproj -c Release)
 

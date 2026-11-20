@@ -28,6 +28,7 @@ if (!IPAddress.TryParse(config.ListenHost, out var listen) ||
         !(config.ListenPort == 53 && config.AllowNonLoopbackListeners && !IPAddress.IsLoopback(listen)) ||
     config.ProbeIntervalSeconds is < 1 or > 60 ||
     config.MaxResponsesPerSecondPerClient is < 20 or > 20000 ||
+    (config.MaxUdpQueriesPerSecond != 0 && config.MaxUdpQueriesPerSecond is < 20 or > 200000) ||
     config.MaxConcurrentHealthProbes is < 1 or > 128 ||
     config.MetricsListenPort is < 0 or > 65535 ||
     config.Zones is not { Length: >= 1 and <= 64 })
@@ -479,7 +480,8 @@ var tcpAccept = Task.Run(async () =>
 });
 Console.WriteLine($"GSLB_DNS_READY UDP+TCP={config.ListenHost}:{config.ListenPort} zones={groups.Count}");
 var buffer=new byte[4096];
-var responseLimiter=new DnsResponseRateLimiter(config.MaxResponsesPerSecondPerClient);
+var responseLimiter=new DnsResponseRateLimiter(config.MaxResponsesPerSecondPerClient,
+    totalPerSecond: config.MaxUdpQueriesPerSecond, groupIpv6: config.GroupIpv6UdpClientsByPrefix);
 try
 {
     while(!stop.IsCancellationRequested)
@@ -529,6 +531,8 @@ sealed record DnsConfig(bool AllowNonLoopbackListeners,string ListenHost,int Lis
     int ProbeIntervalSeconds,DnsZone[] Zones)
 {
     public int MaxResponsesPerSecondPerClient {get;init;} = 500;
+    public int MaxUdpQueriesPerSecond {get;init;} = 0;
+    public bool GroupIpv6UdpClientsByPrefix {get;init;} = false;
     public int MaxConcurrentHealthProbes {get;init;} = 32;
     public string MetricsListenHost { get; init; } = "127.0.0.1";
     public int MetricsListenPort { get; init; }

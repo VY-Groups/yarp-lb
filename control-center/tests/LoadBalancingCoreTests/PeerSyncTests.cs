@@ -75,6 +75,49 @@ public static class PeerSyncTests
             Console.WriteLine("PASS: " + name);
         }
         var secret=Enumerable.Repeat((byte)0x42,32).ToArray();
+        var activeKey = Enumerable.Repeat((byte)0x43,32).ToArray();
+        var oldKey = Enumerable.Repeat((byte)0x44,32).ToArray();
+        var overlap = new PeerSignedMessages(activeKey,oldKey);
+        var oldSigner = new PeerSignedMessages(oldKey);
+        var newSigner = new PeerSignedMessages(activeKey);
+        var sample = Encoding.UTF8.GetBytes("bounded fixture payload");
+        const long keyTime = 12345;
+        var oldMessage = oldSigner.Sign("node-a",keyTime,sample);
+        Check(overlap.Verify("node-a","node-a",keyTime,oldMessage.nonce,oldMessage.signature,sample,keyTime),
+            "overlap accepts previous signing key");
+        var entryPrefix = Encoding.UTF8.GetBytes("node-a\n"+keyTime+"\n"+oldMessage.nonce+"\n");
+        var macInput = entryPrefix.Concat(System.Security.Cryptography.SHA256.HashData(sample)).ToArray();
+        var replayWithNewKey = Convert.ToBase64String(System.Security.Cryptography.HMACSHA256.HashData(activeKey,macInput));
+        Check(!overlap.Verify("node-a","node-a",keyTime,oldMessage.nonce,replayWithNewKey,sample,keyTime),
+            "nonce replay is rejected across signing keys");
+        var newMessage = newSigner.Sign("node-a",keyTime,sample);
+        Check(overlap.Verify("node-a","node-a",keyTime,newMessage.nonce,newMessage.signature,sample,keyTime),
+            "overlap admits distinct active-key message");
+        var outgoing = overlap.Sign("node-a",keyTime,sample);
+        Check(newSigner.Verify("node-a","node-a",keyTime,outgoing.nonce,outgoing.signature,sample,keyTime) &&
+              !oldSigner.Verify("node-a","node-a",keyTime,outgoing.nonce,outgoing.signature,sample,keyTime),
+            "outgoing messages use only active signing key");
+        var retired = new PeerSignedMessages(activeKey);
+        var oldAfterRetirement = oldSigner.Sign("node-a",keyTime,sample);
+        Check(!retired.Verify("node-a","node-a",keyTime,oldAfterRetirement.nonce,oldAfterRetirement.signature,sample,keyTime),
+            "retired signing key rejected");
+        var keyConfig = PeerSyncSettings.FromEnvironment("node-a","node-b",
+            "https://node-b.test/gateway/internal/peer-sync",new string('i',32),null,null,
+            new string('a',32),new string('b',32))!;
+        Check(Encoding.UTF8.GetString(keyConfig.Secret)==new string('i',32) &&
+              Encoding.UTF8.GetString(keyConfig.SigningSecret!)==new string('a',32) &&
+              Encoding.UTF8.GetString(keyConfig.PreviousSigningSecret!)==new string('b',32),
+            "identity hashing key independent of transport-key rotation");
+        foreach (var (active,previous) in new (string?,string?)[] {
+            (null,new string('b',32)), ("short",null), (new string('a',32),"short"),
+            (new string('a',32),new string('a',32)) })
+        {
+            var denied = false;
+            try { PeerSyncSettings.FromEnvironment("node-a","node-b",
+                "https://node-b.test/gateway/internal/peer-sync",new string('i',32),null,null,active,previous); }
+            catch (InvalidOperationException) { denied = true; }
+            Check(denied,"invalid signing overlap settings rejected");
+        }
         var publisherClock = new ManualTimeProvider(DateTimeOffset.UtcNow);
         var publisherDiagnostics = new PeerSyncPublisherDiagnostics(publisherClock);
         var initialPublisher = publisherDiagnostics.Snapshot();

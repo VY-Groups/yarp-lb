@@ -461,6 +461,19 @@ def verify_queued_destination_replacement(base:str,admin:Client,reviewer:Client,
     await_marker(True)
     apply(original,False)
     await_marker(False)
+    # The YARP model marker precedes asynchronous admission reconciliation.
+    # Only an idempotent GET may wait for the matching gate; never retry the
+    # transaction POST or the held stream that the fixture is about to test.
+    deadline=time.monotonic()+6
+    while True:
+        status,headers,body=response(base,"/admit/normal")
+        if status==200 and body=="e2e-origin:/normal":
+            break
+        check(status==503 and headers.get("X-GatewayCore-Rejection")=="admission_policy_conflict",
+            "unreconciled policy rejects the readiness GET locally")
+        if time.monotonic()>=deadline:
+            raise AssertionError("destination admission policy did not reconcile")
+        time.sleep(.05)
     Origin.replacement_release.clear()
     with Origin.connection_lock:
         Origin.replacement_attempts.clear()
@@ -619,6 +632,22 @@ def acceptance(base:str,https_base:str,origin_port:int):
     operator.request("POST","/admin/api/change-requests",change,expect=423)
     admin.request("POST","/admin/api/setup/freeze",{"frozen":False,
         "reason":"E2E completed maintenance freeze test"})
+    profile=admin.request("GET","/admin/api/organization")
+    profile_update={"organizationName":"Disposable E2E Organization","sector":"technology",
+        "region":"Lab","notes":"","expectedRevision":profile["revision"]}
+    viewer.request("PUT","/admin/api/organization",profile_update,expect=403)
+    updated=admin.request("PUT","/admin/api/organization",profile_update)
+    admin.request("PUT","/admin/api/organization",profile_update,expect=409)
+    audit=admin.request("GET","/admin/api/audit")
+    for action,expected in (("ROUTING_CHANGE_FREEZE_ENABLED",True),
+                            ("ROUTING_CHANGE_FREEZE_DISABLED",False)):
+        matching=[row for row in audit if row["action"]==action]
+        check(len(matching)==1 and matching[0]["details"]["current"] is expected,
+              "shared audit records exact freeze outcome: "+action)
+    matching=[row for row in audit if row["action"]=="ORGANIZATION_PROFILE_UPDATED"]
+    check(len(matching)==1 and matching[0]["details"]["revision"]==updated["revision"]
+          and matching[0]["details"]["organizationName"]==profile_update["organizationName"],
+          "shared audit records exact profile revision; denied and stale updates do not emit success")
     plan={"schemaVersion":1,"payload":payload}
     before_drafts=admin.request("GET","/admin/api/change-requests")
     before_backups=admin.request("GET","/admin/api/backups")

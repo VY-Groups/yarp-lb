@@ -161,6 +161,21 @@ try
     Assert(Throws(()=>{using var _=Provider(state);}),
         "0644 secret password file is refused");
     File.SetUnixFileMode(first.PasswordFile,PrivateFile);
+    var linkedSecrets=Path.Combine(root,"linked-secrets");
+    Directory.CreateSymbolicLink(linkedSecrets,secrets);
+    Set("YARP_LINUX_DP_CERT_PFX_PATH",Path.Combine(linkedSecrets,Path.GetFileName(first.Pfx)));
+    Assert(Throws(()=>{using var _=Provider(state);}), "symlinked PFX ancestor refused");
+    Set("YARP_LINUX_DP_CERT_PFX_PATH",first.Pfx);
+    Set("YARP_LINUX_DP_CERT_PASSWORD_FILE",Path.Combine(linkedSecrets,Path.GetFileName(first.PasswordFile)));
+    Assert(Throws(()=>{using var _=Provider(state);}), "symlinked password ancestor refused");
+    Set("YARP_LINUX_DP_CERT_PASSWORD_FILE",first.PasswordFile);
+    File.SetUnixFileMode(secrets,PrivateDir|UnixFileMode.OtherWrite);
+    Assert(Throws(()=>{using var _=Provider(state);}), "world-writable secret ancestor refused");
+    File.SetUnixFileMode(secrets,PrivateDir);
+    var originalPassword=File.ReadAllBytes(first.PasswordFile);
+    File.WriteAllText(first.PasswordFile,new string('x',4097));
+    Assert(Throws(()=>{using var _=Provider(state);}), "oversized wrapping password refused");
+    File.WriteAllBytes(first.PasswordFile,originalPassword);
     File.SetUnixFileMode(state,PrivateDir|UnixFileMode.GroupRead);
     Assert(Throws(()=>LinuxKeyProtection.InitializeStateDirectory()),
         "0750 state directory is refused");

@@ -50,6 +50,40 @@ public static class DestinationAdmissionTests
               DestinationAdmissionState.QueueWaitBucketIndex(60_001) == -1,
             "known 6 ms wait maps to the 10 ms finite bucket and values above 60 s map to +Inf");
 
+        // Applied model updates and registry reconciliation are asynchronous.
+        // Exercise both directions of mismatch, including timeout-only changes.
+        var oldPolicy = new DestinationAdmissionPolicy(3, 2, 5000);
+        var newPolicy = new DestinationAdmissionPolicy(1, 0, 1000);
+        var revisionGate = new DestinationAdmissionState(oldPolicy);
+        async Task ExpectPolicyConflict(DestinationAdmissionPolicy expected)
+        {
+            var rejected = false;
+            try
+            {
+                using var unexpected = await revisionGate.AcquireForPolicyAsync(CancellationToken.None, expected);
+            }
+            catch (DestinationAdmissionPolicyChangedException) { rejected = true; }
+            Check(rejected, "policy mismatch fails before reserving or queueing a permit");
+        }
+        await ExpectPolicyConflict(newPolicy);
+        Check(revisionGate.Snapshot is { InFlight: 0, Queued: 0, Rejected: 1 },
+            "unreconciled stricter policy leaves accounting unchanged except rejection");
+        using (var prior = await revisionGate.AcquireForPolicyAsync(CancellationToken.None, oldPolicy) ??
+            throw new Exception("FAIL: matching old revision grants"))
+        {
+            Check(revisionGate.TryUpdatePolicy(newPolicy), "reconcile new policy without resetting live permit");
+            await ExpectPolicyConflict(oldPolicy);
+            await ExpectPolicyConflict(newPolicy with { QueueTimeoutMs = 2000 });
+            Check(await revisionGate.AcquireForPolicyAsync(CancellationToken.None, newPolicy) is null,
+                "matching stricter revision preserves old live permit and enforces new bounds");
+            Check(revisionGate.Snapshot is { InFlight: 1, Queued: 0, Rejected: 4 },
+                "revision and queue-full denials cannot leak or double-count slots");
+        }
+        using (var recovered = await revisionGate.AcquireForPolicyAsync(CancellationToken.None, newPolicy) ??
+            throw new Exception("FAIL: matching policy recovers after original lease ends"))
+            Check(revisionGate.Snapshot.InFlight == 1, "matching revision resumes at correct capacity");
+        Check(revisionGate.Snapshot is { InFlight: 0, Queued: 0 }, "revision fence returns to idle");
+
         var single = new DestinationAdmissionState(new DestinationAdmissionPolicy(1, 2, 5000));
         using var first = await single.AcquireAsync(CancellationToken.None) ??
             throw new Exception("FAIL: first destination permit should be acquired");

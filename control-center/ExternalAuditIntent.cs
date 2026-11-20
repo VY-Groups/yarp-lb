@@ -92,23 +92,79 @@ internal sealed class ExternalAuditIntent : IDisposable
         SignatureInput("GatewayCore-Audit-Receipt-v1", id, body);
 
     internal async Task<bool> ConfirmAsync(string actor, string operation, string revision,
+        string targetDigest, CancellationToken cancellationToken) =>
+        await ConfirmWithIdAsync(actor, operation, revision, targetDigest, cancellationToken) is not null;
+
+    internal async Task<string?> ConfirmWithIdAsync(string actor, string operation, string revision,
         string targetDigest, CancellationToken cancellationToken)
     {
-        if (cancellationToken.IsCancellationRequested || actor.Length is < 1 or > 256 || actor.Any(char.IsControl) || operation is not ("CONFIG_APPLY_INTENT" or "CONFIG_RESTORE_INTENT" or "USER_CREATE_INTENT" or "USER_PASSWORD_RESET_INTENT" or "USER_DISABLE_INTENT" or "USER_ENABLE_INTENT") ||
+        if (cancellationToken.IsCancellationRequested || actor.Length is < 1 or > 256 || actor.Any(char.IsControl) || operation is not ("CONFIG_APPLY_INTENT" or "CONFIG_RESTORE_INTENT" or "USER_CREATE_INTENT" or "USER_PASSWORD_RESET_INTENT" or "USER_DISABLE_INTENT" or "USER_ENABLE_INTENT" or "INVENTORY_ADD_INTENT" or "INVENTORY_DELETE_INTENT" or "FLEET_REGISTER_INTENT" or "FLEET_UNREGISTER_INTENT" or "MAIL_SETTINGS_INTENT" or "MAIL_PROOF_INTENT" or "DIRECTORY_SETTINGS_INTENT" or "TOPOLOGY_DRAFT_INTENT" or "TOPOLOGY_CONFIRM_INTENT" or "CHANGE_REQUEST_INTENT" or "CHANGE_REJECT_INTENT" or "FLEET_ROLLOUT_INTENT" or "FLEET_RECOVERY_INTENT") ||
             !IsDigest(revision) || !IsDigest(targetDigest))
-            return false;
+            return null;
         var id = Guid.NewGuid().ToString("N");
         var payload = JsonSerializer.SerializeToUtf8Bytes(new
         {
             schema = 1, eventId = id, node, utc = DateTimeOffset.UtcNow,
             actor, operation, revision, targetDigest
         });
+        return await SendAsync(id, payload, EventMac(id, payload, false), false, cancellationToken)
+            ? id : null;
+    }
+
+    internal sealed record QueuedEvent(string Id, byte[] Payload, string Mac);
+    private string EventMac(string id, byte[] payload, bool recorded) =>
+        Convert.ToBase64String(HMACSHA256.HashData(senderKey, SignatureInput(
+            recorded ? "GatewayCore-Audit-Event-v2" : "GatewayCore-Audit-Intent-v1", id, payload)));
+
+    internal static bool AccountCorrelationAction(string action) => action is
+        "ACCOUNT_MUTATION_PREPARED" or "USER_CREATED" or "PASSWORD_RESET" or "USER_OFFBOARDED" or "USER_REENABLED";
+
+    internal QueuedEvent CreateEvent(string actor, string action, DateTimeOffset utc, string localDigest,
+        string? intentId = null)
+    {
+        if (actor.Length is < 1 or > 256 || actor.Any(char.IsControl))
+            actor = "invalid-actor:" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(actor)));
+        if (action.Length is < 1 or > 96 || !action.All(c => c is >= 'A' and <= 'Z' or >= '0' and <= '9' or '_') ||
+            !IsDigest(localDigest)) throw new InvalidDataException("Invalid recorded audit event");
+        if (intentId is not null && (!AccountCorrelationAction(action) ||
+            !Guid.TryParseExact(intentId, "N", out var intent) || intent.ToString("N") != intentId))
+            throw new InvalidDataException("Invalid account audit correlation");
+        if (action == "ACCOUNT_MUTATION_PREPARED" && intentId is null)
+            throw new InvalidDataException("Prepared account audit requires confirmed intent");
+        var correlation = intentId is null ? new string('0', 64) :
+            Convert.ToHexString(SHA256.HashData(Encoding.ASCII.GetBytes(intentId)));
+        var id = Guid.NewGuid().ToString("N");
+        var payload = JsonSerializer.SerializeToUtf8Bytes(new
+        {
+            schema = 2, eventId = id, node, utc, actor, operation = action,
+            revision = correlation, targetDigest = localDigest
+        });
+        if (payload.Length > 4096) throw new InvalidDataException("Recorded audit envelope exceeds limit");
+        return new QueuedEvent(id, payload, EventMac(id, payload, true));
+    }
+
+    internal bool ValidEvent(QueuedEvent entry)
+    {
+        if (entry.Id is null || !Guid.TryParseExact(entry.Id, "N", out var id) || id.ToString("N") != entry.Id ||
+            entry.Payload is not { Length: >= 1 and <= 4096 } || entry.Mac is not { Length: 44 }) return false;
+        if (!CryptographicOperations.FixedTimeEquals(Encoding.ASCII.GetBytes(entry.Mac),
+            Encoding.ASCII.GetBytes(EventMac(entry.Id, entry.Payload, true)))) return false;
+        using var doc = JsonDocument.Parse(entry.Payload);
+        var root = doc.RootElement;
+        return root.GetProperty("schema").GetInt32() == 2 &&
+            root.GetProperty("node").GetString() == node && root.GetProperty("eventId").GetString() == entry.Id;
+    }
+
+    internal Task<bool> DeliverEventAsync(QueuedEvent entry, CancellationToken ct) =>
+        ValidEvent(entry) ? SendAsync(entry.Id, entry.Payload, entry.Mac, true, ct) : Task.FromResult(false);
+
+    private async Task<bool> SendAsync(string id, byte[] payload, string mac, bool recorded, CancellationToken cancellationToken)
+    {
         using var request = new HttpRequestMessage(HttpMethod.Post, endpoint);
         request.Content = new ByteArrayContent(payload);
         request.Content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/json");
         request.Headers.Add(EventIdHeader, id);
-        request.Headers.Add(RequestSignature, Convert.ToBase64String(HMACSHA256.HashData(senderKey,
-            SignatureInput("GatewayCore-Audit-Intent-v1", id, payload))));
+        request.Headers.Add(RequestSignature, mac);
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         deadline.CancelAfter(TimeSpan.FromSeconds(5));
         try
@@ -122,7 +178,8 @@ internal sealed class ExternalAuditIntent : IDisposable
             var signature = Convert.FromBase64String(values[0]);
             lock (verifyGate)
                 return !deadline.IsCancellationRequested &&
-                    collectorKey.VerifyData(ReceiptInput(id, payload), signature,
+                    collectorKey.VerifyData(recorded ? SignatureInput("GatewayCore-Audit-Event-Receipt-v2", id, payload)
+                        : ReceiptInput(id, payload), signature,
                         HashAlgorithmName.SHA256, RSASignaturePadding.Pss) &&
                     !deadline.IsCancellationRequested;
         }

@@ -7,7 +7,7 @@ services:
     expose: ["8000"]
     networks: ["waf-private"]
   waf:
-    image: owasp/modsecurity-crs:nginx
+    image: ${WAF_IMAGE:-owasp/modsecurity-crs:nginx}
     environment:
       BACKEND: http://protected-app:8000
       SERVER_NAME: localhost
@@ -28,6 +28,13 @@ services:
       - "127.0.0.1:18888:8080"
     depends_on:
       - protected-app
+    networks: ["waf-private"]
+  benchmark:
+    image: python:3.12-alpine
+    profiles: ["benchmark"]
+    entrypoint: ["python", "/app/benchmark.py"]
+    volumes:
+      - ../../tests/WafCrs/benchmark.py:/app/benchmark.py:ro
     networks: ["waf-private"]
 networks:
   waf-private:
