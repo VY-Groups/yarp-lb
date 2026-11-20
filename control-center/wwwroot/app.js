@@ -997,6 +997,14 @@ function act(type, id) {
         void fleetStatus();
         return;
     }
+    if (type === 'fleet-journal') {
+        void fleetJournal();
+        return;
+    }
+    if (type === 'fleet-recover') {
+        void recoverFleetRollout(id);
+        return;
+    }
     if (type === 'fleet-rollout') {
         void performFleetRollout();
         return;
@@ -1428,7 +1436,7 @@ $('content').addEventListener('submit', e => {
 });
 async function fleet() { try {
     const rows = await api('/admin/api/fleet');
-    $('content').innerHTML = `<div class="toolbar"><div><h2>Managed YARP gateway fleet</h2><p class="subtle">Read-only mTLS gateway status. A registered gateway is not automatically enrolled or remotely controlled.</p></div>${currentRole === 'Administrator' ? actionBtn('+ Register gateway', 'fleet-add', '') : ''} ${actionBtn('Check agent status', 'fleet-probe', '')} ${currentRole === 'Administrator' ? actionBtn('Roll out approved change', 'fleet-rollout', '') : ''} ${actionBtn('Destination metrics', 'dest-metrics', '')}</div><div class="tablewrap"><table><thead><tr><th>Gateway</th><th>HTTPS agent origin</th><th>Identity</th><th>Actions</th></tr></thead><tbody>${rows.map(x => `<tr><td>${esc(x.id)}</td><td class="mono">${esc(x.url)}</td><td>${esc(x.clientCertificateThumbprint)}</td><td>${currentRole === 'Administrator' ? actionBtn('Unregister', 'fleet-remove', x.id) : '—'}</td></tr>`).join('') || '<tr><td colspan="4">No gateways registered</td></tr>'}</tbody></table></div><div class="healthbanner">mTLS gateway agents require independent certificate provisioning. This console cannot remotely install Windows services or deploy configs yet.</div>`;
+    $('content').innerHTML = `<div class="toolbar"><div><h2>Managed YARP gateway fleet</h2><p class="subtle">Read-only mTLS gateway status. A registered gateway is not automatically enrolled or remotely controlled.</p></div>${currentRole === 'Administrator' ? actionBtn('+ Register gateway', 'fleet-add', '') : ''} ${actionBtn('Check agent status', 'fleet-probe', '')} ${currentRole === 'Administrator' ? actionBtn('Roll out approved change', 'fleet-rollout', '') : ''} ${actionBtn('Destination metrics', 'dest-metrics', '')} ${actionBtn('Rollout journal', 'fleet-journal', '')}</div><div class="tablewrap"><table><thead><tr><th>Gateway</th><th>HTTPS agent origin</th><th>Identity</th><th>Actions</th></tr></thead><tbody>${rows.map(x => `<tr><td>${esc(x.id)}</td><td class="mono">${esc(x.url)}</td><td>${esc(x.clientCertificateThumbprint)}</td><td>${currentRole === 'Administrator' ? actionBtn('Unregister', 'fleet-remove', x.id) : '—'}</td></tr>`).join('') || '<tr><td colspan="4">No gateways registered</td></tr>'}</tbody></table></div><div class="healthbanner">mTLS gateway agents require independent certificate provisioning. Reviewed configuration rollout requires compatible agent rollback fencing; service installation remains manual.</div>`;
 }
 catch (e) {
     show(String(e), true);
@@ -1483,6 +1491,27 @@ async function fleetStatus() {
     catch (e) {
         show(String(e), true);
     }
+}
+async function fleetJournal() {
+    try {
+        const rows = await api('/admin/api/fleet/rollouts');
+        $('content').innerHTML = `<div class="toolbar"><h2>Fleet rollout journal</h2>${actionBtn('Back to fleet', 'switch', 'fleet')} ${actionBtn('Refresh', 'fleet-journal', '')}</div><p class="subtle">Recovery rolls back attempted targets only. A successful rollback is verified by original revision; application health still requires inspection. Legacy or ambiguous journals require manual reconciliation.</p><div class="tablewrap"><table><thead><tr><th>Transaction</th><th>Status</th><th>Action</th></tr></thead><tbody>${rows.map(x => `<tr><td>${esc(x.id)}<div class="subtle">${esc(x.changeId || '')}</div></td><td>${esc(x.status)}</td><td>${currentRole === 'Administrator' && x.schema === 2 && ['starting', 'preparing', 'activating', 'manual-intervention-required', 'recovering'].includes(x.status) ? actionBtn('Recover / rollback', 'fleet-recover', x.id) : '—'}</td></tr>`).join('') || '<tr><td colspan="3">No rollout records</td></tr>'}</tbody></table></div>`;
+    }
+    catch (e) {
+        show(String(e), true);
+    }
+}
+async function recoverFleetRollout(id) {
+    if (!confirm('Recover transaction ' + id + ' by rolling back attempted gateways? Verify the original fleet membership and maintenance approval before continuing.'))
+        return;
+    try {
+        const x = await api('/admin/api/fleet/rollouts/' + encodeURIComponent(id) + '/recover', 'POST', {});
+        show('Recovery ' + id + ': ' + x.status + '. Inspect live health.');
+    }
+    catch (e) {
+        show('Recovery not confirmed: ' + String(e), true);
+    }
+    await fleetJournal();
 }
 async function performFleetRollout() {
     const changeId = prompt('Enter a two-person APPROVED change request ID for BOTH gateways. Changes can affect live traffic.');
