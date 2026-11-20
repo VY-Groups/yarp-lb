@@ -114,7 +114,7 @@ internal sealed class DurableAuditOutbox : IDisposable
         }
     }
 
-    private sealed class QueueFullException() : IOException("Audit outbox full; no event discarded");
+    private sealed class QueueFullException() : IOException("Audit outbox full; no event discarded") { }
 
     internal async Task<bool> DeliverOneAsync(CancellationToken ct)
     {
