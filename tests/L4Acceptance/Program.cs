@@ -217,6 +217,7 @@ try
         Assert((await TcpRoundTrip("unhealthy-"+i)).StartsWith("B|"),
             "active health probe removes down backend from new connection selection");
     Assert(await ValidatePublicBindDenied(), "public listener requires explicit opt-in");
+    await ValidatePartialStartupFailure();
     Console.WriteLine("L4 TCP+UDP REAL-SOCKET ACCEPTANCE PASSED");
 }
 finally
@@ -383,6 +384,47 @@ async Task<bool> ValidatePublicBindDenied()
     var error=await childError;
     return child.ExitCode != 0 && error.Contains(
         "public binds require explicit opt-in",StringComparison.Ordinal);
+}
+async Task ValidatePartialStartupFailure()
+{
+    using var occupied = new TcpListener(IPAddress.Loopback, 0);
+    occupied.Start();
+    var blocked = ((IPEndPoint)occupied.LocalEndpoint).Port;
+    var failureConfig = Path.Combine(scratch, "partial-bind.json");
+    // First listener is valid and stays alive unless sibling failure stops it.
+    File.WriteAllText(failureConfig, JsonSerializer.Serialize(new {
+        AllowNonLoopbackListeners = false,
+        Tcp = new [] {
+            new { Name = "first-tcp", ListenHost = "127.0.0.1", ListenPort = 19052,
+                Backends = new [] { new { Host = "127.0.0.1", Port = 19112 } } },
+            new { Name = "blocked-tcp", ListenHost = "127.0.0.1", ListenPort = blocked,
+                Backends = new [] { new { Host = "127.0.0.1", Port = 19112 } } }
+        },
+        Udp = new [] { new { Name = "sibling-udp", ListenHost = "127.0.0.1", ListenPort = 19053,
+            Backends = new [] { new { Host = "127.0.0.1", Port = 19122 } } } }
+    }));
+    var start = new ProcessStartInfo("dotnet") { WorkingDirectory = Path.GetDirectoryName(dll)!,
+        UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true };
+    start.ArgumentList.Add(dll); start.ArgumentList.Add(failureConfig);
+    using var child = Process.Start(start)!;
+    var output = child.StandardOutput.ReadToEndAsync();
+    var errors = child.StandardError.ReadToEndAsync();
+    using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(12));
+    try { await child.WaitForExitAsync(timeout.Token); }
+    catch (OperationCanceledException) when (timeout.IsCancellationRequested)
+    {
+        if (!child.HasExited) child.Kill(entireProcessTree: true);
+        await child.WaitForExitAsync();
+        throw new Exception("Partial listener startup hung: " + await output + await errors);
+    }
+    var log = await output;
+    Assert(child.ExitCode != 0 && log.Contains("L4_TCP_READY first-tcp") &&
+        !log.Contains("L4_ENGINE_READY"), "partial bind failure exits nonzero without advertising engine readiness");
+    Assert((await errors).Contains("SocketException"), "bind failure retains socket diagnostic");
+    using var rebound = new TcpListener(IPAddress.Loopback, 19052);
+    rebound.Start();
+    using var reboundUdp = new UdpClient(new IPEndPoint(IPAddress.Loopback, 19053));
+    Assert(true, "sibling TCP and UDP listeners released on startup failure");
 }
 async Task WaitFor(Func<Task<bool>> check)
 {

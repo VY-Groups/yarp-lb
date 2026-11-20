@@ -20,7 +20,7 @@ Listener addresses default to loopback-only; **non-loopback binding requires** `
 - `SendProxyProtocolV1` (default false): prefixes the backend connection with a `PROXY TCP4` line. Only enable for a trusted backend that explicitly expects PROXY v1. Do not enable against ordinary TCP services.
 - Backend `DrainNewConnections` (default false): prevents *new* streams from using that target, without interrupting already established streams. This is static config at process startup in version 0.1; a coordinated, zero-loss live drain API is NOT implemented.
 
-Checks are TCP-connect-only, NOT application readiness, TLS or real traffic SLOs. UDP still has no corresponding active health checks.
+TCP checks are connect-only, NOT application readiness, TLS or real traffic SLOs. UDP application checks are optional as described below.
 
 ## UDP listener fields
 
@@ -36,3 +36,5 @@ The Control Center capability API must continue marking L4 as **partial**, not c
 ## Bounded transport admission
 
 `TcpMaxConnections` and `UdpMaxSessions` default to 1024 per listener; valid range 1–4096. The signed configuration validator uses the same bounds and rejects null/string values. TCP counts pending upstream connects and established streams; excess accepted sockets close immediately, with no upstream connect or application-byte replay. The kernel listen backlog is separate; no application waiting queue is provided. Established streams retain their slots through bidirectional shutdown; errors and idle expiry release slots. UDP drops new endpoints when the configured session table is full, preserving existing source affinity; idle expiry releases capacity. TCP admission emits one aggregate active/rejected summary on listener stop, not a per-rejection log. The process stops accepting on shutdown and permits established TCP streams up to five seconds to drain, then cancels their forwarding (up to two seconds additional cleanup). This is a process-local bound, not distributed quota, dynamic live drain, per-client admission, full DDoS defense or demonstrated capacity. Windows/Linux socket tests cover overload, preservation of existing streams/sessions, half-close slot recovery and UDP idle recovery. Physical soak and transport-level loss/reordering evidence remain open.
+
+A listener bind or runtime failure shuts down sibling listeners and exits nonzero; startup must not advertise engine readiness if a configured listener fails to bind. The real-process fixture occupies a TCP port, verifies bounded nonzero exit and checks that sibling TCP/UDP ports can be rebound. This is local process failure containment, not physical failover.
