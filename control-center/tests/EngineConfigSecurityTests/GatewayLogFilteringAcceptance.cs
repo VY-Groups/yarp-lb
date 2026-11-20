@@ -50,12 +50,22 @@ internal static class GatewayLogFilteringAcceptance
                 "real YARP forwarding succeeds while log filters are active");
             var yarpLogger = gateway.Services.GetRequiredService<ILoggerFactory>()
                 .CreateLogger("Yarp.ReverseProxy.Forwarder.HttpForwarder");
+            var hostingLogger = gateway.Services.GetRequiredService<ILoggerFactory>()
+                .CreateLogger("Microsoft.AspNetCore.Hosting.Diagnostics");
+            var endpointLogger = gateway.Services.GetRequiredService<ILoggerFactory>()
+                .CreateLogger("Microsoft.AspNetCore.Routing.EndpointMiddleware");
             yarpLogger.LogInformation("acceptance-info-filtered");
             yarpLogger.LogWarning("acceptance-warning-preserved");
+            hostingLogger.LogInformation("hosting-info-filtered");
+            hostingLogger.LogWarning("hosting-warning-preserved");
+            endpointLogger.LogInformation("endpoint-info-filtered");
+            endpointLogger.LogWarning("endpoint-warning-preserved");
 
             var accessLogDeadline = DateTimeOffset.UtcNow.AddSeconds(3);
             while ((!output.ToString().Contains("GATEWAY_ACCESS", StringComparison.Ordinal) ||
-                    !output.ToString().Contains("acceptance-warning-preserved", StringComparison.Ordinal)) &&
+                    !output.ToString().Contains("acceptance-warning-preserved", StringComparison.Ordinal) ||
+                    !output.ToString().Contains("hosting-warning-preserved", StringComparison.Ordinal) ||
+                    !output.ToString().Contains("endpoint-warning-preserved", StringComparison.Ordinal)) &&
                    DateTimeOffset.UtcNow < accessLogDeadline)
                 await Task.Delay(10);
 
@@ -68,9 +78,15 @@ internal static class GatewayLogFilteringAcceptance
             Must(!lines.Contains("acceptance-info-filtered", StringComparison.Ordinal) &&
                  !lines.Contains("Information Yarp.ReverseProxy.Forwarder.HttpForwarder", StringComparison.Ordinal),
                 "YARP Information sentinel and per-request messages are filtered from the console sink");
+            Must(!lines.Contains("hosting-info-filtered", StringComparison.Ordinal) &&
+                 !lines.Contains("endpoint-info-filtered", StringComparison.Ordinal),
+                "ASP.NET hosting and endpoint Information sentinels are filtered from the console sink");
             Must(lines.Contains("Warning Yarp.ReverseProxy.Forwarder.HttpForwarder", StringComparison.Ordinal),
                 "YARP warnings remain visible in the console sink");
-            Console.WriteLine("PASS: real forwarding preserves access log while suppressing YARP per-request INFO");
+            Must(lines.Contains("Warning Microsoft.AspNetCore.Hosting.Diagnostics", StringComparison.Ordinal) &&
+                 lines.Contains("Warning Microsoft.AspNetCore.Routing.EndpointMiddleware", StringComparison.Ordinal),
+                "ASP.NET hosting and endpoint warnings remain visible in the console sink");
+            Console.WriteLine("PASS: real forwarding preserves access log while suppressing duplicate per-request INFO");
         }
         finally
         {
