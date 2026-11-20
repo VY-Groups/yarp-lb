@@ -229,6 +229,28 @@ udpIdleListener["UdpIdleTimeoutSeconds"] = "30";
 Must(!EngineConfigContract.Validate("l4",udpIdleConfig,false), "signed UDP configuration rejects string idle timeout");
 udpIdleListener["UdpIdleTimeoutSeconds"] = null;
 Must(!EngineConfigContract.Validate("l4",udpIdleConfig,false), "signed UDP configuration rejects explicit null idle timeout");
+var dnsBudget = dns.DeepClone().AsObject();
+foreach (var value in new[] {0,20,200000})
+{
+    dnsBudget["MaxUdpQueriesPerSecond"] = value;
+    Must(EngineConfigContract.Validate("gslb",dnsBudget,false), "signed DNS UDP aggregate bound accepts " + value);
+}
+foreach (var value in new[] {-1,1,19,200001})
+{
+    dnsBudget["MaxUdpQueriesPerSecond"] = value;
+    Must(!EngineConfigContract.Validate("gslb",dnsBudget,false), "signed DNS UDP aggregate bound rejects " + value);
+}
+dnsBudget["MaxUdpQueriesPerSecond"] = null;
+Must(!EngineConfigContract.Validate("gslb",dnsBudget,false), "signed DNS aggregate null rejected");
+dnsBudget["MaxUdpQueriesPerSecond"] = "20";
+Must(!EngineConfigContract.Validate("gslb",dnsBudget,false), "signed DNS aggregate string rejected");
+dnsBudget["MaxUdpQueriesPerSecond"] = 20;
+dnsBudget["GroupIpv6UdpClientsByPrefix"] = true;
+Must(EngineConfigContract.Validate("gslb",dnsBudget,false), "signed IPv6 prefix grouping accepted");
+dnsBudget["GroupIpv6UdpClientsByPrefix"] = "true";
+Must(!EngineConfigContract.Validate("gslb",dnsBudget,false), "signed IPv6 grouping rejects string");
+dnsBudget["GroupIpv6UdpClientsByPrefix"] = null;
+Must(!EngineConfigContract.Validate("gslb",dnsBudget,false), "signed IPv6 grouping rejects null");
 var badDns=dns.DeepClone().AsObject();
 badDns["Zones"]![0]!["Sites"]![0]!["HealthUrl"]="file:///etc/passwd";
 Must(!EngineConfigContract.Validate("gslb",badDns,false),
