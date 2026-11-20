@@ -36,7 +36,7 @@ var pfxPassword = Convert.ToHexString(RandomNumberGenerator.GetBytes(16));
 var keyFlags = OperatingSystem.IsWindows()
     ? X509KeyStorageFlags.UserKeySet | X509KeyStorageFlags.PersistKeySet | X509KeyStorageFlags.Exportable
     : X509KeyStorageFlags.EphemeralKeySet;
-using var loopbackCert = new X509Certificate2(
+using var loopbackCert = X509CertificateLoader.LoadPkcs12(
     issuedCert.Export(X509ContentType.Pfx, pfxPassword), pfxPassword, keyFlags);
 // Include ordinary INFO/Warning/Error traffic as in the shipping gateway.
 // Exercise the IDENTICAL product logging bootstrap under real k6 load.
