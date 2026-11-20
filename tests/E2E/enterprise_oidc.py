@@ -318,7 +318,7 @@ def distributed_revocation(cwd,dll):
             for node,origin in ((first,origin1),(second,origin2)):
                 config=node/"oidc.json"
                 config.write_text(json.dumps({"Issuer":idp.issuer,"ClientId":idp.client,
-                    "ClientSecretFile":str(secret),"ManagementOrigin":origin,"RequiredAcr":"urn:fixture:fido",
+                    "ManagementOrigin":origin,"RequiredAcr":"urn:fixture:fido",
                     "RequiredAmr":"fido2","BreakGlassUsername":"recovery","Accounts":[{"Subject":"operator-subject",
                     "Username":"operator","Group":"gateway-operators","Role":"Operator"}]}))
                 config.chmod(0o600);configs.append(config)
@@ -327,7 +327,8 @@ def distributed_revocation(cwd,dll):
             redis_proc=start_redis()
             try:
                 check(cli("SET",cutoff_key,"0","NX")=="OK","explicit shared cutoff initialization")
-                shared={"SSL_CERT_FILE":str(trust),"GATEWAY_OIDC_REVOCATION_REDIS_FILE":str(redis_file)}
+                shared={"SSL_CERT_FILE":str(trust),"GATEWAY_OIDC_REVOCATION_REDIS_FILE":str(redis_file),
+                "GATEWAY_OIDC_CLIENT_SECRET_FILE":str(secret)}
                 with patch.dict(os.environ,dict(shared,GATEWAY_OIDC_CONFIG_FILE=str(configs[0]))), gateway(cwd,dll,first,hp1,tls1):
                     with patch.dict(os.environ,dict(shared,GATEWAY_OIDC_CONFIG_FILE=str(configs[1]))), gateway(cwd,dll,second,hp2,tls2):
                         idp.gateway_origin=origin1
@@ -434,7 +435,8 @@ def main():
                 "BreakGlassUsername":"recovery","Accounts":[{"Subject":"operator-subject",
                    "Username":"operator","Group":"gateway-operators","Role":"Operator"}]}))
             config.chmod(0o600)
-            with patch.dict(os.environ,{"GATEWAY_OIDC_CONFIG_FILE":str(config),"SSL_CERT_FILE":str(trust)}):
+            with patch.dict(os.environ,{"GATEWAY_OIDC_CONFIG_FILE":str(config),"SSL_CERT_FILE":str(trust),
+                                       "GATEWAY_OIDC_CLIENT_SECRET_FILE":str(client_secret_path)}):
                 with gateway(cwd,dll,root,hp,tlsport) as base:
                     a,_=browser(origin,ctx)
                     check(a.request("GET","/admin/api/auth-methods")["enterpriseOidc"],"enterprise SSO announced on management origin")
