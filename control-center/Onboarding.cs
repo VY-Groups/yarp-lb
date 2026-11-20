@@ -24,11 +24,12 @@ public static class OnboardingApi
         return state.Status == "design-confirmed" && (state.Plan.Mode is "ha-pair" or "fleet");
     }
 
-    public static void MapOnboardingApi(this WebApplication app, string privateDir)
+    public static void MapOnboardingApi(this WebApplication app, string privateDir,
+        Func<HttpContext, string, byte[], byte[], string, bool, Task<IResult?>> confirmMutation,
+        Action<string, byte[]> writeState, Func<string, string, object?, Task> audit)
     {
         var statePath = Path.Combine(privateDir, "onboarding-topology.json");
         var backupDir = Path.Combine(privateDir, "onboarding-backups");
-        var auditPath = Path.Combine(privateDir, "admin-audit.jsonl");
 
         app.MapGet("/admin/api/onboarding", () =>
         {
@@ -54,7 +55,8 @@ public static class OnboardingApi
             await WriteGate.WaitAsync(http.RequestAborted);
             try
             {
-                var revision = CurrentRevision(statePath);
+                var before = File.Exists(statePath) ? File.ReadAllBytes(statePath) : Array.Empty<byte>();
+                var revision = File.Exists(statePath) ? Convert.ToHexString(SHA256.HashData(before)) : "EMPTY";
                 if (!string.Equals(input.ExpectedRevision, revision, StringComparison.Ordinal))
                     return Results.Conflict(new { error = "Topology was changed by another administrator. Refresh the setup page.", revision });
                 // A saved design is not a deployed fleet and does not indicate network readiness.
@@ -66,24 +68,21 @@ public static class OnboardingApi
                     UpdatedUtc = DateTimeOffset.UtcNow,
                     UpdatedBy = http.User.Identity?.Name ?? "unknown"
                 };
+                var proposed = JsonSerializer.SerializeToUtf8Bytes(next, JsonOptions);
+                var denied = await confirmMutation(http, statePath, before, proposed,
+                    input.ConfirmDesign ? "TOPOLOGY_CONFIRM_INTENT" : "TOPOLOGY_DRAFT_INTENT", true);
+                if (denied is not null) return denied;
                 Directory.CreateDirectory(backupDir);
                 if (File.Exists(statePath))
                 {
                     var backup = Path.Combine(backupDir, $"topology-{DateTimeOffset.UtcNow:yyyyMMddTHHmmssfffffffZ}.json");
                     File.Copy(statePath, backup, overwrite: false);
                 }
-                var temp = statePath + "." + Guid.NewGuid().ToString("N") + ".tmp";
-                try
-                {
-                    await File.WriteAllTextAsync(temp, JsonSerializer.Serialize(next, JsonOptions), http.RequestAborted);
-                    File.Move(temp, statePath, overwrite: true);
-                }
-                finally { if (File.Exists(temp)) File.Delete(temp); }
-                await File.AppendAllTextAsync(auditPath,
-                    JsonSerializer.Serialize(new { utc = DateTimeOffset.UtcNow, actor = next.UpdatedBy,
-                        action = input.ConfirmDesign ? "TOPOLOGY_DESIGN_CONFIRMED" : "TOPOLOGY_DRAFT_SAVED",
-                        details = new { mode = next.Plan.Mode, gatewayCount = next.Plan.Gateways.Count,
-                            workloadCount = next.Plan.Workloads.Count, note = "No YARP routes or Windows services changed" } }) + Environment.NewLine);
+                writeState(statePath, proposed);
+                await audit(next.UpdatedBy,
+                    input.ConfirmDesign ? "TOPOLOGY_DESIGN_CONFIRMED" : "TOPOLOGY_DRAFT_SAVED",
+                    new { mode = next.Plan.Mode, gatewayCount = next.Plan.Gateways.Count,
+                        workloadCount = next.Plan.Workloads.Count, note = "No YARP routes or Windows services changed" });
                 return Results.Ok(Describe(next, statePath));
             }
             finally { WriteGate.Release(); }
