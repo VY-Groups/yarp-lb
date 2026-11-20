@@ -432,8 +432,9 @@ def main():
             config=root/"oidc.json"
             client_secret_path=Path(sd)/"client-secret"
             write_private_fixture_file(client_secret_path, idp.secret)
-            # ClientSecretFile is a path reference, not the secret value.
-            config.write_text(json.dumps({"Issuer":idp.issuer,"ClientId":idp.client,"ClientSecretFile":str(client_secret_path),
+            # Keep secret-file locations out of the serialized configuration;
+            # the dedicated environment override supplies the runtime path.
+            config.write_text(json.dumps({"Issuer":idp.issuer,"ClientId":idp.client,
                 "ManagementOrigin":origin,"RequiredAcr":"urn:fixture:fido","RequiredAmr":"fido2",
                 "BreakGlassUsername":"recovery","Accounts":[{"Subject":"operator-subject",
                    "Username":"operator","Group":"gateway-operators","Role":"Operator"}]}))
