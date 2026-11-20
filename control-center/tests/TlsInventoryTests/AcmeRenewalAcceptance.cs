@@ -38,7 +38,10 @@ internal static class AcmeRenewalAcceptance
         var rootRequest = new CertificateRequest("CN=Deterministic ACME Test CA", rootKey, HashAlgorithmName.SHA256);
         rootRequest.CertificateExtensions.Add(new X509BasicConstraintsExtension(true, false, 0, true));
         rootRequest.CertificateExtensions.Add(new X509KeyUsageExtension(X509KeyUsageFlags.KeyCertSign | X509KeyUsageFlags.CrlSign, true));
-        using var root = rootRequest.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-2), DateTimeOffset.UtcNow.AddDays(180));
+        // Keep the test CA valid beyond every leaf generated below. The next leaf
+        // intentionally lasts 180 days; matching the CA lifetime can put its
+        // notAfter a few milliseconds beyond the issuer on slower runners.
+        using var root = rootRequest.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-2), DateTimeOffset.UtcNow.AddDays(365));
         var chainPolicy = new X509ChainPolicy
         {
             TrustMode = X509ChainTrustMode.CustomRootTrust,

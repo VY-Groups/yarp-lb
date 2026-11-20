@@ -24,6 +24,7 @@ internal static class EnterpriseOidcAuthentication
             options.ClientId = settings.ClientId;
             options.ClientSecret = secret;
             options.CallbackPath = EnterpriseOidcPolicy.Callback;
+            options.SignedOutCallbackPath = "/admin/oidc/signed-out";
             options.ResponseType = "code";
             options.ResponseMode = "query";
             options.UsePkce = true;
@@ -62,6 +63,27 @@ internal static class EnterpriseOidcAuthentication
                 ctx.ProtocolMessage.SetParameter("acr_values", settings.RequiredAcr);
                 ctx.ProtocolMessage.SetParameter("max_age", "0");
                 ctx.ProtocolMessage.SetParameter("prompt", "login");
+                return Task.CompletedTask;
+            };
+            options.Events.OnRedirectToIdentityProviderForSignOut = ctx =>
+            {
+                // The framework enforces HTTPS for discovery, but the
+                // end-session URL is supplied by discovery metadata. Never
+                // send a browser to a cleartext endpoint from that document.
+                if (!Uri.TryCreate(ctx.ProtocolMessage.IssuerAddress, UriKind.Absolute, out var endSessionUri) ||
+                    !string.Equals(endSessionUri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase) ||
+                    string.IsNullOrEmpty(endSessionUri.Host) || !string.IsNullOrEmpty(endSessionUri.UserInfo) ||
+                    !string.IsNullOrEmpty(endSessionUri.Fragment))
+                {
+                    ctx.HandleResponse();
+                    ctx.Response.StatusCode = StatusCodes.Status502BadGateway;
+                    return Task.CompletedTask;
+                }
+                // Tokens are deliberately not persisted in the local ticket.
+                // RP-Initiated Logout permits client_id when id_token_hint is
+                // unavailable; the exact callback must be registered at the OP.
+                ctx.ProtocolMessage.ClientId = settings.ClientId;
+                ctx.ProtocolMessage.PostLogoutRedirectUri = settings.ManagementOrigin + options.SignedOutCallbackPath;
                 return Task.CompletedTask;
             };
             options.Events.OnTokenValidated = ctx =>

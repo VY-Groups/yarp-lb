@@ -398,12 +398,18 @@ app.Use(async (ctx, next) =>
                 (!Uri.TryCreate(origin, UriKind.Absolute, out var o) ||
                  !string.Equals(o.Authority, ctx.Request.Host.Value, StringComparison.OrdinalIgnoreCase)))
             { ctx.Response.StatusCode = 403; return; }
-            // The only non-JSON management mutation is an independently
-            // signed IdP logout POST. It still requires the management listener.
+            // Form posts are limited to the independently signed IdP notice
+            // and the authenticated, CSRF-protected RP logout form.
             if (ctx.Request.Method == "POST" && ctx.Request.Path == EnterpriseOidcLogout.Path && oidcPolicy is not null)
             {
                 if (ctx.Request.ContentLength is not long size || size < 1 || size > EnterpriseOidcLogout.MaxForm ||
                     !string.Equals(ctx.Request.ContentType?.Split(';')[0].Trim(), "application/x-www-form-urlencoded", StringComparison.OrdinalIgnoreCase))
+                { ctx.Response.StatusCode = 400; return; }
+            }
+            else if (ctx.Request.Method == "POST" && ctx.Request.Path == "/admin/api/logout" &&
+                string.Equals(ctx.Request.ContentType?.Split(';')[0].Trim(), "application/x-www-form-urlencoded", StringComparison.OrdinalIgnoreCase))
+            {
+                if (oidcPolicy is null || ctx.Request.ContentLength is not long size || size < 1 || size > 1024)
                 { ctx.Response.StatusCode = 400; return; }
             }
             else if (!ctx.Request.HasJsonContentType()) { ctx.Response.StatusCode = 415; return; }
@@ -763,6 +769,18 @@ app.Use(async (ctx, next) =>
         if (ctx.User.Identity?.IsAuthenticated != true) { ctx.Response.StatusCode = 401; return; }
         var token = ctx.User.FindFirst("csrf")?.Value;
         var provided = ctx.Request.Headers["X-CSRF-Token"].ToString();
+        if (ctx.Request.Path == "/admin/api/logout" &&
+            string.Equals(ctx.Request.ContentType?.Split(';')[0].Trim(), "application/x-www-form-urlencoded", StringComparison.OrdinalIgnoreCase))
+        {
+            try
+            {
+                var form = await ctx.Request.ReadFormAsync(ctx.RequestAborted);
+                var values = form["csrf"];
+                provided = form.Count == 1 && values.Count == 1 ? values[0] ?? "" : "";
+            }
+            catch (Exception ex) when (ex is InvalidDataException or IOException or InvalidOperationException or OperationCanceledException)
+            { ctx.Response.StatusCode = 400; return; }
+        }
         if (string.IsNullOrWhiteSpace(token) ||
             !CryptographicOperations.FixedTimeEquals(Encoding.UTF8.GetBytes(token), Encoding.UTF8.GetBytes(provided)))
         { ctx.Response.StatusCode = 403; return; }
@@ -856,6 +874,7 @@ app.MapGet("/admin/api/session", (HttpContext ctx) => Results.Ok(new {
     username = ctx.User.Identity?.Name,
     role = ctx.User.FindFirst(ClaimTypes.Role)?.Value,
     csrf = ctx.User.FindFirst("csrf")?.Value,
+    federatedOidc = oidcPolicy is not null && ctx.User.HasClaim(c => c.Type == EnterpriseOidcPolicy.SubjectClaim),
     mode = "Local administrative test console — not certified for CA production"
 }));
 
@@ -1056,7 +1075,12 @@ app.MapPost("/admin/api/login/verify", async (HttpContext ctx, VerifyOtpInput in
 app.MapPost("/admin/api/logout", async (HttpContext ctx) =>
 {
     await Audit(Actor(ctx), "LOGOUT");
+    if (oidcPolicy is not null && ctx.User.HasClaim(c => c.Type == EnterpriseOidcPolicy.SubjectClaim))
+        return Results.SignOut(new AuthenticationProperties { RedirectUri = "/dashboard" },
+            [CookieAuthenticationDefaults.AuthenticationScheme, EnterpriseOidcPolicy.Scheme]);
     await ctx.SignOutAsync(CookieAuthenticationDefaults.AuthenticationScheme);
+    if (string.Equals(ctx.Request.ContentType?.Split(';')[0].Trim(), "application/x-www-form-urlencoded", StringComparison.OrdinalIgnoreCase))
+        return Results.Redirect("/dashboard");
     return Results.Ok(new { loggedOut = true });
 }).RequireAuthorization();
 
