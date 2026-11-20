@@ -231,6 +231,7 @@ app.MapGet("/agent/v1/status", () => Results.Ok(new
     utc = DateTimeOffset.UtcNow,
     serviceManagementEnabled = allowActions,
     configDeploymentEnabled = allowConfigChanges,
+    rollbackFenceProtocol = 1,
     engineConfigStagingEnabled = allowEngineConfigChanges,
     revision = allowConfigChanges ? Sha(File.ReadAllBytes(gatewayConfigPath)) : null,
     allowedServiceNames = allowedServices,
