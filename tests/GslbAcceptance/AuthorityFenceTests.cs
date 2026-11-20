@@ -181,9 +181,46 @@ internal static class AuthorityFenceTests
                 certA, keyA, Path.Combine(root, "trust-replay.json"), 10, 10, 2, 100, [],
                 [new AgentTrust("observer-a", vantage, [pinA], [publicAPath]),
                  new AgentTrust("observer-b", "zone-b", [pinB], [publicBPath])]);
-            var trustedDigest = AuthorityFenceFingerprint.Compute([fingerprintZone], TrustPolicy("zone-a"));
-            Check(trustedDigest != AuthorityFenceFingerprint.Compute([fingerprintZone], TrustPolicy("zone-changed")),
-                "authority fingerprint binds global observer identity and vantage trust policy");
+            var trust = TrustPolicy("zone-a");
+            var reportTargets = new[] { new AgentReportTarget(fingerprintZone.Name, "service",
+                ["observer-a", "observer-b"], 2) };
+            AgentHealthReportStore LoadTrust(AgentReportServerConfig cfg) => new(
+                cfg.Agents, reportTargets, Path.Combine(root, Guid.NewGuid().ToString("N") + "-observer-replay.json"),
+                cfg.MaxTtlSeconds, cfg.MaxAgeSeconds, cfg.MaxClockSkewSeconds);
+            string TrustDigest(AgentReportServerConfig cfg, AgentHealthReportStore store) =>
+                AuthorityFenceFingerprint.Compute([fingerprintZone], cfg, loadedAgentStore: store);
+            Check(ThrowsInvalid(() => AuthorityFenceFingerprint.Compute([fingerprintZone], trust)),
+                "observer trust fingerprint cannot omit actual loaded store");
+            using (var loaded = LoadTrust(trust))
+            {
+                var trustedDigest = TrustDigest(trust, loaded);
+                var changedVantage = TrustPolicy("zone-changed");
+                using (var changed = LoadTrust(changedVantage))
+                    Check(trustedDigest != TrustDigest(changedVantage, changed),
+                        "authority fingerprint binds actual observer identity and vantage trust");
+                var originalPem = File.ReadAllText(publicAPath);
+                try
+                {
+                    // Equivalent PEM representation does not change loaded key identity.
+                    File.WriteAllText(publicAPath, originalPem.TrimEnd() + "\n\n");
+                    using (var equivalent = LoadTrust(trust))
+                        Check(trustedDigest == TrustDigest(trust, equivalent),
+                            "equivalent public key encoding keeps canonical authority fingerprint");
+                    using var replacementKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+                    File.WriteAllText(publicAPath, replacementKey.ExportSubjectPublicKeyInfoPem());
+                    using var replacementStore = LoadTrust(trust);
+                    Check(trustedDigest == TrustDigest(trust, loaded),
+                        "changing PEM on disk cannot relabel already loaded observer trust");
+                    Check(trustedDigest != TrustDigest(trust, replacementStore),
+                        "newly loaded replacement key changes authority fingerprint");
+                    // Even disappearance of a formerly loaded path must not
+                    // substitute unverified trust data in the fingerprint.
+                    File.Delete(publicAPath);
+                    Check(trustedDigest == TrustDigest(trust, loaded),
+                        "loaded fingerprint does not depend on a second file read");
+                }
+                finally { File.WriteAllText(publicAPath, originalPem); }
+            }
             var now = DateTimeOffset.UtcNow;
             AuthorityFenceSnapshot initial;
             using (var source = new AuthorityFenceStore(configA, fingerprint, [target]))

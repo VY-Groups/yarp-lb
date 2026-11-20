@@ -696,3 +696,7 @@ Do not enable signing for a public zone until independent
 resolver/parent-delegation and multi-authority acceptance is complete.
 Zone serials are operator-configured and do not automatically increment.
 AXFR/IXFR, NOTIFY, TSIG and recursive service are also unsupported.
+
+### Authority observer trust fingerprint
+
+For fence-enabled authorities with signed observer reports, the configuration fingerprint uses the exact validated in-memory observer identity, vantage group, SHA-256 certificate pin and canonical public signing key ID (not a second read or textual hash of a PEM file). Equivalent public-key PEM formatting no longer changes the digest; replacing a PEM after load cannot cause a running authority to attest trust in a different key. A newly loaded replacement key does change it. Missing loaded observer trust is rejected. This changes fingerprints for report-enabled fence configurations: coordinate the restart of both authorities and expect fail-closed routing while fingerprints disagree; do not roll only one authority indefinitely. Review the same trust settings and keys on each host before rollout. No automatic trust reload, consensus membership change or live key rotation is implied. Tests cover real loaded trust stores, changed vantage groups, equivalent encodings, on-disk replacement/removal after load and required loaded state.

@@ -156,6 +156,18 @@ internal sealed class AgentHealthReportStore : IDisposable
         }
     }
 
+    // These are the exact public identities used by the verifier, not a
+    // second read of externally mutable PEM paths. Return fresh arrays.
+    internal sealed record LoadedTrustIdentity(string AgentId, string VantageGroup,
+        string[] CertificatePins, string[] SigningKeys);
+
+    internal LoadedTrustIdentity[] GetLoadedTrustIdentity() =>
+        agents.OrderBy(row => row.Key, StringComparer.Ordinal)
+            .Select(row => new LoadedTrustIdentity(row.Key, row.Value.VantageGroup,
+                row.Value.CertificateSha256.Select(Convert.ToHexString).Order(StringComparer.Ordinal).ToArray(),
+                row.Value.SigningPublicKeys.Keys.Order(StringComparer.Ordinal).ToArray()))
+            .ToArray();
+
     public bool TryAccept(AgentHealthReport report, X509Certificate2 clientCertificate,
         DateTimeOffset now, long nowTick)
     {
