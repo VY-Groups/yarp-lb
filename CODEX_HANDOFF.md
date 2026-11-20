@@ -24,10 +24,10 @@ issue list is #34, #36, #37, #48, #49, #51, #52, #53, #100, #101 and #109.
   fresh observer reports arrived; then both recovered. The full scenario and
   exact limits are recorded in
   ops/acceptance/gslb-physical-observer-quorum-20261120.md.
-- All test binaries, configs, certificates, temporary state and processes were
-  removed. Apache remained active and returned HTTP 200 on all three hosts;
-  ports 53 and 15444 were no longer listening. No AWS security-group, route,
-  Apache or system-service configuration was changed.
+- All temporary GatewayCore binaries, configs, certificates, state, watchdogs
+  and processes were removed. Apache remained active and returned HTTP 200 on
+  all three hosts; ports 53 and 15444 were no longer listening. No AWS
+  security-group, route, Apache or system-service configuration was changed.
 - This materially advances #109's physical observer-quorum evidence, but does
   not complete it. This run did not exercise AuthorityFence under a physical
   authority-link partition, a public delegated zone, DNSSEC, one-hour soak,
@@ -36,9 +36,7 @@ issue list is #34, #36, #37, #48, #49, #51, #52, #53, #100, #101 and #109.
 - PR #285 is merged but issue #38 remains open; do not infer complete federated
   logout or distributed identity revocation from that increment.
 
-## Current continuation update (2026-11-20)
-
-## Current continuation update (2026-11-20)
+## Previous continuation update (2026-11-20)
 
 This update supersedes the 2026-11-19 continuation snapshot below. Live GitHub
 and exact post-merge CI were checked on 2026-11-20:
@@ -911,4 +909,3 @@ The live backlog now has **14 open issues**, including P0 #36, #52 and #109 and 
 - **#50 / observability:** OTLP and Grafana CI integrations and safer span redaction are merged. A deployed monitoring/alert pipeline, retention and overhead comparison remain unverified.
 
 Production remains **NO-GO**. No annual 99.9% availability measurement exists; a GitHub-hosted runner, one-hour fixture test or DNS protocol matrix cannot substitute for a year-long service SLI or the required site release drills.
-
