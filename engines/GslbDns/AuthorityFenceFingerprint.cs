@@ -7,8 +7,13 @@ internal static class AuthorityFenceFingerprint
     public static string Compute(DnsZone[] zones, AgentReportServerConfig? agentReports,
         int probeIntervalSeconds = 1, int maxConcurrentHealthProbes = 1,
         IReadOnlyDictionary<string, DnssecZoneSigner>? loadedSigners = null,
-        GeoIpAuthorityIdentity? geoIpIdentity = null)
+        GeoIpAuthorityIdentity? geoIpIdentity = null,
+        AgentHealthReportStore? loadedAgentStore = null)
     {
+        // Never claim equivalent observer trust based on rereading a PEM
+        // after the running store has imported a different key.
+        if ((agentReports is null) != (loadedAgentStore is null))
+            throw new InvalidDataException("Authority fingerprint requires the loaded observer trust store");
         var geoRouting = zones.Any(zone => zone.RoutingPolicy == "GeoIpEcs");
         if (geoRouting && (geoIpIdentity is null ||
             zones.Any(zone => zone.RoutingPolicy == "GeoIpEcs" &&
@@ -40,17 +45,7 @@ internal static class AuthorityFenceFingerprint
             agentReports.MaxReportsPerMinute,
             RevokedPins = (agentReports.RevokedCertificateSha256 ?? []).Select(pin => pin.ToUpperInvariant())
                 .Order(StringComparer.Ordinal).ToArray(),
-            Agents = (agentReports.Agents ?? []).OrderBy(agent => agent.AgentId, StringComparer.Ordinal)
-                .Select(agent => new
-                {
-                    agent.AgentId,
-                    agent.VantageGroup,
-                    CertificatePins = (agent.CertificateSha256 ?? []).Select(pin => pin.ToUpperInvariant())
-                        .Order(StringComparer.Ordinal).ToArray(),
-                    SigningKeys = (agent.SigningPublicKeyPems ?? []).Select(path =>
-                        Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(path))))
-                        .Order(StringComparer.Ordinal).ToArray()
-                }).ToArray()
+            Agents = loadedAgentStore!.GetLoadedTrustIdentity()
         };
         var canonical = zones.OrderBy(zone => zone.Name.TrimEnd('.'), StringComparer.OrdinalIgnoreCase)
             .Select(zone => new
