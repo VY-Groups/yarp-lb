@@ -36,6 +36,16 @@ public static class PrivateKeyFileSecurity
     /// </summary>
     public static string ReadPrivateKeyPem(string? path, string purpose)
     {
+        var bytes = ReadPrivateFileBytes(path, purpose, MaximumPemBytes);
+        try { return new UTF8Encoding(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true).GetString(bytes); }
+        finally { System.Security.Cryptography.CryptographicOperations.ZeroMemory(bytes); }
+    }
+
+    /// <summary>Read bounded secret bytes from the same validated no-follow handle.</summary>
+    public static byte[] ReadPrivateFileBytes(string? path, string purpose, int maximumBytes)
+    {
+        if (maximumBytes is < 1 or > 16 * 1024 * 1024)
+            throw new ArgumentOutOfRangeException(nameof(maximumBytes));
         if (string.IsNullOrWhiteSpace(path) || !Path.IsPathFullyQualified(path))
             throw new InvalidDataException($"{purpose} path must be absolute");
         if (!OperatingSystem.IsWindows() && !OperatingSystem.IsLinux())
@@ -55,12 +65,22 @@ public static class PrivateKeyFileSecurity
         }
 
         using var stream = new FileStream(handle, FileAccess.Read);
-        if (!stream.CanSeek || stream.Length is <= 0 or > MaximumPemBytes)
-            throw new InvalidDataException($"{purpose} must be a regular PEM file no larger than {MaximumPemBytes} bytes");
-
-        var bytes = new byte[checked((int)stream.Length)];
-        stream.ReadExactly(bytes);
-        return new UTF8Encoding(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true).GetString(bytes);
+        var length = stream.Length;
+        if (!stream.CanSeek || length <= 0 || length > maximumBytes)
+            throw new InvalidDataException($"{purpose} must be a regular file no larger than {maximumBytes} bytes");
+        var bytes = new byte[checked((int)length)];
+        try
+        {
+            stream.ReadExactly(bytes);
+            if (stream.ReadByte() != -1)
+                throw new InvalidDataException($"{purpose} changed while reading");
+            return bytes;
+        }
+        catch
+        {
+            System.Security.Cryptography.CryptographicOperations.ZeroMemory(bytes);
+            throw;
+        }
     }
 
     /// <summary>
@@ -162,6 +182,10 @@ public static class PrivateKeyFileSecurity
             throw new InvalidDataException($"Unable to verify {purpose} ownership and permissions",
                 new Win32Exception(Marshal.GetLastPInvokeError()));
 
+        // statx describes the actual opened object; reject FIFOs/sockets
+        // before constructing a stream (O_NONBLOCK avoids FIFO open hangs).
+        if ((metadata.Mode & 0xF000) != (isDirectory ? 0x4000 : 0x8000))
+            throw new InvalidDataException($"{purpose} must be a regular file or expected directory");
         ValidateLinuxPathObject(metadata.OwnerUid, metadata.Mode, GetEffectiveUid(), isDirectory, purpose);
         return metadata;
     }

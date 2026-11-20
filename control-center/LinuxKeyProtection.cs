@@ -3,6 +3,7 @@ using System.Security.Cryptography.X509Certificates;
 using System.Xml;
 using System.Xml.Linq;
 using Microsoft.AspNetCore.DataProtection;
+using GatewayCore.Gslb.Contracts;
 
 /// <summary>
 /// Linux/on-premise ASP.NET Data Protection key-ring envelope encryption.
@@ -44,6 +45,8 @@ public static class LinuxKeyProtection
     {
         if ((File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0)
             throw new InvalidOperationException("Key directory must not be a symlink");
+        try { PrivateKeyFileSecurity.ValidateLinuxPrivateStateDirectory(path, "Linux Data Protection state"); }
+        catch (InvalidDataException ex) { throw new InvalidOperationException("Unsafe Linux Data Protection directory ancestry", ex); }
         var mode = File.GetUnixFileMode(path);
         if ((mode & PublicPermissions) != 0 || (mode & PrivateDirectoryMode) != PrivateDirectoryMode)
             throw new InvalidOperationException("State/key directory requires owner-only 0700 permissions");
@@ -67,11 +70,24 @@ public static class LinuxKeyProtection
     {
         var path = SecretPath(pfxEnv);
         var passwordPath = SecretPath(passwordFileEnv);
-        var password = File.ReadAllText(passwordPath).TrimEnd('\r', '\n');
-        if (password.Length == 0)
-            throw new InvalidOperationException("Empty Linux PFX password is prohibited");
-        var cert = X509CertificateLoader.LoadPkcs12FromFile(path, password,
-            X509KeyStorageFlags.EphemeralKeySet);
+        byte[] ReadSecret(string file, string purpose, int limit)
+        {
+            try { return PrivateKeyFileSecurity.ReadPrivateFileBytes(file, purpose, limit); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException)
+            { throw new InvalidOperationException("Unsafe or unavailable Linux Data Protection secret", ex); }
+        }
+        var passwordBytes = ReadSecret(passwordPath, "Linux PFX password", 4096);
+        X509Certificate2 cert;
+        try
+        {
+            var password = new System.Text.UTF8Encoding(false, true).GetString(passwordBytes).TrimEnd('\r', '\n');
+            if (password.Length == 0 || password.Any(char.IsControl))
+                throw new InvalidOperationException("Invalid Linux PFX password");
+            var pfx = ReadSecret(path, "Linux wrapping PFX", 1024 * 1024);
+            try { cert = X509CertificateLoader.LoadPkcs12(pfx, password, X509KeyStorageFlags.EphemeralKeySet); }
+            finally { CryptographicOperations.ZeroMemory(pfx); }
+        }
+        finally { CryptographicOperations.ZeroMemory(passwordBytes); }
         try
         {
             using var privateKey = cert.GetRSAPrivateKey();
@@ -101,9 +117,11 @@ public static class LinuxKeyProtection
                 throw new InvalidOperationException("Existing Linux key-ring XML must not be a symlink");
             if ((File.GetUnixFileMode(path) & PublicPermissions) != 0)
                 throw new InvalidOperationException("Existing Linux key-ring XML requires owner-only permissions");
-            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
-            if (stream.Length is <= 0 or > 1024 * 1024)
-                throw new InvalidOperationException("Existing Linux key-ring XML exceeds the supported size");
+            byte[] bytes;
+            try { bytes = PrivateKeyFileSecurity.ReadPrivateFileBytes(path, "Linux key-ring XML", 1024 * 1024); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException)
+            { throw new InvalidOperationException("Unsafe existing Linux key-ring XML", ex); }
+            using var stream = new MemoryStream(bytes, writable: false);
             using var reader = XmlReader.Create(stream, new XmlReaderSettings
             {
                 DtdProcessing = DtdProcessing.Prohibit,
