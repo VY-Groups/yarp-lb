@@ -41,6 +41,8 @@ var keyDir = Path.Combine(privateDir, "data-protection-keys");
 if (!OperatingSystem.IsLinux() || ec2Lab)
     Directory.CreateDirectory(keyDir);
 var oidcPolicy = EnterpriseOidcPolicy.FromFile(Environment.GetEnvironmentVariable("GATEWAY_OIDC_CONFIG_FILE"));
+using var sharedOidcRevocation = SharedOidcRevocation.FromFile(
+    Environment.GetEnvironmentVariable("GATEWAY_OIDC_REVOCATION_REDIS_FILE"), oidcPolicy);
 var localAudit = new LocalAdminAudit(Path.Combine(privateDir, "admin-audit.jsonl"));
 using var externalAuditIntent = ExternalAuditIntent.FromEnvironment(
     Environment.GetEnvironmentVariable("GATEWAY_AUDIT_INTENT_URL"),
@@ -167,6 +169,10 @@ var adminAuthentication = builder.Services.AddAuthentication(CookieAuthenticatio
                           EnterpriseOidcPolicy.AfterRevocation(principal, active.OidcRevokedBefore)
                         : active.Role == "Administrator" && oidcPolicy.IsBreakGlass(active.Username) &&
                           principal.FindFirst(EnterpriseOidcPolicy.RecoveryClaim)?.Value == oidcPolicy.Fingerprint);
+                    if (allowed && sharedOidcRevocation is not null && oidcSubject is not null)
+                        allowed = long.TryParse(EnterpriseOidcPolicy.Single(principal, EnterpriseOidcPolicy.AuthTimeClaim),
+                            System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var authTime) &&
+                            await sharedOidcRevocation.AllowsAsync(oidcSubject, authTime, active.OidcRevokedBefore);
                     if (!allowed)
                     { ctx.RejectPrincipal(); await ctx.HttpContext.SignOutAsync(CookieAuthenticationDefaults.AuthenticationScheme); return; }
                 }
@@ -184,7 +190,7 @@ var adminAuthentication = builder.Services.AddAuthentication(CookieAuthenticatio
     });
 if (oidcPolicy is not null)
     EnterpriseOidcAuthentication.Configure(adminAuthentication, oidcPolicy,
-        Path.Combine(privateDir, "admin-users.json"), localAudit);
+        Path.Combine(privateDir, "admin-users.json"), localAudit, sharedOidcRevocation);
 builder.Services.AddAuthorization();
 builder.Services.AddSingleton<DirectoryAuthService>(sp =>
     new DirectoryAuthService(sp.GetRequiredService<IDataProtectionProvider>(), privateDir));
@@ -945,6 +951,9 @@ app.MapPost(EnterpriseOidcLogout.Path, async (HttpContext ctx, IOptionsMonitor<O
         options.Get(EnterpriseOidcPolicy.Scheme), ctx.RequestAborted);
     if (notice is null) return Results.BadRequest();
     var row = oidcPolicy.Resolve(notice.Subject)!;
+    if (sharedOidcRevocation is not null &&
+        await sharedOidcRevocation.ReadOrAdvanceAsync(notice.Subject, notice.IssuedAt) is null)
+        return Results.StatusCode(503);
     await loginGate.WaitAsync(ctx.RequestAborted);
     try
     {
@@ -958,7 +967,8 @@ app.MapPost(EnterpriseOidcLogout.Path, async (HttpContext ctx, IOptionsMonitor<O
         {
             var index = users.IndexOf(user);
             user = user with { OidcRevokedBefore = notice.IssuedAt,
-                SecurityStamp = Convert.ToHexString(RandomNumberGenerator.GetBytes(24)) };
+                SecurityStamp = sharedOidcRevocation is null
+                    ? Convert.ToHexString(RandomNumberGenerator.GetBytes(24)) : user.SecurityStamp };
             users[index] = user;
             WriteUsers(users);
         }

@@ -13,7 +13,7 @@ internal static class EnterpriseOidcAuthentication
     private const string ValidatedTime = ".gc.auth_time";
 
     internal static void Configure(AuthenticationBuilder builder, EnterpriseOidcPolicy policy,
-        string usersPath, LocalAdminAudit audit)
+        string usersPath, LocalAdminAudit audit, SharedOidcRevocation? sharedRevocation = null)
     {
         var settings = policy.Settings;
         var secret = policy.ReadClientSecret();
@@ -118,6 +118,9 @@ internal static class EnterpriseOidcAuthentication
                     var user = users.SingleOrDefault(u => u.Username.Equals(row.Username, StringComparison.OrdinalIgnoreCase));
                     if (user is null || !user.Enabled || user.Provider != "Local" || user.Role != row.Role ||
                         string.IsNullOrEmpty(user.SecurityStamp) || user.OidcRevokedBefore < 0 || time <= user.OidcRevokedBefore)
+                    { ctx.HandleResponse(); ctx.Response.Redirect("/admin/oidc/error"); return; }
+                    if (sharedRevocation is not null &&
+                        !await sharedRevocation.AllowsAsync(row.Subject, time, user.OidcRevokedBefore))
                     { ctx.HandleResponse(); ctx.Response.Redirect("/admin/oidc/error"); return; }
                     var claims = new[]
                     {
