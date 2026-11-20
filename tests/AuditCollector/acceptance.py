@@ -87,7 +87,7 @@ class ReceiptProxy:
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self.server.daemon_threads = True
         server_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        server_context.load_cert_chain(str(tlskey), str(cert))
+        server_context.load_cert_chain(str(cert), str(tlskey))
         self.server.socket = server_context.wrap_socket(self.server.socket, server_side=True)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.url = f"https://127.0.0.1:{self.server.server_address[1]}/audit/v1/intents"
