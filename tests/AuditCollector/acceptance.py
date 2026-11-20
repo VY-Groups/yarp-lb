@@ -235,9 +235,59 @@ def main():
                                        {"id":"origin-b","application":"fixture","zone":"restricted","hostingEngine":"http","url":f"http://127.0.0.1:{upstream}/"}]}
                     validation=admin.request("POST","/admin/api/onboarding/validate",{"plan":plan})
                     check(validation["issues"]==[],"valid HA design before fleet registration audit acceptance")
-                    saved=admin.request("POST","/admin/api/onboarding",{"plan":plan,"confirmDesign":True,
-                          "expectedRevision":topology["revision"]})
-                    check(saved["status"]=="design-confirmed","real onboarding API confirms HA design")
+                    topology_file=gateway_root/"state"/"onboarding-topology.json"
+                    for confirmed,operation in [(False,"TOPOLOGY_DRAFT_INTENT"),(True,"TOPOLOGY_CONFIRM_INTENT")]:
+                        before=topology_file.read_bytes() if topology_file.exists() else b""
+                        count=len(ledger.read_text().splitlines())
+                        request_body={"plan":plan,"confirmDesign":confirmed,"expectedRevision":topology["revision"]}
+                        admin.request("POST","/admin/api/onboarding",request_body,expect=503)
+                        check((topology_file.read_bytes() if topology_file.exists() else b"")==before,
+                              "outage leaves topology unchanged: "+operation)
+                        proc=start()
+                        try:
+                            topology=admin.request("POST","/admin/api/onboarding",request_body)
+                        finally: stop(proc)
+                        rows=ledger.read_text().splitlines()
+                        retained=json.loads(base64.b64decode(json.loads(rows[-1])["Body"]))
+                        check(len(rows)==count+1 and retained["operation"]==operation and
+                              retained["revision"]==hashlib.sha256(before).hexdigest().upper() and
+                              retained["targetDigest"]==hashlib.sha256(topology_file.read_bytes()).hexdigest().upper(),
+                              "signed receipt binds persisted topology: "+operation)
+                    check(topology["status"]=="design-confirmed","real onboarding API confirms HA design")
+                    change={"reason":"Disposable audit regression review","payload":{"routes":{},"clusters":{},"revision":"fixture-stale"}}
+                    before_requests=admin.request("GET","/admin/api/change-requests")
+                    operator.request("POST","/admin/api/change-requests",change,expect=503)
+                    check(admin.request("GET","/admin/api/change-requests")==before_requests,
+                          "collector outage prevents change submission")
+                    count=len(ledger.read_text().splitlines())
+                    proc=start()
+                    try:
+                        pending=operator.request("POST","/admin/api/change-requests",change)
+                    finally: stop(proc)
+                    request_file=gateway_root/"state"/"change-requests"/(pending["id"]+".json")
+                    before=request_file.read_bytes()
+                    rows=ledger.read_text().splitlines()
+                    retained=json.loads(base64.b64decode(json.loads(rows[-1])["Body"]))
+                    check(len(rows)==count+1 and retained["operation"]=="CHANGE_REQUEST_INTENT" and
+                          retained["actor"]=="operator" and retained["targetDigest"]==hashlib.sha256(before).hexdigest().upper(),
+                          "submission receipt binds exact pending request")
+                    decision="/admin/api/change-requests/"+pending["id"]+"/decision"
+                    reject={"decision":"reject","reason":"Disposable independent rejection"}
+                    operator.request("POST",decision,reject,expect=403)
+                    admin.request("POST",decision,reject,expect=503)
+                    check(request_file.read_bytes()==before,"outage leaves review status pending")
+                    count=len(ledger.read_text().splitlines())
+                    proc=start()
+                    try:
+                        reviewed=admin.request("POST",decision,reject)
+                    finally: stop(proc)
+                    rows=ledger.read_text().splitlines()
+                    retained=json.loads(base64.b64decode(json.loads(rows[-1])["Body"]))
+                    check(reviewed["status"]=="Rejected" and len(rows)==count+1 and
+                          retained["operation"]=="CHANGE_REJECT_INTENT" and retained["actor"]=="reviewer" and
+                          retained["revision"]==hashlib.sha256(before).hexdigest().upper() and
+                          retained["targetDigest"]==hashlib.sha256(request_file.read_bytes()).hexdigest().upper(),
+                          "independent rejection receipt binds exact reviewed request")
                     # An operator must not be able to register a fleet node even
                     # if the collector is available. Preserve the existing RBAC.
                     operator.request("POST","/admin/api/fleet",fleet_body,expect=403)
