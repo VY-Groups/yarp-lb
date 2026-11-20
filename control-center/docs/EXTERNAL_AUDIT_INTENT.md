@@ -1,6 +1,6 @@
 # External audit intent receipt (experimental, opt-in)
 
-Issue #38 increment: route approval and config restore only. This adds an authenticated, bounded pre-mutation HTTPS guard, not a full immutable audit system. Existing local audit remains unchanged. The gateway data plane never calls the collector.
+Issue #38 increment: route approval, config restore, and administrator account create, password reset, disable and enable. This adds an authenticated, bounded pre-mutation HTTPS guard, not a full immutable audit system. Existing local audit remains unchanged. The gateway data plane never calls the collector.
 
 Set all four environment variables or none:
 
@@ -11,11 +11,11 @@ Set all four environment variables or none:
 | GATEWAY_AUDIT_SENDER_KEY_FILE | Absolute non-symlink file of exactly 32 random binary bytes, owner-only on Unix; on Windows restrict ACL to the service account and protected administrators |
 | GATEWAY_AUDIT_COLLECTOR_PUBLIC_KEY_FILE | Absolute non-symlink PEM SubjectPublicKeyInfo RSA public key (2048..4096 bits); integrity-protect the file/parent directory with OS permissions |
 
-Generate and distribute sender keys independently for each node. The collector private signing key must never be installed on the gateway. Partial configuration or invalid key files fail startup. No built-in collector, no automatic retries; configure endpoint trust and access by separate operators.
+Generate and distribute sender keys independently for each node. The collector private signing key must never be installed on the gateway. Partial configuration or invalid key files fail startup. An independent collector is provided in engines/AuditCollector; the gateway intent request itself does not retry. Configure endpoint trust and access by separate operators.
 
 ## Collector contract
 
-The gateway POSTs a bounded JSON intent containing schema, eventId, node, UTC, authenticated actor, operation, current config SHA-256 and target config SHA-256. No config payload, secrets or arbitrary administrative notes are transmitted. The exact serialized UTF-8 bytes are the signed message. X-GC-Audit-Event-Id is the lowercase GUID N format. X-GC-Audit-Signature is Base64 HMAC-SHA256 with the node sender key over ASCII:
+The gateway POSTs a bounded JSON intent containing schema, eventId, node, UTC, authenticated actor, operation, current state SHA-256 and proposed state SHA-256. No config payload, secrets or arbitrary administrative notes are transmitted. The exact serialized UTF-8 bytes are the signed message. X-GC-Audit-Event-Id is the lowercase GUID N format. X-GC-Audit-Signature is Base64 HMAC-SHA256 with the node sender key over ASCII:
 
 ```text
 GatewayCore-Audit-Intent-v1\n<eventId>\n<uppercase hex SHA256(body)>
@@ -31,6 +31,13 @@ The gateway uses the configured public key to verify the receipt. Missing, stale
 
 ## Boundary
 
-This first increment is deliberately limited to approved configuration writes and restores. Other mutations, authentication events, rejected attempts, fleet rollout, centralized outcome records, durable retry spool, signed chain/ordered receipts, rotation, real collector retention/WORM/legal hold, multi-replica behavior and live outage/network testing remain open. The test handler exercises receipt binding and negative responses; it does not establish actual external persistence. Do not call this an immutable external audit or claim production readiness until a separate collector implementation and real retention/correlation tests exist. OIDC/FIDO2 remain separate issue #38 work.
+This increment covers approved configuration writes/restores and the four explicit administrator account operations. Other mutations, authentication events, rejected attempts, fleet rollout, centralized outcome records, durable retry spool, signed chain/ordered receipts, rotation, real collector retention/WORM/legal hold, multi-replica behavior and live outage/network testing remain open. The test handler exercises receipt binding and negative responses; it does not establish actual external persistence. Do not call this an immutable external audit or claim production readiness until a separate collector implementation and real retention/correlation tests exist. OIDC/FIDO2 remain separate issue #38 work.
 
 The gateway rejects pre-canceled or late-canceled confirmation and control characters in the actor. Both protected configuration operations recheck their original configuration bytes after waiting for the collector; a changed baseline returns conflict rather than using a stale receipt. The existing process-local configuration gate is retained. This is not a distributed filesystem transaction or rollback of an already-started write; prohibit concurrent out-of-band file editors.
+
+
+## Administrator account protection
+
+The four USER_CREATE_INTENT, USER_PASSWORD_RESET_INTENT, USER_DISABLE_INTENT and USER_ENABLE_INTENT operations require authenticated collector receipts when the gate is configured. Under the existing account mutation lock, the gateway verifies the actor is still an enabled Administrator with the current session security stamp and binds the exact original and proposed account-file bytes by SHA-256. No passwords, salts, hashes, email addresses or raw account-file bytes are sent. Missing, forged or late receipts return 503 without changing persisted account state. A baseline changed during confirmation returns 409. Ordinary role enforcement and local audit remain; the data plane does not call the collector. Install the upgraded collector before enabling these operations. The original intent schema is retained with explicit additional operation names; an older collector will deny them.
+
+The disposable Ubuntu CI test runs the actual gateway and collector over trusted HTTPS and verifies before/after digests, collector outage denial and recovery for all four operations. Unit receipt-validation tests and Windows collector contract/build tests remain enabled. This is not a full asynchronous gateway-wide audit spool: login, bootstrap, other security events, fleet, mail/directory settings, outcome correlation and distributed identity revocation remain tracked in #38. Production provider/retention acceptance remains #36.
