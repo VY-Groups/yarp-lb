@@ -239,7 +239,7 @@ async Task ValidateAdmission()
     async Task<bool> Ready(TcpClient client)
     {
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(3));
-        try { return await client.GetStream().ReadAsync(new byte[1],timeout.Token) == 1; }
+        try { return await client.Client.ReceiveAsync(new byte[1].AsMemory(),SocketFlags.None,timeout.Token) == 1; }
         catch (IOException) { return false; }
         catch (SocketException) { return false; }
     }
@@ -248,9 +248,12 @@ async Task ValidateAdmission()
     Assert(await Ready(one) && await Ready(two), "two TCP streams acquire configured slots");
     using (var extra = await Connect())
         Assert(!await Ready(extra), "TCP overload closes extra connection before backend greeting");
+    // Retain the stream before shutdown: TcpClient.GetStream can reject
+    // a socket whose peer FIN arrives before the subsequent method call.
+    var oneStream = one.GetStream();
     one.Client.Shutdown(SocketShutdown.Send);
     using (var eof = new CancellationTokenSource(TimeSpan.FromSeconds(3)))
-        Assert(await one.GetStream().ReadAsync(new byte[1],eof.Token)==0, "half-close releases first TCP stream");
+        Assert(await oneStream.ReadAsync(new byte[1],eof.Token)==0, "half-close releases first TCP stream");
     await WaitFor(async () =>
     {
         using var recovered = await Connect();
