@@ -16,6 +16,7 @@ import sys
 import tempfile
 import time
 import uuid
+from unittest.mock import patch
 
 def check(condition, message):
     if not condition:
@@ -150,5 +151,51 @@ def main():
         ledger.write_bytes(original)
         run(*verify,env=env)
         print("AUDIT_COLLECTOR_HTTPS_SUCCESS",flush=True)
+
+        # Use the shipping gateway and the shipping collector, not a fake
+        # HttpMessageHandler. Check the exact serialized mutation digest and
+        # prove outage denial leaves the persisted credentials/stamps unchanged.
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1]/"E2E"))
+        from real_control_center import backend, gateway, openssl_state, port as free_port, Client
+        cwd=Path(__file__).resolve().parents[2]/"control-center"
+        gateway_dll=cwd/"bin/Release/net10.0/GatewayCoreYarp.dll"
+        gateway_root=root/"gateway-fixture"
+        operations=[("USER_CREATE_INTENT","/admin/api/users",
+                        {"username":"operator","password":"Operator-fixture-pass-123!","email":"operator@example.invalid","role":"Operator"}),
+                    ("USER_PASSWORD_RESET_INTENT","/admin/api/users/operator/password",{"password":"Reset-fixture-password-123!"}),
+                    ("USER_DISABLE_INTENT","/admin/api/users/operator/disable",{}),
+                    ("USER_ENABLE_INTENT","/admin/api/users/operator/enable",{})]
+        gateway_env={"GATEWAY_AUDIT_INTENT_URL":f"https://127.0.0.1:{port}/audit/v1/intents",
+            "GATEWAY_AUDIT_NODE_ID":"node-a","GATEWAY_AUDIT_SENDER_KEY_FILE":str(keys/"node-a.key"),
+            "GATEWAY_AUDIT_COLLECTOR_PUBLIC_KEY_FILE":str(public),"SSL_CERT_FILE":str(cert)}
+        with backend() as upstream:
+            openssl_state(gateway_root,upstream)
+            with patch.dict(os.environ,gateway_env), gateway(cwd,gateway_dll,gateway_root,free_port()) as base:
+                admin=Client(base)
+                admin.bootstrap("reviewer","Reviewer-fixture-pass-123!","reviewer@example.invalid")
+                state=gateway_root/"state"/"admin-users.json"
+                for index,(operation,route,body) in enumerate(operations):
+                    before=state.read_bytes()
+                    admin.request("POST",route,body,expect=503)
+                    check(state.read_bytes()==before,"collector outage denies "+operation+" without account mutation")
+                    proc=start()
+                    try:
+                        admin.request("POST",route,body)
+                        after=state.read_bytes()
+                        check(after!=before,"verified receipt authorizes "+operation)
+                    finally: stop(proc)
+                    rows=ledger.read_text().splitlines()
+                    check(len(rows)==3+index,"one retained intent for "+operation)
+                    retained=json.loads(base64.b64decode(json.loads(rows[-1])["Body"]))
+                    check(retained["operation"]==operation and retained["actor"]=="reviewer" and
+                        retained["revision"]==hashlib.sha256(before).hexdigest().upper() and
+                        retained["targetDigest"]==hashlib.sha256(after).hexdigest().upper(),
+                        "retained receipt binds exact before/after bytes for "+operation)
+                    check("password" not in retained and "email" not in retained,
+                        "no plaintext credentials or email fields exported")
+                operator=Client(base)
+                operator.login("operator","Reset-fixture-password-123!")
+                check(operator.session()["role"]=="Operator","account recovery retains correct role")
+        print("ACCOUNT_MUTATION_EXTERNAL_AUDIT_SUCCESS",flush=True)
 
 if __name__=="__main__": main()
