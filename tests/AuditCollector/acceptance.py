@@ -26,6 +26,12 @@ def check(condition, message):
         raise AssertionError(message)
     print("PASS: " + message, flush=True)
 
+def safe_receipt_response(status, response_body, receipt):
+    """Reject malformed signed receipts instead of forwarding a modified value."""
+    if receipt and ("\r" in receipt or "\n" in receipt):
+        return 503, b"", None
+    return status, response_body, receipt
+
 def run(*args, **kw):
     return subprocess.run(args, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, **kw)
 
@@ -71,6 +77,10 @@ class ReceiptProxy:
                     owner.hold_entered.set()
                     if not owner.release_held.wait(20):
                         status, response_body, receipt = 503, b"", None
+                # A malformed signed receipt must fail closed; stripping its
+                # bytes would produce a different value from the one signed.
+                status, response_body, receipt = safe_receipt_response(
+                    status, response_body, receipt)
                 self.send_response(status)
                 if receipt:
                     self.send_header("X-GC-Audit-Receipt", receipt)
@@ -88,6 +98,7 @@ class ReceiptProxy:
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self.server.daemon_threads = True
         server_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        server_context.minimum_version = ssl.TLSVersion.TLSv1_2
         server_context.load_cert_chain(str(cert), str(tlskey))
         self.server.socket = server_context.wrap_socket(self.server.socket, server_side=True)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
@@ -123,6 +134,11 @@ def fixture_smtp_trust(ca):
 def main():
     if os.environ.get("GITHUB_ACTIONS") != "true":
         raise SystemExit("Disposable CI only")
+    check(safe_receipt_response(201, b"ok", "signed") ==
+          (201, b"ok", "signed"), "valid signed receipt is forwarded unchanged")
+    for malformed in ("signed\rInjected: true", "signed\nInjected: true"):
+        check(safe_receipt_response(201, b"ok", malformed) ==
+              (503, b"", None), "CR/LF in signed receipt fails closed")
     dll = Path(sys.argv[1]).resolve()
     with tempfile.TemporaryDirectory(prefix="audit-fixture-") as tmp:
         root = Path(tmp)
@@ -156,6 +172,7 @@ def main():
             AUDIT_LEDGER_FILE=str(ledger), AUDIT_NODE_KEYS_DIR=str(keys), AUDIT_SIGNING_PEM=str(signing),
             AUDIT_TLS_PFX=str(pfx), AUDIT_TLS_PASSWORD_FILE=str(pwd))
         ctx = ssl.create_default_context(cafile=str(cert))
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
         def request(body, event, key=secret, recorded=False):
             digest=hashlib.sha256(body).hexdigest().upper()
             purpose="GatewayCore-Audit-Event-v2" if recorded else "GatewayCore-Audit-Intent-v1"

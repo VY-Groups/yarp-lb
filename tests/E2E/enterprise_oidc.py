@@ -150,6 +150,7 @@ class Idp:
         self.insecure_server=ThreadingHTTPServer(("127.0.0.2",0),InsecureLogoutHandler)
         self.insecure_logout_endpoint=f"http://127.0.0.2:{self.insecure_server.server_address[1]}/logout"
         tls=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        tls.minimum_version = ssl.TLSVersion.TLSv1_2
         tls.load_cert_chain(str(cert),str(tlskey))
         self.server.socket=tls.wrap_socket(self.server.socket,server_side=True)
         self.thread=threading.Thread(target=self.server.serve_forever,daemon=True)
@@ -250,6 +251,7 @@ def distributed_revocation(cwd,dll):
         trust=root/"trust.pem"
         trust.write_bytes(cert.read_bytes()+idp_cert.read_bytes())
         ctx=ssl.create_default_context(cafile=str(trust))
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
         ports=[]
         while len(ports)<5:
             candidate=port()
@@ -401,6 +403,7 @@ def main():
         trust=root/"trusted.pem"
         trust.write_bytes(admin_cert.read_bytes()+idp_cert.read_bytes())
         ctx=ssl.create_default_context(cafile=str(trust))
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
         hp,tlsport=port(),port()
         while hp==tlsport: tlsport=port()
         origin=f"https://127.0.0.1:{tlsport}"

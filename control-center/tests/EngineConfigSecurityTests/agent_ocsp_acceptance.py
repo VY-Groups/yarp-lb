@@ -43,6 +43,7 @@ def fingerprint(openssl: str, cert: Path) -> str:
 
 def load_chain(cert: Path, key: Path, root: Path) -> ssl.SSLContext:
     context = ssl.create_default_context(cafile=str(root))
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
     # Kestrel presents the leaf certificate; trust the isolated intermediate
     # directly for the client-side listener check while the agent validates
     # incoming client chains from the root anchor.
