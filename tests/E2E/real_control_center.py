@@ -461,6 +461,19 @@ def verify_queued_destination_replacement(base:str,admin:Client,reviewer:Client,
     await_marker(True)
     apply(original,False)
     await_marker(False)
+    # The YARP model marker precedes asynchronous admission reconciliation.
+    # Only an idempotent GET may wait for the matching gate; never retry the
+    # transaction POST or the held stream that the fixture is about to test.
+    deadline=time.monotonic()+6
+    while True:
+        status,headers,body=response(base,"/admit/normal")
+        if status==200 and body=="e2e-origin:/normal":
+            break
+        check(status==503 and headers.get("X-GatewayCore-Rejection")=="admission_policy_conflict",
+            "unreconciled policy rejects the readiness GET locally")
+        if time.monotonic()>=deadline:
+            raise AssertionError("destination admission policy did not reconcile")
+        time.sleep(.05)
     Origin.replacement_release.clear()
     with Origin.connection_lock:
         Origin.replacement_attempts.clear()
