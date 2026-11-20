@@ -23,9 +23,31 @@ assert 'SourceIpHash' in code and 'WeightedRandom' in code
 assert 'LoadBalancingCore.TryWeight' in code
 assert 'DangerousAcceptAnyServerCertificate' in code
 assert 'GATEWAY_TRUSTED_PROXY_IPS' in code
-assert 'GATEWAY_ACCESS timestampUtc={TimestampUtc:o}' in code
-assert 'clientAddress.Address?.ToString()' in code
-assert 'Request.Path' not in code[code.index('GATEWAY_ACCESS timestampUtc='):code.index('var destinationTelemetry')]
+# The shipping gateway uses a typed source-generated log method. Pin the
+# exact structured schema and the actual call-site argument allowlist, not
+# an obsolete inline message location. Existing real forwarding and OTLP
+# acceptance also check the emitted access log and its privacy contract.
+telemetry=(root/'GatewayOpenTelemetry.cs').read_text()
+import re
+template = (
+    'GATEWAY_ACCESS timestampUtc={TimestampUtc:o} clientIp={ClientIp} '
+    'clientIpSource={ClientIpSource} method={Method} routeId={RouteId} '
+    'statusCode={StatusCode} durationMs={DurationMs}'
+)
+declaration = re.search(
+    r'\[LoggerMessage\(EventId\s*=\s*0,\s*Level\s*=\s*LogLevel\.Information,\s*'
+    r'Message\s*=\s*"([^"]+)"\)\]\s*public static partial void LogAccess\(',
+    telemetry)
+assert declaration is not None and declaration.group(1) == template
+call = re.search(
+    r'GatewayOpenTelemetry\.LogAccess\(accessLogger,\s*'
+    r'timestampUtc,\s*clientAddress\.Address\?\.ToString\(\)\s*\?\?\s*"unknown",\s*'
+    r'clientAddress\.Source,\s*ctx\.Request\.Method,\s*routeId,\s*ctx\.Response\.StatusCode,\s*'
+    r'Math\.Round\(elapsed\s*\*\s*1000\.0\s*/\s*System\.Diagnostics\.Stopwatch\.Frequency,\s*3\)\);',
+    code)
+assert call is not None, 'typed access log must use only the reviewed bounded fields'
+assert 'Request.Path' not in call.group(0) and 'Request.Query' not in call.group(0)
+assert 'Request.Headers' not in call.group(0)
 assert '/admin/api/reports/traffic.json' in code
 assert '/admin/api/reports/traffic.csv' in code
 assert 'duration_bucket_upper_seconds' in code
