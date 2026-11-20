@@ -23,6 +23,22 @@ from urllib.request import build_opener, ProxyHandler, HTTPSHandler, HTTPCookieP
 from unittest.mock import patch
 from real_control_center import backend, gateway, openssl_state, port, Client, check
 
+# These Linux-only CI fixtures must exercise the shipping file-based secret
+# readers. Use an owner-only RAM-backed directory, never ordinary disk or
+# uploaded artifacts, and create each secret file with permissions atomically.
+def fixture_secret_directory():
+    with open("/proc/mounts", encoding="utf-8") as mounts:
+        if not any(line.split()[1:3] == ["/dev/shm", "tmpfs"] for line in mounts):
+            raise RuntimeError("CI requires /dev/shm tmpfs for disposable credentials")
+    return tempfile.TemporaryDirectory(prefix="gatewaycore-ci-secrets-", dir="/dev/shm")
+
+def write_private_fixture_file(path, data):
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "wb") as stream:
+        stream.write(data if isinstance(data, bytes) else data.encode("utf-8"))
+    if path.stat().st_mode & 0o777 != 0o600:
+        raise RuntimeError("Fixture secret file permissions are not owner-only")
+
 def b64url(data):
     return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
 
@@ -240,7 +256,7 @@ def insecure_logout_endpoint_is_rejected(client,idp):
         "HTTP end-session metadata fails closed without contacting its endpoint")
 
 def distributed_revocation(cwd,dll):
-    with tempfile.TemporaryDirectory(prefix="gatewaycore-oidc-shared-") as td, backend() as upstream:
+    with tempfile.TemporaryDirectory(prefix="gatewaycore-oidc-shared-") as td, fixture_secret_directory() as sd, backend() as upstream:
         root=Path(td)
         first,second=root/"first",root/"second"
         for node in (first,second):
@@ -267,9 +283,8 @@ def distributed_revocation(cwd,dll):
                 recovery.request("POST","/admin/api/users",{"username":"operator",
                     "password":"Operator-fixture-password!","email":"operator@example.invalid","role":"Operator"})
         password=secrets.token_hex(32)
-        redis_file=root/"redis-connection"
-        redis_file.write_text(f"127.0.0.1:{redis_port},ssl=true,sslHost=127.0.0.1,password={password}")
-        redis_file.chmod(0o600)
+        redis_file=Path(sd)/"redis-connection"
+        write_private_fixture_file(redis_file, f"127.0.0.1:{redis_port},ssl=true,sslHost=127.0.0.1,password={password}")
         redis_args=["redis-server","--bind","127.0.0.1","--port","0","--tls-port",str(redis_port),
             "--tls-cert-file",str(cert),"--tls-key-file",str(key),"--tls-ca-cert-file",str(cert),
             "--tls-auth-clients","no","--requirepass",password,"--dir",str(root),
@@ -298,8 +313,8 @@ def distributed_revocation(cwd,dll):
                 except subprocess.TimeoutExpired: proc.kill();proc.wait(timeout=5)
         with Idp(root,origin1,idp_key,idp_cert) as idp:
             configs=[]
-            secret=root/"shared-secret"
-            secret.write_text(idp.secret);secret.chmod(0o600)
+            secret=Path(sd)/"shared-secret"
+            write_private_fixture_file(secret, idp.secret)
             for node,origin in ((first,origin1),(second,origin2)):
                 config=node/"oidc.json"
                 config.write_text(json.dumps({"Issuer":idp.issuer,"ClientId":idp.client,
@@ -389,7 +404,7 @@ def main():
         raise SystemExit("Disposable GitHub Actions CI only")
     cwd=args.root.resolve()
     dll=cwd/"bin/Release/net10.0/GatewayCoreYarp.dll"
-    with tempfile.TemporaryDirectory(prefix="gatewaycore-oidc-") as td, backend() as upstream:
+    with tempfile.TemporaryDirectory(prefix="gatewaycore-oidc-") as td, fixture_secret_directory() as sd, backend() as upstream:
         root=Path(td)
         openssl_state(root,upstream)
         admin_key,admin_cert=make_tls(root,"admin","127.0.0.1")
@@ -411,8 +426,9 @@ def main():
                 "email":"operator@example.invalid","role":"Operator"})
         with Idp(root,origin,idp_key,idp_cert) as idp:
             config=root/"oidc.json"
-            secret=root/"client-secret"
-            secret.write_text(idp.secret)
+            secret=Path(sd)/"client-secret"
+            write_private_fixture_file(secret, idp.secret)
+            # ClientSecretFile is a path reference, not the secret value.
             config.write_text(json.dumps({"Issuer":idp.issuer,"ClientId":idp.client,"ClientSecretFile":str(secret),
                 "ManagementOrigin":origin,"RequiredAcr":"urn:fixture:fido","RequiredAmr":"fido2",
                 "BreakGlassUsername":"recovery","Accounts":[{"Subject":"operator-subject",

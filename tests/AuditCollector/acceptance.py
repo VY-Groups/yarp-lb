@@ -21,6 +21,22 @@ import uuid
 from unittest.mock import patch
 from contextlib import contextmanager
 
+# These Linux-only CI fixtures must exercise the shipping file-based secret
+# readers. Use an owner-only RAM-backed directory, never ordinary disk or
+# uploaded artifacts, and create each secret file with permissions atomically.
+def fixture_secret_directory():
+    with open("/proc/mounts", encoding="utf-8") as mounts:
+        if not any(line.split()[1:3] == ["/dev/shm", "tmpfs"] for line in mounts):
+            raise RuntimeError("CI requires /dev/shm tmpfs for disposable credentials")
+    return tempfile.TemporaryDirectory(prefix="gatewaycore-ci-secrets-", dir="/dev/shm")
+
+def write_private_fixture_file(path, data):
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "wb") as stream:
+        stream.write(data if isinstance(data, bytes) else data.encode("utf-8"))
+    if path.stat().st_mode & 0o777 != 0o600:
+        raise RuntimeError("Fixture secret file permissions are not owner-only")
+
 def check(condition, message):
     if not condition:
         raise AssertionError(message)
@@ -124,22 +140,23 @@ def main():
     if os.environ.get("GITHUB_ACTIONS") != "true":
         raise SystemExit("Disposable CI only")
     dll = Path(sys.argv[1]).resolve()
-    with tempfile.TemporaryDirectory(prefix="audit-fixture-") as tmp:
+    with tempfile.TemporaryDirectory(prefix="audit-fixture-") as tmp, fixture_secret_directory() as sd:
         root = Path(tmp)
-        keys = root / "keys"
+        private = Path(sd)
+        keys = private / "keys"
         keys.mkdir(mode=0o700)
         secret = secrets.token_bytes(32)
-        (keys / "node-a.key").write_bytes(secret)
+        write_private_fixture_file(keys / "node-a.key", secret)
         ledger = root / "ledger.jsonl"
         ledger.touch()
-        signing = root / "signing.pem"
+        signing = private / "signing.pem"
         public = root / "public.pem"
         cert = root / "tls.crt"
-        tlskey = root / "tls.key"
-        pfx = root / "tls.pfx"
+        tlskey = private / "tls.key"
+        pfx = private / "tls.pfx"
         password = secrets.token_hex(16)
-        pwd = root / "pfx-password"
-        pwd.write_text(password)
+        pwd = private / "pfx-password"
+        write_private_fixture_file(pwd, password)
         run("openssl","genpkey","-algorithm","RSA","-pkeyopt","rsa_keygen_bits:2048","-out",str(signing))
         run("openssl","pkey","-in",str(signing),"-pubout","-out",str(public))
         run("openssl","req","-x509","-newkey","rsa:2048","-nodes","-days","2",
