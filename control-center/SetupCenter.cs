@@ -31,7 +31,7 @@ public static class SetupCenter
         catch { return new FreezeState(true, "Freeze state unreadable: fail closed"); }
     }
 
-    public static void MapSetupCenter(this WebApplication app, string privateDir)
+    public static void MapSetupCenter(this WebApplication app, string privateDir, Func<string, string, object?, Task> audit)
     {
         app.MapGet("/admin/api/setup/version", () => Results.Ok(new
         {
@@ -125,11 +125,9 @@ public static class SetupCenter
                 var tmp = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
                 try { await File.WriteAllTextAsync(tmp, JsonSerializer.Serialize(next, JsonOptions), ctx.RequestAborted); File.Move(tmp, path, overwrite: true); }
                 finally { if (File.Exists(tmp)) File.Delete(tmp); }
-                var record = new { utc = DateTimeOffset.UtcNow, actor = next.UpdatedBy,
-                    action = input.Frozen ? "ROUTING_CHANGE_FREEZE_ENABLED" : "ROUTING_CHANGE_FREEZE_DISABLED",
-                    details = new { previous = prior.Frozen, current = next.Frozen, next.Reason } };
-                await File.AppendAllTextAsync(Path.Combine(privateDir, "admin-audit.jsonl"),
-                    JsonSerializer.Serialize(record) + Environment.NewLine, ctx.RequestAborted);
+                await audit(next.UpdatedBy,
+                    input.Frozen ? "ROUTING_CHANGE_FREEZE_ENABLED" : "ROUTING_CHANGE_FREEZE_DISABLED",
+                    new { previous = prior.Frozen, current = next.Frozen, next.Reason });
                 return Results.Ok(next);
             }
             finally { Lock.Release(); }
