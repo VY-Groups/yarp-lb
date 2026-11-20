@@ -91,3 +91,22 @@ This is a manual prior-certificate operation, not automatic renewal revocation.
 The current leaf is deliberately never revoked by this endpoint. The CI fake
 issuer verifies request selection and rejection behavior; it does not prove
 public CA acceptance, OCSP/CRL propagation, or that clients enforce revocation.
+
+## Revocation request boundary and certificate lifecycle serialization
+
+The revocation endpoint does not bind the JSON body before checking its size.
+Kestrel enforces a 32 KiB endpoint request limit for both fixed-length and
+chunked bodies, and the handler's bounded reader independently caps bytes before
+JSON deserialization. Oversized requests return HTTP 413 before audit or issuer
+calls. The Windows/Linux TlsInventory acceptance sends real HTTP requests for
+both oversized body forms and confirms the bounded JSON path still works.
+
+ACME renewal PFX replacement/live activation and operator revocation share one
+process-local lifecycle gate. The gate is held through CA revocation response
+and through renewal listener activation, so the managed renewal worker cannot
+change the selected TLS leaf between revocation eligibility validation and the
+CA decision. External out-of-band writes to the configured PFX are not covered
+by this process-local gate and must not run concurrently with GatewayCore's ACME
+operations. The acceptance test holds a fake CA revocation response while a
+renewal attempts activation and verifies that the leaf and PFX remain unchanged
+until revocation completes.

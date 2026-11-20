@@ -1,6 +1,8 @@
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
+using System.Text.Json;
+using Microsoft.AspNetCore.Http;
 using Certes;
 using Certes.Acme.Resource;
 using Microsoft.AspNetCore.DataProtection;
@@ -196,12 +198,14 @@ public sealed record AcmeRenewalResult(bool Renewed, DateTimeOffset? NotAfter, s
 /// </summary>
 public sealed class AcmeRenewalCoordinator(IAcmeCertificateIssuer issuer,
     AcmeHttp01ChallengeStore challenges, TimeProvider? timeProvider = null,
-    X509ChainPolicy? testChainPolicy = null, Func<string, bool>? isCertificateActive = null)
+    X509ChainPolicy? testChainPolicy = null, Func<string, bool>? isCertificateActive = null,
+    AcmeCertificateLifecycleGate? lifecycleGate = null)
 {
     private readonly TimeProvider clock = timeProvider ?? TimeProvider.System;
     private readonly SemaphoreSlim renewalGate = new(1, 1);
     private readonly X509ChainPolicy? validationPolicy = testChainPolicy;
     private readonly Func<string, bool>? activeCertificateCheck = isCertificateActive;
+    private readonly AcmeCertificateLifecycleGate certificateLifecycle = lifecycleGate ?? new();
 
     public async Task<AcmeRenewalResult> RenewIfDueAsync(string directoryUrl, string dnsName,
         string contactEmail, bool publicHttp01Enabled, string activePfxPath,
@@ -260,6 +264,9 @@ public sealed class AcmeRenewalCoordinator(IAcmeCertificateIssuer issuer,
                 using var active = LoadActiveCertificate(activePfxPath, passwordFilePath);
                 if (string.Equals(leaf.Thumbprint, active.Thumbprint, StringComparison.OrdinalIgnoreCase))
                     throw new CryptographicException("ACME renewal returned the currently active certificate.");
+                // Serialize the atomic PFX replacement and live listener activation with
+                // operator revocation so the leaf cannot change during its active check.
+                using var lifecycleLease = await certificateLifecycle.EnterAsync(operationToken);
                 File.Move(stagePath, activePfxPath, overwrite: true);
                 stagePath = null;
                 activePfxReplaced = true;
@@ -413,15 +420,79 @@ public sealed record AcmeRevocationRequest(string CertificateDerBase64, string T
 public sealed record AcmeRevocationResult(string Thumbprint, string DnsName,
     RevocationReason Reason);
 
+public sealed class AcmeRevocationRequestTooLargeException()
+    : Exception("ACME revocation request exceeded the configured size limit.");
+
+public static class AcmeRevocationRequestReader
+{
+    public const int MaxRequestBytes = 32 * 1024;
+    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+
+    public static async Task<AcmeRevocationRequest> ReadAsync(HttpRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (request.ContentLength is > MaxRequestBytes)
+            throw new AcmeRevocationRequestTooLargeException();
+        if (request.ContentType is not { } contentType ||
+            !contentType.StartsWith("application/json", StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException("ACME revocation request must be JSON.");
+
+        using var body = new MemoryStream(capacity: MaxRequestBytes);
+        var buffer = new byte[4096];
+        byte[]? payload = null;
+        try
+        {
+            while (true)
+            {
+                var read = await request.Body.ReadAsync(buffer.AsMemory(), cancellationToken);
+                if (read == 0) break;
+                if (body.Length + read > MaxRequestBytes)
+                    throw new AcmeRevocationRequestTooLargeException();
+                body.Write(buffer, 0, read);
+            }
+            payload = body.ToArray();
+            return JsonSerializer.Deserialize<AcmeRevocationRequest>(payload, JsonOptions)
+                ?? throw new InvalidDataException("ACME revocation request JSON is empty.");
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(buffer);
+            if (payload is not null) CryptographicOperations.ZeroMemory(payload);
+            if (body.TryGetBuffer(out var bodyBuffer))
+                CryptographicOperations.ZeroMemory(bodyBuffer.AsSpan(0, checked((int)body.Length)));
+        }
+    }
+}
+
+public sealed class AcmeCertificateLifecycleGate
+{
+    private readonly SemaphoreSlim gate = new(1, 1);
+    private int waiting;
+    internal int WaitingCount => Volatile.Read(ref waiting);
+
+    public async ValueTask<IDisposable> EnterAsync(CancellationToken cancellationToken)
+    {
+        Interlocked.Increment(ref waiting);
+        try { await gate.WaitAsync(cancellationToken); }
+        finally { Interlocked.Decrement(ref waiting); }
+        return new Lease(gate);
+    }
+
+    private sealed class Lease(SemaphoreSlim gate) : IDisposable
+    {
+        private SemaphoreSlim? held = gate;
+        public void Dispose() => Interlocked.Exchange(ref held, null)?.Release();
+    }
+}
+
 public sealed class AcmeActiveCertificateRevocationException()
     : InvalidOperationException("The currently served traffic certificate cannot be revoked.");
 
 public sealed class AcmeRevocationCoordinator(IAcmeCertificateIssuer issuer,
     string directoryUrl, string dnsName, string contactEmail,
-    Func<string, bool> isCertificateActive)
+    Func<string, bool> isCertificateActive, AcmeCertificateLifecycleGate lifecycleGate)
 {
     private const string ServerAuthOid = "1.3.6.1.5.5.7.3.1";
-    private readonly SemaphoreSlim gate = new(1, 1);
 
     public async Task<AcmeRevocationResult> RevokeAsync(AcmeRevocationRequest request,
         CancellationToken cancellationToken)
@@ -471,16 +542,13 @@ public sealed class AcmeRevocationCoordinator(IAcmeCertificateIssuer issuer,
 
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             timeout.CancelAfter(TimeSpan.FromSeconds(30));
-            await gate.WaitAsync(timeout.Token);
-            try
-            {
-                // Recheck after serialization so a certificate activated while this
-                // request waited cannot be revoked by a stale operator request.
-                if (isCertificateActive(thumbprint))
-                    throw new AcmeActiveCertificateRevocationException();
-                await issuer.RevokeCertificateAsync(directoryUrl, contactEmail, der, reason, timeout.Token);
-            }
-            finally { gate.Release(); }
+            // This process-wide gate is shared with the renewal coordinator. It stays
+            // held from the active-leaf check through the CA response, so managed PFX
+            // replacement/activation cannot race a manual revocation request.
+            using var lifecycleLease = await lifecycleGate.EnterAsync(timeout.Token);
+            if (isCertificateActive(thumbprint))
+                throw new AcmeActiveCertificateRevocationException();
+            await issuer.RevokeCertificateAsync(directoryUrl, contactEmail, der, reason, timeout.Token);
             return new AcmeRevocationResult(thumbprint, target.NormalizedDnsName!, reason);
         }
         finally

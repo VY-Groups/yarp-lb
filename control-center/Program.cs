@@ -19,6 +19,7 @@ using Microsoft.Extensions.Options;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.RateLimiting;
+using Microsoft.AspNetCore.Mvc;
 using System.Threading.RateLimiting;
 using Yarp.ReverseProxy.LoadBalancing;
 
@@ -90,6 +91,7 @@ if (acmeRenewalSettings is { } renewalSettings)
 {
     var activeListeners = isolatedListeners ?? throw new InvalidOperationException(
         "ACME requires the isolated traffic listener certificate rotator.");
+    builder.Services.AddSingleton<AcmeCertificateLifecycleGate>();
     var accountKeyPath = Path.Combine(privateDir, "acme-account.encrypted");
     builder.Services.AddSingleton<IAcmeCertificateIssuer>(services => new CertesAcmeCertificateIssuer(
         new AcmeAccountKeyStore(accountKeyPath,
@@ -98,10 +100,12 @@ if (acmeRenewalSettings is { } renewalSettings)
     builder.Services.AddSingleton<AcmeRenewalCoordinator>(services => new AcmeRenewalCoordinator(
         services.GetRequiredService<IAcmeCertificateIssuer>(),
         services.GetRequiredService<AcmeHttp01ChallengeStore>(),
-        isCertificateActive: activeListeners.IsTrafficCertificateActive));
+        isCertificateActive: activeListeners.IsTrafficCertificateActive,
+        lifecycleGate: services.GetRequiredService<AcmeCertificateLifecycleGate>()));
     builder.Services.AddSingleton<AcmeRevocationCoordinator>(services => new AcmeRevocationCoordinator(
         services.GetRequiredService<IAcmeCertificateIssuer>(), renewalSettings.DirectoryUrl,
-        renewalSettings.DnsName, renewalSettings.ContactEmail, activeListeners.IsTrafficCertificateActive));
+        renewalSettings.DnsName, renewalSettings.ContactEmail, activeListeners.IsTrafficCertificateActive,
+        services.GetRequiredService<AcmeCertificateLifecycleGate>()));
     builder.Services.AddHostedService(services => new AcmeRenewalBackgroundService(renewalSettings,
         services.GetRequiredService<AcmeRenewalCoordinator>(), null,
         services.GetRequiredService<ILogger<AcmeRenewalBackgroundService>>()));
@@ -1369,13 +1373,25 @@ app.MapHttp01Challenge(acmeHttp01PublicEntrypointEnabled,
     ctx => isolatedListeners?.OnTrafficHttp(ctx) == true);
 if (acmeRenewalSettings is { } revokeSettings)
 {
-    app.MapPost("/admin/api/tls/acme/revoke", async (HttpContext ctx, AcmeRevocationRequest input,
+    app.MapPost("/admin/api/tls/acme/revoke", async (HttpContext ctx,
         AcmeRevocationCoordinator coordinator) =>
     {
-        if (ctx.Request.ContentLength is > 32_768)
-            return Results.BadRequest(new { error = "Revocation request exceeds 32 KiB." });
-        if (input.CertificateDerBase64?.Length is > 1_400_000)
-            return Results.BadRequest(new { error = "Certificate payload exceeds its bound." });
+        AcmeRevocationRequest input;
+        try
+        {
+            // Read the body ourselves before parsing. The same limit is also endpoint
+            // metadata so Kestrel rejects Content-Length and chunked overflows.
+            input = await AcmeRevocationRequestReader.ReadAsync(ctx.Request, ctx.RequestAborted);
+        }
+        catch (AcmeRevocationRequestTooLargeException)
+        {
+            return Results.StatusCode(StatusCodes.Status413PayloadTooLarge);
+        }
+        catch (Exception ex) when (ex is InvalidDataException or JsonException)
+        {
+            return Results.BadRequest(new { error = "Revocation request JSON is invalid." });
+        }
+
         await Audit(Actor(ctx), "ACME_CERTIFICATE_REVOCATION_REQUEST", new
         {
             thumbprint = input.Thumbprint,
@@ -1413,6 +1429,7 @@ if (acmeRenewalSettings is { } revokeSettings)
             return Results.Json(new { error = "ACME certificate revocation is unavailable." }, statusCode: 503);
         }
     })
+    .WithMetadata(new RequestSizeLimitAttribute(AcmeRevocationRequestReader.MaxRequestBytes))
     .RequireAuthorization(policy => policy.RequireRole("Administrator"))
     .RequireRateLimiting("acme-revoke");
 }
