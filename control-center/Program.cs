@@ -2003,7 +2003,7 @@ HttpClient CreateFleetClient(FleetGateway row)
 }
 
 // Version 0.1 setup APIs and independently verified YARP runtime state.
-app.MapSetupCenter(privateDir);
+app.MapSetupCenter(privateDir, Audit);
 app.MapCapabilityRegistry();
 app.MapOnboardingApi(privateDir);
 // Enforce onboarding state server-side; hiding navigation is never a security boundary.
@@ -2076,7 +2076,7 @@ if (peerSyncSettings is not null && peerStateJournal is not null && peerSigner i
         return Results.NoContent();
     });
 }
-app.MapOrganizationProfile(privateDir);
+app.MapOrganizationProfile(privateDir, Audit);
 app.MapTlsInventory();
 app.MapReverseProxy(proxyPipeline =>
 {
