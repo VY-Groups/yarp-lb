@@ -54,8 +54,20 @@ foreach (var tcp in config.Tcp)
     loops.Add(RunTcp(tcp, stop.Token));
 foreach (var udp in config.Udp)
     loops.Add(RunUdp(udp, stop.Token));
-Console.WriteLine($"L4_ENGINE_READY TCP={config.Tcp.Length} UDP={config.Udp.Length}; version 0.1 experimental");
-try { await Task.WhenAll(loops); }
+try
+{
+    // A listener can fail during bind or later while other listeners are
+    // still running. Waiting for all before signalling stop would hang the
+    // process in a partially available state.
+    if (!loops.Any(loop => loop.IsCompleted))
+        Console.WriteLine($"L4_ENGINE_READY TCP={config.Tcp.Length} UDP={config.Udp.Length}; version 0.1 experimental");
+    await Task.WhenAny(loops);
+    var requestedStop = stop.IsCancellationRequested;
+    stop.Cancel();
+    await Task.WhenAll(loops);
+    if (!requestedStop)
+        throw new InvalidOperationException("L4 listener exited unexpectedly");
+}
 catch (OperationCanceledException) when (stop.IsCancellationRequested) { }
 finally
 {
