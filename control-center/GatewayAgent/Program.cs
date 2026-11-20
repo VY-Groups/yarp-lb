@@ -417,7 +417,7 @@ app.MapPost("/agent/v1/config/rollback", async (ConfigRollback input) =>
             }
             File.Move(next, gatewayConfigPath, true);
         }
-        return Results.Ok(new {state="rolled-back",revision=Sha(original)});
+        return Results.Ok(new {state="rolled-back",revision=Sha(original),rollbackFenced=true});
     }
     finally {revisionLock.Release();}
 });
