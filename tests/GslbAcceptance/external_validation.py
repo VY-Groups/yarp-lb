@@ -92,6 +92,7 @@ def main():
             openssl("x509", "-req", "-in", role + ".csr", "-CA", "ca.pem", "-CAkey", "ca.key",
                     "-CAcreateserial", "-days", "1", "-extfile", str(ext), "-out", role + ".pem")
         tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        tls.minimum_version = ssl.TLSVersion.TLSv1_2
         tls.load_cert_chain(root / "server.pem", root / "server.key")
         tls.load_verify_locations(root / "ca.pem")
         tls.verify_mode = ssl.CERT_REQUIRED

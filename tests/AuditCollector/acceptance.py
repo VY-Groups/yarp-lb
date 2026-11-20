@@ -71,9 +71,13 @@ class ReceiptProxy:
                     owner.hold_entered.set()
                     if not owner.release_held.wait(20):
                         status, response_body, receipt = 503, b"", None
+                # A malformed upstream receipt must fail closed, not be
+                # forwarded as a different signed receipt or extra header.
+                if receipt and ("\r" in receipt or "\n" in receipt):
+                    status, response_body, receipt = 503, b"", None
                 self.send_response(status)
                 if receipt:
-                    self.send_header("X-GC-Audit-Receipt", receipt)
+                    self.send_header("X-GC-Audit-Receipt", receipt.replace("\r", "").replace("\n", ""))
                 self.send_header("Content-Length", str(len(response_body)))
                 self.send_header("Connection", "close")
                 self.end_headers()
@@ -88,6 +92,7 @@ class ReceiptProxy:
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self.server.daemon_threads = True
         server_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        server_context.minimum_version = ssl.TLSVersion.TLSv1_2
         server_context.load_cert_chain(str(cert), str(tlskey))
         self.server.socket = server_context.wrap_socket(self.server.socket, server_side=True)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
@@ -156,6 +161,7 @@ def main():
             AUDIT_LEDGER_FILE=str(ledger), AUDIT_NODE_KEYS_DIR=str(keys), AUDIT_SIGNING_PEM=str(signing),
             AUDIT_TLS_PFX=str(pfx), AUDIT_TLS_PASSWORD_FILE=str(pwd))
         ctx = ssl.create_default_context(cafile=str(cert))
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
         def request(body, event, key=secret, recorded=False):
             digest=hashlib.sha256(body).hexdigest().upper()
             purpose="GatewayCore-Audit-Event-v2" if recorded else "GatewayCore-Audit-Intent-v1"
