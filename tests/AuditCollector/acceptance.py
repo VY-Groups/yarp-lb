@@ -263,6 +263,55 @@ def main():
                             check(request(changed_bytes,event_id,recorded=True)==(409,None),
                                   "same event ID with changed bytes cannot obtain receipt")
                     finally: stop(proc)
+                # Correlation must work with the real shipping gateway and
+                # collector. A distinct intent receipt never authorizes replay.
+                with gateway(cwd,gateway_dll,queued_root,free_port()) as base:
+                    admin=Client(base)
+                    admin.login("reviewer","Reviewer-fixture-pass-123!")
+                    state=queued_root/"state"/"admin-users.json"
+                    proc=start()
+                    try:
+                        actions_by_intent={"USER_CREATE_INTENT":"USER_CREATED",
+                            "USER_PASSWORD_RESET_INTENT":"PASSWORD_RESET",
+                            "USER_DISABLE_INTENT":"USER_OFFBOARDED",
+                            "USER_ENABLE_INTENT":"USER_REENABLED"}
+                        for operation,route,body in operations:
+                            before=state.read_bytes()
+                            admin.request("POST",route,body)
+                            after=state.read_bytes()
+                            deadline=time.monotonic()+30
+                            while time.monotonic()<deadline and list(spool.glob("*.event")):
+                                time.sleep(.1)
+                            check(not list(spool.glob("*.event")),"correlated events delivered")
+                            ledger_rows=[json.loads(base64.b64decode(json.loads(line)["Body"]))
+                                         for line in ledger.read_text().splitlines()]
+                            intents=[v for v in ledger_rows if v["schema"]==1 and v["operation"]==operation]
+                            intent=intents[-1]
+                            check(intent["revision"]==hashlib.sha256(before).hexdigest().upper() and
+                                  intent["targetDigest"]==hashlib.sha256(after).hexdigest().upper(),
+                                  "correlated intent binds exact mutation bytes")
+                            correlation=hashlib.sha256(intent["eventId"].encode("ascii")).hexdigest().upper()
+                            linked=[v for v in ledger_rows if v["schema"]==2 and v["revision"]==correlation]
+                            check(sorted(v["operation"] for v in linked)==sorted(
+                                ["ACCOUNT_MUTATION_PREPARED",actions_by_intent[operation]]),
+                                "one prepared and one successful outcome correlate to "+operation)
+                            lines=(queued_root/"state"/"admin-audit.jsonl").read_bytes().splitlines()
+                            exact={hashlib.sha256(line).hexdigest().upper() for line in lines
+                                   if json.loads(line).get("intentId")==intent["eventId"]}
+                            check(len(exact)==2 and all(v["targetDigest"] in exact for v in linked),
+                                  "correlated envelopes bind both exact local rows")
+                        # Inject a queue storage fault after startup. The collector
+                        # still authorizes the intent, but precommit storage must deny.
+                        before=state.read_bytes()
+                        (spool/"incomplete.tmp").write_text("fixture fault")
+                        admin.request("POST","/admin/api/users",{
+                            "username":"must-not-exist","password":"Blocked-fixture-password-123!",
+                            "email":"blocked@example.invalid","role":"Viewer"},expect=503)
+                        check(state.read_bytes()==before,"preparation storage fault denies account mutation")
+                        check(admin.request("GET","/admin/api/audit/delivery")["storageFault"],
+                              "outbox storage fault remains visible")
+                    finally: stop(proc)
         print("DURABLE_GATEWAY_AUDIT_HTTPS_SUCCESS",flush=True)
+        print("ACCOUNT_INTENT_OUTCOME_CORRELATION_SUCCESS",flush=True)
 
 if __name__=="__main__": main()

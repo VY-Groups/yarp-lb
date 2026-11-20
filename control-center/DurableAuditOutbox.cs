@@ -86,7 +86,7 @@ internal sealed class DurableAuditOutbox : IDisposable
         return row;
     }
 
-    internal void Enqueue(string actor, string action, DateTimeOffset utc, string digest)
+    internal void Enqueue(string actor, string action, DateTimeOffset utc, string digest, string? intentId = null)
     {
         lock (gate)
         {
@@ -94,7 +94,7 @@ internal sealed class DurableAuditOutbox : IDisposable
             try
             {
                 if (Entries().Length >= MaxEntries) throw new QueueFullException();
-                var row = transport.CreateEvent(actor, action, utc, digest);
+                var row = transport.CreateEvent(actor, action, utc, digest, intentId);
                 var target = Path.Combine(directory, row.Id + ".event");
                 var bytes = JsonSerializer.SerializeToUtf8Bytes(row);
                 if (bytes.Length > MaxEntryBytes) throw new InvalidDataException("Audit queue record too large");

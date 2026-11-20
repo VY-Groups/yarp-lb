@@ -35,7 +35,9 @@ internal static class AuditContract
                 actor.Any(char.IsControl) ||
                 (recorded ? operation is not { Length: >= 1 and <= 96 } ||
                     !operation.All(c => c is >= 'A' and <= 'Z' or >= '0' and <= '9' or '_') ||
-                    root.GetProperty("revision").GetString() != new string('0', 64)
+                    (operation == "ACCOUNT_MUTATION_PREPARED" && root.GetProperty("revision").GetString() == new string('0', 64)) ||
+                    (root.GetProperty("revision").GetString() != new string('0', 64) &&
+                        operation is not ("ACCOUNT_MUTATION_PREPARED" or "USER_CREATED" or "PASSWORD_RESET" or "USER_OFFBOARDED" or "USER_REENABLED"))
                   : operation is not ("CONFIG_APPLY_INTENT" or "CONFIG_RESTORE_INTENT" or "USER_CREATE_INTENT" or "USER_PASSWORD_RESET_INTENT" or "USER_DISABLE_INTENT" or "USER_ENABLE_INTENT")) ||
                 !Digest(root.GetProperty("revision").GetString()) || !Digest(root.GetProperty("targetDigest").GetString()) ||
                 !root.GetProperty("utc").TryGetDateTimeOffset(out var utc)) return null;

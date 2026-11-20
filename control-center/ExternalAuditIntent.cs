@@ -92,18 +92,23 @@ internal sealed class ExternalAuditIntent : IDisposable
         SignatureInput("GatewayCore-Audit-Receipt-v1", id, body);
 
     internal async Task<bool> ConfirmAsync(string actor, string operation, string revision,
+        string targetDigest, CancellationToken cancellationToken) =>
+        await ConfirmWithIdAsync(actor, operation, revision, targetDigest, cancellationToken) is not null;
+
+    internal async Task<string?> ConfirmWithIdAsync(string actor, string operation, string revision,
         string targetDigest, CancellationToken cancellationToken)
     {
         if (cancellationToken.IsCancellationRequested || actor.Length is < 1 or > 256 || actor.Any(char.IsControl) || operation is not ("CONFIG_APPLY_INTENT" or "CONFIG_RESTORE_INTENT" or "USER_CREATE_INTENT" or "USER_PASSWORD_RESET_INTENT" or "USER_DISABLE_INTENT" or "USER_ENABLE_INTENT") ||
             !IsDigest(revision) || !IsDigest(targetDigest))
-            return false;
+            return null;
         var id = Guid.NewGuid().ToString("N");
         var payload = JsonSerializer.SerializeToUtf8Bytes(new
         {
             schema = 1, eventId = id, node, utc = DateTimeOffset.UtcNow,
             actor, operation, revision, targetDigest
         });
-        return await SendAsync(id, payload, EventMac(id, payload, false), false, cancellationToken);
+        return await SendAsync(id, payload, EventMac(id, payload, false), false, cancellationToken)
+            ? id : null;
     }
 
     internal sealed record QueuedEvent(string Id, byte[] Payload, string Mac);
@@ -111,17 +116,28 @@ internal sealed class ExternalAuditIntent : IDisposable
         Convert.ToBase64String(HMACSHA256.HashData(senderKey, SignatureInput(
             recorded ? "GatewayCore-Audit-Event-v2" : "GatewayCore-Audit-Intent-v1", id, payload)));
 
-    internal QueuedEvent CreateEvent(string actor, string action, DateTimeOffset utc, string localDigest)
+    internal static bool AccountCorrelationAction(string action) => action is
+        "ACCOUNT_MUTATION_PREPARED" or "USER_CREATED" or "PASSWORD_RESET" or "USER_OFFBOARDED" or "USER_REENABLED";
+
+    internal QueuedEvent CreateEvent(string actor, string action, DateTimeOffset utc, string localDigest,
+        string? intentId = null)
     {
         if (actor.Length is < 1 or > 256 || actor.Any(char.IsControl))
             actor = "invalid-actor:" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(actor)));
         if (action.Length is < 1 or > 96 || !action.All(c => c is >= 'A' and <= 'Z' or >= '0' and <= '9' or '_') ||
             !IsDigest(localDigest)) throw new InvalidDataException("Invalid recorded audit event");
+        if (intentId is not null && (!AccountCorrelationAction(action) ||
+            !Guid.TryParseExact(intentId, "N", out var intent) || intent.ToString("N") != intentId))
+            throw new InvalidDataException("Invalid account audit correlation");
+        if (action == "ACCOUNT_MUTATION_PREPARED" && intentId is null)
+            throw new InvalidDataException("Prepared account audit requires confirmed intent");
+        var correlation = intentId is null ? new string('0', 64) :
+            Convert.ToHexString(SHA256.HashData(Encoding.ASCII.GetBytes(intentId)));
         var id = Guid.NewGuid().ToString("N");
         var payload = JsonSerializer.SerializeToUtf8Bytes(new
         {
             schema = 2, eventId = id, node, utc, actor, operation = action,
-            revision = new string('0', 64), targetDigest = localDigest
+            revision = correlation, targetDigest = localDigest
         });
         if (payload.Length > 4096) throw new InvalidDataException("Recorded audit envelope exceeds limit");
         return new QueuedEvent(id, payload, EventMac(id, payload, true));
