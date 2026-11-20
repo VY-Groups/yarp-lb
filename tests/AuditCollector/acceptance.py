@@ -196,6 +196,47 @@ def main():
                 operator=Client(base)
                 operator.login("operator","Reset-fixture-password-123!")
                 check(operator.session()["role"]=="Operator","account recovery retains correct role")
+                inventory=gateway_root/"state"/"inventory.json"
+                fleet=gateway_root/"state"/"fleet-gateways.json"
+                fleet_body={"id":"lab-node","url":"https://127.0.0.1:19443/",
+                    "clientCertificateThumbprint":"A"*64}
+                # An operator must not be able to register a fleet node even
+                # if the collector is available. Preserve the existing RBAC.
+                operator.request("POST","/admin/api/fleet",fleet_body,expect=403)
+                check(not fleet.exists(),"operator cannot register fleet node")
+                resources=[
+                    (operator,"operator",inventory,"INVENTORY_ADD_INTENT","POST","/admin/api/inventory",
+                     {"id":"lab-service","name":"Lab service","type":"Service",
+                      "address":"fixture.example.invalid","notes":"not exported"}),
+                    (operator,"operator",inventory,"INVENTORY_DELETE_INTENT","DELETE","/admin/api/inventory/lab-service",{}),
+                    (admin,"reviewer",fleet,"FLEET_REGISTER_INTENT","POST","/admin/api/fleet",fleet_body),
+                    (admin,"reviewer",fleet,"FLEET_UNREGISTER_INTENT","DELETE","/admin/api/fleet/lab-node",{}),
+                ]
+                for client,actor,state,operation,method,route,payload in resources:
+                    existed=state.exists()
+                    before=state.read_bytes() if existed else b""
+                    count=len(ledger.read_text().splitlines())
+                    client.request(method,route,payload,expect=503)
+                    check(state.exists()==existed and (not existed or state.read_bytes()==before),
+                          "collector outage leaves resource unchanged: "+operation)
+                    proc=start()
+                    try:
+                        client.request(method,route,payload)
+                        after=state.read_bytes()
+                    finally: stop(proc)
+                    check(after!=before,"signed receipt permits "+operation)
+                    rows=ledger.read_text().splitlines()
+                    check(len(rows)==count+1,"exactly one retained intent: "+operation)
+                    retained=json.loads(base64.b64decode(json.loads(rows[-1])["Body"]))
+                    check(retained["operation"]==operation and retained["actor"]==actor and
+                          retained["revision"]==hashlib.sha256(before).hexdigest().upper() and
+                          retained["targetDigest"]==hashlib.sha256(after).hexdigest().upper(),
+                          "retained before/after digests match exact resource bytes: "+operation)
+                    check(set(retained)=={"schema","eventId","node","utc","actor","operation","revision","targetDigest"},
+                          "no internal address, certificate or inventory notes exported")
+                check(json.loads(inventory.read_bytes())==[] and json.loads(fleet.read_bytes())==[],
+                      "resource deletion persisted after valid receipts")
+        print("INVENTORY_FLEET_EXTERNAL_AUDIT_SUCCESS",flush=True)
         print("ACCOUNT_MUTATION_EXTERNAL_AUDIT_SUCCESS",flush=True)
 
 if __name__=="__main__": main()
