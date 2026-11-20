@@ -14,7 +14,7 @@ support_program=program
 support_installer=installer
 support_service=(root/'ops/systemd/gatewaycore-yarp.service').read_text(encoding='utf-8')
 global_sdk=(root.parent/'global.json').read_text(encoding='utf-8')
-assert 'app.MapSetupCenter(privateDir)' in program
+assert 'app.MapSetupCenter(privateDir, Audit)' in program
 assert 'SetupCenter.ReadFreeze(privateDir).Frozen' in program
 for path in ['/admin/api/setup/version','/admin/api/setup/overview','/admin/api/setup/freeze','/admin/api/runtime/destinations']:
     assert path in setup

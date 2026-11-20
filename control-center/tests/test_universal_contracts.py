@@ -8,7 +8,7 @@ installer=(p/'INSTALL.ps1').read_text()
 for value in ['/admin/api/organization','/admin/api/organization/sectors','MapOrganizationProfile', 'RequireRole("Administrator")','ExpectedRevision','Results.Conflict','File.Move(tmp, dest, true)']:
  assert value in (api+app), value
 assert 'OrganizationProfile.cs' in installer
-assert 'app.MapOrganizationProfile(privateDir)' in app
+assert 'app.MapOrganizationProfile(privateDir, Audit)' in app
 assert "IsLoopback(address)" in app and 'yarp_control_http_requests_total' in app
 assert "'GatewayCore.ApplicationCategory'" not in ui
 assert 'Set up your GatewayCore gateway' not in ui

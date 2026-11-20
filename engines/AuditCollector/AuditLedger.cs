@@ -3,7 +3,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 
-internal sealed record AuditIntent(string EventId, string Node, DateTimeOffset Utc);
+internal sealed record AuditIntent(string EventId, string Node, DateTimeOffset Utc, bool RecordedEvent = false);
 internal static class AuditContract
 {
     internal const int MaxBody = 4096;
@@ -24,30 +24,35 @@ internal static class AuditContract
             var names = new HashSet<string>(StringComparer.Ordinal);
             foreach (var field in root.EnumerateObject())
                 if (!Fields.Contains(field.Name, StringComparer.Ordinal) || !names.Add(field.Name)) return null;
-            if (names.Count != Fields.Length || root.GetProperty("schema").GetInt32() != 1) return null;
+            if (names.Count != Fields.Length || root.GetProperty("schema").GetInt32() is not (1 or 2)) return null;
+            var recorded = root.GetProperty("schema").GetInt32() == 2;
+            var operation = root.GetProperty("operation").GetString();
             var id = root.GetProperty("eventId").GetString();
             var node = root.GetProperty("node").GetString();
             var actor = root.GetProperty("actor").GetString();
             if (id is null || !Guid.TryParseExact(id, "N", out var guid) || guid.ToString("N") != id ||
                 node is null || !ValidNode(node) || actor is not { Length: >= 1 and <= 256 } ||
                 actor.Any(char.IsControl) ||
-                root.GetProperty("operation").GetString() is not ("CONFIG_APPLY_INTENT" or "CONFIG_RESTORE_INTENT" or "USER_CREATE_INTENT" or "USER_PASSWORD_RESET_INTENT" or "USER_DISABLE_INTENT" or "USER_ENABLE_INTENT") ||
+                (recorded ? operation is not { Length: >= 1 and <= 96 } ||
+                    !operation.All(c => c is >= 'A' and <= 'Z' or >= '0' and <= '9' or '_') ||
+                    root.GetProperty("revision").GetString() != new string('0', 64)
+                  : operation is not ("CONFIG_APPLY_INTENT" or "CONFIG_RESTORE_INTENT" or "USER_CREATE_INTENT" or "USER_PASSWORD_RESET_INTENT" or "USER_DISABLE_INTENT" or "USER_ENABLE_INTENT")) ||
                 !Digest(root.GetProperty("revision").GetString()) || !Digest(root.GetProperty("targetDigest").GetString()) ||
                 !root.GetProperty("utc").TryGetDateTimeOffset(out var utc)) return null;
-            return new AuditIntent(id, node, utc);
+            return new AuditIntent(id, node, utc, recorded);
         }
         catch (Exception ex) when (ex is JsonException or InvalidOperationException or FormatException)
         { return null; }
     }
     internal static byte[] Input(string purpose, string id, byte[] body) =>
         Encoding.ASCII.GetBytes(purpose + "\n" + id + "\n" + Convert.ToHexString(SHA256.HashData(body)));
-    internal static bool VerifyMac(string id, byte[] body, string? mac, byte[] key)
+    internal static bool VerifyMac(string id, byte[] body, string? mac, byte[] key, bool recorded = false)
     {
         if (mac is not { Length: 44 }) return false;
         Span<byte> decoded = stackalloc byte[32];
         return Convert.TryFromBase64String(mac, decoded, out var n) && n == 32 &&
             CryptographicOperations.FixedTimeEquals(decoded,
-                HMACSHA256.HashData(key, Input("GatewayCore-Audit-Intent-v1", id, body)));
+                HMACSHA256.HashData(key, Input(recorded ? "GatewayCore-Audit-Event-v2" : "GatewayCore-Audit-Intent-v1", id, body)));
     }
 }
 
@@ -67,6 +72,7 @@ internal sealed class AuditLedger : IDisposable
     private readonly string? pendingPath;
     private byte[]? lastRecord;
     private readonly HashSet<string> seen = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, string> recordedDigests = new(StringComparer.Ordinal);
     private string head = Genesis;
     private long length;
     private bool faulted;
@@ -130,6 +136,7 @@ internal sealed class AuditLedger : IDisposable
                 !signer.VerifyData(input, Convert.FromBase64String(entry.Signature),
                     HashAlgorithmName.SHA256, RSASignaturePadding.Pss))
                 throw new InvalidDataException("Ledger body or signature mismatch");
+            if (intent.RecordedEvent) recordedDigests.Add(intent.EventId, Convert.ToHexString(SHA256.HashData(body)));
             head = entry.Hash;
             lastRecord = Encoding.UTF8.GetBytes(raw + "\n");
         }
@@ -182,6 +189,8 @@ internal sealed class AuditLedger : IDisposable
         length += bytes.Length;
         head = entry.Hash;
         seen.Add(id);
+        var body = Convert.FromBase64String(entry.Body);
+        if (AuditContract.Parse(body) is { RecordedEvent: true }) recordedDigests.Add(id, Convert.ToHexString(SHA256.HashData(body)));
         lastRecord = bytes;
     }
 
@@ -231,7 +240,14 @@ internal sealed class AuditLedger : IDisposable
                 CheckLocal();
                 // Never stack another sequence behind an unresolved write.
                 if (!DrainPending()) return new(503);
-                if (seen.Contains(id)) return new(409);
+                var intent = AuditContract.Parse(body);
+                if (intent is null || intent.EventId != id) return new(403);
+                var digest = Convert.ToHexString(SHA256.HashData(body));
+                // Only non-authorizing recorded events can obtain a receipt for
+                // an exact already-committed envelope after a lost response.
+                if (seen.Contains(id))
+                    return intent.RecordedEvent && recordedDigests.TryGetValue(id, out var prior) && prior == digest
+                        ? new(201, SignReceipt(id, body, true)) : new(409);
                 if (seen.Count >= MaxEntries) return new(503);
                 var seq = seen.Count + 1L;
                 var input = ChainInput(seq, head, body);
@@ -241,9 +257,7 @@ internal sealed class AuditLedger : IDisposable
                 var bytes = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(entry) + "\n");
                 if (bytes.Length > MaxLine || length + bytes.Length > MaxBytes) return new(503);
                 // Prepare receipt; return it ONLY after durable append succeeds.
-                var receipt = Convert.ToBase64String(signer.SignData(
-                    AuditContract.Input("GatewayCore-Audit-Receipt-v1", id, body),
-                    HashAlgorithmName.SHA256, RSASignaturePadding.Pss));
+                var receipt = SignReceipt(id, body, intent.RecordedEvent);
                 if (pending is not null)
                 {
                     pending.Position = 0;
@@ -261,5 +275,10 @@ internal sealed class AuditLedger : IDisposable
             }
         }
     }
+    private string SignReceipt(string id, byte[] body, bool recorded) =>
+        Convert.ToBase64String(signer.SignData(AuditContract.Input(recorded
+            ? "GatewayCore-Audit-Event-Receipt-v2" : "GatewayCore-Audit-Receipt-v1", id, body),
+            HashAlgorithmName.SHA256, RSASignaturePadding.Pss));
+
     public void Dispose() { pending?.Dispose(); stream.Dispose(); }
 }

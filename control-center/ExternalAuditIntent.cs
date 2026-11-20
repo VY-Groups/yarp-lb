@@ -103,12 +103,52 @@ internal sealed class ExternalAuditIntent : IDisposable
             schema = 1, eventId = id, node, utc = DateTimeOffset.UtcNow,
             actor, operation, revision, targetDigest
         });
+        return await SendAsync(id, payload, EventMac(id, payload, false), false, cancellationToken);
+    }
+
+    internal sealed record QueuedEvent(string Id, byte[] Payload, string Mac);
+    private string EventMac(string id, byte[] payload, bool recorded) =>
+        Convert.ToBase64String(HMACSHA256.HashData(senderKey, SignatureInput(
+            recorded ? "GatewayCore-Audit-Event-v2" : "GatewayCore-Audit-Intent-v1", id, payload)));
+
+    internal QueuedEvent CreateEvent(string actor, string action, DateTimeOffset utc, string localDigest)
+    {
+        if (actor.Length is < 1 or > 256 || actor.Any(char.IsControl))
+            actor = "invalid-actor:" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(actor)));
+        if (action.Length is < 1 or > 96 || !action.All(c => c is >= 'A' and <= 'Z' or >= '0' and <= '9' or '_') ||
+            !IsDigest(localDigest)) throw new InvalidDataException("Invalid recorded audit event");
+        var id = Guid.NewGuid().ToString("N");
+        var payload = JsonSerializer.SerializeToUtf8Bytes(new
+        {
+            schema = 2, eventId = id, node, utc, actor, operation = action,
+            revision = new string('0', 64), targetDigest = localDigest
+        });
+        if (payload.Length > 4096) throw new InvalidDataException("Recorded audit envelope exceeds limit");
+        return new QueuedEvent(id, payload, EventMac(id, payload, true));
+    }
+
+    internal bool ValidEvent(QueuedEvent entry)
+    {
+        if (entry.Id is null || !Guid.TryParseExact(entry.Id, "N", out var id) || id.ToString("N") != entry.Id ||
+            entry.Payload is not { Length: >= 1 and <= 4096 } || entry.Mac is not { Length: 44 }) return false;
+        if (!CryptographicOperations.FixedTimeEquals(Encoding.ASCII.GetBytes(entry.Mac),
+            Encoding.ASCII.GetBytes(EventMac(entry.Id, entry.Payload, true)))) return false;
+        using var doc = JsonDocument.Parse(entry.Payload);
+        var root = doc.RootElement;
+        return root.GetProperty("schema").GetInt32() == 2 &&
+            root.GetProperty("node").GetString() == node && root.GetProperty("eventId").GetString() == entry.Id;
+    }
+
+    internal Task<bool> DeliverEventAsync(QueuedEvent entry, CancellationToken ct) =>
+        ValidEvent(entry) ? SendAsync(entry.Id, entry.Payload, entry.Mac, true, ct) : Task.FromResult(false);
+
+    private async Task<bool> SendAsync(string id, byte[] payload, string mac, bool recorded, CancellationToken cancellationToken)
+    {
         using var request = new HttpRequestMessage(HttpMethod.Post, endpoint);
         request.Content = new ByteArrayContent(payload);
         request.Content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/json");
         request.Headers.Add(EventIdHeader, id);
-        request.Headers.Add(RequestSignature, Convert.ToBase64String(HMACSHA256.HashData(senderKey,
-            SignatureInput("GatewayCore-Audit-Intent-v1", id, payload))));
+        request.Headers.Add(RequestSignature, mac);
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         deadline.CancelAfter(TimeSpan.FromSeconds(5));
         try
@@ -122,7 +162,8 @@ internal sealed class ExternalAuditIntent : IDisposable
             var signature = Convert.FromBase64String(values[0]);
             lock (verifyGate)
                 return !deadline.IsCancellationRequested &&
-                    collectorKey.VerifyData(ReceiptInput(id, payload), signature,
+                    collectorKey.VerifyData(recorded ? SignatureInput("GatewayCore-Audit-Event-Receipt-v2", id, payload)
+                        : ReceiptInput(id, payload), signature,
                         HashAlgorithmName.SHA256, RSASignaturePadding.Pss) &&
                     !deadline.IsCancellationRequested;
         }

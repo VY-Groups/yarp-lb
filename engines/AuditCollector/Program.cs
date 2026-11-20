@@ -136,9 +136,11 @@ app.MapPost("/audit/v1/intents", async (HttpContext ctx) =>
         var intent = AuditContract.Parse(bytes);
         if (intent is null || !string.Equals(intent.EventId, ids[0], StringComparison.Ordinal) ||
             !keys.TryGetValue(intent.Node, out var sender) ||
-            !AuditContract.VerifyMac(intent.EventId, bytes, macs[0], sender))
+            !AuditContract.VerifyMac(intent.EventId, bytes, macs[0], sender, intent.RecordedEvent))
             return Results.StatusCode(403);
-        if ((DateTimeOffset.UtcNow - intent.Utc).Duration() > TimeSpan.FromSeconds(60))
+        var age = DateTimeOffset.UtcNow - intent.Utc;
+        if (age < TimeSpan.FromSeconds(-60) ||
+            age > (intent.RecordedEvent ? TimeSpan.FromDays(30) : TimeSpan.FromSeconds(60)))
             return Results.StatusCode(409);
         var result = ledger.Append(intent.EventId, bytes);
         if (result.Status != 201) return Results.StatusCode(result.Status);
