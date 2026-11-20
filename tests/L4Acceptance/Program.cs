@@ -20,11 +20,14 @@ using var udpA = new UdpClient(new IPEndPoint(IPAddress.Loopback, 19121));
 using var udpB = new UdpClient(new IPEndPoint(IPAddress.Loopback, 19122));
 long udpAReceived = 0;
 long udpBReceived = 0;
+var udpAProbeHealthy = 1;
+var udpAUnhealthy = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+var udpARecovered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 var workers = new [] {
     TcpEcho(tcpA, "A", stop.Token), TcpEcho(tcpB, "B", stop.Token),
     ProxyProtocolBackend(proxyBackend, stop.Token), IdleBackend(idleBackend, stop.Token),
     HalfCloseBackend(halfCloseBackend, stop.Token), AdmissionBackend(admissionBackend, stop.Token),
-    UdpEcho(udpA, "A", stop.Token, () => Interlocked.Increment(ref udpAReceived)),
+    UdpEcho(udpA, "A", stop.Token, () => Interlocked.Increment(ref udpAReceived), () => Volatile.Read(ref udpAProbeHealthy) == 1),
     UdpEcho(udpB, "B", stop.Token, () => Interlocked.Increment(ref udpBReceived))
 };
 var scratch = Path.Combine(Path.GetTempPath(), "yarp-l4-" + Guid.NewGuid().ToString("N"));
@@ -58,7 +61,10 @@ File.WriteAllText(configFile, JsonSerializer.Serialize(new {
       new { Name = "udp-admission", ListenHost="127.0.0.1", ListenPort=19025, UdpMaxSessions=1, UdpIdleTimeoutSeconds=2,
       Backends = new [] { new { Host="127.0.0.1", Port=19121, DrainNewConnections=false } } },
       new { Name = "udp-all-drained", ListenHost="127.0.0.1", ListenPort=19023, UdpIdleTimeoutSeconds=30,
-      Backends = new [] { new { Host="127.0.0.1", Port=19121, DrainNewConnections=true }, new { Host="127.0.0.1", Port=19122, DrainNewConnections=true } } } }
+      Backends = new [] { new { Host="127.0.0.1", Port=19121, DrainNewConnections=true }, new { Host="127.0.0.1", Port=19122, DrainNewConnections=true } } },
+      new { Name = "udp-health", ListenHost="127.0.0.1", ListenPort=19026, UdpProbePayload="health-check",
+      UdpProbeExpectedResponse="healthy", UdpProbeIntervalSeconds=1, UdpIdleTimeoutSeconds=30,
+      Backends = new [] { new { Host="127.0.0.1", Port=19121, DrainNewConnections=false }, new { Host="127.0.0.1", Port=19122, DrainNewConnections=false } } } }
 }));
 var info=new ProcessStartInfo("dotnet") { WorkingDirectory=Path.GetDirectoryName(dll)!, UseShellExecute=false,
     RedirectStandardOutput=true, RedirectStandardError=true };
@@ -78,11 +84,14 @@ async Task<string> ReadProxyOutput()
         "L4_UDP_READY udp-all-drained 127.0.0.1:19023",
         "L4_UDP_READY udp-idle 127.0.0.1:19024",
         "L4_UDP_READY udp-admission 127.0.0.1:19025",
+        "L4_UDP_READY udp-health 127.0.0.1:19026",
         "L4_TCP_READY tcp-admission 127.0.0.1:19016"
     };
     while (await proxy.StandardOutput.ReadLineAsync() is { } line)
     {
         output.AppendLine(line);
+        if (line == "L4_UDP_HEALTH udp-health 127.0.0.1:19121 healthy=False") udpAUnhealthy.TrySetResult();
+        if (line == "L4_UDP_HEALTH udp-health 127.0.0.1:19121 healthy=True") udpARecovered.TrySetResult();
         expected.Remove(line);
         if (line == "L4_UDP_RETIRED udp-idle count=1") idleRetired.TrySetResult();
         if (line == "L4_UDP_RETIRED udp-admission count=1") admissionRetired.TrySetResult();
@@ -155,6 +164,25 @@ try
     }
     Assert(!proxy.HasExited && (await UdpRoundTrip(c1,"still-sticky")).StartsWith(first[..2]),
         "L4 engine remains alive and drain checks preserve unrelated UDP sessions");
+    Volatile.Write(ref udpAProbeHealthy, 0);
+    await udpAUnhealthy.Task.WaitAsync(TimeSpan.FromSeconds(5));
+    for (var i = 0; i < 8; i++)
+    {
+        using var client = new UdpClient(AddressFamily.InterNetwork);
+        client.Connect(IPAddress.Loopback, 19026);
+        Assert((await UdpRoundTrip(client, "after-probe-failure")).StartsWith("B|"),
+            "failed UDP application probe excludes that backend from new sessions");
+    }
+    Volatile.Write(ref udpAProbeHealthy, 1);
+    await udpARecovered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+    var recoveredBackendA = false;
+    for (var i = 0; i < 12 && !recoveredBackendA; i++)
+    {
+        using var client = new UdpClient(AddressFamily.InterNetwork);
+        client.Connect(IPAddress.Loopback, 19026);
+        recoveredBackendA = (await UdpRoundTrip(client, "after-probe-recovery")).StartsWith("A|");
+    }
+    Assert(recoveredBackendA, "healthy UDP application probe restores backend to new sessions");
     using (var idleUdp = new UdpClient(AddressFamily.InterNetwork))
     {
         idleUdp.Connect(IPAddress.Loopback, 19024);
@@ -381,15 +409,22 @@ static async Task TcpEcho(TcpListener listener,string id,CancellationToken token
     }
     catch(SocketException) when(token.IsCancellationRequested){}
 }
-static async Task UdpEcho(UdpClient listener,string id,CancellationToken token,Action recordReceived)
+static async Task UdpEcho(UdpClient listener,string id,CancellationToken token,Action recordReceived,Func<bool>? probeHealthy = null)
 {
     try
     {
         while(!token.IsCancellationRequested)
         {
             var packet=await listener.ReceiveAsync(token);
+            var request = Encoding.UTF8.GetString(packet.Buffer);
+            if (request == "health-check")
+            {
+                if (probeHealthy?.Invoke() ?? true)
+                    await listener.SendAsync(Encoding.UTF8.GetBytes("healthy"),packet.RemoteEndPoint,token);
+                continue;
+            }
             recordReceived();
-            var msg=id+"|"+Encoding.UTF8.GetString(packet.Buffer);
+            var msg=id+"|"+request;
             await listener.SendAsync(Encoding.UTF8.GetBytes(msg),packet.RemoteEndPoint,token);
         }
     }

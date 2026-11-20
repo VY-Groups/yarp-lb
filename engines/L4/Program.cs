@@ -32,6 +32,10 @@ foreach (var listener in listeners)
         listener.TcpIdleTimeoutSeconds is < 1 or > 3600 ||
         listener.UdpIdleTimeoutSeconds is < 1 or > 3600 ||
         listener.ProbeIntervalSeconds is < 1 or > 60 ||
+        listener.UdpProbeIntervalSeconds is < 1 or > 60 ||
+        ((listener.UdpProbePayload is null) != (listener.UdpProbeExpectedResponse is null)) ||
+        (listener.UdpProbePayload is { } probePayload && Encoding.UTF8.GetByteCount(probePayload) is < 1 or > 512) ||
+        (listener.UdpProbeExpectedResponse is { } probeResponse && Encoding.UTF8.GetByteCount(probeResponse) is < 1 or > 512) ||
         listener.Backends.Any(b => b.Port is < 1 or > 65535 ||
             !IPAddress.TryParse(b.Host, out var ip) ||
             ip.AddressFamily != AddressFamily.InterNetwork))
@@ -231,13 +235,14 @@ async Task RunUdp(L4Listener cfg, CancellationToken token)
     listener.Bind(new IPEndPoint(IPAddress.Parse(cfg.ListenHost), cfg.ListenPort));
     Console.WriteLine($"L4_UDP_READY {cfg.Name} {cfg.ListenHost}:{cfg.ListenPort}");
     var sessions = new Dictionary<string, UdpSession>();
-    var eligibleBackends = cfg.Backends.Where(b => !b.DrainNewConnections).ToArray();
+    var targets = cfg.Backends.Select(b => new UdpTarget(b)).ToArray();
     long cursor = -1;
     var buffer = new byte[65_535];
     var idleMs = cfg.UdpIdleTimeoutSeconds * 1000L;
     using var sweepTimer = new PeriodicTimer(TimeSpan.FromSeconds(1));
     using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(token);
     var ct = lifetime.Token;
+    var probes = ProbeUdpTargets(cfg, targets, ct);
     Task<SocketReceiveFromResult> Receive() => listener.ReceiveFromAsync(buffer.AsMemory(),
         SocketFlags.None, new IPEndPoint(IPAddress.Any, 0), ct).AsTask();
     var receive = Receive();
@@ -279,9 +284,14 @@ async Task RunUdp(L4Listener cfg, CancellationToken token)
                 session.Close();
                 session = null;
             }
-            if (session is null && sessions.Count < cfg.UdpMaxSessions && eligibleBackends.Length != 0)
+            var eligibleBackends = targets.Where(t => !t.Backend.DrainNewConnections).ToArray();
+            var healthyBackends = eligibleBackends.Where(t => Volatile.Read(ref t.Healthy) == 1).ToArray();
+            // Keep the same availability-first contract as TCP: if every probe fails,
+            // try configured non-draining targets rather than creating a probe-only outage.
+            var candidates = healthyBackends.Length > 0 ? healthyBackends : eligibleBackends;
+            if (session is null && sessions.Count < cfg.UdpMaxSessions && candidates.Length != 0)
             {
-                var selected = eligibleBackends[(int)((ulong)Interlocked.Increment(ref cursor) % (ulong)eligibleBackends.Length)];
+                var selected = candidates[(int)((ulong)Interlocked.Increment(ref cursor) % (ulong)candidates.Length)].Backend;
                 var peer = new UdpClient(AddressFamily.InterNetwork);
                 peer.Connect(IPAddress.Parse(selected.Host), selected.Port);
                 session = new UdpSession(peer, remote, now);
@@ -312,7 +322,41 @@ async Task RunUdp(L4Listener cfg, CancellationToken token)
         try { await receive; } catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
         catch (SocketException) when (ct.IsCancellationRequested) { }
         try { await tick; } catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
+        try { await probes; } catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
     }
+}
+static async Task ProbeUdpTargets(L4Listener cfg, UdpTarget[] targets, CancellationToken token)
+{
+    if (cfg.UdpProbePayload is null || cfg.UdpProbeExpectedResponse is null) return;
+    var payload = Encoding.UTF8.GetBytes(cfg.UdpProbePayload);
+    var expected = Encoding.UTF8.GetBytes(cfg.UdpProbeExpectedResponse);
+    try
+    {
+        while (!token.IsCancellationRequested)
+        {
+            foreach (var target in targets)
+            {
+                if (target.Backend.DrainNewConnections) continue;
+                var healthy = false;
+                try
+                {
+                    using var probe = new UdpClient(AddressFamily.InterNetwork);
+                    probe.Connect(IPAddress.Parse(target.Backend.Host), target.Backend.Port);
+                    using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token);
+                    timeout.CancelAfter(TimeSpan.FromMilliseconds(500));
+                    await probe.SendAsync(payload, timeout.Token);
+                    var response = await probe.ReceiveAsync(timeout.Token);
+                    healthy = response.Buffer.AsSpan().SequenceEqual(expected);
+                }
+                catch (Exception ex) when (ex is SocketException or OperationCanceledException or ObjectDisposedException) { }
+                var previous = Interlocked.Exchange(ref target.Healthy, healthy ? 1 : 0);
+                if (previous != (healthy ? 1 : 0))
+                    Console.WriteLine($"L4_UDP_HEALTH {cfg.Name} {target.Backend.Host}:{target.Backend.Port} healthy={healthy}");
+            }
+            await Task.Delay(TimeSpan.FromSeconds(cfg.UdpProbeIntervalSeconds), token);
+        }
+    }
+    catch (OperationCanceledException) when (token.IsCancellationRequested) { }
 }
 static async Task RelayUdpResponse(UdpSession session, Socket downstream, long idleMs, CancellationToken token)
 {
@@ -336,6 +380,9 @@ sealed record L4Listener(string Name, string ListenHost, int ListenPort, L4Backe
     public int TcpIdleTimeoutSeconds { get; init; } = 300;
     public int UdpIdleTimeoutSeconds { get; init; } = 30;
     public int ProbeIntervalSeconds { get; init; } = 2;
+    public string? UdpProbePayload { get; init; }
+    public string? UdpProbeExpectedResponse { get; init; }
+    public int UdpProbeIntervalSeconds { get; init; } = 2;
     public bool SendProxyProtocolV1 { get; init; }
 }
 sealed record L4Backend(string Host, int Port)
@@ -347,6 +394,12 @@ sealed class TcpTarget
     public TcpTarget(L4Backend backend) => Backend = backend;
     public L4Backend Backend { get; }
     public int Healthy = 1; // unknown until first probe; connect-time fallback still applies
+}
+sealed class UdpTarget
+{
+    public UdpTarget(L4Backend backend) => Backend = backend;
+    public L4Backend Backend { get; }
+    public int Healthy = 1;
 }
 sealed class UdpSession
 {
