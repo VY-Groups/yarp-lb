@@ -58,7 +58,58 @@ foreach (var bad in new[]
     catch (ArgumentException) { }
 }
 
-Console.WriteLine("PASS: standalone declarative validation and redacted deterministic config planning");
+var bundle = """
+{
+  "gatewayClass": {"apiVersion":"gateway.networking.k8s.io/v1","kind":"GatewayClass","metadata":{"name":"lab"},"spec":{"controllerName":"gatewaycore.example/offline"}},
+  "gateway": {"apiVersion":"gateway.networking.k8s.io/v1","kind":"Gateway","metadata":{"name":"edge","namespace":"apps"},"spec":{"gatewayClassName":"lab","listeners":[{"name":"http","protocol":"HTTP","port":80,"allowedRoutes":{"namespaces":{"from":"Same"}}}]}},
+  "httpRoutes": [{"apiVersion":"gateway.networking.k8s.io/v1","kind":"HTTPRoute","metadata":{"name":"web","namespace":"apps"},"spec":{"parentRefs":[{"name":"edge","sectionName":"http"}],"rules":[{"matches":[{"path":{"type":"PathPrefix","value":"/"}}],"backendRefs":[{"name":"api","port":8080}]}]}}],
+  "services": [{"apiVersion":"v1","kind":"Service","metadata":{"name":"api","namespace":"apps"},"spec":{"type":"ClusterIP","ports":[{"port":8080,"protocol":"TCP","appProtocol":"http"}]}}]
+}
+""";
+var imported = GatewayApiImport.Translate(bundle);
+Check(imported["routes"]!["web"]!["Match"]!["Path"]!.ToString() == "/{**catch-all}" &&
+      imported["clusters"]!["svc-api-8080"]!["Destinations"]!["service"]!["Address"]!.ToString() ==
+        "http://api.apps.svc.cluster.local:8080/", "Gateway API root prefix maps to explicit same namespace service origin");
+Check(PlanEngine.Validate(imported.ToJsonString()).RouteCount == 1 &&
+      PlanEngine.Build(imported.ToJsonString(), GatewayApiImport.Translate(bundle).ToJsonString()).Changes.Count == 0,
+      "Gateway API import is deterministic and passes supported declarative planner");
+foreach (var bad in new[] {
+    bundle.Replace("\"from\":\"Same\"", "\"from\":\"All\""),
+    bundle.Replace("\"sectionName\":\"http\"", "\"sectionName\":\"other\""),
+    bundle.Replace("\"gatewayClassName\":\"lab\"", "\"gatewayClassName\":\"other\""),
+    bundle.Replace("\"name\":\"web\",\"namespace\":\"apps\"", "\"name\":\"web\",\"namespace\":\"other\""),
+    bundle.Replace("\"name\":\"api\",\"namespace\":\"apps\"", "\"name\":\"api\",\"namespace\":\"other\""),
+    bundle.Replace("\"name\":\"api\",\"port\":8080", "\"name\":\"api\",\"port\":8081"),
+    bundle.Replace("\"name\":\"api\",\"port\":8080", "\"name\":\"api\",\"port\":8080,\"namespace\":\"other\""),
+    bundle.Replace("\"type\":\"PathPrefix\"", "\"type\":\"Exact\""),
+    bundle.Replace("\"value\":\"/\"", "\"value\":\"/api\""),
+    bundle.Replace("\"protocol\":\"HTTP\"", "\"protocol\":\"HTTPS\""),
+    bundle.Replace("\"type\":\"ClusterIP\"", "\"type\":\"ExternalName\""),
+    bundle.Replace("\"appProtocol\":\"http\"", "\"appProtocol\":\"h2c\""),
+    bundle.Replace("\"sectionName\":\"http\"", "\"sectionName\":\"http\",\"SectionName\":\"http\""),
+    bundle.Replace("\"backendRefs\":[", "\"filters\":[],\"backendRefs\":["),
+    bundle.Replace("\"kind\":\"HTTPRoute\"", "\"kind\":\"TLSRoute\""),
+    new string(' ',524289) + bundle
+})
+{
+    try { GatewayApiImport.Translate(bad); throw new InvalidOperationException("Unsupported Gateway API import succeeded"); }
+    catch (ArgumentException) { }
+}
+var bundlePath = Path.Combine(Path.GetTempPath(), $"gateway-api-{Guid.NewGuid():N}.json");
+try
+{
+    File.WriteAllText(bundlePath,bundle);
+    var cli = RunCli("import-gateway-api",bundlePath);
+    Check(cli.ExitCode == 0 && System.Text.Json.Nodes.JsonNode.DeepEquals(
+        System.Text.Json.Nodes.JsonNode.Parse(cli.StdOut),imported), "offline import CLI produces validated desired JSON");
+    File.WriteAllText(bundlePath,bundle.Replace("\"from\":\"Same\"", "\"from\":\"All\""));
+    cli = RunCli("import-gateway-api",bundlePath);
+    Check(cli.ExitCode == 1 && cli.StdOut.Length == 0 && !cli.StdErr.Contains("api.apps"),
+        "unsafe import exits nonzero without partially translated config");
+}
+finally { File.Delete(bundlePath); }
+
+Console.WriteLine("PASS: standalone declarative validation, redacted deterministic planning and strict Gateway API import");
 
 static (int ExitCode, string StdOut, string StdErr) RunCli(params string[] args)
 {
