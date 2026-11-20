@@ -62,9 +62,10 @@ def main():
             AUDIT_LEDGER_FILE=str(ledger), AUDIT_NODE_KEYS_DIR=str(keys), AUDIT_SIGNING_PEM=str(signing),
             AUDIT_TLS_PFX=str(pfx), AUDIT_TLS_PASSWORD_FILE=str(pwd))
         ctx = ssl.create_default_context(cafile=str(cert))
-        def request(body, event, key=secret):
+        def request(body, event, key=secret, recorded=False):
             digest=hashlib.sha256(body).hexdigest().upper()
-            mac=hmac.digest(key, ("GatewayCore-Audit-Intent-v1\n"+event+"\n"+digest).encode(), "sha256")
+            purpose="GatewayCore-Audit-Event-v2" if recorded else "GatewayCore-Audit-Intent-v1"
+            mac=hmac.digest(key, (purpose+"\n"+event+"\n"+digest).encode(), "sha256")
             conn=http.client.HTTPSConnection("127.0.0.1",port,context=ctx,timeout=5)
             try:
                 conn.request("POST","/audit/v1/intents",body,{"Content-Type":"application/json",
@@ -97,10 +98,11 @@ def main():
             proc.terminate()
             try: proc.wait(timeout=10)
             except subprocess.TimeoutExpired: proc.kill();proc.wait()
-        def verify_receipt(body,event,signature):
+        def verify_receipt(body,event,signature,recorded=False):
             msg=root/"receipt-input"
             sig=root/"receipt-signature"
-            msg.write_bytes(("GatewayCore-Audit-Receipt-v1\n"+event+"\n"+hashlib.sha256(body).hexdigest().upper()).encode())
+            purpose="GatewayCore-Audit-Event-Receipt-v2" if recorded else "GatewayCore-Audit-Receipt-v1"
+            msg.write_bytes((purpose+"\n"+event+"\n"+hashlib.sha256(body).hexdigest().upper()).encode())
             sig.write_bytes(base64.b64decode(signature,validate=True))
             run("openssl","dgst","-sha256","-verify",str(public),"-signature",str(sig),
                 "-sigopt","rsa_padding_mode:pss","-sigopt","rsa_pss_saltlen:auto",str(msg))
@@ -197,5 +199,58 @@ def main():
                 operator.login("operator","Reset-fixture-password-123!")
                 check(operator.session()["role"]=="Operator","account recovery retains correct role")
         print("ACCOUNT_MUTATION_EXTERNAL_AUDIT_SUCCESS",flush=True)
+
+        spool=root/"private-spool"
+        spool.mkdir(mode=0o700)
+        gateway_env["GATEWAY_AUDIT_OUTBOX_DIR"]=str(spool)
+        queued_root=root/"queued-gateway"
+        with backend() as upstream:
+            openssl_state(queued_root,upstream)
+            with patch.dict(os.environ,gateway_env):
+                with gateway(cwd,gateway_dll,queued_root,free_port()) as base:
+                    admin=Client(base)
+                    admin.bootstrap("reviewer","Reviewer-fixture-pass-123!","reviewer@example.invalid")
+                    files=list(spool.glob("*.event"))
+                    check(bool(files),"collector outage leaves durable gateway audit records")
+                    entries=[json.loads(p.read_bytes()) for p in files]
+                    local_lines=(queued_root/"state"/"admin-audit.jsonl").read_bytes().splitlines()
+                    hashes={hashlib.sha256(line).hexdigest().upper() for line in local_lines}
+                    check(all(json.loads(base64.b64decode(e["Payload"]))["targetDigest"] in hashes for e in entries),
+                          "queued event binds exact local audit record bytes")
+                    check(admin.request("GET","/admin/api/audit/delivery")["pending"]>=len(entries),
+                          "administrator sees pending delivery without exported details")
+                # Restart the shipping gateway before the collector is restored.
+                with gateway(cwd,gateway_dll,queued_root,free_port()) as base:
+                    check(all((spool/(e["Id"]+".event")).exists() for e in entries),
+                          "gateway restart preserves every original queued event")
+                    admin=Client(base)
+                    admin.login("reviewer","Reviewer-fixture-pass-123!")
+                    proc=start()
+                    try:
+                        deadline=time.monotonic()+30
+                        while time.monotonic()<deadline and list(spool.glob("*.event")):
+                            time.sleep(.2)
+                        check(not list(spool.glob("*.event")),"real HTTPS collector drains persistent gateway queue")
+                        check(admin.request("GET","/admin/api/audit/delivery")["pending"]==0,
+                              "delivery status reports drained queue")
+                        retained=[json.loads(base64.b64decode(json.loads(line)["Body"])) for line in ledger.read_text().splitlines()]
+                        for entry in entries:
+                            event_id=entry["Id"]
+                            body=base64.b64decode(entry["Payload"])
+                            record=json.loads(body)
+                            check(sum(e["eventId"]==event_id for e in retained)==1 and record in retained,
+                                  "original event retained once with exact digest")
+                            count=len(ledger.read_text().splitlines())
+                            status,receipt=request(body,event_id,recorded=True)
+                            check(status==201 and receipt,"lost recorded-event receipt can be recovered")
+                            verify_receipt(body,event_id,receipt,recorded=True)
+                            check(len(ledger.read_text().splitlines())==count,"exact event retry does not append twice")
+                            check(request(body,event_id)==(403,None),"intent MAC cannot authenticate historical event")
+                            changed=dict(record,operation="CHANGED_EVENT")
+                            changed_bytes=json.dumps(changed,separators=(",",":")).encode()
+                            check(request(changed_bytes,event_id,recorded=True)==(409,None),
+                                  "same event ID with changed bytes cannot obtain receipt")
+                    finally: stop(proc)
+        print("DURABLE_GATEWAY_AUDIT_HTTPS_SUCCESS",flush=True)
 
 if __name__=="__main__": main()
