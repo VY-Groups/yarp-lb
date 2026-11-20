@@ -115,6 +115,10 @@ try
     Must(!FleetRolloutJournal.HasUnresolved(journalDir.FullName) &&
         FleetRolloutJournal.Targets(FleetRolloutJournal.Read(path)).All(t => !FleetRolloutJournal.NeedsRollback(t)),
         "verified rollback survives restart and clears roll-forward fence");
+    targets[0]["rollbackVerified"] = false;
+    FleetRolloutJournal.Write(path, recovered);
+    Must(FleetRolloutJournal.HasUnresolved(journalDir.FullName), "terminal label alone cannot hide unresolved target");
+    targets[0]["rollbackVerified"] = true;
     recovered["status"] = "rollback-attempted";
     recovered.Remove("schema");
     FleetRolloutJournal.Write(path, recovered);
