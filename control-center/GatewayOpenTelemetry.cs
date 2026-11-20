@@ -20,8 +20,16 @@ using Yarp.ReverseProxy.Model;
 /// Opt-in OTLP traces and metrics. Export uses bounded SDK queues and background
 /// workers; collector availability never gates the proxy request path.
 /// </summary>
-public static class GatewayOpenTelemetry
+public static partial class GatewayOpenTelemetry
 {
+    // Typed logging removes the params object[] and eager boxing from the
+    // common call site while preserving the existing structured access log.
+    [LoggerMessage(EventId = 0, Level = LogLevel.Information,
+        Message = "GATEWAY_ACCESS timestampUtc={TimestampUtc:o} clientIp={ClientIp} clientIpSource={ClientIpSource} method={Method} routeId={RouteId} statusCode={StatusCode} durationMs={DurationMs}")]
+    public static partial void LogAccess(ILogger logger, DateTimeOffset timestampUtc,
+        string clientIp, string clientIpSource, string method, string routeId,
+        int statusCode, double durationMs);
+
     public const string ActivitySourceName = "GatewayCore.ControlCenter";
     public static readonly ActivitySource ActivitySource = new(ActivitySourceName, "0.1");
     private static readonly Meter Meter = new(ActivitySourceName, "0.1");

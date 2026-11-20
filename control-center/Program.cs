@@ -476,8 +476,7 @@ app.Use(async (ctx, next) =>
         var routeCandidate = ctx.Features.Get<IReverseProxyFeature>()?.Route?.Config.RouteId;
         var routeId = routeCandidate is not null && ValidId(routeCandidate) ? routeCandidate : "unmatched";
         var timestampUtc = DateTimeOffset.UtcNow;
-        accessLogger.LogInformation(
-            "GATEWAY_ACCESS timestampUtc={TimestampUtc:o} clientIp={ClientIp} clientIpSource={ClientIpSource} method={Method} routeId={RouteId} statusCode={StatusCode} durationMs={DurationMs}",
+        GatewayOpenTelemetry.LogAccess(accessLogger,
             timestampUtc, clientAddress.Address?.ToString() ?? "unknown", clientAddress.Source,
             ctx.Request.Method, routeId, ctx.Response.StatusCode,
             Math.Round(elapsed * 1000.0 / System.Diagnostics.Stopwatch.Frequency, 3));

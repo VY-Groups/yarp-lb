@@ -12,6 +12,37 @@ internal static class GatewayLogFilteringAcceptance
 {
     public static async Task RunAsync()
     {
+        // Compare both implementations with the same warmed no-op logger:
+        // this isolates call-site allocation, not console/OTLP formatter costs.
+        var capture = new CallSiteLogger();
+        var timestamp = DateTimeOffset.Parse("2026-01-02T03:04:05+00:00",
+            System.Globalization.CultureInfo.InvariantCulture);
+        void Legacy() => capture.LogInformation(
+            "GATEWAY_ACCESS timestampUtc={TimestampUtc:o} clientIp={ClientIp} clientIpSource={ClientIpSource} method={Method} routeId={RouteId} statusCode={StatusCode} durationMs={DurationMs}",
+            timestamp, "127.0.0.1", "socket", "POST", "fixture", 200, 12.5);
+        void Typed() => GatewayOpenTelemetry.LogAccess(capture, timestamp, "127.0.0.1",
+            "socket", "POST", "fixture", 200, 12.5);
+        capture.Capture = true;
+        Legacy();
+        var previousMessage = capture.Message;
+        var previousFields = capture.Fields;
+        Typed();
+        Must(capture.Message == previousMessage && capture.Fields is not null &&
+             previousFields is not null && previousFields.SequenceEqual(capture.Fields),
+            "typed access log preserves formatted message and structured field names and values");
+        capture.Capture = false;
+        long Measure(Action emit)
+        {
+            for (var i = 0; i < 2000; i++) emit();
+            var before = GC.GetAllocatedBytesForCurrentThread();
+            for (var i = 0; i < 100000; i++) emit();
+            return GC.GetAllocatedBytesForCurrentThread() - before;
+        }
+        var legacyBytes = Measure(Legacy);
+        var typedBytes = Measure(Typed);
+        Console.WriteLine($"ACCESS_LOG_CALLSITE_ALLOCATIONS legacy={legacyBytes} typed={typedBytes} calls=100000");
+        Must(typedBytes < legacyBytes, "typed access log reduces warmed synchronous call-site allocation");
+
         var (backend, backendPort) = BuildApp("log-filter-backend");
         backend.MapGet("/{**path}", () => Results.Text("forwarded"));
         await backend.StartAsync();
@@ -32,11 +63,9 @@ internal static class GatewayLogFilteringAcceptance
                 var clientAddress = GatewayClientAddress.ForAccessLog(
                     context.Connection.RemoteIpAddress,
                     context.Request.Headers["X-Forwarded-For"].ToString(), new HashSet<string>());
-                accessLogger.LogInformation(
-                    "GATEWAY_ACCESS timestampUtc={TimestampUtc:o} clientIp={ClientIp} clientIpSource={ClientIpSource} statusCode={StatusCode}",
-                    DateTimeOffset.UtcNow,
+                GatewayOpenTelemetry.LogAccess(accessLogger, DateTimeOffset.UtcNow,
                     clientAddress.Address?.ToString() ?? "unknown", clientAddress.Source,
-                    context.Response.StatusCode);
+                    context.Request.Method, "acceptance-route", context.Response.StatusCode, 12.5);
             }
         });
         gateway.MapReverseProxy();
@@ -73,7 +102,7 @@ internal static class GatewayLogFilteringAcceptance
             Must(lines.Contains("Information GatewayCore.AccessLog", StringComparison.Ordinal) &&
                  lines.Contains("GATEWAY_ACCESS timestampUtc=", StringComparison.Ordinal) &&
                  lines.Contains("clientIp=127.0.0.1", StringComparison.Ordinal) &&
-                 lines.Contains("clientIpSource=socket", StringComparison.Ordinal),
+                 lines.Contains("clientIpSource=socket method=GET routeId=acceptance-route statusCode=200 durationMs=12.5", StringComparison.Ordinal),
                 "timestamped client-IP access log remains enabled at Information");
             Must(!lines.Contains("acceptance-info-filtered", StringComparison.Ordinal) &&
                  !lines.Contains("Information Yarp.ReverseProxy.Forwarder.HttpForwarder", StringComparison.Ordinal),
@@ -153,6 +182,22 @@ internal static class GatewayLogFilteringAcceptance
     {
         if (!condition) throw new InvalidOperationException("FAIL: " + description);
         Console.WriteLine("PASS: " + description);
+    }
+
+    private sealed class CallSiteLogger : ILogger
+    {
+        public bool Capture { get; set; }
+        public string? Message { get; private set; }
+        public KeyValuePair<string, object?>[]? Fields { get; private set; }
+        public bool IsEnabled(LogLevel level) => level == LogLevel.Information;
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public void Log<TState>(LogLevel level, EventId eventId, TState state, Exception? exception,
+            Func<TState, Exception?, string> formatter)
+        {
+            if (!Capture) return;
+            Message = formatter(state, exception);
+            Fields = ((IEnumerable<KeyValuePair<string, object?>>)(object)state!).ToArray();
+        }
     }
 
     private sealed class SynchronizedCaptureWriter : TextWriter
