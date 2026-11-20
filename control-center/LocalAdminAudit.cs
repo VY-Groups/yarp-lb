@@ -8,15 +8,29 @@ internal sealed class LocalAdminAudit
     private readonly string path;
     private readonly SemaphoreSlim gate = new(1, 1);
 
-    public LocalAdminAudit(string path) => this.path = path;
+    private readonly DurableAuditOutbox? outbox;
+    public LocalAdminAudit(string path, DurableAuditOutbox? outbox = null) { this.path = path; this.outbox = outbox; }
 
-    public async Task AppendAsync(string actor, string action, object? details = null)
+    public async Task AppendAsync(string actor, string action, object? details = null, string? intentId = null)
     {
-        var line = JsonSerializer.Serialize(new { utc = DateTimeOffset.UtcNow, actor, action, details });
+        var utc = DateTimeOffset.UtcNow;
+        var line = intentId is null
+            ? JsonSerializer.Serialize(new { utc, actor, action, details })
+            : JsonSerializer.Serialize(new { utc, actor, action, details, intentId });
         await gate.WaitAsync().ConfigureAwait(false);
         try
         {
-            await File.AppendAllTextAsync(path, line + Environment.NewLine).ConfigureAwait(false);
+            try
+            {
+                outbox?.Enqueue(actor, action, utc, Convert.ToHexString(
+                    System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(line))), intentId);
+            }
+            finally
+            {
+                // Keep the local evidence even when the external queue is full
+                // or damaged; propagate the queue error to the caller.
+                await File.AppendAllTextAsync(path, line + Environment.NewLine).ConfigureAwait(false);
+            }
         }
         finally { gate.Release(); }
     }

@@ -38,7 +38,6 @@ sealed class DirectoryAuthService
     private const string NestedMembershipOid = "1.2.840.113556.1.4.1941";
     private readonly string _configPath;
     private readonly IDataProtector _protector;
-    private readonly object _saveLock = new();
 
     public DirectoryAuthService(IDataProtectionProvider provider, string stateDirectory)
     {
@@ -67,30 +66,28 @@ sealed class DirectoryAuthService
             tls = "TLS certificate chain and hostname validation are not bypassed" };
     }
 
-    public void Save(DirectorySettingsInput input)
+    // Caller serializes mail/directory policy writes and holds the lock
+    // through validation, audit confirmation and commit. The exact protected
+    // bytes below are signed by the collector before they become active.
+    public byte[] PrepareSettings(DirectorySettingsInput input)
     {
         Validate(input);
-        lock (_saveLock)
+        var previous = Read();
+        var changedIdentity = !string.Equals(input.BindUsername, previous.BindUsername, StringComparison.OrdinalIgnoreCase)
+            || !string.Equals(input.Host, previous.Host, StringComparison.OrdinalIgnoreCase);
+        var protectedPassword = !string.IsNullOrWhiteSpace(input.Password)
+            ? _protector.Protect(input.Password)
+            : changedIdentity ? "" : previous.EncryptedBindPassword;
+        var settings = new DirectorySettings(input.Enabled, input.Host.Trim(), input.Port,
+            input.SearchBaseDn.Trim(), input.BindUsername.Trim(), protectedPassword,
+            input.AdminGroupDn.Trim(), input.OperatorGroupDn.Trim(), input.ViewerGroupDn.Trim());
+        if (settings.Enabled)
         {
-            var previous = Read();
-            var changedIdentity = !string.Equals(input.BindUsername, previous.BindUsername, StringComparison.OrdinalIgnoreCase)
-                || !string.Equals(input.Host, previous.Host, StringComparison.OrdinalIgnoreCase);
-            var protectedPassword = !string.IsNullOrWhiteSpace(input.Password)
-                ? _protector.Protect(input.Password)
-                : changedIdentity ? "" : previous.EncryptedBindPassword;
-            var settings = new DirectorySettings(input.Enabled, input.Host.Trim(), input.Port,
-                input.SearchBaseDn.Trim(), input.BindUsername.Trim(), protectedPassword,
-                input.AdminGroupDn.Trim(), input.OperatorGroupDn.Trim(), input.ViewerGroupDn.Trim());
-            if (settings.Enabled)
-            {
-                if (string.IsNullOrWhiteSpace(protectedPassword))
-                    throw new ArgumentException("Provide an AD bind service account password before enabling LDAP login.");
-                CheckServiceConnection(settings); // fail closed; don't save enabled configuration if TLS/bind/group checks fail
-            }
-            var tmp = _configPath + ".tmp";
-            File.WriteAllText(tmp, JsonSerializer.Serialize(settings));
-            File.Move(tmp, _configPath, true);
+            if (string.IsNullOrWhiteSpace(protectedPassword))
+                throw new ArgumentException("Provide an AD bind service account password before enabling LDAP login.");
+            CheckServiceConnection(settings);
         }
+        return JsonSerializer.SerializeToUtf8Bytes(settings);
     }
 
     public void TestSavedConnection()

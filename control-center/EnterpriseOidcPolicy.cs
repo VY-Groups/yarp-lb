@@ -107,7 +107,7 @@ internal sealed class EnterpriseOidcPolicy
         return secret;
     }
 
-    private static byte[] ReadPrivate(string path, int max)
+    internal static byte[] ReadPrivate(string path, int max)
     {
         if (!Path.IsPathFullyQualified(path) || !File.Exists(path) ||
             (File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0)
