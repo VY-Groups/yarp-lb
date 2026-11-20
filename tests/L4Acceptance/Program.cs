@@ -217,6 +217,8 @@ try
         Assert((await TcpRoundTrip("unhealthy-"+i)).StartsWith("B|"),
             "active health probe removes down backend from new connection selection");
     Assert(await ValidatePublicBindDenied(), "public listener requires explicit opt-in");
+    if (OperatingSystem.IsLinux()) await ValidateGracefulShutdown();
+    else Console.WriteLine("SIGTERM graceful shutdown acceptance is Linux-only; Windows console-control acceptance remains separate.");
     Console.WriteLine("L4 TCP+UDP REAL-SOCKET ACCEPTANCE PASSED");
 }
 finally
@@ -232,6 +234,69 @@ finally
     if(errors.Length>0)Console.WriteLine("L4 proxy stderr: "+errors);
 }
 return 0;
+
+async Task ValidateGracefulShutdown()
+{
+    // The admission backend sends a greeting only after the upstream
+    // connection exists, so both streams are established before SIGTERM.
+    using var drain = new TcpClient(AddressFamily.InterNetwork);
+    using var held = new TcpClient(AddressFamily.InterNetwork);
+    using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+    var token = deadline.Token;
+    await drain.ConnectAsync(IPAddress.Loopback, 19016, token);
+    await held.ConnectAsync(IPAddress.Loopback, 19016, token);
+    var drainStream = drain.GetStream();
+    var heldStream = held.GetStream();
+    var greeting = new byte[1];
+    await drainStream.ReadExactlyAsync(greeting, token);
+    Assert(greeting[0] == 1, "draining TCP stream established before SIGTERM");
+    await heldStream.ReadExactlyAsync(greeting, token);
+    Assert(greeting[0] == 1, "held TCP stream established before SIGTERM");
+
+    var elapsed = Stopwatch.StartNew();
+    var signal = new ProcessStartInfo("kill") { UseShellExecute = false };
+    signal.ArgumentList.Add("-TERM");
+    signal.ArgumentList.Add(proxy.Id.ToString(System.Globalization.CultureInfo.InvariantCulture));
+    using (var sender = Process.Start(signal) ?? throw new Exception("Cannot send SIGTERM"))
+    {
+        await sender.WaitForExitAsync(token);
+        Assert(sender.ExitCode == 0, "SIGTERM delivered to shipping process");
+    }
+
+    // A rejected connect is evidence that admission has actually stopped,
+    // not merely that the signal command has returned.
+    var admissionStopped = false;
+    while (elapsed.Elapsed < TimeSpan.FromSeconds(3))
+    {
+        using var candidate = new TcpClient(AddressFamily.InterNetwork);
+        try { await candidate.ConnectAsync(IPAddress.Loopback, 19016, token); }
+        catch (SocketException ex) when (ex.SocketErrorCode == SocketError.ConnectionRefused)
+        { admissionStopped = true; break; }
+        await Task.Delay(25, token);
+    }
+    Assert(admissionStopped, "SIGTERM stops accepting new TCP connections");
+    Assert(!proxy.HasExited, "process remains alive while established streams drain");
+
+    var payload = Encoding.ASCII.GetBytes("finish-during-drain");
+    await drainStream.WriteAsync(payload, token);
+    var reply = new byte[payload.Length];
+    await drainStream.ReadExactlyAsync(reply, token);
+    Assert(reply.AsSpan().SequenceEqual(payload), "established TCP transaction finishes after admission stops");
+    drain.Client.Shutdown(SocketShutdown.Send);
+    Assert(await drainStream.ReadAsync(new byte[1], token) == 0, "completed stream drains through EOF");
+
+    // Leave the other stream open. Its 30-second idle deadline is longer
+    // than the process drain budget, so shutdown must actively cancel it.
+    await proxy.WaitForExitAsync(token);
+    Assert(proxy.ExitCode == 0 && elapsed.Elapsed < TimeSpan.FromSeconds(10),
+        "SIGTERM exits successfully within bounded drain and cleanup time");
+    var heldClosed = false;
+    try { heldClosed = await heldStream.ReadAsync(new byte[1], token) == 0; }
+    catch (IOException) { heldClosed = true; }
+    Assert(heldClosed, "held TCP stream is released after bounded shutdown");
+    using var udpRebound = new UdpClient(new IPEndPoint(IPAddress.Loopback, 19021));
+    Assert(true, "UDP listener released on graceful process exit");
+}
 
 async Task<string> TcpRoundTrip(string message, int port=19011)
 {
