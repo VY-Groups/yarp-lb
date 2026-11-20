@@ -71,6 +71,13 @@ public readonly record struct DestinationAdmissionPolicy(int MaxInFlight, int Ma
         result >= min && result <= max;
 }
 
+/// <summary>The applied request policy and the current gate revision differ.
+/// This is a local admission rejection, never an upstream forwarding failure.</summary>
+public sealed class DestinationAdmissionPolicyChangedException : InvalidOperationException
+{
+    public DestinationAdmissionPolicyChangedException() : base("Destination admission policy changed") { }
+}
+
 public enum DestinationAdmissionFailure
 {
     None,
@@ -216,14 +223,33 @@ public sealed class DestinationAdmissionState
         return AcquireAsync(cancellationToken, (TimeSpan?)queueTimeout);
     }
 
+    /// <summary>Atomically compare the selected applied policy with the reconciled
+    /// gate before granting or enqueueing. A stale gate must not admit under a
+    /// different limit or timeout while the background registry catches up.</summary>
+    public ValueTask<DestinationAdmissionLease?> AcquireForPolicyAsync(
+        CancellationToken cancellationToken, DestinationAdmissionPolicy expectedPolicy)
+    {
+        if (!expectedPolicy.Enabled) throw new ArgumentException("Enabled admission policy required", nameof(expectedPolicy));
+        return AcquireAsync(cancellationToken,
+            TimeSpan.FromMilliseconds(expectedPolicy.QueueTimeoutMs), expectedPolicy);
+    }
+
     private ValueTask<DestinationAdmissionLease?> AcquireAsync(
-        CancellationToken cancellationToken, TimeSpan? queueTimeout)
+        CancellationToken cancellationToken, TimeSpan? queueTimeout,
+        DestinationAdmissionPolicy? expectedPolicy = null)
     {
         Waiter? waiter = null;
         lock (_sync)
         {
             if (cancellationToken.IsCancellationRequested)
                 return ValueTask.FromCanceled<DestinationAdmissionLease?>(cancellationToken);
+
+            if (expectedPolicy is { } expected && (expected != _policy || _admissionBlocked))
+            {
+                Interlocked.Increment(ref _rejected);
+                return ValueTask.FromException<DestinationAdmissionLease?>(
+                    new DestinationAdmissionPolicyChangedException());
+            }
 
             // A failed queue-shrink update fences handles acquired under the
             // previous revision from adding new work. Existing waiters remain

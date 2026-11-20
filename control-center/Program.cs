@@ -2215,7 +2215,15 @@ app.MapReverseProxy(proxyPipeline =>
         using (registryHandle)
         {
         var state = registryHandle.State;
-        var policy = state.Policy;
+        // Use the policy of the exact selected proxy model, not whichever
+        // revision the asynchronous registry last reconciled.
+        if (!DestinationAdmissionPolicy.TryParse(selectedConfig.Metadata, out var policy, out _) ||
+            !policy.Enabled)
+        {
+            context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+            GatewayOpenTelemetry.MarkLocalRejection(context, "admission_policy_conflict");
+            return;
+        }
 
         var applicationStopping = context.RequestServices.GetRequiredService<IHostApplicationLifetime>().ApplicationStopping;
         using var waitCancellation = CancellationTokenSource.CreateLinkedTokenSource(
@@ -2224,8 +2232,13 @@ app.MapReverseProxy(proxyPipeline =>
         DestinationAdmissionState.DestinationAdmissionLease? lease;
         try
         {
-            lease = await state.AcquireAsync(waitCancellation.Token,
-                TimeSpan.FromMilliseconds(policy.QueueTimeoutMs));
+            lease = await state.AcquireForPolicyAsync(waitCancellation.Token, policy);
+        }
+        catch (DestinationAdmissionPolicyChangedException)
+        {
+            context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+            GatewayOpenTelemetry.MarkLocalRejection(context, "admission_policy_conflict");
+            return;
         }
         catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested)
         {
