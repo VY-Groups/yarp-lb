@@ -322,9 +322,10 @@ internal static class AcmeRenewalAcceptance
 
     private static async Task VerifyBoundedRevocationHttpAsync(Action<bool, string> check)
     {
-        await using var app = WebApplication.CreateBuilder().Build();
-        app.WebHost.ConfigureKestrel(options => options.Listen(IPAddress.Loopback, 0,
+        var builder = WebApplication.CreateBuilder();
+        builder.WebHost.ConfigureKestrel(options => options.Listen(IPAddress.Loopback, 0,
             listen => listen.Protocols = Microsoft.AspNetCore.Server.Kestrel.Core.HttpProtocols.Http1));
+        await using var app = builder.Build();
         var parsed = 0;
         app.MapPost("/admin/api/tls/acme/revoke", async (HttpContext context) =>
         {
