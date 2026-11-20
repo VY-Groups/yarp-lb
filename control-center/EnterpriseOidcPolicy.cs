@@ -159,6 +159,11 @@ internal sealed class EnterpriseOidcPolicy
 
     internal bool IsBreakGlass(string? username) =>
         string.Equals(username, Settings.BreakGlassUsername, StringComparison.OrdinalIgnoreCase);
+    internal bool RecoverySessionValid(ClaimsPrincipal principal, string username, string role, string provider) =>
+        provider == "Local" && role == "Administrator" && IsBreakGlass(username) &&
+        Single(principal, RecoveryClaim) == Fingerprint &&
+        !principal.HasClaim(claim => claim.Type == SubjectClaim);
+
     internal bool MatchesOrigin(string scheme, string? host) =>
         !string.IsNullOrWhiteSpace(host) &&
         Uri.TryCreate(scheme + "://" + host, UriKind.Absolute, out var uri) &&

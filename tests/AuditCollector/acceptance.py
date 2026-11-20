@@ -485,6 +485,37 @@ def main():
                             "revoked receipt leaves inventory byte-for-byte unchanged")
                         check(not admin2.session()["authenticated"],
                             "password reset invalidates reviewer2's previously authenticated session")
+                        # Real two-person routing approval while a genuine
+                        # collector receipt is held and its actor revoked.
+                        admin2=Client(base)
+                        admin2.login("reviewer2","Reviewer-two-reset-fixture-789!")
+                        config_path=gateway_root/"state"/"config"/"appsettings.json"
+                        config_before=config_path.read_bytes()
+                        proxy=json.loads(config_before)["ReverseProxy"]
+                        draft=admin.request("POST","/admin/api/change-requests",{
+                            "reason":"Disposable routing authorization race",
+                            "payload":{"routes":proxy["Routes"],"clusters":proxy["Clusters"],
+                                "disabled":proxy.get("AdminDisabledDestinations",{}),
+                                "revision":hashlib.sha256(config_before).hexdigest().upper()}})
+                        draft_path=gateway_root/"state"/"change-requests"/(draft["id"]+".json")
+                        draft_before=draft_path.read_bytes()
+                        receipt_proxy.hold_once("CONFIG_APPLY_INTENT")
+                        approval_errors=[]
+                        def approve_revoked():
+                            try:
+                                admin2.request("POST","/admin/api/change-requests/"+draft["id"]+"/decision",
+                                    {"decision":"approve","reason":"Disposable independent review"},expect=403)
+                            except Exception as ex: approval_errors.append(repr(ex))
+                        approval=threading.Thread(target=approve_revoked,daemon=True)
+                        approval.start()
+                        check(receipt_proxy.hold_entered.wait(10),"valid routing approval receipt held before actor revocation")
+                        admin.request("POST","/admin/api/users/reviewer2/password",
+                            {"password":"Reviewer-two-final-fixture-456!"})
+                        receipt_proxy.release_held.set()
+                        approval.join(timeout=15)
+                        check(not approval.is_alive() and not approval_errors and
+                              config_path.read_bytes()==config_before and draft_path.read_bytes()==draft_before,
+                            "revoked reviewer cannot publish routing config or mark draft approved")
                     finally:
                         receipt_proxy.release_held.set()
                         stop(proc)

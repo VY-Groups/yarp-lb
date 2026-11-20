@@ -182,8 +182,7 @@ var adminAuthentication = builder.Services.AddAuthentication(CookieAuthenticatio
                     var allowed = active.Provider == "Local" && (oidcSubject is not null
                         ? oidcPolicy.SessionValid(principal, active.Username, active.Role, DateTimeOffset.UtcNow) &&
                           EnterpriseOidcPolicy.AfterRevocation(principal, active.OidcRevokedBefore)
-                        : active.Role == "Administrator" && oidcPolicy.IsBreakGlass(active.Username) &&
-                          principal.FindFirst(EnterpriseOidcPolicy.RecoveryClaim)?.Value == oidcPolicy.Fingerprint);
+                        : oidcPolicy.RecoverySessionValid(principal, active.Username, active.Role, active.Provider));
                     if (allowed && sharedOidcRevocation is not null && oidcSubject is not null)
                         allowed = long.TryParse(EnterpriseOidcPolicy.Single(principal, EnterpriseOidcPolicy.AuthTimeClaim),
                             System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var authTime) &&
@@ -872,7 +871,16 @@ byte[] AccountSnapshot() => File.Exists(usersPath) ? File.ReadAllBytes(usersPath
 async Task<(IResult? Error, string? IntentId)> ConfirmAccountMutation(HttpContext ctx,
     byte[] before, List<AdminUser> proposed, string operation)
 {
-    if (externalAuditIntent is null) return (null, null);
+    if (externalAuditIntent is null)
+    {
+        if (oidcPolicy is null) return (null, null);
+        if (!await AuditActorCurrent(ctx, administratorOnly: true)) return (Results.StatusCode(403), null);
+        if (ctx.RequestAborted.IsCancellationRequested)
+            return (Results.Json(new { error = "Account mutation cancelled; state unchanged" }, statusCode: 503), null);
+        if (!AccountSnapshot().AsSpan().SequenceEqual(before))
+            return (Results.Conflict(new { error = "Account state changed during final authorization" }), null);
+        return (null, null);
+    }
     if (!AccountSnapshot().AsSpan().SequenceEqual(before))
         return (Results.Conflict(new { error = "Account state changed before external audit confirmation" }), null);
     if (!await AuditActorCurrent(ctx, administratorOnly: true))
@@ -921,8 +929,10 @@ async Task<bool> AuditActorCurrent(HttpContext ctx, bool administratorOnly)
         active.Role != ctx.User.FindFirst(ClaimTypes.Role)?.Value ||
         (administratorOnly ? active.Role != "Administrator" : active.Role is not ("Administrator" or "Operator")))
         return false;
-    if (oidcPolicy is null || oidcPolicy.IsBreakGlass(active.Username)) return true;
-    if (!oidcPolicy.SessionValid(ctx.User, active.Username, active.Role, DateTimeOffset.UtcNow, stepUp: true) ||
+    if (oidcPolicy is null) return true;
+    if (oidcPolicy.IsBreakGlass(active.Username))
+        return oidcPolicy.RecoverySessionValid(ctx.User, active.Username, active.Role, active.Provider);
+    if (active.Provider != "Local" || !oidcPolicy.SessionValid(ctx.User, active.Username, active.Role, DateTimeOffset.UtcNow, stepUp: true) ||
         !EnterpriseOidcPolicy.AfterRevocation(ctx.User, active.OidcRevokedBefore)) return false;
     if (sharedOidcRevocation is null) return true;
     var subject = EnterpriseOidcPolicy.Single(ctx.User, EnterpriseOidcPolicy.SubjectClaim);
@@ -933,22 +943,25 @@ async Task<bool> AuditActorCurrent(HttpContext ctx, bool administratorOnly)
     // on a security stamp or role captured before the remote authority call.
     var current = ReadUsers().SingleOrDefault(x => x.Username.Equals(active.Username, StringComparison.OrdinalIgnoreCase));
     return current is not null && current.Enabled && current.Role == active.Role &&
-        current.SecurityStamp == active.SecurityStamp &&
+        current.SecurityStamp == active.SecurityStamp && current.Provider == active.Provider &&
         current.OidcRevokedBefore == active.OidcRevokedBefore &&
         oidcPolicy.SessionValid(ctx.User, current.Username, current.Role, DateTimeOffset.UtcNow, stepUp: true);
 }
 async Task<IResult?> ConfirmStateMutation(HttpContext ctx, string path, byte[] before, byte[] proposed,
     string operation, bool administratorOnly)
 {
-    if (externalAuditIntent is null) return null;
+    if (externalAuditIntent is null && oidcPolicy is null) return null;
     if (!await AuditActorCurrent(ctx, administratorOnly)) return Results.StatusCode(403);
     if (!AuditStateBytes(path).AsSpan().SequenceEqual(before))
         return Results.Conflict(new { error = "State changed before external audit confirmation" });
-    if (!await externalAuditIntent.ConfirmAsync(Actor(ctx), operation,
-        Convert.ToHexString(SHA256.HashData(before)), Convert.ToHexString(SHA256.HashData(proposed)),
-        ctx.RequestAborted) || ctx.RequestAborted.IsCancellationRequested)
+    if (externalAuditIntent is not null &&
+        !await externalAuditIntent.ConfirmAsync(Actor(ctx), operation,
+            Convert.ToHexString(SHA256.HashData(before)), Convert.ToHexString(SHA256.HashData(proposed)),
+            ctx.RequestAborted))
         return Results.Json(new { error = "External audit receipt unavailable; state unchanged" }, statusCode: 503);
     if (!await AuditActorCurrent(ctx, administratorOnly)) return Results.StatusCode(403);
+    if (ctx.RequestAborted.IsCancellationRequested)
+        return Results.Json(new { error = "Mutation cancelled; state unchanged" }, statusCode: 503);
     if (!AuditStateBytes(path).AsSpan().SequenceEqual(before))
         return Results.Conflict(new { error = "State changed during external audit confirmation" });
     return null;
@@ -958,7 +971,7 @@ async Task<IResult?> ConfirmStateMutation(HttpContext ctx, string path, byte[] b
 async Task<IResult?> ConfirmAndWriteResourceMutation(HttpContext ctx, string path,
     byte[] before, byte[] proposed, string operation, bool administratorOnly)
 {
-    if (externalAuditIntent is null)
+    if (externalAuditIntent is null && oidcPolicy is null)
     {
         WriteAuditedState(path, proposed);
         return null;
@@ -1256,7 +1269,7 @@ app.MapPost("/admin/api/users", async (HttpContext ctx, UserInput input) =>
     await loginGate.WaitAsync();
     try
     {
-        var before = externalAuditIntent is null ? Array.Empty<byte>() : AccountSnapshot();
+        var before = externalAuditIntent is null && oidcPolicy is null ? Array.Empty<byte>() : AccountSnapshot();
         var users = ReadUsers();
         if (users.Any(x => x.Username.Equals(input.Username, StringComparison.OrdinalIgnoreCase)))
             return Results.Conflict(new { error = "Username exists" });
@@ -1275,7 +1288,7 @@ app.MapPost("/admin/api/users/{username}/password", async (HttpContext ctx, stri
     await loginGate.WaitAsync();
     try
     {
-        var before = externalAuditIntent is null ? Array.Empty<byte>() : AccountSnapshot();
+        var before = externalAuditIntent is null && oidcPolicy is null ? Array.Empty<byte>() : AccountSnapshot();
         var users = ReadUsers();
         var user = users.FirstOrDefault(x => x.Username.Equals(username, StringComparison.OrdinalIgnoreCase));
         if (user is null) return Results.NotFound();
@@ -1300,7 +1313,7 @@ app.MapPost("/admin/api/users/{username}/disable", async (HttpContext ctx, strin
     try
     {
         if (string.Equals(username, Actor(ctx), StringComparison.OrdinalIgnoreCase)) return Results.BadRequest(new { error = "Cannot disable own account" });
-        var before = externalAuditIntent is null ? Array.Empty<byte>() : AccountSnapshot();
+        var before = externalAuditIntent is null && oidcPolicy is null ? Array.Empty<byte>() : AccountSnapshot();
         var users = ReadUsers(); var i = users.FindIndex(x => x.Username.Equals(username, StringComparison.OrdinalIgnoreCase));
         if (i < 0) return Results.NotFound();
         if (users[i].Role == "Administrator" && users.Count(x => x.Enabled && x.Role == "Administrator") <= 1)
@@ -1319,7 +1332,7 @@ app.MapPost("/admin/api/users/{username}/enable", async (HttpContext ctx, string
     await loginGate.WaitAsync();
     try
     {
-        var before = externalAuditIntent is null ? Array.Empty<byte>() : AccountSnapshot();
+        var before = externalAuditIntent is null && oidcPolicy is null ? Array.Empty<byte>() : AccountSnapshot();
         var users = ReadUsers(); var i = users.FindIndex(x => x.Username.Equals(username, StringComparison.OrdinalIgnoreCase));
         if (i < 0) return Results.NotFound();
         users[i] = users[i] with { Enabled = true, SecurityStamp = Convert.ToHexString(RandomNumberGenerator.GetBytes(24)) };
@@ -1350,7 +1363,7 @@ app.MapPost("/admin/api/mail", async (HttpContext ctx, MailSettingsInput input) 
     await identitySettingsGate.WaitAsync(ctx.RequestAborted);
     try
     {
-        var before = externalAuditIntent is null ? Array.Empty<byte>() : AuditStateBytes(mailPath);
+        var before = externalAuditIntent is null && oidcPolicy is null ? Array.Empty<byte>() : AuditStateBytes(mailPath);
         var existing = ReadMail();
         var mode = string.IsNullOrEmpty(input.AuthMode) ? MailProviderAuth.PasswordMode : input.AuthMode;
         var sameOAuthIdentity = string.Equals(existing.AuthMode, mode, StringComparison.Ordinal)
@@ -1411,7 +1424,7 @@ app.MapPost("/admin/api/mail/test", async (HttpContext ctx) =>
         await SendMailMessage(admin.Email!, "YARP Control Center SMTP test", "This is a test message from your local YARP administration console.", cfg);
         if (ReadMail() != cfg)
             return Results.Conflict(new { error = "SMTP settings changed during delivery test" });
-        var before = externalAuditIntent is null ? Array.Empty<byte>() : AuditStateBytes(mailProofPath);
+        var before = externalAuditIntent is null && oidcPolicy is null ? Array.Empty<byte>() : AuditStateBytes(mailProofPath);
         var proposed = Encoding.UTF8.GetBytes(MailFingerprint(cfg));
         var denied = await ConfirmStateMutation(ctx, mailProofPath, before, proposed, "MAIL_PROOF_INTENT", true);
         if (denied is not null) return denied;
@@ -1447,7 +1460,7 @@ app.MapPost("/admin/api/directory", async (HttpContext ctx, DirectorySettingsInp
         var mail = ReadMail();
         if (input.Enabled && (!mail.Enabled || !MailDeliveryVerified(mail)))
             return Results.BadRequest(new { error = "Enable verified SMTP email OTP before enabling AD login" });
-        var before = externalAuditIntent is null ? Array.Empty<byte>() : AuditStateBytes(directoryPath);
+        var before = externalAuditIntent is null && oidcPolicy is null ? Array.Empty<byte>() : AuditStateBytes(directoryPath);
         var proposed = directoryAuth.PrepareSettings(input);
         var denied = await ConfirmStateMutation(ctx, directoryPath, before, proposed, "DIRECTORY_SETTINGS_INTENT", true);
         if (denied is not null) return denied;
@@ -1496,7 +1509,7 @@ app.MapPost("/admin/api/inventory", async (HttpContext ctx, InventoryInput input
     await gate.WaitAsync();
     try
     {
-        var before = externalAuditIntent is null ? Array.Empty<byte>() : AuditStateBytes(inventoryPath);
+        var before = externalAuditIntent is null && oidcPolicy is null ? Array.Empty<byte>() : AuditStateBytes(inventoryPath);
         var entries = ReadInventory();
         if (entries.Any(x => x.Id == input.Id)) return Results.Conflict(new { error = "ID already exists" });
         entries.Add(input);
@@ -1513,7 +1526,7 @@ app.MapDelete("/admin/api/inventory/{id}", async (HttpContext ctx, string id) =>
     await gate.WaitAsync();
     try
     {
-        var before = externalAuditIntent is null ? Array.Empty<byte>() : AuditStateBytes(inventoryPath);
+        var before = externalAuditIntent is null && oidcPolicy is null ? Array.Empty<byte>() : AuditStateBytes(inventoryPath);
         var items = ReadInventory();
         var changed = items.RemoveAll(x => x.Id == id);
         if (changed == 0) return Results.NotFound();
@@ -1780,6 +1793,40 @@ IResult? ValidateChangeSafely(JsonObject submitted)
     }
 }
 
+// Caller holds the routing writer gate. Never hold loginGate across
+// external collector I/O. Serialize the final authorization and write with
+// local account mutations, and recheck the shared authority after waiting.
+async Task<(IResult? Denied, string? Backup)> CommitRoutingBytes(HttpContext ctx,
+    byte[] before, byte[] proposed, string operation)
+{
+    var denied = await ConfirmStateMutation(ctx, configPath, before, proposed, operation, true);
+    if (denied is not null) return (denied, null);
+    try { await loginGate.WaitAsync(ctx.RequestAborted); }
+    catch (OperationCanceledException)
+    { return (Results.Json(new { error = "Routing mutation cancelled; configuration unchanged" }, statusCode: 503), null); }
+    try
+    {
+        if (!await AuditActorCurrent(ctx, true)) return (Results.StatusCode(403), null);
+        if (ctx.RequestAborted.IsCancellationRequested)
+            return (Results.Json(new { error = "Routing mutation cancelled; configuration unchanged" }, statusCode: 503), null);
+        if (!File.ReadAllBytes(configPath).AsSpan().SequenceEqual(before))
+            return (Results.Conflict(new { error = "Configuration changed during final authorization" }), null);
+        Directory.CreateDirectory(backupFolder);
+        var backup = Path.Combine(backupFolder, $"appsettings-{DateTimeOffset.UtcNow:yyyyMMddTHHmmssfffffff}Z.json");
+        var options = new FileStreamOptions { Mode = FileMode.CreateNew, Access = FileAccess.Write, Share = FileShare.None };
+        if (!OperatingSystem.IsWindows()) options.UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
+        using (var stream = new FileStream(backup, options))
+        {
+            stream.Write(before);
+            stream.Flush(flushToDisk: true);
+        }
+        // No await between final local account fence and configuration publication.
+        WriteAuditedState(configPath, proposed);
+        return (null, backup);
+    }
+    finally { loginGate.Release(); }
+}
+
 async Task<IResult> CommitReviewedChange(HttpContext ctx, JsonObject submitted)
 {
     var invalid = ValidateChangeSafely(submitted);
@@ -1802,23 +1849,8 @@ async Task<IResult> CommitReviewedChange(HttpContext ctx, JsonObject submitted)
         proxy["AdminDisabledDestinations"] = disabled.DeepClone();
         doc["ReverseProxy"] = proxy;
         var newConfig = doc.ToJsonString(new JsonSerializerOptions { WriteIndented = true });
-        if (externalAuditIntent is not null)
-        {
-            if (!await externalAuditIntent.ConfirmAsync(Actor(ctx), "CONFIG_APPLY_INTENT", currentRevision,
-                    Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(newConfig))), ctx.RequestAborted) ||
-                ctx.RequestAborted.IsCancellationRequested)
-                return Results.Json(new { error = "External audit receipt unavailable; configuration unchanged" }, statusCode: 503);
-            if (!File.ReadAllBytes(configPath).AsSpan().SequenceEqual(snapshot))
-                return Results.Conflict(new { error = "Configuration changed during external audit confirmation" });
-        }
-        Directory.CreateDirectory(backupFolder);
-        var stamp = DateTimeOffset.UtcNow.ToString("yyyyMMddTHHmmssfffffffZ");
-        var backup = Path.Combine(backupFolder, $"appsettings-{stamp}.json");
-        using (var backupStream = new FileStream(backup, FileMode.CreateNew, FileAccess.Write, FileShare.None))
-            await backupStream.WriteAsync(snapshot);
-        var temp = configPath + ".tmp";
-        await File.WriteAllTextAsync(temp, newConfig);
-        File.Move(temp, configPath, overwrite: true);
+        var (denied, backup) = await CommitRoutingBytes(ctx, snapshot, Encoding.UTF8.GetBytes(newConfig), "CONFIG_APPLY_INTENT");
+        if (denied is not null) return denied;
         await Audit(Actor(ctx), "CONFIG_APPLIED", new { routes = routes.Count, clusters = clusters.Count, backup = Path.GetFileName(backup) });
         return Results.Ok(new { saved = true, backup = Path.GetFileName(backup), message = "Saved to appsettings.json; YARP config reload typically occurs automatically. Verify gateway logs." });
     }
@@ -1998,21 +2030,9 @@ app.MapPost("/admin/api/restore/{name}", async (HttpContext ctx, string name) =>
     {
         var json = await File.ReadAllTextAsync(path);
         if (JsonNode.Parse(json)?["ReverseProxy"] is null) return Results.BadRequest(new { error = "Backup lacks ReverseProxy configuration" });
-        if (externalAuditIntent is not null)
-        {
-            var restoreSnapshot = File.ReadAllBytes(configPath);
-            if (!await externalAuditIntent.ConfirmAsync(Actor(ctx), "CONFIG_RESTORE_INTENT",
-                    Convert.ToHexString(SHA256.HashData(restoreSnapshot)),
-                    Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(json))), ctx.RequestAborted) ||
-                ctx.RequestAborted.IsCancellationRequested)
-                return Results.Json(new { error = "External audit receipt unavailable; configuration unchanged" }, statusCode: 503);
-            if (!File.ReadAllBytes(configPath).AsSpan().SequenceEqual(restoreSnapshot))
-                return Results.Conflict(new { error = "Configuration changed during external audit confirmation" });
-        }
-        var safety = Path.Combine(backupFolder, $"appsettings-{DateTimeOffset.UtcNow:yyyyMMddTHHmmssfffffff}Z.json");
-        File.Copy(configPath, safety);
-        await File.WriteAllTextAsync(configPath + ".tmp", json);
-        File.Move(configPath + ".tmp", configPath, true);
+        var restoreSnapshot = File.ReadAllBytes(configPath);
+        var (denied, safety) = await CommitRoutingBytes(ctx, restoreSnapshot, Encoding.UTF8.GetBytes(json), "CONFIG_RESTORE_INTENT");
+        if (denied is not null) return denied;
         await Audit(Actor(ctx), "CONFIG_RESTORED", new { restored = name, preRestore = Path.GetFileName(safety) });
         return Results.Ok(new { restored = true });
     }
@@ -2043,7 +2063,7 @@ app.MapPost("/admin/api/fleet", async (HttpContext ctx, FleetGateway row) =>
     {
         if (FleetRolloutJournal.HasUnresolved(rolloutFolder))
             return Results.Conflict(new { error = "Resolve the unfinished rollout before changing fleet membership." });
-        var before = externalAuditIntent is null ? Array.Empty<byte>() : AuditStateBytes(fleetPath);
+        var before = externalAuditIntent is null && oidcPolicy is null ? Array.Empty<byte>() : AuditStateBytes(fleetPath);
         var list = ReadFleet();
         if (list.Any(x => x.Id.Equals(row.Id, StringComparison.OrdinalIgnoreCase))) return Results.Conflict(new { error = "Duplicate gateway ID" });
         list.Add(row);
@@ -2063,7 +2083,7 @@ app.MapDelete("/admin/api/fleet/{id}", async (HttpContext ctx, string id) =>
     {
         if (FleetRolloutJournal.HasUnresolved(rolloutFolder))
             return Results.Conflict(new { error = "Resolve the unfinished rollout before changing fleet membership." });
-        var before = externalAuditIntent is null ? Array.Empty<byte>() : AuditStateBytes(fleetPath);
+        var before = externalAuditIntent is null && oidcPolicy is null ? Array.Empty<byte>() : AuditStateBytes(fleetPath);
         var list = ReadFleet();
         if (list.RemoveAll(x => x.Id == id) != 1) return Results.NotFound();
         var proposed = JsonSerializer.SerializeToUtf8Bytes(list);
