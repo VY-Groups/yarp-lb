@@ -175,6 +175,9 @@ def main():
         sender_http,sender_tls,receiver_http,receiver_tls,unused=ports
         secret=secrets.token_hex(32).encode()
         receiver_cfg=config("receiver","sender",f"https://127.0.0.1:{unused}{PATH}",secret)
+        active_signing=secrets.token_hex(32).encode()
+        receiver_cfg.update({"GATEWAY_PEER_SYNC_SIGNING_SECRET":active_signing.decode(),
+                             "GATEWAY_PEER_SYNC_PREVIOUS_SIGNING_SECRET":secret.decode()})
         receiver_context=ssl.create_default_context(cafile=str(receiver_cert))
         with Relay(receiver_tls,receiver_cert,relay_key,relay_cert) as relay:
             sender_cfg=config("sender","receiver",
@@ -242,7 +245,22 @@ def main():
                     until("restarted receiver did not recover both counters",
                         lambda:(lambda x:x["remoteIdentities"]==2 and x["remoteRequests"]==3)(
                             admin.request("GET","/admin/api/peer-sync/status")))
-                    check(True,"real receiver restart teaches new challenge and full backfill")
+                    check(True,"real receiver restart teaches new challenge and full backfill using previous signing key")
+                    payload,headers=signed(active_signing,"sender",old_frame)
+                    status,_=https_post(receiver_tls,receiver_context,payload,headers)
+                    check(status==409,"active signing key authenticates obsolete boot frame but cannot bypass epoch fence")
+                # Restart receiving side without overlap. The old publisher
+                # stays running; it must receive 403, not a challenge or ACK.
+                retired_cfg=dict(receiver_cfg)
+                retired_cfg.pop("GATEWAY_PEER_SYNC_PREVIOUS_SIGNING_SECRET")
+                with peer_gateway(cwd,dll,receiver_root,receiver_http,receiver_tls,retired_cfg):
+                    payload,headers=signed(secret,"sender",old_frame)
+                    check(https_post(receiver_tls,receiver_context,payload,headers)[0]==403,
+                          "real replacement receiver refuses retired signing key")
+                    payload,headers=signed(active_signing,"sender",old_frame)
+                    status,hdrs=https_post(receiver_tls,receiver_context,payload,headers)
+                    check(status==409 and any(k.lower()==EPOCH_HEADER.lower() for k in hdrs),
+                          "still accepts active key and preserves receiver-boot fence")
         print("PEER_V4_HTTPS_SUCCESS",flush=True)
 
 if __name__=="__main__": main()

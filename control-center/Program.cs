@@ -250,14 +250,17 @@ var peerSyncSettings = PeerSyncSettings.FromEnvironment(
     Environment.GetEnvironmentVariable("GATEWAY_PEER_SYNC_REMOTE_URL"),
     Environment.GetEnvironmentVariable("GATEWAY_PEER_SYNC_SECRET"),
     Environment.GetEnvironmentVariable("GATEWAY_PEER_SYNC_CAPACITY"),
-    Environment.GetEnvironmentVariable("GATEWAY_PEER_SYNC_INTERVAL_SECONDS"));
+    Environment.GetEnvironmentVariable("GATEWAY_PEER_SYNC_INTERVAL_SECONDS"),
+    Environment.GetEnvironmentVariable("GATEWAY_PEER_SYNC_SIGNING_SECRET"),
+    Environment.GetEnvironmentVariable("GATEWAY_PEER_SYNC_PREVIOUS_SIGNING_SECRET"));
 if (peerSyncSettings is not null)
 {
     builder.Services.AddSingleton(peerSyncSettings);
     builder.Services.AddSingleton(sp => new PeerStateJournal(peerSyncSettings.NodeId,
         peerSyncSettings.RemoteId, peerSyncSettings.Secret, peerSyncSettings.Capacity,
         TimeSpan.FromSeconds(Math.Clamp(peerSyncSettings.IntervalSeconds * 3, 6, 60))));
-    builder.Services.AddSingleton(sp => new PeerSignedMessages(peerSyncSettings.Secret));
+    builder.Services.AddSingleton(sp => new PeerSignedMessages(
+        peerSyncSettings.SigningSecret ?? peerSyncSettings.Secret, peerSyncSettings.PreviousSigningSecret));
     builder.Services.AddSingleton<PeerSyncPublisherDiagnostics>();
     builder.Services.AddHttpClient("peer-sync", client => client.Timeout = TimeSpan.FromSeconds(5))
         .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler {

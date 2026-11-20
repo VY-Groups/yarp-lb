@@ -311,30 +311,34 @@ public sealed class PeerStateJournal
 public sealed class PeerSignedMessages
 {
     private readonly byte[] key;
+    private readonly byte[]? previousKey;
     private readonly object gate = new();
     private readonly Dictionary<string,long> nonceSeen = new(StringComparer.Ordinal);
     private const int NonceCap = 1024;
     private long latestVerifiedNow = long.MinValue;
-    public PeerSignedMessages(byte[] key)
+    public PeerSignedMessages(byte[] key, byte[]? previousKey = null)
     {
-        if (key.Length < 32) throw new ArgumentException("Peer authentication secret requires 32 bytes");
+        if (key.Length < 32 || previousKey is not null &&
+            (previousKey.Length < 32 || CryptographicOperations.FixedTimeEquals(key, previousKey)))
+            throw new ArgumentException("Peer authentication needs distinct keys of at least 32 bytes");
         this.key = (byte[])key.Clone();
+        this.previousKey = previousKey is null ? null : (byte[])previousKey.Clone();
     }
 
-    private byte[] Signature(string sender, long seconds, string nonce, ReadOnlySpan<byte> payload)
+    private static byte[] Signature(byte[] signingKey, string sender, long seconds, string nonce, ReadOnlySpan<byte> payload)
     {
         var digest = SHA256.HashData(payload);
         var prefix = Encoding.UTF8.GetBytes(sender + "\n" + seconds + "\n" + nonce + "\n");
         var input = new byte[prefix.Length + digest.Length];
         prefix.CopyTo(input, 0);
         digest.CopyTo(input, prefix.Length);
-        return HMACSHA256.HashData(key, input);
+        return HMACSHA256.HashData(signingKey, input);
     }
 
     public (string nonce,string signature) Sign(string sender,long time,byte[] payload)
     {
         var nonce = Convert.ToHexString(RandomNumberGenerator.GetBytes(16));
-        return (nonce, Convert.ToBase64String(Signature(sender, time, nonce, payload)));
+        return (nonce, Convert.ToBase64String(Signature(key, sender, time, nonce, payload)));
     }
 
     public bool Verify(string sender,string expectedSender,long time,string nonce,
@@ -347,9 +351,15 @@ public sealed class PeerSignedMessages
         byte[] supplied;
         try { supplied = Convert.FromBase64String(signature); }
         catch(FormatException) { return false; }
-        var expected = Signature(sender, time, nonce, payload);
-        if (supplied.Length != expected.Length ||
-            !CryptographicOperations.FixedTimeEquals(supplied, expected)) return false;
+        if (supplied.Length != 32) return false;
+        var expected = Signature(key, sender, time, nonce, payload);
+        var valid = CryptographicOperations.FixedTimeEquals(supplied, expected);
+        // Evaluate both configured keys, regardless of which matched. Both
+        // share the same replay fence; retiring the old key requires restart.
+        if (previousKey is not null)
+            valid |= CryptographicOperations.FixedTimeEquals(supplied,
+                Signature(previousKey, sender, time, nonce, payload));
+        if (!valid) return false;
         lock (gate)
         {
             // A forward clock correction may collect old nonces. Never allow
