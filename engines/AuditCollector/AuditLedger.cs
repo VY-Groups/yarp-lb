@@ -31,7 +31,7 @@ internal static class AuditContract
             if (id is null || !Guid.TryParseExact(id, "N", out var guid) || guid.ToString("N") != id ||
                 node is null || !ValidNode(node) || actor is not { Length: >= 1 and <= 256 } ||
                 actor.Any(char.IsControl) ||
-                root.GetProperty("operation").GetString() is not ("CONFIG_APPLY_INTENT" or "CONFIG_RESTORE_INTENT" or "USER_CREATE_INTENT" or "USER_PASSWORD_RESET_INTENT" or "USER_DISABLE_INTENT" or "USER_ENABLE_INTENT") ||
+                root.GetProperty("operation").GetString() is not ("CONFIG_APPLY_INTENT" or "CONFIG_RESTORE_INTENT" or "USER_CREATE_INTENT" or "USER_PASSWORD_RESET_INTENT" or "USER_DISABLE_INTENT" or "USER_ENABLE_INTENT" or "INVENTORY_ADD_INTENT" or "INVENTORY_DELETE_INTENT" or "FLEET_REGISTER_INTENT" or "FLEET_UNREGISTER_INTENT" or "MAIL_SETTINGS_INTENT" or "MAIL_PROOF_INTENT" or "DIRECTORY_SETTINGS_INTENT") ||
                 !Digest(root.GetProperty("revision").GetString()) || !Digest(root.GetProperty("targetDigest").GetString()) ||
                 !root.GetProperty("utc").TryGetDateTimeOffset(out var utc)) return null;
             return new AuditIntent(id, node, utc);
