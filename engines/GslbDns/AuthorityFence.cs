@@ -623,6 +623,20 @@ internal sealed class AuthorityFenceRuntime : IAsyncDisposable
         }
         catch
         {
+            // Startup can fail after the HTTP client and publisher have been
+            // created. Cancel the publisher before disposing its transport;
+            // otherwise an in-flight publish can outlive a failed listener.
+            publisherCancellation?.Cancel();
+            if (publisher is not null)
+            {
+                try { await publisher; }
+                catch (OperationCanceledException) { }
+                publisher = null;
+            }
+            publisherCancellation?.Dispose();
+            publisherCancellation = null;
+            client?.Dispose();
+            client = null;
             app = null;
             await web.DisposeAsync();
             serverCertificate.Dispose(); serverCertificate = null;
