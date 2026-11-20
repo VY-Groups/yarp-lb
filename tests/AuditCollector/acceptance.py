@@ -486,6 +486,15 @@ def main():
                     finally:
                         receipt_proxy.release_held.set()
                         stop(proc)
+                    # The race fixture reset the operator password and rotated its
+                    # security stamp. Verify the old session is invalid, then use
+                    # a newly authenticated Operator for the subsequent RBAC checks.
+                    check(not operator.session()["authenticated"],
+                          "concurrent reset invalidates the original operator session")
+                    operator=Client(base)
+                    operator.login("operator","Concurrent-reset-fixture-password-456!")
+                    check(operator.session()["role"]=="Operator",
+                          "fresh operator session retains its role after reset")
                     # The real local STARTTLS server permits testing the proof
                     # mutation as well as encrypted SMTP settings, without an
                     # external provider or a certificate-validation bypass.
