@@ -7,7 +7,8 @@ services:
     expose: ["8000"]
     networks: ["waf-private"]
   waf:
-    image: ${WAF_IMAGE:-owasp/modsecurity-crs:nginx}
+    # Official upstream OCI manifest digest inspected 2026-11-20; update by reviewed PR.
+    image: ${WAF_IMAGE:-owasp/modsecurity-crs@sha256:f7b4ec036553aa65e65fe792394099f597d6130465e63ff58d84f087617f5412}
     environment:
       BACKEND: http://protected-app:8000
       SERVER_NAME: localhost
