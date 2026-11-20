@@ -303,6 +303,8 @@ var loginGate = new SemaphoreSlim(1, 1);
 var pendingOtp = new ConcurrentDictionary<string, OtpChallenge>();
 var mailPath = Path.Combine(privateDir, "mail-settings.json");
 var mailProofPath = Path.Combine(privateDir, "mail-test-proof.sha256");
+var directoryPath = Path.Combine(privateDir, "active-directory.json");
+var identitySettingsGate = new SemaphoreSlim(1, 1);
 var protector = app.Services.GetRequiredService<IDataProtectionProvider>().CreateProtector("GatewayCoreYarp.AdminMail.v1");
 MailSettings ReadMail() => File.Exists(mailPath)
     ? JsonSerializer.Deserialize<MailSettings>(File.ReadAllText(mailPath), jsonOptions) ?? new MailSettings()
@@ -312,9 +314,9 @@ string MailFingerprint(MailSettings cfg) => Convert.ToHexString(SHA256.HashData(
 bool MailDeliveryVerified(MailSettings cfg) => File.Exists(mailProofPath) &&
     CryptographicOperations.FixedTimeEquals(Encoding.UTF8.GetBytes(File.ReadAllText(mailProofPath).Trim()),
         Encoding.UTF8.GetBytes(MailFingerprint(cfg)));
-async Task SendMailMessage(string recipient, string subject, string body)
+async Task SendMailMessage(string recipient, string subject, string body, MailSettings? snapshot = null)
 {
-    var cfg = ReadMail();
+    var cfg = snapshot ?? ReadMail();
     if (string.IsNullOrWhiteSpace(cfg.Host) || cfg.Port is < 1 or > 65535 ||
         cfg.Port == 465 || !ValidEmail(cfg.From) || !ValidEmail(recipient))
         throw new InvalidOperationException("SMTP host, supported port, sender and recipient must be configured.");
@@ -363,9 +365,10 @@ async Task SendMailMessage(string recipient, string subject, string body)
 }
 async Task SendOtp(string recipient, string code)
 {
-    if (!ReadMail().Enabled) throw new InvalidOperationException("OTP not enabled");
+    var cfg = ReadMail();
+    if (!cfg.Enabled || !MailDeliveryVerified(cfg)) throw new InvalidOperationException("Verified OTP not enabled");
     await SendMailMessage(recipient, "YARP Control Center sign-in code",
-        $"Your one-time sign-in code is {code}. It expires in 5 minutes. Do not share this code.");
+        $"Your one-time sign-in code is {code}. It expires in 5 minutes. Do not share this code.", cfg);
 }
 var configPath = applicationConfigPath;
 var gate = new SemaphoreSlim(1, 1);
@@ -1253,58 +1256,77 @@ app.MapPost("/admin/api/mail", async (HttpContext ctx, MailSettingsInput input) 
         input.Port is < 1 or > 65535 || input.Port == 465 || input.Host.Length > 255 || input.From.Length > 254 || input.Username.Length > 254 ||
         (input.Enabled && (string.IsNullOrWhiteSpace(input.Host) || !ValidEmail(input.From) || !input.StartTls)))
         return Results.BadRequest(new { code = "SMTP_INVALID_SETTINGS", error = "Check SMTP host, port (465 unsupported), sender address, and STARTTLS before enabling OTP." });
-    var existing = ReadMail();
-    var mode = string.IsNullOrEmpty(input.AuthMode) ? MailProviderAuth.PasswordMode : input.AuthMode;
-    var sameOAuthIdentity = string.Equals(existing.AuthMode, mode, StringComparison.Ordinal)
-        && string.Equals(existing.Host, input.Host, StringComparison.OrdinalIgnoreCase)
-        && string.Equals(existing.Username, input.Username, StringComparison.OrdinalIgnoreCase)
-        && string.Equals(existing.OAuthClientId, input.OAuthClientId, StringComparison.Ordinal)
-        && string.Equals(existing.OAuthTenant, input.OAuthTenant, StringComparison.Ordinal);
-    var encrypted = mode != MailProviderAuth.PasswordMode ? ""
-        : string.IsNullOrEmpty(input.Password)
-          ? string.Equals(existing.Username, input.Username, StringComparison.OrdinalIgnoreCase)
+    await identitySettingsGate.WaitAsync(ctx.RequestAborted);
+    try
+    {
+        var before = externalAuditIntent is null ? Array.Empty<byte>() : AuditStateBytes(mailPath);
+        var existing = ReadMail();
+        var mode = string.IsNullOrEmpty(input.AuthMode) ? MailProviderAuth.PasswordMode : input.AuthMode;
+        var sameOAuthIdentity = string.Equals(existing.AuthMode, mode, StringComparison.Ordinal)
             && string.Equals(existing.Host, input.Host, StringComparison.OrdinalIgnoreCase)
-            ? existing.EncryptedPassword : ""
-          : protector.Protect(input.Password);
-    var oauthSecret = !MailProviderAuth.UsesOAuth(mode) ? ""
-        : !string.IsNullOrEmpty(input.OAuthClientSecret)
-          ? protector.Protect(input.OAuthClientSecret)
-          : sameOAuthIdentity ? existing.EncryptedOAuthClientSecret : "";
-    var oauthRefresh = !MailProviderAuth.UsesOAuth(mode) || mode == MailProviderAuth.MicrosoftApp ? ""
-        : !string.IsNullOrEmpty(input.OAuthRefreshToken)
-          ? protector.Protect(input.OAuthRefreshToken)
-          : sameOAuthIdentity ? existing.EncryptedOAuthRefreshToken : "";
-    var validation = MailProviderAuth.Validate(mode, input.Host, input.Username,
-        input.OAuthTenant, input.OAuthClientId, !string.IsNullOrEmpty(oauthSecret),
-        !string.IsNullOrEmpty(oauthRefresh));
-    if (validation != null)
-        return Results.BadRequest(new { code = "MAIL_AUTH_INVALID", error = validation });
-    if (mode == MailProviderAuth.PasswordMode && !string.IsNullOrWhiteSpace(input.Username)
-        && string.IsNullOrEmpty(encrypted))
-        return Results.BadRequest(new { code = "SMTP_PASSWORD_REQUIRED", error = "Supply an app password for authenticated SMTP or remove the username for a trusted relay." });
-    var mail = new MailSettings(input.Enabled, input.Host, input.Port, input.From,
-        input.Username, encrypted, input.StartTls, mode,
-        MailProviderAuth.UsesOAuth(mode) ? input.OAuthClientId : "",
-        oauthSecret, oauthRefresh, MailProviderAuth.UsesOAuth(mode) ? input.OAuthTenant : "");
-    if (input.Enabled && !MailDeliveryVerified(mail))
-        return Results.Json(new { code = "SMTP_TEST_REQUIRED", error = "Save SMTP settings with OTP disabled, send a successful test to the administrator email, then enable OTP." }, statusCode: 409);
-    File.WriteAllText(mailPath + ".tmp", JsonSerializer.Serialize(mail)); File.Move(mailPath + ".tmp", mailPath, true);
-    await Audit(Actor(ctx), "MAIL_SETTINGS_UPDATED", new { input.Enabled, input.Host, input.Port, input.StartTls });
-    return Results.Ok(new { saved = true, otpRequiredOnNextLogin = mail.Enabled });
+            && string.Equals(existing.Username, input.Username, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(existing.OAuthClientId, input.OAuthClientId, StringComparison.Ordinal)
+            && string.Equals(existing.OAuthTenant, input.OAuthTenant, StringComparison.Ordinal);
+        var encrypted = mode != MailProviderAuth.PasswordMode ? ""
+            : string.IsNullOrEmpty(input.Password)
+              ? string.Equals(existing.Username, input.Username, StringComparison.OrdinalIgnoreCase)
+                && string.Equals(existing.Host, input.Host, StringComparison.OrdinalIgnoreCase)
+                ? existing.EncryptedPassword : ""
+              : protector.Protect(input.Password);
+        var oauthSecret = !MailProviderAuth.UsesOAuth(mode) ? ""
+            : !string.IsNullOrEmpty(input.OAuthClientSecret)
+              ? protector.Protect(input.OAuthClientSecret)
+              : sameOAuthIdentity ? existing.EncryptedOAuthClientSecret : "";
+        var oauthRefresh = !MailProviderAuth.UsesOAuth(mode) || mode == MailProviderAuth.MicrosoftApp ? ""
+            : !string.IsNullOrEmpty(input.OAuthRefreshToken)
+              ? protector.Protect(input.OAuthRefreshToken)
+              : sameOAuthIdentity ? existing.EncryptedOAuthRefreshToken : "";
+        var validation = MailProviderAuth.Validate(mode, input.Host, input.Username,
+            input.OAuthTenant, input.OAuthClientId, !string.IsNullOrEmpty(oauthSecret),
+            !string.IsNullOrEmpty(oauthRefresh));
+        if (validation != null)
+            return Results.BadRequest(new { code = "MAIL_AUTH_INVALID", error = validation });
+        if (mode == MailProviderAuth.PasswordMode && !string.IsNullOrWhiteSpace(input.Username)
+            && string.IsNullOrEmpty(encrypted))
+            return Results.BadRequest(new { code = "SMTP_PASSWORD_REQUIRED", error = "Supply an app password for authenticated SMTP or remove the username for a trusted relay." });
+        var mail = new MailSettings(input.Enabled, input.Host, input.Port, input.From,
+            input.Username, encrypted, input.StartTls, mode,
+            MailProviderAuth.UsesOAuth(mode) ? input.OAuthClientId : "",
+            oauthSecret, oauthRefresh, MailProviderAuth.UsesOAuth(mode) ? input.OAuthTenant : "");
+        if (input.Enabled && !MailDeliveryVerified(mail))
+            return Results.Json(new { code = "SMTP_TEST_REQUIRED", error = "Save SMTP settings with OTP disabled, send a successful test to the administrator email, then enable OTP." }, statusCode: 409);
+        var proposed = JsonSerializer.SerializeToUtf8Bytes(mail);
+        var denied = await ConfirmStateMutation(ctx, mailPath, before, proposed, "MAIL_SETTINGS_INTENT", true);
+        if (denied is not null) return denied;
+        if (mail.Enabled && !MailDeliveryVerified(mail))
+            return Results.Conflict(new { error = "Verified SMTP settings changed during confirmation" });
+        WriteAuditedState(mailPath, proposed);
+        await Audit(Actor(ctx), "MAIL_SETTINGS_UPDATED", new { input.Enabled, input.Host, input.Port, input.StartTls });
+        return Results.Ok(new { saved = true, otpRequiredOnNextLogin = mail.Enabled });
+    }
+    finally { identitySettingsGate.Release(); }
 }).RequireAuthorization(p => p.RequireRole("Administrator"));
 
 app.MapPost("/admin/api/mail/test", async (HttpContext ctx) =>
 {
     var admin = ReadUsers().FirstOrDefault(x => x.Username.Equals(Actor(ctx), StringComparison.OrdinalIgnoreCase));
     if (admin is null || !ValidEmail(admin.Email)) return Results.BadRequest(new { code = "SMTP_ADMIN_EMAIL_REQUIRED", error = "Set a valid administrator email under Administrators and roles before sending a test." });
+    await identitySettingsGate.WaitAsync(ctx.RequestAborted);
     try
     {
         var cfg = ReadMail();
         if (string.IsNullOrWhiteSpace(cfg.Host) || !ValidEmail(cfg.From) || !cfg.StartTls)
             return Results.Json(new { code = "SMTP_NOT_CONFIGURED", error = "Save a valid SMTP relay, sender, and STARTTLS configuration with OTP disabled before testing." }, statusCode: 409);
-        await SendMailMessage(admin.Email!, "YARP Control Center SMTP test", "This is a test message from your local YARP administration console.");
-        File.WriteAllText(mailProofPath + ".tmp", MailFingerprint(cfg));
-        File.Move(mailProofPath + ".tmp", mailProofPath, true);
+        await SendMailMessage(admin.Email!, "YARP Control Center SMTP test", "This is a test message from your local YARP administration console.", cfg);
+        if (ReadMail() != cfg)
+            return Results.Conflict(new { error = "SMTP settings changed during delivery test" });
+        var before = externalAuditIntent is null ? Array.Empty<byte>() : AuditStateBytes(mailProofPath);
+        var proposed = Encoding.UTF8.GetBytes(MailFingerprint(cfg));
+        var denied = await ConfirmStateMutation(ctx, mailProofPath, before, proposed, "MAIL_PROOF_INTENT", true);
+        if (denied is not null) return denied;
+        if (ReadMail() != cfg)
+            return Results.Conflict(new { error = "SMTP settings changed during audit confirmation" });
+        WriteAuditedState(mailProofPath, proposed);
         await Audit(Actor(ctx), "SMTP_DELIVERY_TEST_SUCCEEDED", new { cfg.Host, recipient = admin.Email });
         return Results.Ok(new { tested = true, recipient = admin.Email, note = "SMTP relay accepted message; confirm it arrived" });
     }
@@ -1321,22 +1343,32 @@ app.MapPost("/admin/api/mail/test", async (HttpContext ctx) =>
         await Audit(Actor(ctx), "SMTP_DELIVERY_TEST_FAILED", new { failureType, innerType, smtpStatus });
         return Results.Json(new { code = "SMTP_RELAY_UNAVAILABLE", error = "SMTP relay test failed. Check reachability, STARTTLS certificate trust, credentials and relay permissions. No OTP settings were enabled." }, statusCode: 503);
     }
+    finally { identitySettingsGate.Release(); }
 }).RequireRateLimiting("mailtest").RequireAuthorization(p => p.RequireRole("Administrator"));
 
 app.MapGet("/admin/api/directory", () => Results.Ok(directoryAuth.PublicSettings()))
     .RequireAuthorization(p => p.RequireRole("Administrator"));
 app.MapPost("/admin/api/directory", async (HttpContext ctx, DirectorySettingsInput input) =>
 {
-    if (input.Enabled && (!ReadMail().Enabled || !MailDeliveryVerified(ReadMail())))
-        return Results.BadRequest(new { error = "Enable verified SMTP email OTP before enabling AD login" });
+    await identitySettingsGate.WaitAsync(ctx.RequestAborted);
     try
     {
-        directoryAuth.Save(input);
+        var mail = ReadMail();
+        if (input.Enabled && (!mail.Enabled || !MailDeliveryVerified(mail)))
+            return Results.BadRequest(new { error = "Enable verified SMTP email OTP before enabling AD login" });
+        var before = externalAuditIntent is null ? Array.Empty<byte>() : AuditStateBytes(directoryPath);
+        var proposed = directoryAuth.PrepareSettings(input);
+        var denied = await ConfirmStateMutation(ctx, directoryPath, before, proposed, "DIRECTORY_SETTINGS_INTENT", true);
+        if (denied is not null) return denied;
+        if (input.Enabled && (ReadMail() != mail || !MailDeliveryVerified(mail)))
+            return Results.Conflict(new { error = "Verified SMTP settings changed during directory confirmation" });
+        WriteAuditedState(directoryPath, proposed);
         await Audit(Actor(ctx), "DIRECTORY_SETTINGS_UPDATED", new { input.Enabled, input.Host, input.Port, input.SearchBaseDn });
         return Results.Ok(new { saved = true, enabled = input.Enabled, note = "Existing AD sessions are revalidated on requests" });
     }
     catch (Exception ex) when (ex is ArgumentException or LdapException or InvalidOperationException or DirectoryOperationException)
     { return Results.BadRequest(new { error = "LDAPS configuration not accepted: check hostname, certificate, bind identity, base DN and mapped group DNs" }); }
+    finally { identitySettingsGate.Release(); }
 }).RequireAuthorization(p => p.RequireRole("Administrator"));
 app.MapPost("/admin/api/directory/test", async (HttpContext ctx) =>
 {
