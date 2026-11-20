@@ -11,12 +11,16 @@ using Microsoft.Extensions.Logging;
 public sealed record PeerSyncSettings(string NodeId, string RemoteId, Uri RemoteUrl,
     byte[] Secret, int Capacity, int IntervalSeconds)
 {
+    // The identity secret stays stable across transport-key rotation.
+    public byte[]? SigningSecret { get; init; }
+    public byte[]? PreviousSigningSecret { get; init; }
+
     public static PeerSyncSettings? FromEnvironment(
         string? nodeId,string? remoteId,string? remoteUrl,string? secret,
-        string? capacity,string? interval)
+        string? capacity,string? interval,string? signingSecret = null,string? previousSigningSecret = null)
     {
         if (nodeId is null && remoteId is null && remoteUrl is null && secret is null &&
-            capacity is null && interval is null) return null;
+            capacity is null && interval is null && signingSecret is null && previousSigningSecret is null) return null;
         static bool ValidId(string? id) =>
             !string.IsNullOrEmpty(id) && id.Length <= 48 &&
             id.All(c => char.IsAsciiLetterOrDigit(c) || c is '-' or '_');
@@ -36,9 +40,23 @@ public sealed record PeerSyncSettings(string NodeId, string RemoteId, Uri Remote
                 n < 1 || n > max) throw new InvalidOperationException("Invalid " + name);
             return n;
         }
+        static byte[]? ReadKey(string? raw)
+        {
+            if (raw is null) return null;
+            var length = Encoding.UTF8.GetByteCount(raw);
+            if (length is < 32 or > 4096)
+                throw new InvalidOperationException("Peer signing key must contain 32..4096 UTF-8 bytes");
+            return Encoding.UTF8.GetBytes(raw);
+        }
+        var active = ReadKey(signingSecret);
+        var previous = ReadKey(previousSigningSecret);
+        if (previous is not null && (active is null ||
+            System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(active,previous)))
+            throw new InvalidOperationException("Peer previous signing key requires a distinct explicit active key");
         return new PeerSyncSettings(nodeId!,remoteId!,uri!,Encoding.UTF8.GetBytes(secret),
             Read(capacity,2048,2048,"peer capacity"),
-            Read(interval,2,30,"peer interval"));
+            Read(interval,2,30,"peer interval"))
+            { SigningSecret = active, PreviousSigningSecret = previous };
     }
 }
 
