@@ -379,7 +379,7 @@ def main():
                     inventory_thread.join(timeout=15)
                     check(reset_done.is_set() and inventory_done.is_set() and not errors,
                         "serialized account reset and resource mutation complete")
-                    check(json.loads(inventory.read_bytes())[0]["id"]=="race-service",
+                    check(json.loads(inventory.read_bytes())[0]["Id"]=="race-service",
                         "resource mutation commits after account lock release")
                     admin2.request("DELETE","/admin/api/inventory/race-service",{})
                     check(json.loads(inventory.read_bytes())==[],
