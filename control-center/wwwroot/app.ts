@@ -3,7 +3,7 @@ type State = {name:string;gateway:string;time:string;routes:Obj;clusters:Obj;dis
 let data:State = {name:'GatewayCore',gateway:'unknown',time:'',routes:{},clusters:{},disabled:{},mode:'Local testing',telemetry:'',revision:''};
 let viewHistory:string[]=[];let lastRenderedView='setup';let restoringNavigation=false;
 function navigateBack(){if(viewHistory.length){restoringNavigation=true;view=viewHistory.pop()!;render()}else if(view!=='setup'){restoringNavigation=true;view='setup';render()}}
-let view='setup';let dirty=false;let probes:Obj[]=[];let liveDestinationHealth:Obj[]|null=null;let liveDestinationHealthAt='';let csrf='';let currentRole='';let currentUser='';let otpChallenge='';
+let view='setup';let dirty=false;let probes:Obj[]=[];let liveDestinationHealth:Obj[]|null=null;let liveDestinationHealthAt='';let csrf='';let currentRole='';let currentUser='';let federatedOidcSession=false;let otpChallenge='';
 let authGeneration=0;let gatewayReadyLabel='● Backend readiness not checked';let gatewayReadyWarn=true;let readinessGeneration=0;let readinessAbort:AbortController|null=null;
 const $=(id:string)=>document.getElementById(id)!;
 const esc=(s:any)=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'} as Obj)[c]);
@@ -486,7 +486,7 @@ function topologyInputUpdate(el:HTMLInputElement|HTMLSelectElement){if(!topology
 }
 $('content').addEventListener('input',e=>{const el=e.target as HTMLInputElement;if(el.matches('[data-setup-field],[data-setup-array]'))topologyInputUpdate(el)});
 $('content').addEventListener('change',e=>{const el=e.target as HTMLInputElement;if(el.matches('[data-setup-field],[data-setup-array]'))topologyInputUpdate(el)});
-document.querySelectorAll<HTMLButtonElement>('.nav').forEach(el=>el.onclick=()=>{const next=el.dataset.view||'overview';if(view===next)return;view=next;render()});$('page-back').onclick=()=>navigateBack();$('modal-close').onclick=()=>($('modal') as HTMLDialogElement).close();$('refresh').onclick=()=>void reload();$('save').onclick=()=>void save();$('logout').onclick=()=>{if(dirty&&!confirm('Sign out? Your unsubmitted configuration draft will be discarded.'))return;void api('/admin/api/logout','POST',{}).then(()=>showLogin(false)).catch(e=>show(String(e),true))};
+document.querySelectorAll<HTMLButtonElement>('.nav').forEach(el=>el.onclick=()=>{const next=el.dataset.view||'overview';if(view===next)return;view=next;render()});$('page-back').onclick=()=>navigateBack();$('modal-close').onclick=()=>($('modal') as HTMLDialogElement).close();$('refresh').onclick=()=>void reload();$('save').onclick=()=>void save();$('logout').onclick=()=>{if(dirty&&!confirm('Sign out? Your unsubmitted configuration draft will be discarded.'))return;if(federatedOidcSession){const form=document.createElement('form');form.method='post';form.action='/admin/api/logout';const token=document.createElement('input');token.type='hidden';token.name='csrf';token.value=csrf;form.append(token);document.body.append(form);form.submit();return}void api('/admin/api/logout','POST',{}).then(()=>showLogin(false)).catch(e=>show(String(e),true))};
 setInterval(()=>{if(!$('app-shell').hidden)void refreshGatewayReadiness()},30000);
 void initSession();
 
@@ -494,7 +494,7 @@ async function initSession(){
   try {
     const r=await api('/admin/api/session');
     if(!r.authenticated){showLogin(!r.initialized);return}
-    csrf=r.csrf;currentRole=r.role;currentUser=r.username;
+    csrf=r.csrf;currentRole=r.role;currentUser=r.username;federatedOidcSession=r.federatedOidc===true;
     $('user-badge').textContent=currentUser+' · '+currentRole;
     $('auth-screen').hidden=true;$('app-shell').hidden=false;
     document.querySelectorAll<HTMLButtonElement>('[data-view="users"],[data-view="mail"],[data-view="directory"]').forEach(b=>b.hidden=currentRole!=='Administrator');
@@ -507,7 +507,7 @@ async function initSession(){
     await reload();
   } catch(err){$('auth-message').textContent=String(err);$('auth-screen').hidden=false;$('app-shell').hidden=true}
 }
-function showLogin(first:boolean){authGeneration++;readinessGeneration++;readinessAbort?.abort();readinessAbort=null;gatewayReadyLabel='● Backend readiness not checked';gatewayReadyWarn=true;csrf='';currentRole='';currentUser='';otpChallenge='';view='setup';viewHistory=[];lastRenderedView='setup';
+function showLogin(first:boolean){authGeneration++;readinessGeneration++;readinessAbort?.abort();readinessAbort=null;gatewayReadyLabel='● Backend readiness not checked';gatewayReadyWarn=true;csrf='';currentRole='';currentUser='';federatedOidcSession=false;otpChallenge='';view='setup';viewHistory=[];lastRenderedView='setup';
  dirty=false;data={name:'GatewayCore',gateway:'unknown',time:'',routes:{},clusters:{},disabled:{},mode:'Local testing',telemetry:'',revision:''};
  probes=[];orgProfile=null;topologyResponse=null;topologyDraft=null;topologyStep=0;topologyChecks=[];topologyWarnings=[];
  $('content').innerHTML='';$('user-badge').textContent='';$('notice').hidden=true;

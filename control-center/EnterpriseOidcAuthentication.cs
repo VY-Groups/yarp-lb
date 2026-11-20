@@ -24,6 +24,7 @@ internal static class EnterpriseOidcAuthentication
             options.ClientId = settings.ClientId;
             options.ClientSecret = secret;
             options.CallbackPath = EnterpriseOidcPolicy.Callback;
+            options.SignedOutCallbackPath = "/admin/oidc/signed-out";
             options.ResponseType = "code";
             options.ResponseMode = "query";
             options.UsePkce = true;
@@ -62,6 +63,15 @@ internal static class EnterpriseOidcAuthentication
                 ctx.ProtocolMessage.SetParameter("acr_values", settings.RequiredAcr);
                 ctx.ProtocolMessage.SetParameter("max_age", "0");
                 ctx.ProtocolMessage.SetParameter("prompt", "login");
+                return Task.CompletedTask;
+            };
+            options.Events.OnRedirectToIdentityProviderForSignOut = ctx =>
+            {
+                // Tokens are deliberately not persisted in the local ticket.
+                // RP-Initiated Logout permits client_id when id_token_hint is
+                // unavailable; the exact callback must be registered at the OP.
+                ctx.ProtocolMessage.ClientId = settings.ClientId;
+                ctx.ProtocolMessage.PostLogoutRedirectUri = settings.ManagementOrigin + options.SignedOutCallbackPath;
                 return Task.CompletedTask;
             };
             options.Events.OnTokenValidated = ctx =>

@@ -47,6 +47,7 @@ class Idp:
         self.auth_override=None
         self.codes={}
         self.exchanges=0
+        self.logout_requests=[]
         self.signing=root/"jwt.pem"
         cmd("openssl","genpkey","-algorithm","RSA","-pkeyopt","rsa_keygen_bits:2048","-out",str(self.signing))
         self.signing.chmod(0o600)
@@ -65,6 +66,7 @@ class Idp:
                 if parsed.path=="/.well-known/openid-configuration":
                     self.reply(200,{"issuer":owner.issuer,"authorization_endpoint":owner.issuer+"/authorize",
                       "token_endpoint":owner.issuer+"/token","jwks_uri":owner.issuer+"/keys",
+                      "end_session_endpoint":owner.issuer+"/logout",
                       "response_types_supported":["code"],"subject_types_supported":["public"],
                       "id_token_signing_alg_values_supported":["RS256"],"code_challenge_methods_supported":["S256"],
                       "token_endpoint_auth_methods_supported":["client_secret_post","client_secret_basic"],
@@ -86,6 +88,18 @@ class Idp:
                     location=q["redirect_uri"]+"?"+urlencode({"code":code,"state":state})
                     self.send_response(302)
                     self.send_header("Location",location)
+                    self.send_header("Content-Length","0")
+                    self.end_headers()
+                elif parsed.path=="/logout":
+                    q={k:v[0] for k,v in parse_qs(parsed.query).items()}
+                    if (q.get("client_id")!=owner.client or
+                        q.get("post_logout_redirect_uri")!=owner.gateway_origin+"/admin/oidc/signed-out" or
+                        not q.get("state") or "id_token_hint" in q):
+                        return self.reply(400,{"error":"invalid_logout_request"})
+                    owner.logout_requests.append(q)
+                    callback=q["post_logout_redirect_uri"]+"?"+urlencode({"state":q["state"]})
+                    self.send_response(302)
+                    self.send_header("Location",callback)
                     self.send_header("Content-Length","0")
                     self.end_headers()
                 else: self.reply(404,{})
@@ -174,6 +188,28 @@ def backchannel(origin,ctx,token,expect):
     except HTTPError as e: status=e.code;e.read()
     check(status==expect,f"back-channel logout returned expected HTTP {expect}")
 
+def federated_logout(client):
+    csrf=client.csrf
+    check(bool(csrf),"federated logout has an authenticated CSRF token")
+    req=Request(client.base+"/admin/api/logout",data=urlencode({"csrf":csrf}).encode(),
+        headers={"Content-Type":"application/x-www-form-urlencoded"},method="POST")
+    with client.opener.open(req,timeout=10) as response:
+        status=response.status
+        final_url=response.geturl()
+        response.read()
+    check(status==200 and final_url.endswith("/dashboard"),
+        "RP-initiated logout returns through the OIDC signed-out callback")
+
+def csrfless_logout(client):
+    req=Request(client.base+"/admin/api/logout",data=urlencode({}).encode(),
+        headers={"Content-Type":"application/x-www-form-urlencoded"},method="POST")
+    try:
+        with client.opener.open(req,timeout=10) as response: status=response.status
+    except HTTPError as error:
+        status=error.code
+        error.read()
+    check(status==403,"RP logout without its CSRF token is rejected")
+
 def main():
     parser=argparse.ArgumentParser()
     parser.add_argument("--root",type=Path,default=Path("control-center"))
@@ -225,8 +261,16 @@ def main():
                         "native OIDC callback completes PKCE, authenticates mapped subject and ignores privileged IdP role")
                     check(idp.exchanges==1 and any(c.name=="GatewayCoreYarpAdmin" and c.secure for c in jar),
                         "real token exchange and secure local session cookie")
+                    check(user["federatedOidc"],"authenticated session identifies its federated logout mode")
                     admin.request("GET","/admin/api/users",expect=403)
-                    admin.request("POST","/admin/api/logout",{})
+                    csrfless_logout(admin)
+                    check(admin.session()["authenticated"],"CSRF rejection preserves the current federated session")
+                    federated_logout(admin)
+                    check(len(idp.logout_requests)==1 and
+                          idp.logout_requests[0]["client_id"]==idp.client and
+                          idp.logout_requests[0]["post_logout_redirect_uri"]==origin+"/admin/oidc/signed-out" and
+                          "id_token_hint" not in idp.logout_requests[0],
+                          "logout sends registered client and exact callback without persisting ID tokens")
                     check(not admin.session()["authenticated"],"local federated-session logout invalidates browser cookie")
                     for mode in ("tampered-state","nonce","issuer","audience","mfa","group"):
                         idp.mode=mode

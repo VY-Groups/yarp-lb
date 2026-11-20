@@ -21,6 +21,7 @@ let liveDestinationHealthAt = '';
 let csrf = '';
 let currentRole = '';
 let currentUser = '';
+let federatedOidcSession = false;
 let otpChallenge = '';
 let authGeneration = 0;
 let gatewayReadyLabel = '● Backend readiness not checked';
@@ -1082,7 +1083,19 @@ $('modal-close').onclick = () => $('modal').close();
 $('refresh').onclick = () => void reload();
 $('save').onclick = () => void save();
 $('logout').onclick = () => { if (dirty && !confirm('Sign out? Your unsubmitted configuration draft will be discarded.'))
-    return; void api('/admin/api/logout', 'POST', {}).then(() => showLogin(false)).catch(e => show(String(e), true)); };
+    return; if (federatedOidcSession) {
+    const form = document.createElement('form');
+    form.method = 'post';
+    form.action = '/admin/api/logout';
+    const token = document.createElement('input');
+    token.type = 'hidden';
+    token.name = 'csrf';
+    token.value = csrf;
+    form.append(token);
+    document.body.append(form);
+    form.submit();
+    return;
+} void api('/admin/api/logout', 'POST', {}).then(() => showLogin(false)).catch(e => show(String(e), true)); };
 setInterval(() => { if (!$('app-shell').hidden)
     void refreshGatewayReadiness(); }, 30000);
 void initSession();
@@ -1096,6 +1109,7 @@ async function initSession() {
         csrf = r.csrf;
         currentRole = r.role;
         currentUser = r.username;
+        federatedOidcSession = r.federatedOidc === true;
         $('user-badge').textContent = currentUser + ' · ' + currentRole;
         $('auth-screen').hidden = true;
         $('app-shell').hidden = false;
@@ -1126,6 +1140,7 @@ function showLogin(first) {
     csrf = '';
     currentRole = '';
     currentUser = '';
+    federatedOidcSession = false;
     otpChallenge = '';
     view = 'setup';
     viewHistory = [];
