@@ -10,12 +10,13 @@ issue list is #34, #36, #37, #48, #49, #51, #52, #53, #100, #101 and #109.
 
 - A direct EC2 physical acceptance was run against GatewayCore binaries built
   from this main commit. Two public DNS authorities in Mumbai and Osaka served
-  a disposable .invalid zone; three independently enrolled signed mTLS
-  observers ran across three Amazon Linux 2023 hosts and reported to both
-  authorities.
+  a disposable .invalid zone; three separately enrolled signed mTLS observers
+  ran on three Amazon Linux 2023 hosts, assigned three configured vantage
+  groups. Actual geographic and network-path diversity was not independently
+  verified. All observers reported to both authorities.
 - With all three fresh reports, each authority returned authoritative
   NOERROR/A over both UDP and TCP. After one observer stopped and its report
-  expired, both authorities continued serving with two distinct healthy
+  expired, both authorities continued serving with two distinct configured
   vantage groups. After a second distinct group stopped and expired, both
   returned authoritative SERVFAIL with no answers. Restarting the observers
   restored service only after fresh reports arrived.
