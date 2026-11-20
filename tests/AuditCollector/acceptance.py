@@ -26,6 +26,12 @@ def check(condition, message):
         raise AssertionError(message)
     print("PASS: " + message, flush=True)
 
+def safe_receipt_response(status, response_body, receipt):
+    """Reject malformed signed receipts instead of forwarding a modified value."""
+    if receipt and ("\r" in receipt or "\n" in receipt):
+        return 503, b"", None
+    return status, response_body, receipt
+
 def run(*args, **kw):
     return subprocess.run(args, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, **kw)
 
@@ -71,13 +77,13 @@ class ReceiptProxy:
                     owner.hold_entered.set()
                     if not owner.release_held.wait(20):
                         status, response_body, receipt = 503, b"", None
-                # A malformed upstream receipt must fail closed, not be
-                # forwarded as a different signed receipt or extra header.
-                if receipt and ("\r" in receipt or "\n" in receipt):
-                    status, response_body, receipt = 503, b"", None
+                # A malformed signed receipt must fail closed; stripping its
+                # bytes would produce a different value from the one signed.
+                status, response_body, receipt = safe_receipt_response(
+                    status, response_body, receipt)
                 self.send_response(status)
                 if receipt:
-                    self.send_header("X-GC-Audit-Receipt", receipt.replace("\r", "").replace("\n", ""))
+                    self.send_header("X-GC-Audit-Receipt", receipt)
                 self.send_header("Content-Length", str(len(response_body)))
                 self.send_header("Connection", "close")
                 self.end_headers()
@@ -128,6 +134,11 @@ def fixture_smtp_trust(ca):
 def main():
     if os.environ.get("GITHUB_ACTIONS") != "true":
         raise SystemExit("Disposable CI only")
+    check(safe_receipt_response(201, b"ok", "signed") ==
+          (201, b"ok", "signed"), "valid signed receipt is forwarded unchanged")
+    for malformed in ("signed\rInjected: true", "signed\nInjected: true"):
+        check(safe_receipt_response(201, b"ok", malformed) ==
+              (503, b"", None), "CR/LF in signed receipt fails closed")
     dll = Path(sys.argv[1]).resolve()
     with tempfile.TemporaryDirectory(prefix="audit-fixture-") as tmp:
         root = Path(tmp)
