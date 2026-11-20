@@ -1,5 +1,48 @@
 # GatewayCore — Codex handoff, verified repository snapshot
 
+## Current continuation update (2026-11-20)
+
+This update supersedes the 2026-11-19 continuation snapshot below. Live GitHub
+and exact post-merge CI were checked on 2026-11-20:
+
+- `main` is `c0b3668984547ed6de8927516ebceccdae10f6e6` (squash merge of PR #282).
+  All **17/17** GitHub Actions checks on this exact `main` commit passed. There
+  were **zero open PRs** and **12 open issues** at the check time: #34, #36,
+  #37, #38, #48, #49, #51, #52, #53, #100, #101 and #109.
+- PR #282 fixed proxy-span lifecycle completion (`Activity.Stop()` after final
+  tags/status) and passed route/cluster/destination dimensions into the lab
+  metric. Its paired-profile harness now applies equivalent lifecycle and
+  dimension instrumentation to the exact base and candidate checkouts, with
+  fail-closed source-shape checks. All 33 PR checks passed on head
+  `0eef88f2114f206d10be056cb02ab9f6a847674c`; the run had three alternating
+  75-VU paired samples, validated OTLP trace/metric markers on both revisions,
+  and emitted bounded GC traces. Mean candidate-minus-baseline allocation was
+  **+2.171 B/request**, with 95% CI **−28.778 to +33.12 B/request**. Since the
+  interval includes zero, this establishes no allocation improvement. Issue
+  #34 remains open.
+- A three-EC2 Amazon Linux 2023 test exercised the #109 two-authority mTLS
+  fencing subset using Mumbai and Osaka authorities plus a third lab host.
+  Each authority recorded 354 successful peer HTTP 204 acknowledgements. Both
+  authorities answered authoritative NOERROR over UDP/TCP at baseline; during
+  a timed reciprocal host-route `/32` partition, both returned authoritative
+  SERVFAIL with no answers; after route recovery, both returned NOERROR over
+  UDP/TCP within four seconds. Test processes, routes, timers and temporary
+  files were removed; Apache remained running on all three hosts. This was a
+  host-route partition, not a switch/security-group or VRRP/ECMP test. It does
+  not complete #109's multi-vantage, observer quorum, adversarial, scale or
+  soak acceptance, so #109 remains open.
+- PRs #258 and #260–#264 are merged. PR #265 is closed **without merge**; do
+  not assume its OIDC back-channel logout/session-revocation code is present in
+  `main` unless independently located and verified. Issue #38 remains open.
+- Issue #50 is currently closed as completed. Its CI stack verifies Collector,
+  Prometheus and Grafana integration; this is not evidence of a customer's
+  deployed retention/alert route and must not be used to claim production
+  monitoring or availability.
+- Production remains **NO-GO**. Annual 99.9% availability is unmeasured. Issue
+  #36 still lacks physical VRRP/ECMP acceptance; #52 lacks public delegation/DS
+  and full key/GeoIP operations; #109 has only the bounded physical subset
+  above. Other open issues remain subject to their own acceptance criteria.
+
 ## Current continuation update (2026-11-19)
 
 This update supersedes the historical 2026-11-16 snapshot below where they
