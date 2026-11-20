@@ -1,38 +1,40 @@
 # GatewayCore — Codex handoff, verified repository snapshot
 
-## Current continuation update — physical observer quorum (2026-11-20)
+## Current continuation update — physical GSLB acceptance (2026-11-20)
 
-This update supersedes the earlier same-date snapshot below for the latest
-physical acceptance and repository state. The live main ref is
-47fbc0403d9bde5f7bcff62b1f55fd7730469623, including merged PR #285. The six
-post-merge workflows reported for that exact main commit passed. The live open
-issue list is #34, #36, #37, #48, #49, #51, #52, #53, #100, #101 and #109.
+This update supersedes the earlier same-date snapshot below for physical
+acceptance. The live main ref is 47fbc0403d9bde5f7bcff62b1f55fd7730469623,
+including merged PR #285. The six post-merge workflows reported for that exact
+main commit passed. The live open issue list is #34, #36, #37, #48, #49, #51,
+#52, #53, #100, #101 and #109.
 
-- A direct EC2 physical acceptance was run against GatewayCore binaries built
-  from this main commit. Two public DNS authorities in Mumbai and Osaka served
-  a disposable .invalid zone; three separately enrolled signed mTLS observers
-  ran on three Amazon Linux 2023 hosts, assigned three configured vantage
-  groups. Actual geographic and network-path diversity was not independently
-  verified. All observers reported to both authorities.
-- With all three fresh reports, each authority returned authoritative
-  NOERROR/A over both UDP and TCP. After one observer stopped and its report
-  expired, both authorities continued serving with two distinct configured
-  vantage groups. After a second distinct group stopped and expired, both
-  returned authoritative SERVFAIL with no answers. Restarting the observers
-  restored service only after fresh reports arrived.
-- With all observers stopped, the Osaka DNS authority was restarted while its
-  local replay state was retained. Both authorities remained at SERVFAIL until
-  fresh observer reports arrived; then both recovered. The full scenario and
-  exact limits are recorded in
+- Two physical EC2 acceptance phases ran against GatewayCore binaries built
+  from this main commit. The observer-quorum phase used two DNS authorities in
+  Mumbai and Osaka plus three separately enrolled signed mTLS observers on
+  three Amazon Linux 2023 hosts, assigned three configured vantage groups.
+  Actual geographic and network-path diversity was not independently verified.
+- In the observer phase, both authorities returned authoritative NOERROR/A
+  over UDP and TCP with three fresh reports. One expired observer was
+  tolerated; after a second distinct configured group expired, both returned
+  authoritative SERVFAIL with no answers. Fresh reports restored service.
+- In the AuthorityFence phase, two authorities exchanged mutually
+  authenticated, signed 2-of-2 snapshots and both returned NOERROR/A. Reciprocal
+  temporary host-route blackholes for each peer's public /32 caused both to
+  return SERVFAIL after the configured 8-second lease. Removing the routes
+  restored NOERROR only after fresh signed snapshots. The Osaka authority was
+  also restarted while the peer routes were blocked, retaining its protected
+  epoch/replay state; both authorities stayed SERVFAIL until routes were
+  restored and fresh snapshots arrived.
+- Temporary peer /32 blackhole routes were removed and normal VPC gateway
+  routes restored. All temporary binaries, configs, certs, state, watchdogs and
+  processes were removed. Apache remained active and returned HTTP 200 on all
+  three hosts; ports 53 and 15444 no longer listened. No AWS security-group,
+  Apache or system-service configuration was changed. Full scope and limits:
   ops/acceptance/gslb-physical-observer-quorum-20261120.md.
-- All temporary GatewayCore binaries, configs, certificates, state, watchdogs
-  and processes were removed. Apache remained active and returned HTTP 200 on
-  all three hosts; ports 53 and 15444 were no longer listening. No AWS
-  security-group, route, Apache or system-service configuration was changed.
-- This materially advances #109's physical observer-quorum evidence, but does
-  not complete it. This run did not exercise AuthorityFence under a physical
-  authority-link partition, a public delegated zone, DNSSEC, one-hour soak,
-  malicious-frame fuzzing, 500 Mbps capacity, VRRP/ECMP or annual availability.
+- This advances #109's physical quorum, authority partition and restart
+  evidence, but does not complete it. Actual geography/path independence was
+  not proven; DNSSEC/public delegation, malicious-frame fuzzing, one-hour soak,
+  500 Mbps capacity, VRRP/ECMP and annual availability remain untested here.
   Keep #109 open. Production remains NO-GO and annual 99.9% is unmeasured.
 - PR #285 is merged but issue #38 remains open; do not infer complete federated
   logout or distributed identity revocation from that increment.
