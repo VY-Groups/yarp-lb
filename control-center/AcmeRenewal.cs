@@ -228,6 +228,7 @@ public sealed class AcmeRenewalCoordinator(IAcmeCertificateIssuer issuer,
         string? stagePath = null;
         string? rollbackPath = null;
         byte[]? activePfxBackup = null;
+        IDisposable? lifecycleLease = null;
         var activePfxReplaced = false;
         try
         {
@@ -266,7 +267,7 @@ public sealed class AcmeRenewalCoordinator(IAcmeCertificateIssuer issuer,
                     throw new CryptographicException("ACME renewal returned the currently active certificate.");
                 // Serialize the atomic PFX replacement and live listener activation with
                 // operator revocation so the leaf cannot change during its active check.
-                using var lifecycleLease = await certificateLifecycle.EnterAsync(operationToken);
+                lifecycleLease = await certificateLifecycle.EnterAsync(operationToken);
                 File.Move(stagePath, activePfxPath, overwrite: true);
                 stagePath = null;
                 activePfxReplaced = true;
@@ -308,6 +309,7 @@ public sealed class AcmeRenewalCoordinator(IAcmeCertificateIssuer issuer,
             if (stagePath is not null) try { File.Delete(stagePath); } catch (IOException) { }
             if (rollbackPath is not null) try { File.Delete(rollbackPath); } catch (IOException) { }
             if (activePfxBackup is not null) CryptographicOperations.ZeroMemory(activePfxBackup);
+            lifecycleLease?.Dispose();
             renewalGate.Release();
         }
     }
