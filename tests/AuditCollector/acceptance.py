@@ -17,6 +17,7 @@ import tempfile
 import time
 import uuid
 from unittest.mock import patch
+from contextlib import contextmanager
 
 def check(condition, message):
     if not condition:
@@ -25,6 +26,19 @@ def check(condition, message):
 
 def run(*args, **kw):
     return subprocess.run(args, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, **kw)
+
+@contextmanager
+def fixture_smtp_trust(ca):
+    # Disposable Ubuntu Actions runner only; match the existing SMTP fixture's
+    # trust setup and remove the temporary CA even on assertion failure.
+    trust=Path("/usr/local/share/ca-certificates/gatewaycore-audit-smtp-fixture.crt")
+    run("sudo","install","-m","0644",str(ca),str(trust))
+    try:
+        run("sudo","update-ca-certificates")
+        yield
+    finally:
+        run("sudo","rm","-f",str(trust))
+        run("sudo","update-ca-certificates")
 
 def main():
     if os.environ.get("GITHUB_ACTIONS") != "true":
@@ -157,6 +171,7 @@ def main():
         # prove outage denial leaves the persisted credentials/stamps unchanged.
         sys.path.insert(0, str(Path(__file__).resolve().parents[1]/"E2E"))
         from real_control_center import backend, gateway, openssl_state, port as free_port, Client
+        from real_smtp_otp import local_smtp, MAIL_USER, MAIL_PASSWORD
         cwd=Path(__file__).resolve().parents[2]/"control-center"
         gateway_dll=cwd/"bin/Release/net10.0/GatewayCoreYarp.dll"
         gateway_root=root/"gateway-fixture"
@@ -168,92 +183,138 @@ def main():
         gateway_env={"GATEWAY_AUDIT_INTENT_URL":f"https://127.0.0.1:{port}/audit/v1/intents",
             "GATEWAY_AUDIT_NODE_ID":"node-a","GATEWAY_AUDIT_SENDER_KEY_FILE":str(keys/"node-a.key"),
             "GATEWAY_AUDIT_COLLECTOR_PUBLIC_KEY_FILE":str(public),"SSL_CERT_FILE":str(cert)}
+        smtp_port=free_port()
         with backend() as upstream:
             openssl_state(gateway_root,upstream)
-            with patch.dict(os.environ,gateway_env), gateway(cwd,gateway_dll,gateway_root,free_port()) as base:
-                admin=Client(base)
-                admin.bootstrap("reviewer","Reviewer-fixture-pass-123!","reviewer@example.invalid")
-                state=gateway_root/"state"/"admin-users.json"
-                for index,(operation,route,body) in enumerate(operations):
-                    before=state.read_bytes()
-                    admin.request("POST",route,body,expect=503)
-                    check(state.read_bytes()==before,"collector outage denies "+operation+" without account mutation")
-                    proc=start()
-                    try:
-                        admin.request("POST",route,body)
-                        after=state.read_bytes()
-                        check(after!=before,"verified receipt authorizes "+operation)
-                    finally: stop(proc)
-                    rows=ledger.read_text().splitlines()
-                    check(len(rows)==3+index,"one retained intent for "+operation)
-                    retained=json.loads(base64.b64decode(json.loads(rows[-1])["Body"]))
-                    check(retained["operation"]==operation and retained["actor"]=="reviewer" and
-                        retained["revision"]==hashlib.sha256(before).hexdigest().upper() and
-                        retained["targetDigest"]==hashlib.sha256(after).hexdigest().upper(),
-                        "retained receipt binds exact before/after bytes for "+operation)
-                    check("password" not in retained and "email" not in retained,
-                        "no plaintext credentials or email fields exported")
-                operator=Client(base)
-                operator.login("operator","Reset-fixture-password-123!")
-                check(operator.session()["role"]=="Operator","account recovery retains correct role")
-                inventory=gateway_root/"state"/"inventory.json"
-                fleet=gateway_root/"state"/"fleet-gateways.json"
-                fleet_body={"id":"lab-node","url":"https://127.0.0.1:19443/",
-                    "clientCertificateThumbprint":"A"*64}
-                # Fleet mutations require a confirmed multi-gateway design.
-                # First prove that the real onboarding gate still denies the
-                # request; then satisfy it through the public management API.
-                admin.request("POST","/admin/api/fleet",fleet_body,expect=409)
-                check(not fleet.exists(),"unconfirmed topology cannot register fleet node")
-                topology=admin.request("GET","/admin/api/onboarding")
-                plan={"mode":"ha-pair","controlPlane":"single-controller","dataStore":"local-file",
-                      "accessPattern":"segmented","publicVip":"fixture-vip.example.invalid",
-                      "upstreamHealthAware":True,"requireIndependentApproval":True,
-                      "gateways":[{"id":"lab-node","hostname":"gateway-a.example.invalid","agentUrl":fleet_body["url"]},
-                                  {"id":"lab-node-b","hostname":"gateway-b.example.invalid","agentUrl":"https://127.0.0.1:19444/"}],
-                      "workloads":[{"id":"origin-a","application":"fixture","zone":"restricted","hostingEngine":"http","url":f"http://127.0.0.1:{upstream}/"},
-                                   {"id":"origin-b","application":"fixture","zone":"restricted","hostingEngine":"http","url":f"http://127.0.0.1:{upstream}/"}]}
-                validation=admin.request("POST","/admin/api/onboarding/validate",{"plan":plan})
-                check(validation["issues"]==[],"valid HA design before fleet registration audit acceptance")
-                saved=admin.request("POST","/admin/api/onboarding",{"plan":plan,"confirmDesign":True,
-                      "expectedRevision":topology["revision"]})
-                check(saved["status"]=="design-confirmed","real onboarding API confirms HA design")
-                # An operator must not be able to register a fleet node even
-                # if the collector is available. Preserve the existing RBAC.
-                operator.request("POST","/admin/api/fleet",fleet_body,expect=403)
-                check(not fleet.exists(),"operator cannot register fleet node")
-                resources=[
-                    (operator,"operator",inventory,"INVENTORY_ADD_INTENT","POST","/admin/api/inventory",
-                     {"id":"lab-service","name":"Lab service","type":"Service",
-                      "address":"fixture.example.invalid","notes":"not exported"}),
-                    (operator,"operator",inventory,"INVENTORY_DELETE_INTENT","DELETE","/admin/api/inventory/lab-service",{}),
-                    (admin,"reviewer",fleet,"FLEET_REGISTER_INTENT","POST","/admin/api/fleet",fleet_body),
-                    (admin,"reviewer",fleet,"FLEET_UNREGISTER_INTENT","DELETE","/admin/api/fleet/lab-node",{}),
-                ]
-                for client,actor,state,operation,method,route,payload in resources:
-                    existed=state.exists()
-                    before=state.read_bytes() if existed else b""
-                    count=len(ledger.read_text().splitlines())
-                    client.request(method,route,payload,expect=503)
-                    check(state.exists()==existed and (not existed or state.read_bytes()==before),
-                          "collector outage leaves resource unchanged: "+operation)
-                    proc=start()
-                    try:
-                        client.request(method,route,payload)
-                        after=state.read_bytes()
-                    finally: stop(proc)
-                    check(after!=before,"signed receipt permits "+operation)
-                    rows=ledger.read_text().splitlines()
-                    check(len(rows)==count+1,"exactly one retained intent: "+operation)
-                    retained=json.loads(base64.b64decode(json.loads(rows[-1])["Body"]))
-                    check(retained["operation"]==operation and retained["actor"]==actor and
-                          retained["revision"]==hashlib.sha256(before).hexdigest().upper() and
-                          retained["targetDigest"]==hashlib.sha256(after).hexdigest().upper(),
-                          "retained before/after digests match exact resource bytes: "+operation)
-                    check(set(retained)=={"schema","eventId","node","utc","actor","operation","revision","targetDigest"},
-                          "no internal address, certificate or inventory notes exported")
-                check(json.loads(inventory.read_bytes())==[] and json.loads(fleet.read_bytes())==[],
-                      "resource deletion persisted after valid receipts")
+            with local_smtp(gateway_root,smtp_port) as (mailbox, smtp_ca), fixture_smtp_trust(smtp_ca):
+                trust_bundle=root/"gateway-trusted.pem"
+                trust_bundle.write_bytes(cert.read_bytes()+smtp_ca.read_bytes())
+                gateway_env["SSL_CERT_FILE"]=str(trust_bundle)
+                with patch.dict(os.environ,gateway_env), gateway(cwd,gateway_dll,gateway_root,free_port()) as base:
+                    admin=Client(base)
+                    admin.bootstrap("reviewer","Reviewer-fixture-pass-123!","reviewer@example.invalid")
+                    state=gateway_root/"state"/"admin-users.json"
+                    for index,(operation,route,body) in enumerate(operations):
+                        before=state.read_bytes()
+                        admin.request("POST",route,body,expect=503)
+                        check(state.read_bytes()==before,"collector outage denies "+operation+" without account mutation")
+                        proc=start()
+                        try:
+                            admin.request("POST",route,body)
+                            after=state.read_bytes()
+                            check(after!=before,"verified receipt authorizes "+operation)
+                        finally: stop(proc)
+                        rows=ledger.read_text().splitlines()
+                        check(len(rows)==3+index,"one retained intent for "+operation)
+                        retained=json.loads(base64.b64decode(json.loads(rows[-1])["Body"]))
+                        check(retained["operation"]==operation and retained["actor"]=="reviewer" and
+                            retained["revision"]==hashlib.sha256(before).hexdigest().upper() and
+                            retained["targetDigest"]==hashlib.sha256(after).hexdigest().upper(),
+                            "retained receipt binds exact before/after bytes for "+operation)
+                        check("password" not in retained and "email" not in retained,
+                            "no plaintext credentials or email fields exported")
+                    operator=Client(base)
+                    operator.login("operator","Reset-fixture-password-123!")
+                    check(operator.session()["role"]=="Operator","account recovery retains correct role")
+                    inventory=gateway_root/"state"/"inventory.json"
+                    fleet=gateway_root/"state"/"fleet-gateways.json"
+                    fleet_body={"id":"lab-node","url":"https://127.0.0.1:19443/",
+                        "clientCertificateThumbprint":"A"*64}
+                    # Fleet mutations require a confirmed multi-gateway design.
+                    # First prove that the real onboarding gate still denies the
+                    # request; then satisfy it through the public management API.
+                    admin.request("POST","/admin/api/fleet",fleet_body,expect=409)
+                    check(not fleet.exists(),"unconfirmed topology cannot register fleet node")
+                    topology=admin.request("GET","/admin/api/onboarding")
+                    plan={"mode":"ha-pair","controlPlane":"single-controller","dataStore":"local-file",
+                          "accessPattern":"segmented","publicVip":"fixture-vip.example.invalid",
+                          "upstreamHealthAware":True,"requireIndependentApproval":True,
+                          "gateways":[{"id":"lab-node","hostname":"gateway-a.example.invalid","agentUrl":fleet_body["url"]},
+                                      {"id":"lab-node-b","hostname":"gateway-b.example.invalid","agentUrl":"https://127.0.0.1:19444/"}],
+                          "workloads":[{"id":"origin-a","application":"fixture","zone":"restricted","hostingEngine":"http","url":f"http://127.0.0.1:{upstream}/"},
+                                       {"id":"origin-b","application":"fixture","zone":"restricted","hostingEngine":"http","url":f"http://127.0.0.1:{upstream}/"}]}
+                    validation=admin.request("POST","/admin/api/onboarding/validate",{"plan":plan})
+                    check(validation["issues"]==[],"valid HA design before fleet registration audit acceptance")
+                    saved=admin.request("POST","/admin/api/onboarding",{"plan":plan,"confirmDesign":True,
+                          "expectedRevision":topology["revision"]})
+                    check(saved["status"]=="design-confirmed","real onboarding API confirms HA design")
+                    # An operator must not be able to register a fleet node even
+                    # if the collector is available. Preserve the existing RBAC.
+                    operator.request("POST","/admin/api/fleet",fleet_body,expect=403)
+                    check(not fleet.exists(),"operator cannot register fleet node")
+                    resources=[
+                        (operator,"operator",inventory,"INVENTORY_ADD_INTENT","POST","/admin/api/inventory",
+                         {"id":"lab-service","name":"Lab service","type":"Service",
+                          "address":"fixture.example.invalid","notes":"not exported"}),
+                        (operator,"operator",inventory,"INVENTORY_DELETE_INTENT","DELETE","/admin/api/inventory/lab-service",{}),
+                        (admin,"reviewer",fleet,"FLEET_REGISTER_INTENT","POST","/admin/api/fleet",fleet_body),
+                        (admin,"reviewer",fleet,"FLEET_UNREGISTER_INTENT","DELETE","/admin/api/fleet/lab-node",{}),
+                    ]
+                    for client,actor,state,operation,method,route,payload in resources:
+                        existed=state.exists()
+                        before=state.read_bytes() if existed else b""
+                        count=len(ledger.read_text().splitlines())
+                        client.request(method,route,payload,expect=503)
+                        check(state.exists()==existed and (not existed or state.read_bytes()==before),
+                              "collector outage leaves resource unchanged: "+operation)
+                        proc=start()
+                        try:
+                            client.request(method,route,payload)
+                            after=state.read_bytes()
+                        finally: stop(proc)
+                        check(after!=before,"signed receipt permits "+operation)
+                        rows=ledger.read_text().splitlines()
+                        check(len(rows)==count+1,"exactly one retained intent: "+operation)
+                        retained=json.loads(base64.b64decode(json.loads(rows[-1])["Body"]))
+                        check(retained["operation"]==operation and retained["actor"]==actor and
+                              retained["revision"]==hashlib.sha256(before).hexdigest().upper() and
+                              retained["targetDigest"]==hashlib.sha256(after).hexdigest().upper(),
+                              "retained before/after digests match exact resource bytes: "+operation)
+                        check(set(retained)=={"schema","eventId","node","utc","actor","operation","revision","targetDigest"},
+                              "no internal address, certificate or inventory notes exported")
+                    check(json.loads(inventory.read_bytes())==[] and json.loads(fleet.read_bytes())==[],
+                          "resource deletion persisted after valid receipts")
+                    # The real local STARTTLS server permits testing the proof
+                    # mutation as well as encrypted SMTP settings, without an
+                    # external provider or a certificate-validation bypass.
+                    mail=gateway_root/"state"/"mail-settings.json"
+                    proof=gateway_root/"state"/"mail-test-proof.sha256"
+                    directory=gateway_root/"state"/"active-directory.json"
+                    mail_payload={"enabled":False,"host":"127.0.0.1","port":smtp_port,
+                                  "from":"reviewer@example.invalid","username":MAIL_USER,
+                                  "password":MAIL_PASSWORD,"startTls":True}
+                    directory_payload={"enabled":False,"host":"directory.example.invalid","port":636,
+                                       "searchBaseDn":"DC=example,DC=invalid","bindUsername":"fixture-bind",
+                                       "password":"CI-only-directory-secret","adminGroupDn":"CN=Admins,DC=example,DC=invalid",
+                                       "operatorGroupDn":"","viewerGroupDn":""}
+                    for operation,route,payload,state in [
+                        ("MAIL_SETTINGS_INTENT","/admin/api/mail",mail_payload,mail),
+                        ("MAIL_PROOF_INTENT","/admin/api/mail/test",{},proof),
+                        ("DIRECTORY_SETTINGS_INTENT","/admin/api/directory",directory_payload,directory)]:
+                        check(not state.exists(),"new settings/proof starts absent")
+                        operator.request("POST",route,payload,expect=403)
+                        count=len(ledger.read_text().splitlines())
+                        admin.request("POST",route,payload,expect=503)
+                        check(not state.exists(),"outage denied persistent "+operation)
+                        if operation=="MAIL_PROOF_INTENT":
+                            check(len(mailbox.messages)==1,"real STARTTLS delivered but proof is not saved without receipt")
+                        proc=start()
+                        try:
+                            admin.request("POST",route,payload)
+                            after=state.read_bytes()
+                        finally: stop(proc)
+                        rows=ledger.read_text().splitlines()
+                        retained=json.loads(base64.b64decode(json.loads(rows[-1])["Body"]))
+                        check(len(rows)==count+1 and retained["operation"]==operation and retained["actor"]=="reviewer" and
+                              retained["revision"]==hashlib.sha256(b"").hexdigest().upper() and
+                              retained["targetDigest"]==hashlib.sha256(after).hexdigest().upper(),
+                              "signed receipt binds exact persisted "+operation)
+                    check(len(mailbox.messages)==2 and mailbox.auth_calls>0,"authenticated SMTP proof succeeds only with external receipt")
+                    check(MAIL_PASSWORD.encode() not in mail.read_bytes() and b"CI-only-directory-secret" not in directory.read_bytes(),
+                          "SMTP and LDAPS bind credentials remain encrypted")
+                    check(admin.request("GET","/admin/api/mail")["deliveryVerified"],
+                          "SMTP delivery proof remains valid for the exact saved configuration")
+        print("MAIL_DIRECTORY_EXTERNAL_AUDIT_SUCCESS",flush=True)
         print("INVENTORY_FLEET_EXTERNAL_AUDIT_SUCCESS",flush=True)
         print("ACCOUNT_MUTATION_EXTERNAL_AUDIT_SUCCESS",flush=True)
 
