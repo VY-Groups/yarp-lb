@@ -14,7 +14,9 @@ import ssl
 import subprocess
 import sys
 import tempfile
+import threading
 import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import uuid
 from unittest.mock import patch
 
@@ -25,6 +27,84 @@ def check(condition, message):
 
 def run(*args, **kw):
     return subprocess.run(args, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, **kw)
+
+class ReceiptProxy:
+    """Disposable TLS forwarder with a one-shot receipt barrier for race acceptance."""
+    def __init__(self, collector_port, cert, tlskey, client_context):
+        self.collector_port = collector_port
+        self.client_context = client_context
+        self.hold_operation = None
+        self.hold_lock = threading.Lock()
+        self.hold_entered = threading.Event()
+        self.release_held = threading.Event()
+        self.inventory_response_forwarded = threading.Event()
+        owner = self
+        class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+            def do_POST(self):
+                if self.path != "/audit/v1/intents":
+                    self.send_error(404)
+                    return
+                body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+                operation = json.loads(body).get("operation")
+                headers = {"Content-Type": self.headers.get("Content-Type", "application/json"),
+                    "X-GC-Audit-Event-Id": self.headers.get("X-GC-Audit-Event-Id", ""),
+                    "X-GC-Audit-Signature": self.headers.get("X-GC-Audit-Signature", "")}
+                connection = http.client.HTTPSConnection("127.0.0.1", owner.collector_port,
+                    context=owner.client_context, timeout=10)
+                try:
+                    connection.request("POST", self.path, body, headers)
+                    upstream = connection.getresponse()
+                    status = upstream.status
+                    response_body = upstream.read()
+                    receipt = upstream.getheader("X-GC-Audit-Receipt")
+                except Exception:
+                    status, response_body, receipt = 503, b"", None
+                finally:
+                    connection.close()
+                with owner.hold_lock:
+                    hold = status == 201 and operation == owner.hold_operation
+                    if hold:
+                        owner.hold_operation = None
+                if hold:
+                    owner.hold_entered.set()
+                    if not owner.release_held.wait(20):
+                        status, response_body, receipt = 503, b"", None
+                self.send_response(status)
+                if receipt:
+                    self.send_header("X-GC-Audit-Receipt", receipt)
+                self.send_header("Content-Length", str(len(response_body)))
+                self.send_header("Connection", "close")
+                self.end_headers()
+                if response_body:
+                    self.wfile.write(response_body)
+                self.wfile.flush()
+                self.close_connection = True
+                if operation == "INVENTORY_ADD_INTENT" and status == 201:
+                    owner.inventory_response_forwarded.set()
+            def log_message(self, *_):
+                pass
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.server.daemon_threads = True
+        server_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        server_context.load_cert_chain(str(tlskey), str(cert))
+        self.server.socket = server_context.wrap_socket(self.server.socket, server_side=True)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.url = f"https://127.0.0.1:{self.server.server_address[1]}/audit/v1/intents"
+    def __enter__(self):
+        self.thread.start()
+        return self
+    def __exit__(self, *_):
+        self.release_held.set()
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=5)
+    def hold_once(self, operation):
+        with self.hold_lock:
+            self.hold_operation = operation
+        self.hold_entered.clear()
+        self.release_held.clear()
+        self.inventory_response_forwarded.clear()
 
 def main():
     if os.environ.get("GITHUB_ACTIONS") != "true":
@@ -168,8 +248,9 @@ def main():
         gateway_env={"GATEWAY_AUDIT_INTENT_URL":f"https://127.0.0.1:{port}/audit/v1/intents",
             "GATEWAY_AUDIT_NODE_ID":"node-a","GATEWAY_AUDIT_SENDER_KEY_FILE":str(keys/"node-a.key"),
             "GATEWAY_AUDIT_COLLECTOR_PUBLIC_KEY_FILE":str(public),"SSL_CERT_FILE":str(cert)}
-        with backend() as upstream:
+        with backend() as upstream, ReceiptProxy(port, cert, tlskey, ctx) as receipt_proxy:
             openssl_state(gateway_root,upstream)
+            gateway_env['GATEWAY_AUDIT_INTENT_URL']=receipt_proxy.url
             with patch.dict(os.environ,gateway_env), gateway(cwd,gateway_dll,gateway_root,free_port()) as base:
                 admin=Client(base)
                 admin.bootstrap("reviewer","Reviewer-fixture-pass-123!","reviewer@example.invalid")
@@ -196,6 +277,117 @@ def main():
                 operator=Client(base)
                 operator.login("operator","Reset-fixture-password-123!")
                 check(operator.session()["role"]=="Operator","account recovery retains correct role")
+                inventory=gateway_root/"state"/"inventory.json"
+                fleet=gateway_root/"state"/"fleet-gateways.json"
+                fleet_body={"id":"lab-node","url":"https://127.0.0.1:19443/",
+                    "clientCertificateThumbprint":"A"*64}
+                # Fleet mutations require a confirmed multi-gateway design.
+                # First prove that the real onboarding gate still denies the
+                # request; then satisfy it through the public management API.
+                admin.request("POST","/admin/api/fleet",fleet_body,expect=409)
+                check(not fleet.exists(),"unconfirmed topology cannot register fleet node")
+                topology=admin.request("GET","/admin/api/onboarding")
+                plan={"mode":"ha-pair","controlPlane":"single-controller","dataStore":"local-file",
+                      "accessPattern":"segmented","publicVip":"fixture-vip.example.invalid",
+                      "upstreamHealthAware":True,"requireIndependentApproval":True,
+                      "gateways":[{"id":"lab-node","hostname":"gateway-a.example.invalid","agentUrl":fleet_body["url"]},
+                                  {"id":"lab-node-b","hostname":"gateway-b.example.invalid","agentUrl":"https://127.0.0.1:19444/"}],
+                      "workloads":[{"id":"origin-a","application":"fixture","zone":"restricted","hostingEngine":"http","url":f"http://127.0.0.1:{upstream}/"},
+                                   {"id":"origin-b","application":"fixture","zone":"restricted","hostingEngine":"http","url":f"http://127.0.0.1:{upstream}/"}]}
+                validation=admin.request("POST","/admin/api/onboarding/validate",{"plan":plan})
+                check(validation["issues"]==[],"valid HA design before fleet registration audit acceptance")
+                saved=admin.request("POST","/admin/api/onboarding",{"plan":plan,"confirmDesign":True,
+                      "expectedRevision":topology["revision"]})
+                check(saved["status"]=="design-confirmed","real onboarding API confirms HA design")
+                # An operator must not be able to register a fleet node even
+                # if the collector is available. Preserve the existing RBAC.
+                operator.request("POST","/admin/api/fleet",fleet_body,expect=403)
+                check(not fleet.exists(),"operator cannot register fleet node")
+                resources=[
+                    (operator,"operator",inventory,"INVENTORY_ADD_INTENT","POST","/admin/api/inventory",
+                     {"id":"lab-service","name":"Lab service","type":"Service",
+                      "address":"fixture.example.invalid","notes":"not exported"}),
+                    (operator,"operator",inventory,"INVENTORY_DELETE_INTENT","DELETE","/admin/api/inventory/lab-service",{}),
+                    (admin,"reviewer",fleet,"FLEET_REGISTER_INTENT","POST","/admin/api/fleet",fleet_body),
+                    (admin,"reviewer",fleet,"FLEET_UNREGISTER_INTENT","DELETE","/admin/api/fleet/lab-node",{}),
+                ]
+                for client,actor,state,operation,method,route,payload in resources:
+                    existed=state.exists()
+                    before=state.read_bytes() if existed else b""
+                    count=len(ledger.read_text().splitlines())
+                    client.request(method,route,payload,expect=503)
+                    check(state.exists()==existed and (not existed or state.read_bytes()==before),
+                          "collector outage leaves resource unchanged: "+operation)
+                    proc=start()
+                    try:
+                        client.request(method,route,payload)
+                        after=state.read_bytes()
+                    finally: stop(proc)
+                    check(after!=before,"signed receipt permits "+operation)
+                    rows=ledger.read_text().splitlines()
+                    check(len(rows)==count+1,"exactly one retained intent: "+operation)
+                    retained=json.loads(base64.b64decode(json.loads(rows[-1])["Body"]))
+                    check(retained["operation"]==operation and retained["actor"]==actor and
+                          retained["revision"]==hashlib.sha256(before).hexdigest().upper() and
+                          retained["targetDigest"]==hashlib.sha256(after).hexdigest().upper(),
+                          "retained before/after digests match exact resource bytes: "+operation)
+                    check(set(retained)=={"schema","eventId","node","utc","actor","operation","revision","targetDigest"},
+                          "no internal address, certificate or inventory notes exported")
+                check(json.loads(inventory.read_bytes())==[] and json.loads(fleet.read_bytes())==[],
+                      "resource deletion persisted after valid receipts")
+
+                # Deterministically hold the account-state lock while a
+                # separate, valid resource receipt is returned. The resource
+                # write must wait until the account reset has committed.
+                proc=start()
+                try:
+                    admin.request("POST","/admin/api/users",
+                        {"username":"reviewer2","password":"Reviewer-two-fixture-pass-123!",
+                         "email":"reviewer2@example.invalid","role":"Administrator"})
+                    admin2=Client(base)
+                    admin2.login("reviewer2","Reviewer-two-fixture-pass-123!")
+                    receipt_proxy.hold_once("USER_PASSWORD_RESET_INTENT")
+                    reset_done=threading.Event()
+                    inventory_done=threading.Event()
+                    results={}
+                    errors={}
+                    def reset_operator():
+                        try:
+                            results["reset"]=admin.request("POST","/admin/api/users/operator/password",
+                                {"password":"Concurrent-reset-fixture-password-456!"})
+                        except Exception as ex: errors["reset"]=repr(ex)
+                        finally: reset_done.set()
+                    def add_during_reset():
+                        try:
+                            results["inventory"]=admin2.request("POST","/admin/api/inventory",
+                                {"id":"race-service","name":"Race service","type":"Service",
+                                 "address":"fixture.example.invalid","notes":"race fixture"})
+                        except Exception as ex: errors["inventory"]=repr(ex)
+                        finally: inventory_done.set()
+                    reset_thread=threading.Thread(target=reset_operator,daemon=True)
+                    inventory_thread=threading.Thread(target=add_during_reset,daemon=True)
+                    reset_thread.start()
+                    check(receipt_proxy.hold_entered.wait(10),
+                        "collector accepted reset receipt while account lock remains held")
+                    inventory_thread.start()
+                    check(receipt_proxy.inventory_response_forwarded.wait(10),
+                        "collector accepted resource receipt while account mutation is pending")
+                    check(not inventory_done.wait(1.0),
+                        "resource mutation cannot commit while account mutation lock is held")
+                    receipt_proxy.release_held.set()
+                    reset_thread.join(timeout=15)
+                    inventory_thread.join(timeout=15)
+                    check(reset_done.is_set() and inventory_done.is_set() and not errors,
+                        "serialized account reset and resource mutation complete")
+                    check(json.loads(inventory.read_bytes())[0]["id"]=="race-service",
+                        "resource mutation commits after account lock release")
+                    admin2.request("DELETE","/admin/api/inventory/race-service",{})
+                    check(json.loads(inventory.read_bytes())==[],
+                        "race fixture resource removed through the signed receipt gate")
+                finally:
+                    receipt_proxy.release_held.set()
+                    stop(proc)
+        print("INVENTORY_FLEET_EXTERNAL_AUDIT_SUCCESS",flush=True)
         print("ACCOUNT_MUTATION_EXTERNAL_AUDIT_SUCCESS",flush=True)
 
 if __name__=="__main__": main()
