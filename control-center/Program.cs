@@ -2056,7 +2056,7 @@ app.MapPost("/admin/api/fleet/rollout/{changeId}", async (HttpContext ctx, strin
             statusResponse.EnsureSuccessStatusCode();
             var status = JsonNode.Parse(await statusResponse.Content.ReadAsStringAsync(ctx.RequestAborted));
             var revision = status?["revision"]?.ToString();
-            if (!FleetRolloutJournal.IsDigest(revision))
+            if (!FleetRolloutJournal.IsDigest(revision) || status?["rollbackFenceProtocol"]?.GetValue<int>() != 1)
                 throw new InvalidOperationException("Agent configuration revision unavailable");
             targets.Add(new JsonObject { ["id"] = row.Id, ["originalRevision"] = revision,
                 ["prepareSent"] = false, ["activateSent"] = false, ["rollbackVerified"] = false });
