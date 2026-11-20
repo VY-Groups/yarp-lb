@@ -15,11 +15,20 @@ var proxyBackend = new TcpListener(IPAddress.Loopback,19113);
 var idleBackend = new TcpListener(IPAddress.Loopback,19114);
 var halfCloseBackend = new TcpListener(IPAddress.Loopback,19115);
 var admissionBackend = new TcpListener(IPAddress.Loopback,19116);
+var lossBackend = new TcpListener(IPAddress.Loopback,19117);
+var lossFallbackBackend = new TcpListener(IPAddress.Loopback,19118);
 proxyBackend.Start(); idleBackend.Start(); halfCloseBackend.Start(); admissionBackend.Start();
+lossBackend.Start(); lossFallbackBackend.Start();
+var refusedPortListener = new TcpListener(IPAddress.Loopback, 0);
+refusedPortListener.Start();
+var refusedPort = ((IPEndPoint)refusedPortListener.LocalEndpoint).Port;
+refusedPortListener.Stop();
 using var udpA = new UdpClient(new IPEndPoint(IPAddress.Loopback, 19121));
 using var udpB = new UdpClient(new IPEndPoint(IPAddress.Loopback, 19122));
 long udpAReceived = 0;
 long udpBReceived = 0;
+long lossPayloadsReceived = 0;
+long lossFallbackPayloadsReceived = 0;
 var udpAProbeHealthy = 1;
 var udpAUnhealthy = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 var udpARecovered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -27,6 +36,9 @@ var workers = new [] {
     TcpEcho(tcpA, "A", stop.Token), TcpEcho(tcpB, "B", stop.Token),
     ProxyProtocolBackend(proxyBackend, stop.Token), IdleBackend(idleBackend, stop.Token),
     HalfCloseBackend(halfCloseBackend, stop.Token), AdmissionBackend(admissionBackend, stop.Token),
+    DropAfterRequestBackend(lossBackend, stop.Token, () => Interlocked.Increment(ref lossPayloadsReceived)),
+    TcpEcho(lossFallbackBackend, "fallback", stop.Token,
+        () => Interlocked.Increment(ref lossFallbackPayloadsReceived)),
     UdpEcho(udpA, "A", stop.Token, () => Interlocked.Increment(ref udpAReceived), () => Volatile.Read(ref udpAProbeHealthy) == 1),
     UdpEcho(udpB, "B", stop.Token, () => Interlocked.Increment(ref udpBReceived))
 };
@@ -51,7 +63,15 @@ File.WriteAllText(configFile, JsonSerializer.Serialize(new {
         Backends = new [] { new { Host="127.0.0.1", Port=19116 } } },
       new { Name = "tcp-drain", ListenHost="127.0.0.1", ListenPort=19014,
         Backends = new [] { new { Host="127.0.0.1", Port=19111, DrainNewConnections=true },
-          new { Host="127.0.0.1", Port=19112, DrainNewConnections=false } } } },
+          new { Host="127.0.0.1", Port=19112, DrainNewConnections=false } } },
+      new { Name = "tcp-connect-failure", ListenHost="127.0.0.1", ListenPort=19017,
+        ProbeIntervalSeconds=60, Backends = new [] { new { Host="127.0.0.1", Port=refusedPort } } },
+      new { Name = "tcp-response-loss", ListenHost="127.0.0.1", ListenPort=19018,
+        ProbeIntervalSeconds=60, Backends = new [] { new { Host="127.0.0.1", Port=19117 },
+          new { Host="127.0.0.1", Port=19118 } } },
+      new { Name = "tcp-all-drained", ListenHost="127.0.0.1", ListenPort=19019,
+        Backends = new [] { new { Host="127.0.0.1", Port=19111, DrainNewConnections=true },
+          new { Host="127.0.0.1", Port=19112, DrainNewConnections=true } } } },
     Udp = new object [] { new { Name = "udp-echo", ListenHost="127.0.0.1", ListenPort=19021, UdpIdleTimeoutSeconds=30,
       Backends = new [] { new { Host="127.0.0.1", Port=19121, DrainNewConnections=false }, new { Host="127.0.0.1", Port=19122, DrainNewConnections=false } } },
       new { Name = "udp-drain", ListenHost="127.0.0.1", ListenPort=19022, UdpIdleTimeoutSeconds=30,
@@ -206,6 +226,7 @@ try
     for (var i=0;i<12;i++)
         Assert((await TcpRoundTrip("drain-"+i,19014)).StartsWith("B|"),
             "backend flagged draining does not receive new TCP streams");
+    await ValidateTcpFailureBoundaries();
     Assert(await ValidateProxyHeader(), "PROXY v1 reports source and destination before application bytes");
     Assert(await ValidateTcpHalfClose(), "client half-close reaches backend while backend response still drains");
     Assert(await ValidateTcpIdle(), "idle TCP stream closed by configured timeout");
@@ -223,6 +244,7 @@ finally
 {
     stop.Cancel();
     tcpA.Stop();tcpB.Stop();proxyBackend.Stop();idleBackend.Stop();halfCloseBackend.Stop();admissionBackend.Stop();
+    lossBackend.Stop();lossFallbackBackend.Stop();
     if(!proxy.HasExited)proxy.Kill(entireProcessTree:true);
     await proxy.WaitForExitAsync();
     try { await Task.WhenAll(workers); } catch {}
@@ -245,6 +267,35 @@ async Task<string> TcpRoundTrip(string message, int port=19011)
     var received=await stream.ReadAsync(buffer,timeout.Token);
     if(received==0)throw new Exception("Unexpected TCP EOF");
     return Encoding.UTF8.GetString(buffer,0,received).Trim();
+}
+async Task ValidateTcpFailureBoundaries()
+{
+    using (var failedConnect = new TcpClient(AddressFamily.InterNetwork))
+    {
+        await failedConnect.ConnectAsync(IPAddress.Loopback, 19017);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+        var result = await failedConnect.GetStream().ReadAsync(new byte[1], timeout.Token);
+        Assert(result == 0, "failed upstream connect closes downstream without forwarding application bytes");
+    }
+    using (var responseLoss = new TcpClient(AddressFamily.InterNetwork))
+    {
+        await responseLoss.ConnectAsync(IPAddress.Loopback, 19018);
+        var stream = responseLoss.GetStream();
+        await stream.WriteAsync(Encoding.UTF8.GetBytes("single-attempt"));
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+        var result = await stream.ReadAsync(new byte[1], timeout.Token);
+        Assert(result == 0, "backend response loss closes the established stream without retry");
+        Assert(Interlocked.Read(ref lossPayloadsReceived) == 1 &&
+               Interlocked.Read(ref lossFallbackPayloadsReceived) == 0,
+            "post-connect request reaches exactly one backend and is never replayed");
+    }
+    using (var allDrained = new TcpClient(AddressFamily.InterNetwork))
+    {
+        await allDrained.ConnectAsync(IPAddress.Loopback, 19019);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+        var result = await allDrained.GetStream().ReadAsync(new byte[1], timeout.Token);
+        Assert(result == 0, "all-drained TCP listener rejects new streams without selecting a backend");
+    }
 }
 async Task<string> UdpRoundTrip(UdpClient c,string message)
 {
@@ -394,7 +445,7 @@ void Assert(bool value,string name)
     if(!value)throw new Exception("FAIL: "+name);
     Console.WriteLine("PASS: "+name);
 }
-static async Task TcpEcho(TcpListener listener,string id,CancellationToken token)
+static async Task TcpEcho(TcpListener listener,string id,CancellationToken token,Action? recordReceived = null)
 {
     try
     {
@@ -412,8 +463,12 @@ static async Task TcpEcho(TcpListener listener,string id,CancellationToken token
                     try
                     {
                         var n=await stream.ReadAsync(buffer,token);
-                        if(n>0)await stream.WriteAsync(Encoding.UTF8.GetBytes(id+"|"+
-                            Encoding.UTF8.GetString(buffer,0,n)),token);
+                        if(n>0)
+                        {
+                            recordReceived?.Invoke();
+                            await stream.WriteAsync(Encoding.UTF8.GetBytes(id+"|"+
+                                Encoding.UTF8.GetString(buffer,0,n)),token);
+                        }
                     }
                     catch(Exception ex) when(ex is IOException or OperationCanceledException or SocketException) {}
                 }
@@ -421,6 +476,31 @@ static async Task TcpEcho(TcpListener listener,string id,CancellationToken token
         }
     }
     catch(SocketException) when(token.IsCancellationRequested){}
+}
+static async Task DropAfterRequestBackend(TcpListener listener, CancellationToken token, Action recordReceived)
+{
+    try
+    {
+        while (!token.IsCancellationRequested)
+        {
+            var client = await listener.AcceptTcpClientAsync(token);
+            _ = Task.Run(async () =>
+            {
+                using (client)
+                {
+                    try
+                    {
+                        var buffer = new byte[1024];
+                        if (await client.GetStream().ReadAsync(buffer, token) > 0)
+                            recordReceived();
+                    }
+                    catch (Exception ex) when (ex is IOException or SocketException or OperationCanceledException) { }
+                }
+            }, token);
+        }
+    }
+    catch (OperationCanceledException) when (token.IsCancellationRequested) { }
+    catch (SocketException) when (token.IsCancellationRequested) { }
 }
 static async Task UdpEcho(UdpClient listener,string id,CancellationToken token,Action recordReceived,Func<bool>? probeHealthy = null)
 {
