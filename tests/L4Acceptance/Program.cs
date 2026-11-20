@@ -19,16 +19,25 @@ proxyBackend.Start(); idleBackend.Start(); halfCloseBackend.Start(); admissionBa
 using var udpA = new UdpClient(new IPEndPoint(IPAddress.Loopback, 19121));
 using var udpB = new UdpClient(new IPEndPoint(IPAddress.Loopback, 19122));
 long udpAReceived = 0;
+long udpLossA = 0, udpLossB = 0;
+var udpLost = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+using var resetBackend = new TcpListener(IPAddress.Loopback, 19117);
+resetBackend.Start();
+long resetRequests = 0, replayRequests = 0;
+var resetSeen = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 long udpBReceived = 0;
 var udpAProbeHealthy = 1;
 var udpAUnhealthy = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 var udpARecovered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 var workers = new [] {
-    TcpEcho(tcpA, "A", stop.Token), TcpEcho(tcpB, "B", stop.Token),
+    TcpEcho(tcpA, "A", stop.Token), TcpEcho(tcpB, "B", stop.Token, request => { if (request.Contains("reset-unique", StringComparison.Ordinal)) Interlocked.Increment(ref replayRequests); }),
     ProxyProtocolBackend(proxyBackend, stop.Token), IdleBackend(idleBackend, stop.Token),
     HalfCloseBackend(halfCloseBackend, stop.Token), AdmissionBackend(admissionBackend, stop.Token),
-    UdpEcho(udpA, "A", stop.Token, () => Interlocked.Increment(ref udpAReceived), () => Volatile.Read(ref udpAProbeHealthy) == 1),
-    UdpEcho(udpB, "B", stop.Token, () => Interlocked.Increment(ref udpBReceived))
+    ResetBackend(resetBackend, stop.Token, () => { Interlocked.Increment(ref resetRequests); resetSeen.TrySetResult(); }),
+    UdpEcho(udpA, "A", stop.Token, () => Interlocked.Increment(ref udpAReceived), () => Volatile.Read(ref udpAProbeHealthy) == 1,
+        request => { if (request != "loss-unique") return false; Interlocked.Increment(ref udpLossA); udpLost.TrySetResult(); return true; }),
+    UdpEcho(udpB, "B", stop.Token, () => Interlocked.Increment(ref udpBReceived), null,
+        request => { if (request == "loss-unique") Interlocked.Increment(ref udpLossB); return false; })
 };
 var scratch = Path.Combine(Path.GetTempPath(), "yarp-l4-" + Guid.NewGuid().ToString("N"));
 Directory.CreateDirectory(scratch);
@@ -49,6 +58,9 @@ File.WriteAllText(configFile, JsonSerializer.Serialize(new {
       new { Name = "tcp-admission", ListenHost="127.0.0.1", ListenPort=19016,
         TcpMaxConnections=2, TcpIdleTimeoutSeconds=30,
         Backends = new [] { new { Host="127.0.0.1", Port=19116 } } },
+      new { Name = "tcp-reset", ListenHost="127.0.0.1", ListenPort=19017,
+        TcpIdleTimeoutSeconds=3,
+        Backends = new [] { new { Host="127.0.0.1", Port=19117 }, new { Host="127.0.0.1", Port=19112 } } },
       new { Name = "tcp-drain", ListenHost="127.0.0.1", ListenPort=19014,
         Backends = new [] { new { Host="127.0.0.1", Port=19111, DrainNewConnections=true },
           new { Host="127.0.0.1", Port=19112, DrainNewConnections=false } } } },
@@ -62,6 +74,8 @@ File.WriteAllText(configFile, JsonSerializer.Serialize(new {
       Backends = new [] { new { Host="127.0.0.1", Port=19121, DrainNewConnections=false } } },
       new { Name = "udp-all-drained", ListenHost="127.0.0.1", ListenPort=19023, UdpIdleTimeoutSeconds=30,
       Backends = new [] { new { Host="127.0.0.1", Port=19121, DrainNewConnections=true }, new { Host="127.0.0.1", Port=19122, DrainNewConnections=true } } },
+      new { Name = "udp-loss", ListenHost="127.0.0.1", ListenPort=19027,
+      Backends = new [] { new { Host="127.0.0.1", Port=19121 }, new { Host="127.0.0.1", Port=19122 } } },
       new { Name = "udp-health", ListenHost="127.0.0.1", ListenPort=19026, UdpProbePayload="health-check",
       UdpProbeExpectedResponse="healthy", UdpProbeIntervalSeconds=1, UdpIdleTimeoutSeconds=30,
       Backends = new [] { new { Host="127.0.0.1", Port=19121, DrainNewConnections=false }, new { Host="127.0.0.1", Port=19122, DrainNewConnections=false } } } }
@@ -85,7 +99,9 @@ async Task<string> ReadProxyOutput()
         "L4_UDP_READY udp-idle 127.0.0.1:19024",
         "L4_UDP_READY udp-admission 127.0.0.1:19025",
         "L4_UDP_READY udp-health 127.0.0.1:19026",
-        "L4_TCP_READY tcp-admission 127.0.0.1:19016"
+        "L4_TCP_READY tcp-admission 127.0.0.1:19016",
+        "L4_TCP_READY tcp-reset 127.0.0.1:19017",
+        "L4_UDP_READY udp-loss 127.0.0.1:19027"
     };
     while (await proxy.StandardOutput.ReadLineAsync() is { } line)
     {
@@ -210,6 +226,7 @@ try
     Assert(await ValidateTcpHalfClose(), "client half-close reaches backend while backend response still drains");
     Assert(await ValidateTcpIdle(), "idle TCP stream closed by configured timeout");
     await ValidateAdmission();
+    await ValidateNoReplay();
     // Verify active health rejects down nodes rather than repeatedly relying on connect exceptions.
     tcpA.Stop();
     await Task.Delay(2600);
@@ -252,6 +269,47 @@ async Task<string> UdpRoundTrip(UdpClient c,string message)
     using var timeout=new CancellationTokenSource(TimeSpan.FromSeconds(3));
     var result=await c.ReceiveAsync(timeout.Token);
     return Encoding.UTF8.GetString(result.Buffer);
+}
+async Task ValidateNoReplay()
+{
+    using (var client = new TcpClient(AddressFamily.InterNetwork))
+    {
+        await client.ConnectAsync(IPAddress.Loopback, 19017);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(6));
+        var stream = client.GetStream();
+        await stream.WriteAsync(Encoding.ASCII.GetBytes("reset-unique"), timeout.Token);
+        await resetSeen.Task.WaitAsync(timeout.Token);
+        var received = 0;
+        try { received = await stream.ReadAsync(new byte[128], timeout.Token); }
+        catch (IOException) { }
+        catch (SocketException) { }
+        Assert(received == 0 && Interlocked.Read(ref resetRequests) == 1,
+            "established TCP backend reset terminates the original stream");
+    }
+    Assert((await TcpRoundTrip("new-after-reset", 19017)).StartsWith("B|"),
+        "new TCP connection reaches surviving backend after reset");
+    Assert(Interlocked.Read(ref replayRequests) == 0 && Interlocked.Read(ref resetRequests) == 1,
+        "reset transaction never replayed to another TCP backend");
+
+    using var udp = new UdpClient(AddressFamily.InterNetwork);
+    udp.Connect(IPAddress.Loopback, 19027);
+    await udp.SendAsync(Encoding.ASCII.GetBytes("loss-unique"));
+    await udpLost.Task.WaitAsync(TimeSpan.FromSeconds(3));
+    using (var timeout = new CancellationTokenSource(TimeSpan.FromMilliseconds(700)))
+    {
+        var replied = false;
+        try { await udp.ReceiveAsync(timeout.Token); replied = true; }
+        catch (OperationCanceledException) when (timeout.IsCancellationRequested) { }
+        Assert(!replied, "lost UDP response is not retried");
+    }
+    Assert((await UdpRoundTrip(udp, "new-after-loss")).StartsWith("A|"),
+        "UDP endpoint remains pinned after dropped backend response");
+    using var fresh = new UdpClient(AddressFamily.InterNetwork);
+    fresh.Connect(IPAddress.Loopback, 19027);
+    Assert((await UdpRoundTrip(fresh, "new-endpoint")).StartsWith("B|"),
+        "new UDP endpoint can reach alternate backend");
+    Assert(Interlocked.Read(ref udpLossA) == 1 && Interlocked.Read(ref udpLossB) == 0,
+        "lost UDP transaction delivered exactly once to original backend and never replayed");
 }
 async Task<bool> ValidateProxyHeader()
 {
@@ -394,7 +452,33 @@ void Assert(bool value,string name)
     if(!value)throw new Exception("FAIL: "+name);
     Console.WriteLine("PASS: "+name);
 }
-static async Task TcpEcho(TcpListener listener,string id,CancellationToken token)
+static async Task ResetBackend(TcpListener listener, CancellationToken token, Action recorded)
+{
+    try
+    {
+        while (!token.IsCancellationRequested)
+        {
+            var client = await listener.AcceptTcpClientAsync(token);
+            _ = Task.Run(async () =>
+            {
+                using (client)
+                {
+                    try
+                    {
+                        var payload = new byte["reset-unique".Length];
+                        await client.GetStream().ReadExactlyAsync(payload, token);
+                        if (!payload.AsSpan().SequenceEqual(Encoding.ASCII.GetBytes("reset-unique"))) return;
+                        client.Client.LingerState = new LingerOption(true, 0);
+                        recorded();
+                    }
+                    catch (Exception ex) when (ex is IOException or SocketException or OperationCanceledException) { }
+                }
+            });
+        }
+    }
+    catch (OperationCanceledException) when (token.IsCancellationRequested) { }
+}
+static async Task TcpEcho(TcpListener listener,string id,CancellationToken token, Action<string>? record = null)
 {
     try
     {
@@ -412,8 +496,12 @@ static async Task TcpEcho(TcpListener listener,string id,CancellationToken token
                     try
                     {
                         var n=await stream.ReadAsync(buffer,token);
-                        if(n>0)await stream.WriteAsync(Encoding.UTF8.GetBytes(id+"|"+
-                            Encoding.UTF8.GetString(buffer,0,n)),token);
+                        if(n>0)
+                        {
+                            var request = Encoding.UTF8.GetString(buffer,0,n);
+                            record?.Invoke(request);
+                            await stream.WriteAsync(Encoding.UTF8.GetBytes(id+"|"+request),token);
+                        }
                     }
                     catch(Exception ex) when(ex is IOException or OperationCanceledException or SocketException) {}
                 }
@@ -422,7 +510,7 @@ static async Task TcpEcho(TcpListener listener,string id,CancellationToken token
     }
     catch(SocketException) when(token.IsCancellationRequested){}
 }
-static async Task UdpEcho(UdpClient listener,string id,CancellationToken token,Action recordReceived,Func<bool>? probeHealthy = null)
+static async Task UdpEcho(UdpClient listener,string id,CancellationToken token,Action recordReceived,Func<bool>? probeHealthy = null, Func<string,bool>? dropResponse = null)
 {
     try
     {
@@ -446,6 +534,7 @@ static async Task UdpEcho(UdpClient listener,string id,CancellationToken token,A
                 continue;
             }
             recordReceived();
+            if (dropResponse?.Invoke(request) == true) continue;
             var msg=id+"|"+request;
             await listener.SendAsync(Encoding.UTF8.GetBytes(msg),packet.RemoteEndPoint,token);
         }
