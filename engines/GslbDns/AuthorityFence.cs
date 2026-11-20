@@ -529,6 +529,7 @@ internal sealed class AuthorityFenceRuntime : IAsyncDisposable
     private X509Certificate2? clientCertificate;
     private HttpClient? client;
     private Task? publisher;
+    private CancellationTokenSource? publisherCancellation;
     private readonly SemaphoreSlim requestSlots = new(16, 16);
     private readonly object publisherLock = new();
 
@@ -617,7 +618,8 @@ internal sealed class AuthorityFenceRuntime : IAsyncDisposable
                 AuthorityFenceStore.IsPinnedCertificate(certificate,
                     config.Peer.ServerCertificateSha256, "1.3.6.1.5.5.7.3.1");
             client = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(2) };
-            publisher = PublishLoop(token);
+            publisherCancellation = CancellationTokenSource.CreateLinkedTokenSource(token);
+            publisher = PublishLoop(publisherCancellation.Token);
         }
         catch
         {
@@ -671,12 +673,18 @@ internal sealed class AuthorityFenceRuntime : IAsyncDisposable
     {
         var running = app;
         app = null;
+        // Stop the publisher independently of the caller's startup token.
+        // A normal shutdown must not wait indefinitely for the next timer tick
+        // when StartAsync was invoked with CancellationToken.None.
+        publisherCancellation?.Cancel();
         if (publisher is not null)
         {
             try { await publisher; }
             catch (OperationCanceledException) { }
             publisher = null;
         }
+        publisherCancellation?.Dispose();
+        publisherCancellation = null;
         if (running is not null)
         {
             using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
