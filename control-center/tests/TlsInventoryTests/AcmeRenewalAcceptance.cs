@@ -252,6 +252,30 @@ internal static class AcmeRenewalAcceptance
                   File.GetLastWriteTimeUtc(activePfxPath) == timestampBeforeIssuerFailure,
                 "an issuer failure before certificate replacement leaves active PFX bytes and file metadata untouched");
 
+            // Simulate an operator replacing the active PFX while an ACME
+            // order is outstanding. Re-exporting the same leaf produces new
+            // encrypted bytes without changing the current listener identity.
+            var manualPfx = ToPfx(replacementLeaf);
+            Check(!manualPfx.SequenceEqual(beforeIssuerFailure), "manual replacement fixture has distinct PFX bytes");
+            fakeCa.NextPfx = ToPfx(nextLeaf);
+            var replacingIssuer = new CallbackIssuer(fakeCa, async () =>
+            {
+                var temporary = activePfxPath + ".manual";
+                await File.WriteAllBytesAsync(temporary, manualPfx);
+                SetPrivate(temporary);
+                File.Move(temporary, activePfxPath, overwrite: true);
+            });
+            var staleCoordinator = new AcmeRenewalCoordinator(replacingIssuer, challengeStore, clock, chainPolicy);
+            var staleRejected = false;
+            try
+            {
+                await staleCoordinator.RenewIfDueAsync(DirectoryUrl, DnsName, "admin@example.com", true,
+                    activePfxPath, passwordPath, TimeSpan.FromDays(30), CancellationToken.None);
+            }
+            catch (InvalidOperationException ex) when (ex.Message.Contains("refusing stale replacement")) { staleRejected = true; }
+            Check(staleRejected && (await File.ReadAllBytesAsync(activePfxPath)).SequenceEqual(manualPfx),
+                "outstanding ACME order cannot overwrite a newer manual PFX");
+
             var beforeActivationFailure = await File.ReadAllBytesAsync(activePfxPath);
             fakeCa.NextPfx = ToPfx(nextLeaf);
             var activationFailureCoordinator = new AcmeRenewalCoordinator(fakeCa, challengeStore, clock, chainPolicy,
@@ -462,6 +486,22 @@ internal static class AcmeRenewalAcceptance
     private static void SetPrivate(string path)
     {
         if (OperatingSystem.IsLinux()) File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+    }
+
+    private sealed class CallbackIssuer(IAcmeCertificateIssuer inner, Func<Task> afterIssue) : IAcmeCertificateIssuer
+    {
+        public async Task<AcmeIssuedCertificate> IssueHttp01Async(string directoryUrl, string dnsName,
+            string contactEmail, string pfxPassword, AcmeHttp01ChallengeStore challenges,
+            CancellationToken cancellationToken)
+        {
+            var issued = await inner.IssueHttp01Async(directoryUrl, dnsName, contactEmail, pfxPassword,
+                challenges, cancellationToken);
+            await afterIssue();
+            return issued;
+        }
+        public Task RevokeCertificateAsync(string directoryUrl, string contactEmail, byte[] certificateDer,
+            RevocationReason reason, CancellationToken cancellationToken) =>
+            inner.RevokeCertificateAsync(directoryUrl, contactEmail, certificateDer, reason, cancellationToken);
     }
 
     private sealed class ThrowingIssuer : IAcmeCertificateIssuer
