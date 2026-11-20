@@ -16,8 +16,12 @@ internal static class FleetRolloutJournal
         foreach (var path in Directory.EnumerateFiles(folder, "rollout_*.json"))
         {
             var row = Read(path);
-            if (row["status"]?.ToString() is not ("activated-pending-health-validation" or "rollback-verified" or "not-dispatched"))
-                return true;
+            var status = row["status"]?.ToString();
+            if (status == "activated-pending-health-validation") continue;
+            if (status == "rollback-verified" && row["schema"]?.GetValue<int>() == 2 &&
+                Targets(row).Length is >= 2 and <= 20 &&
+                Targets(row).All(target => !NeedsRollback(target))) continue;
+            return true;
         }
         return false;
     }
