@@ -14,7 +14,9 @@ import ssl
 import subprocess
 import sys
 import tempfile
+import threading
 import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import uuid
 from unittest.mock import patch
 from contextlib import contextmanager
@@ -26,6 +28,84 @@ def check(condition, message):
 
 def run(*args, **kw):
     return subprocess.run(args, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, **kw)
+
+class ReceiptProxy:
+    """Disposable TLS forwarder with a one-shot receipt barrier for race acceptance."""
+    def __init__(self, collector_port, cert, tlskey, client_context):
+        self.collector_port = collector_port
+        self.client_context = client_context
+        self.hold_operation = None
+        self.hold_lock = threading.Lock()
+        self.hold_entered = threading.Event()
+        self.release_held = threading.Event()
+        self.inventory_response_forwarded = threading.Event()
+        owner = self
+        class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+            def do_POST(self):
+                if self.path != "/audit/v1/intents":
+                    self.send_error(404)
+                    return
+                body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+                operation = json.loads(body).get("operation")
+                headers = {"Content-Type": self.headers.get("Content-Type", "application/json"),
+                    "X-GC-Audit-Event-Id": self.headers.get("X-GC-Audit-Event-Id", ""),
+                    "X-GC-Audit-Signature": self.headers.get("X-GC-Audit-Signature", "")}
+                connection = http.client.HTTPSConnection("127.0.0.1", owner.collector_port,
+                    context=owner.client_context, timeout=10)
+                try:
+                    connection.request("POST", self.path, body, headers)
+                    upstream = connection.getresponse()
+                    status = upstream.status
+                    response_body = upstream.read()
+                    receipt = upstream.getheader("X-GC-Audit-Receipt")
+                except Exception:
+                    status, response_body, receipt = 503, b"", None
+                finally:
+                    connection.close()
+                with owner.hold_lock:
+                    hold = status == 201 and operation == owner.hold_operation
+                    if hold:
+                        owner.hold_operation = None
+                if hold:
+                    owner.hold_entered.set()
+                    if not owner.release_held.wait(20):
+                        status, response_body, receipt = 503, b"", None
+                self.send_response(status)
+                if receipt:
+                    self.send_header("X-GC-Audit-Receipt", receipt)
+                self.send_header("Content-Length", str(len(response_body)))
+                self.send_header("Connection", "close")
+                self.end_headers()
+                if response_body:
+                    self.wfile.write(response_body)
+                self.wfile.flush()
+                self.close_connection = True
+                if operation == "INVENTORY_ADD_INTENT" and status == 201:
+                    owner.inventory_response_forwarded.set()
+            def log_message(self, *_):
+                pass
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.server.daemon_threads = True
+        server_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        server_context.load_cert_chain(str(cert), str(tlskey))
+        self.server.socket = server_context.wrap_socket(self.server.socket, server_side=True)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.url = f"https://127.0.0.1:{self.server.server_address[1]}/audit/v1/intents"
+    def __enter__(self):
+        self.thread.start()
+        return self
+    def __exit__(self, *_):
+        self.release_held.set()
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=5)
+    def hold_once(self, operation):
+        with self.hold_lock:
+            self.hold_operation = operation
+        self.hold_entered.clear()
+        self.release_held.clear()
+        self.inventory_response_forwarded.clear()
 
 @contextmanager
 def fixture_smtp_trust(ca):
@@ -184,8 +264,9 @@ def main():
             "GATEWAY_AUDIT_NODE_ID":"node-a","GATEWAY_AUDIT_SENDER_KEY_FILE":str(keys/"node-a.key"),
             "GATEWAY_AUDIT_COLLECTOR_PUBLIC_KEY_FILE":str(public),"SSL_CERT_FILE":str(cert)}
         smtp_port=free_port()
-        with backend() as upstream:
+        with backend() as upstream, ReceiptProxy(port, cert, tlskey, ctx) as receipt_proxy:
             openssl_state(gateway_root,upstream)
+            gateway_env['GATEWAY_AUDIT_INTENT_URL']=receipt_proxy.url
             with local_smtp(gateway_root,smtp_port) as (mailbox, smtp_ca), fixture_smtp_trust(smtp_ca):
                 trust_bundle=root/"gateway-trusted.pem"
                 trust_bundle.write_bytes(cert.read_bytes()+smtp_ca.read_bytes())
@@ -324,6 +405,87 @@ def main():
                               "no internal address, certificate or inventory notes exported")
                     check(json.loads(inventory.read_bytes())==[] and json.loads(fleet.read_bytes())==[],
                           "resource deletion persisted after valid receipts")
+                    # Deterministically hold the account-state lock while a
+                    # separate, valid resource receipt is returned. The resource
+                    # write must wait until the account reset has committed.
+                    proc=start()
+                    try:
+                        admin.request("POST","/admin/api/users",
+                            {"username":"reviewer2","password":"Reviewer-two-fixture-pass-123!",
+                             "email":"reviewer2@example.invalid","role":"Administrator"})
+                        admin2=Client(base)
+                        admin2.login("reviewer2","Reviewer-two-fixture-pass-123!")
+                        receipt_proxy.hold_once("USER_PASSWORD_RESET_INTENT")
+                        reset_done=threading.Event()
+                        inventory_done=threading.Event()
+                        results={}
+                        errors={}
+                        def reset_operator():
+                            try:
+                                results["reset"]=admin.request("POST","/admin/api/users/operator/password",
+                                    {"password":"Concurrent-reset-fixture-password-456!"})
+                            except Exception as ex: errors["reset"]=repr(ex)
+                            finally: reset_done.set()
+                        def add_during_reset():
+                            try:
+                                results["inventory"]=admin2.request("POST","/admin/api/inventory",
+                                    {"id":"race-service","name":"Race service","type":"Service",
+                                     "address":"fixture.example.invalid","notes":"race fixture"})
+                            except Exception as ex: errors["inventory"]=repr(ex)
+                            finally: inventory_done.set()
+                        reset_thread=threading.Thread(target=reset_operator,daemon=True)
+                        inventory_thread=threading.Thread(target=add_during_reset,daemon=True)
+                        reset_thread.start()
+                        check(receipt_proxy.hold_entered.wait(10),
+                            "collector accepted reset receipt while account lock remains held")
+                        inventory_thread.start()
+                        check(receipt_proxy.inventory_response_forwarded.wait(10),
+                            "collector accepted resource receipt while account mutation is pending")
+                        check(not inventory_done.wait(1.0),
+                            "resource mutation cannot commit while account mutation lock is held")
+                        receipt_proxy.release_held.set()
+                        reset_thread.join(timeout=15)
+                        inventory_thread.join(timeout=15)
+                        check(reset_done.is_set() and inventory_done.is_set() and not errors,
+                            "serialized account reset and resource mutation complete")
+                        check(json.loads(inventory.read_bytes())[0]["Id"]=="race-service",
+                            "resource mutation commits after account lock release")
+                        admin2.request("DELETE","/admin/api/inventory/race-service",{})
+                        check(json.loads(inventory.read_bytes())==[],
+                            "race fixture resource removed through the signed receipt gate")
+                        # Same actor must be revalidated after a signed receipt
+                        # returns: hold reviewer2's inventory receipt, reset that
+                        # account as administrator, then release the stale receipt.
+                        revocation_before_exists=inventory.exists()
+                        revocation_before=inventory.read_bytes() if revocation_before_exists else b""
+                        receipt_proxy.hold_once("INVENTORY_ADD_INTENT")
+                        revoked_done=threading.Event()
+                        revoked_errors={}
+                        def add_after_revocation():
+                            try:
+                                admin2.request("POST","/admin/api/inventory",
+                                    {"id":"revoked-service","name":"Revoked service","type":"Service",
+                                     "address":"fixture.example.invalid","notes":"must not persist"},expect=403)
+                            except Exception as ex: revoked_errors["revoked"]=repr(ex)
+                            finally: revoked_done.set()
+                        revoked_thread=threading.Thread(target=add_after_revocation,daemon=True)
+                        revoked_thread.start()
+                        check(receipt_proxy.hold_entered.wait(10),
+                            "collector accepted reviewer2 inventory receipt before revocation")
+                        admin.request("POST","/admin/api/users/reviewer2/password",
+                            {"password":"Reviewer-two-reset-fixture-789!"})
+                        receipt_proxy.release_held.set()
+                        revoked_thread.join(timeout=15)
+                        check(revoked_done.is_set() and not revoked_errors,
+                            "same-actor password reset revokes pending inventory mutation with HTTP 403")
+                        check(inventory.exists()==revocation_before_exists and
+                              (not inventory.exists() or inventory.read_bytes()==revocation_before),
+                            "revoked receipt leaves inventory byte-for-byte unchanged")
+                        check(not admin2.session()["authenticated"],
+                            "password reset invalidates reviewer2's previously authenticated session")
+                    finally:
+                        receipt_proxy.release_held.set()
+                        stop(proc)
                     # The real local STARTTLS server permits testing the proof
                     # mutation as well as encrypted SMTP settings, without an
                     # external provider or a certificate-validation bypass.

@@ -877,6 +877,33 @@ async Task<IResult?> ConfirmStateMutation(HttpContext ctx, string path, byte[] b
         return Results.Conflict(new { error = "State changed during external audit confirmation" });
     return null;
 }
+// The caller holds the resource gate, never loginGate. Obtain the account
+// gate after collector I/O and retain it through the exact state commit.
+async Task<IResult?> ConfirmAndWriteResourceMutation(HttpContext ctx, string path,
+    byte[] before, byte[] proposed, string operation, bool administratorOnly)
+{
+    if (externalAuditIntent is null)
+    {
+        WriteAuditedState(path, proposed);
+        return null;
+    }
+    var denied = await ConfirmStateMutation(ctx, path, before, proposed, operation, administratorOnly);
+    if (denied is not null) return denied;
+    try { await loginGate.WaitAsync(ctx.RequestAborted); }
+    catch (OperationCanceledException)
+    { return Results.Json(new { error = "Account mutation commit cancelled; state unchanged" }, statusCode: 503); }
+    try
+    {
+        if (ctx.RequestAborted.IsCancellationRequested)
+            return Results.Json(new { error = "Account mutation commit cancelled; state unchanged" }, statusCode: 503);
+        if (!AuditActorCurrent(ctx, administratorOnly)) return Results.StatusCode(403);
+        if (!AuditStateBytes(path).AsSpan().SequenceEqual(before))
+            return Results.Conflict(new { error = "State changed during external audit confirmation" });
+        WriteAuditedState(path, proposed);
+        return null;
+    }
+    finally { loginGate.Release(); }
+}
 void WriteAuditedState(string path, byte[] proposed)
 {
     var temp = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
@@ -1392,9 +1419,8 @@ app.MapPost("/admin/api/inventory", async (HttpContext ctx, InventoryInput input
         if (entries.Any(x => x.Id == input.Id)) return Results.Conflict(new { error = "ID already exists" });
         entries.Add(input);
         var proposed = JsonSerializer.SerializeToUtf8Bytes(entries);
-        var denied = await ConfirmStateMutation(ctx, inventoryPath, before, proposed, "INVENTORY_ADD_INTENT", false);
+        var denied = await ConfirmAndWriteResourceMutation(ctx, inventoryPath, before, proposed, "INVENTORY_ADD_INTENT", false);
         if (denied is not null) return denied;
-        WriteAuditedState(inventoryPath, proposed);
         await Audit(Actor(ctx), "INVENTORY_ADDED", new { input.Id, input.Type });
         return Results.Ok(new { added = input.Id });
     }
@@ -1410,9 +1436,8 @@ app.MapDelete("/admin/api/inventory/{id}", async (HttpContext ctx, string id) =>
         var changed = items.RemoveAll(x => x.Id == id);
         if (changed == 0) return Results.NotFound();
         var proposed = JsonSerializer.SerializeToUtf8Bytes(items);
-        var denied = await ConfirmStateMutation(ctx, inventoryPath, before, proposed, "INVENTORY_DELETE_INTENT", false);
+        var denied = await ConfirmAndWriteResourceMutation(ctx, inventoryPath, before, proposed, "INVENTORY_DELETE_INTENT", false);
         if (denied is not null) return denied;
-        WriteAuditedState(inventoryPath, proposed);
         await Audit(Actor(ctx), "INVENTORY_DELETED", new { id });
         return Results.Ok(new { deleted = id });
     }
@@ -1871,9 +1896,8 @@ app.MapPost("/admin/api/fleet", async (HttpContext ctx, FleetGateway row) =>
         if (list.Any(x => x.Id.Equals(row.Id, StringComparison.OrdinalIgnoreCase))) return Results.Conflict(new { error = "Duplicate gateway ID" });
         list.Add(row);
         var proposed = JsonSerializer.SerializeToUtf8Bytes(list);
-        var denied = await ConfirmStateMutation(ctx, fleetPath, before, proposed, "FLEET_REGISTER_INTENT", true);
+        var denied = await ConfirmAndWriteResourceMutation(ctx, fleetPath, before, proposed, "FLEET_REGISTER_INTENT", true);
         if (denied is not null) return denied;
-        WriteAuditedState(fleetPath, proposed);
         await Audit(Actor(ctx), "FLEET_GATEWAY_REGISTERED", new { row.Id, row.Url });
         return Results.Ok(new { registered = true });
     }
@@ -1891,9 +1915,8 @@ app.MapDelete("/admin/api/fleet/{id}", async (HttpContext ctx, string id) =>
         var list = ReadFleet();
         if (list.RemoveAll(x => x.Id == id) != 1) return Results.NotFound();
         var proposed = JsonSerializer.SerializeToUtf8Bytes(list);
-        var denied = await ConfirmStateMutation(ctx, fleetPath, before, proposed, "FLEET_UNREGISTER_INTENT", true);
+        var denied = await ConfirmAndWriteResourceMutation(ctx, fleetPath, before, proposed, "FLEET_UNREGISTER_INTENT", true);
         if (denied is not null) return denied;
-        WriteAuditedState(fleetPath, proposed);
         await Audit(Actor(ctx), "FLEET_GATEWAY_UNREGISTERED", new { id });
         return Results.Ok(new { removed = id });
     }
