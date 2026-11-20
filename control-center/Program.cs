@@ -41,13 +41,19 @@ var keyDir = Path.Combine(privateDir, "data-protection-keys");
 if (!OperatingSystem.IsLinux() || ec2Lab)
     Directory.CreateDirectory(keyDir);
 var oidcPolicy = EnterpriseOidcPolicy.FromFile(Environment.GetEnvironmentVariable("GATEWAY_OIDC_CONFIG_FILE"));
-var localAudit = new LocalAdminAudit(Path.Combine(privateDir, "admin-audit.jsonl"));
 using var externalAuditIntent = ExternalAuditIntent.FromEnvironment(
     Environment.GetEnvironmentVariable("GATEWAY_AUDIT_INTENT_URL"),
     Environment.GetEnvironmentVariable("GATEWAY_AUDIT_NODE_ID"),
     Environment.GetEnvironmentVariable("GATEWAY_AUDIT_SENDER_KEY_FILE"),
     Environment.GetEnvironmentVariable("GATEWAY_AUDIT_COLLECTOR_PUBLIC_KEY_FILE"));
+var auditOutboxPath = Environment.GetEnvironmentVariable("GATEWAY_AUDIT_OUTBOX_DIR");
+if (auditOutboxPath is not null && externalAuditIntent is null)
+    throw new InvalidOperationException("Audit outbox requires the external audit collector configuration");
+using var auditOutbox = auditOutboxPath is null ? null : new DurableAuditOutbox(auditOutboxPath, externalAuditIntent!);
+var localAudit = new LocalAdminAudit(Path.Combine(privateDir, "admin-audit.jsonl"), auditOutbox);
 var builder = WebApplication.CreateBuilder(args);
+if (auditOutbox is not null)
+    builder.Services.AddHostedService(sp => new AuditOutboxWorker(auditOutbox, sp.GetRequiredService<ILogger<AuditOutboxWorker>>()));
 GatewayOpenTelemetry.Configure(builder.Services);
 // Explicit v0.1 multi-socket mode; legacy loopback remains CI migration-only.
 var isolatedListeners = GatewayListenerIsolation.FromEnvironment();
@@ -303,6 +309,8 @@ var loginGate = new SemaphoreSlim(1, 1);
 var pendingOtp = new ConcurrentDictionary<string, OtpChallenge>();
 var mailPath = Path.Combine(privateDir, "mail-settings.json");
 var mailProofPath = Path.Combine(privateDir, "mail-test-proof.sha256");
+var directoryPath = Path.Combine(privateDir, "active-directory.json");
+var identitySettingsGate = new SemaphoreSlim(1, 1);
 var protector = app.Services.GetRequiredService<IDataProtectionProvider>().CreateProtector("GatewayCoreYarp.AdminMail.v1");
 MailSettings ReadMail() => File.Exists(mailPath)
     ? JsonSerializer.Deserialize<MailSettings>(File.ReadAllText(mailPath), jsonOptions) ?? new MailSettings()
@@ -312,9 +320,9 @@ string MailFingerprint(MailSettings cfg) => Convert.ToHexString(SHA256.HashData(
 bool MailDeliveryVerified(MailSettings cfg) => File.Exists(mailProofPath) &&
     CryptographicOperations.FixedTimeEquals(Encoding.UTF8.GetBytes(File.ReadAllText(mailProofPath).Trim()),
         Encoding.UTF8.GetBytes(MailFingerprint(cfg)));
-async Task SendMailMessage(string recipient, string subject, string body)
+async Task SendMailMessage(string recipient, string subject, string body, MailSettings? snapshot = null)
 {
-    var cfg = ReadMail();
+    var cfg = snapshot ?? ReadMail();
     if (string.IsNullOrWhiteSpace(cfg.Host) || cfg.Port is < 1 or > 65535 ||
         cfg.Port == 465 || !ValidEmail(cfg.From) || !ValidEmail(recipient))
         throw new InvalidOperationException("SMTP host, supported port, sender and recipient must be configured.");
@@ -363,9 +371,10 @@ async Task SendMailMessage(string recipient, string subject, string body)
 }
 async Task SendOtp(string recipient, string code)
 {
-    if (!ReadMail().Enabled) throw new InvalidOperationException("OTP not enabled");
+    var cfg = ReadMail();
+    if (!cfg.Enabled || !MailDeliveryVerified(cfg)) throw new InvalidOperationException("Verified OTP not enabled");
     await SendMailMessage(recipient, "YARP Control Center sign-in code",
-        $"Your one-time sign-in code is {code}. It expires in 5 minutes. Do not share this code.");
+        $"Your one-time sign-in code is {code}. It expires in 5 minutes. Do not share this code.", cfg);
 }
 var configPath = applicationConfigPath;
 var gate = new SemaphoreSlim(1, 1);
@@ -842,25 +851,114 @@ void WriteUsers(List<AdminUser> users)
 }
 // Capture the exact persisted account baseline under the existing login gate.
 byte[] AccountSnapshot() => File.Exists(usersPath) ? File.ReadAllBytes(usersPath) : [];
-async Task<IResult?> ConfirmAccountMutation(HttpContext ctx, byte[] before, List<AdminUser> proposed, string operation)
+async Task<(IResult? Error, string? IntentId)> ConfirmAccountMutation(HttpContext ctx,
+    byte[] before, List<AdminUser> proposed, string operation)
+{
+    if (externalAuditIntent is null) return (null, null);
+    if (!AccountSnapshot().AsSpan().SequenceEqual(before))
+        return (Results.Conflict(new { error = "Account state changed before external audit confirmation" }), null);
+    if (!AuditActorCurrent(ctx, administratorOnly: true))
+        return (Results.StatusCode(403), null);
+    var revision = Convert.ToHexString(SHA256.HashData(before));
+    var targetDigest = Convert.ToHexString(SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(proposed)));
+    var intentId = await externalAuditIntent.ConfirmWithIdAsync(Actor(ctx), operation,
+        revision, targetDigest, ctx.RequestAborted);
+    if (intentId is null || ctx.RequestAborted.IsCancellationRequested)
+        return (Results.Json(new { error = "External audit receipt unavailable; account state unchanged" }, statusCode: 503), null);
+    if (!AuditActorCurrent(ctx, administratorOnly: true))
+        return (Results.StatusCode(403), null);
+    if (!AccountSnapshot().AsSpan().SequenceEqual(before))
+        return (Results.Conflict(new { error = "Account state changed during external audit confirmation" }), null);
+    if (auditOutbox is not null)
+    {
+        // Persist a correlated PREPARED record before allowing the mutation.
+        // If storage fails, the account bytes remain unchanged. PREPARED is
+        // not proof of success: a crash may leave the outcome unresolved.
+        try { await localAudit.AppendAsync(Actor(ctx), "ACCOUNT_MUTATION_PREPARED",
+            new { operation, revision, targetDigest }, intentId); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException or InvalidDataException)
+        { return (Results.Json(new { error = "Account audit preparation unavailable; state unchanged" }, statusCode: 503), null); }
+    }
+    if (ctx.RequestAborted.IsCancellationRequested)
+        return (Results.Json(new { error = "Account mutation cancelled; state unchanged" }, statusCode: 503), null);
+    if (!AccountSnapshot().AsSpan().SequenceEqual(before))
+        return (Results.Conflict(new { error = "Account state changed during audit preparation" }), null);
+    if (!AuditActorCurrent(ctx, administratorOnly: true))
+        return (Results.StatusCode(403), null);
+    return (null, intentId);
+}
+// Call only under the writer lock for the target file. The proposed bytes
+// are persisted verbatim, so the signed digest describes the actual state.
+byte[] AuditStateBytes(string path) => File.Exists(path) ? File.ReadAllBytes(path) : [];
+bool AuditActorCurrent(HttpContext ctx, bool administratorOnly)
+{
+    var active = ReadUsers().SingleOrDefault(x => x.Username.Equals(Actor(ctx), StringComparison.OrdinalIgnoreCase));
+    if (active is null || !active.Enabled || active.SecurityStamp != ctx.User.FindFirst("stamp")?.Value ||
+        active.Role != ctx.User.FindFirst(ClaimTypes.Role)?.Value ||
+        (administratorOnly ? active.Role != "Administrator" : active.Role is not ("Administrator" or "Operator")))
+        return false;
+    return oidcPolicy is null || oidcPolicy.IsBreakGlass(active.Username) ||
+        (oidcPolicy.SessionValid(ctx.User, active.Username, active.Role, DateTimeOffset.UtcNow, stepUp: true) &&
+         EnterpriseOidcPolicy.AfterRevocation(ctx.User, active.OidcRevokedBefore));
+}
+async Task<IResult?> ConfirmStateMutation(HttpContext ctx, string path, byte[] before, byte[] proposed,
+    string operation, bool administratorOnly)
 {
     if (externalAuditIntent is null) return null;
-    if (!AccountSnapshot().AsSpan().SequenceEqual(before))
-        return Results.Conflict(new { error = "Account state changed before external audit confirmation" });
-    // Recheck the authenticated actor under the account mutation lock: a
-    // request may have queued behind another account's offboarding/reset.
-    var active = ReadUsers().SingleOrDefault(x => x.Username.Equals(Actor(ctx), StringComparison.OrdinalIgnoreCase));
-    if (active is null || !active.Enabled || active.Role != "Administrator" ||
-        active.SecurityStamp != ctx.User.FindFirst("stamp")?.Value)
-        return Results.StatusCode(403);
+    if (!AuditActorCurrent(ctx, administratorOnly)) return Results.StatusCode(403);
+    if (!AuditStateBytes(path).AsSpan().SequenceEqual(before))
+        return Results.Conflict(new { error = "State changed before external audit confirmation" });
     if (!await externalAuditIntent.ConfirmAsync(Actor(ctx), operation,
-            Convert.ToHexString(SHA256.HashData(before)),
-            Convert.ToHexString(SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(proposed))), ctx.RequestAborted) ||
-        ctx.RequestAborted.IsCancellationRequested)
-        return Results.Json(new { error = "External audit receipt unavailable; account state unchanged" }, statusCode: 503);
-    if (!AccountSnapshot().AsSpan().SequenceEqual(before))
-        return Results.Conflict(new { error = "Account state changed during external audit confirmation" });
+        Convert.ToHexString(SHA256.HashData(before)), Convert.ToHexString(SHA256.HashData(proposed)),
+        ctx.RequestAborted) || ctx.RequestAborted.IsCancellationRequested)
+        return Results.Json(new { error = "External audit receipt unavailable; state unchanged" }, statusCode: 503);
+    if (!AuditActorCurrent(ctx, administratorOnly)) return Results.StatusCode(403);
+    if (!AuditStateBytes(path).AsSpan().SequenceEqual(before))
+        return Results.Conflict(new { error = "State changed during external audit confirmation" });
     return null;
+}
+// The caller holds the resource gate, never loginGate. Obtain the account
+// gate after collector I/O and retain it through the exact state commit.
+async Task<IResult?> ConfirmAndWriteResourceMutation(HttpContext ctx, string path,
+    byte[] before, byte[] proposed, string operation, bool administratorOnly)
+{
+    if (externalAuditIntent is null)
+    {
+        WriteAuditedState(path, proposed);
+        return null;
+    }
+    var denied = await ConfirmStateMutation(ctx, path, before, proposed, operation, administratorOnly);
+    if (denied is not null) return denied;
+    try { await loginGate.WaitAsync(ctx.RequestAborted); }
+    catch (OperationCanceledException)
+    { return Results.Json(new { error = "Account mutation commit cancelled; state unchanged" }, statusCode: 503); }
+    try
+    {
+        if (ctx.RequestAborted.IsCancellationRequested)
+            return Results.Json(new { error = "Account mutation commit cancelled; state unchanged" }, statusCode: 503);
+        if (!AuditActorCurrent(ctx, administratorOnly)) return Results.StatusCode(403);
+        if (!AuditStateBytes(path).AsSpan().SequenceEqual(before))
+            return Results.Conflict(new { error = "State changed during external audit confirmation" });
+        WriteAuditedState(path, proposed);
+        return null;
+    }
+    finally { loginGate.Release(); }
+}
+void WriteAuditedState(string path, byte[] proposed)
+{
+    var temp = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+    try
+    {
+        var options = new FileStreamOptions { Mode = FileMode.CreateNew, Access = FileAccess.Write, Share = FileShare.None };
+        if (!OperatingSystem.IsWindows()) options.UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
+        using (var stream = new FileStream(temp, options))
+        {
+            stream.Write(proposed);
+            stream.Flush(flushToDisk: true);
+        }
+        File.Move(temp, path, true);
+    }
+    finally { if (File.Exists(temp)) File.Delete(temp); }
 }
 Task Audit(string actor, string action, object? details = null) =>
     localAudit.AppendAsync(actor, action, details);
@@ -1121,10 +1219,10 @@ app.MapPost("/admin/api/users", async (HttpContext ctx, UserInput input) =>
         if (users.Any(x => x.Username.Equals(input.Username, StringComparison.OrdinalIgnoreCase)))
             return Results.Conflict(new { error = "Username exists" });
         users.Add(NewUser(input.Username, input.Role, input.Password, input.Email));
-        var denied = await ConfirmAccountMutation(ctx, before, users, "USER_CREATE_INTENT");
-        if (denied is not null) return denied;
+        var confirmation = await ConfirmAccountMutation(ctx, before, users, "USER_CREATE_INTENT");
+        if (confirmation.Error is not null) return confirmation.Error;
         WriteUsers(users);
-        await Audit(Actor(ctx), "USER_CREATED", new { input.Username, input.Role });
+        await localAudit.AppendAsync(Actor(ctx), "USER_CREATED", new { input.Username, input.Role }, confirmation.IntentId);
         return Results.Ok(new { created = input.Username });
     }
     finally { loginGate.Release(); }
@@ -1144,10 +1242,10 @@ app.MapPost("/admin/api/users/{username}/password", async (HttpContext ctx, stri
         { Enabled = user.Enabled, OidcRevokedBefore = user.OidcRevokedBefore,
             OidcLogoutAuditThrough = user.OidcLogoutAuditThrough };
         users[users.IndexOf(user)] = updated;
-        var denied = await ConfirmAccountMutation(ctx, before, users, "USER_PASSWORD_RESET_INTENT");
-        if (denied is not null) return denied;
+        var confirmation = await ConfirmAccountMutation(ctx, before, users, "USER_PASSWORD_RESET_INTENT");
+        if (confirmation.Error is not null) return confirmation.Error;
         WriteUsers(users);
-        await Audit(Actor(ctx), "PASSWORD_RESET", new { username });
+        await localAudit.AppendAsync(Actor(ctx), "PASSWORD_RESET", new { username }, confirmation.IntentId);
         return Results.Ok(new { changed = true, reLoginRequired = true });
     }
     finally { loginGate.Release(); }
@@ -1166,10 +1264,10 @@ app.MapPost("/admin/api/users/{username}/disable", async (HttpContext ctx, strin
         if (users[i].Role == "Administrator" && users.Count(x => x.Enabled && x.Role == "Administrator") <= 1)
             return Results.BadRequest(new { error = "Last active administrator cannot be disabled" });
         users[i] = users[i] with { Enabled = false, SecurityStamp = Convert.ToHexString(RandomNumberGenerator.GetBytes(24)) };
-        var denied = await ConfirmAccountMutation(ctx, before, users, "USER_DISABLE_INTENT");
-        if (denied is not null) return denied;
+        var confirmation = await ConfirmAccountMutation(ctx, before, users, "USER_DISABLE_INTENT");
+        if (confirmation.Error is not null) return confirmation.Error;
         WriteUsers(users);
-        await Audit(Actor(ctx), "USER_OFFBOARDED", new { username });
+        await localAudit.AppendAsync(Actor(ctx), "USER_OFFBOARDED", new { username }, confirmation.IntentId);
         return Results.Ok(new { disabled = username });
     }
     finally { loginGate.Release(); }
@@ -1183,10 +1281,10 @@ app.MapPost("/admin/api/users/{username}/enable", async (HttpContext ctx, string
         var users = ReadUsers(); var i = users.FindIndex(x => x.Username.Equals(username, StringComparison.OrdinalIgnoreCase));
         if (i < 0) return Results.NotFound();
         users[i] = users[i] with { Enabled = true, SecurityStamp = Convert.ToHexString(RandomNumberGenerator.GetBytes(24)) };
-        var denied = await ConfirmAccountMutation(ctx, before, users, "USER_ENABLE_INTENT");
-        if (denied is not null) return denied;
+        var confirmation = await ConfirmAccountMutation(ctx, before, users, "USER_ENABLE_INTENT");
+        if (confirmation.Error is not null) return confirmation.Error;
         WriteUsers(users);
-        await Audit(Actor(ctx), "USER_REENABLED", new { username });
+        await localAudit.AppendAsync(Actor(ctx), "USER_REENABLED", new { username }, confirmation.IntentId);
         return Results.Ok(new { enabled = username });
     }
     finally { loginGate.Release(); }
@@ -1207,58 +1305,77 @@ app.MapPost("/admin/api/mail", async (HttpContext ctx, MailSettingsInput input) 
         input.Port is < 1 or > 65535 || input.Port == 465 || input.Host.Length > 255 || input.From.Length > 254 || input.Username.Length > 254 ||
         (input.Enabled && (string.IsNullOrWhiteSpace(input.Host) || !ValidEmail(input.From) || !input.StartTls)))
         return Results.BadRequest(new { code = "SMTP_INVALID_SETTINGS", error = "Check SMTP host, port (465 unsupported), sender address, and STARTTLS before enabling OTP." });
-    var existing = ReadMail();
-    var mode = string.IsNullOrEmpty(input.AuthMode) ? MailProviderAuth.PasswordMode : input.AuthMode;
-    var sameOAuthIdentity = string.Equals(existing.AuthMode, mode, StringComparison.Ordinal)
-        && string.Equals(existing.Host, input.Host, StringComparison.OrdinalIgnoreCase)
-        && string.Equals(existing.Username, input.Username, StringComparison.OrdinalIgnoreCase)
-        && string.Equals(existing.OAuthClientId, input.OAuthClientId, StringComparison.Ordinal)
-        && string.Equals(existing.OAuthTenant, input.OAuthTenant, StringComparison.Ordinal);
-    var encrypted = mode != MailProviderAuth.PasswordMode ? ""
-        : string.IsNullOrEmpty(input.Password)
-          ? string.Equals(existing.Username, input.Username, StringComparison.OrdinalIgnoreCase)
+    await identitySettingsGate.WaitAsync(ctx.RequestAborted);
+    try
+    {
+        var before = externalAuditIntent is null ? Array.Empty<byte>() : AuditStateBytes(mailPath);
+        var existing = ReadMail();
+        var mode = string.IsNullOrEmpty(input.AuthMode) ? MailProviderAuth.PasswordMode : input.AuthMode;
+        var sameOAuthIdentity = string.Equals(existing.AuthMode, mode, StringComparison.Ordinal)
             && string.Equals(existing.Host, input.Host, StringComparison.OrdinalIgnoreCase)
-            ? existing.EncryptedPassword : ""
-          : protector.Protect(input.Password);
-    var oauthSecret = !MailProviderAuth.UsesOAuth(mode) ? ""
-        : !string.IsNullOrEmpty(input.OAuthClientSecret)
-          ? protector.Protect(input.OAuthClientSecret)
-          : sameOAuthIdentity ? existing.EncryptedOAuthClientSecret : "";
-    var oauthRefresh = !MailProviderAuth.UsesOAuth(mode) || mode == MailProviderAuth.MicrosoftApp ? ""
-        : !string.IsNullOrEmpty(input.OAuthRefreshToken)
-          ? protector.Protect(input.OAuthRefreshToken)
-          : sameOAuthIdentity ? existing.EncryptedOAuthRefreshToken : "";
-    var validation = MailProviderAuth.Validate(mode, input.Host, input.Username,
-        input.OAuthTenant, input.OAuthClientId, !string.IsNullOrEmpty(oauthSecret),
-        !string.IsNullOrEmpty(oauthRefresh));
-    if (validation != null)
-        return Results.BadRequest(new { code = "MAIL_AUTH_INVALID", error = validation });
-    if (mode == MailProviderAuth.PasswordMode && !string.IsNullOrWhiteSpace(input.Username)
-        && string.IsNullOrEmpty(encrypted))
-        return Results.BadRequest(new { code = "SMTP_PASSWORD_REQUIRED", error = "Supply an app password for authenticated SMTP or remove the username for a trusted relay." });
-    var mail = new MailSettings(input.Enabled, input.Host, input.Port, input.From,
-        input.Username, encrypted, input.StartTls, mode,
-        MailProviderAuth.UsesOAuth(mode) ? input.OAuthClientId : "",
-        oauthSecret, oauthRefresh, MailProviderAuth.UsesOAuth(mode) ? input.OAuthTenant : "");
-    if (input.Enabled && !MailDeliveryVerified(mail))
-        return Results.Json(new { code = "SMTP_TEST_REQUIRED", error = "Save SMTP settings with OTP disabled, send a successful test to the administrator email, then enable OTP." }, statusCode: 409);
-    File.WriteAllText(mailPath + ".tmp", JsonSerializer.Serialize(mail)); File.Move(mailPath + ".tmp", mailPath, true);
-    await Audit(Actor(ctx), "MAIL_SETTINGS_UPDATED", new { input.Enabled, input.Host, input.Port, input.StartTls });
-    return Results.Ok(new { saved = true, otpRequiredOnNextLogin = mail.Enabled });
+            && string.Equals(existing.Username, input.Username, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(existing.OAuthClientId, input.OAuthClientId, StringComparison.Ordinal)
+            && string.Equals(existing.OAuthTenant, input.OAuthTenant, StringComparison.Ordinal);
+        var encrypted = mode != MailProviderAuth.PasswordMode ? ""
+            : string.IsNullOrEmpty(input.Password)
+              ? string.Equals(existing.Username, input.Username, StringComparison.OrdinalIgnoreCase)
+                && string.Equals(existing.Host, input.Host, StringComparison.OrdinalIgnoreCase)
+                ? existing.EncryptedPassword : ""
+              : protector.Protect(input.Password);
+        var oauthSecret = !MailProviderAuth.UsesOAuth(mode) ? ""
+            : !string.IsNullOrEmpty(input.OAuthClientSecret)
+              ? protector.Protect(input.OAuthClientSecret)
+              : sameOAuthIdentity ? existing.EncryptedOAuthClientSecret : "";
+        var oauthRefresh = !MailProviderAuth.UsesOAuth(mode) || mode == MailProviderAuth.MicrosoftApp ? ""
+            : !string.IsNullOrEmpty(input.OAuthRefreshToken)
+              ? protector.Protect(input.OAuthRefreshToken)
+              : sameOAuthIdentity ? existing.EncryptedOAuthRefreshToken : "";
+        var validation = MailProviderAuth.Validate(mode, input.Host, input.Username,
+            input.OAuthTenant, input.OAuthClientId, !string.IsNullOrEmpty(oauthSecret),
+            !string.IsNullOrEmpty(oauthRefresh));
+        if (validation != null)
+            return Results.BadRequest(new { code = "MAIL_AUTH_INVALID", error = validation });
+        if (mode == MailProviderAuth.PasswordMode && !string.IsNullOrWhiteSpace(input.Username)
+            && string.IsNullOrEmpty(encrypted))
+            return Results.BadRequest(new { code = "SMTP_PASSWORD_REQUIRED", error = "Supply an app password for authenticated SMTP or remove the username for a trusted relay." });
+        var mail = new MailSettings(input.Enabled, input.Host, input.Port, input.From,
+            input.Username, encrypted, input.StartTls, mode,
+            MailProviderAuth.UsesOAuth(mode) ? input.OAuthClientId : "",
+            oauthSecret, oauthRefresh, MailProviderAuth.UsesOAuth(mode) ? input.OAuthTenant : "");
+        if (input.Enabled && !MailDeliveryVerified(mail))
+            return Results.Json(new { code = "SMTP_TEST_REQUIRED", error = "Save SMTP settings with OTP disabled, send a successful test to the administrator email, then enable OTP." }, statusCode: 409);
+        var proposed = JsonSerializer.SerializeToUtf8Bytes(mail);
+        var denied = await ConfirmStateMutation(ctx, mailPath, before, proposed, "MAIL_SETTINGS_INTENT", true);
+        if (denied is not null) return denied;
+        if (mail.Enabled && !MailDeliveryVerified(mail))
+            return Results.Conflict(new { error = "Verified SMTP settings changed during confirmation" });
+        WriteAuditedState(mailPath, proposed);
+        await Audit(Actor(ctx), "MAIL_SETTINGS_UPDATED", new { input.Enabled, input.Host, input.Port, input.StartTls });
+        return Results.Ok(new { saved = true, otpRequiredOnNextLogin = mail.Enabled });
+    }
+    finally { identitySettingsGate.Release(); }
 }).RequireAuthorization(p => p.RequireRole("Administrator"));
 
 app.MapPost("/admin/api/mail/test", async (HttpContext ctx) =>
 {
     var admin = ReadUsers().FirstOrDefault(x => x.Username.Equals(Actor(ctx), StringComparison.OrdinalIgnoreCase));
     if (admin is null || !ValidEmail(admin.Email)) return Results.BadRequest(new { code = "SMTP_ADMIN_EMAIL_REQUIRED", error = "Set a valid administrator email under Administrators and roles before sending a test." });
+    await identitySettingsGate.WaitAsync(ctx.RequestAborted);
     try
     {
         var cfg = ReadMail();
         if (string.IsNullOrWhiteSpace(cfg.Host) || !ValidEmail(cfg.From) || !cfg.StartTls)
             return Results.Json(new { code = "SMTP_NOT_CONFIGURED", error = "Save a valid SMTP relay, sender, and STARTTLS configuration with OTP disabled before testing." }, statusCode: 409);
-        await SendMailMessage(admin.Email!, "YARP Control Center SMTP test", "This is a test message from your local YARP administration console.");
-        File.WriteAllText(mailProofPath + ".tmp", MailFingerprint(cfg));
-        File.Move(mailProofPath + ".tmp", mailProofPath, true);
+        await SendMailMessage(admin.Email!, "YARP Control Center SMTP test", "This is a test message from your local YARP administration console.", cfg);
+        if (ReadMail() != cfg)
+            return Results.Conflict(new { error = "SMTP settings changed during delivery test" });
+        var before = externalAuditIntent is null ? Array.Empty<byte>() : AuditStateBytes(mailProofPath);
+        var proposed = Encoding.UTF8.GetBytes(MailFingerprint(cfg));
+        var denied = await ConfirmStateMutation(ctx, mailProofPath, before, proposed, "MAIL_PROOF_INTENT", true);
+        if (denied is not null) return denied;
+        if (ReadMail() != cfg)
+            return Results.Conflict(new { error = "SMTP settings changed during audit confirmation" });
+        WriteAuditedState(mailProofPath, proposed);
         await Audit(Actor(ctx), "SMTP_DELIVERY_TEST_SUCCEEDED", new { cfg.Host, recipient = admin.Email });
         return Results.Ok(new { tested = true, recipient = admin.Email, note = "SMTP relay accepted message; confirm it arrived" });
     }
@@ -1275,22 +1392,32 @@ app.MapPost("/admin/api/mail/test", async (HttpContext ctx) =>
         await Audit(Actor(ctx), "SMTP_DELIVERY_TEST_FAILED", new { failureType, innerType, smtpStatus });
         return Results.Json(new { code = "SMTP_RELAY_UNAVAILABLE", error = "SMTP relay test failed. Check reachability, STARTTLS certificate trust, credentials and relay permissions. No OTP settings were enabled." }, statusCode: 503);
     }
+    finally { identitySettingsGate.Release(); }
 }).RequireRateLimiting("mailtest").RequireAuthorization(p => p.RequireRole("Administrator"));
 
 app.MapGet("/admin/api/directory", () => Results.Ok(directoryAuth.PublicSettings()))
     .RequireAuthorization(p => p.RequireRole("Administrator"));
 app.MapPost("/admin/api/directory", async (HttpContext ctx, DirectorySettingsInput input) =>
 {
-    if (input.Enabled && (!ReadMail().Enabled || !MailDeliveryVerified(ReadMail())))
-        return Results.BadRequest(new { error = "Enable verified SMTP email OTP before enabling AD login" });
+    await identitySettingsGate.WaitAsync(ctx.RequestAborted);
     try
     {
-        directoryAuth.Save(input);
+        var mail = ReadMail();
+        if (input.Enabled && (!mail.Enabled || !MailDeliveryVerified(mail)))
+            return Results.BadRequest(new { error = "Enable verified SMTP email OTP before enabling AD login" });
+        var before = externalAuditIntent is null ? Array.Empty<byte>() : AuditStateBytes(directoryPath);
+        var proposed = directoryAuth.PrepareSettings(input);
+        var denied = await ConfirmStateMutation(ctx, directoryPath, before, proposed, "DIRECTORY_SETTINGS_INTENT", true);
+        if (denied is not null) return denied;
+        if (input.Enabled && (ReadMail() != mail || !MailDeliveryVerified(mail)))
+            return Results.Conflict(new { error = "Verified SMTP settings changed during directory confirmation" });
+        WriteAuditedState(directoryPath, proposed);
         await Audit(Actor(ctx), "DIRECTORY_SETTINGS_UPDATED", new { input.Enabled, input.Host, input.Port, input.SearchBaseDn });
         return Results.Ok(new { saved = true, enabled = input.Enabled, note = "Existing AD sessions are revalidated on requests" });
     }
     catch (Exception ex) when (ex is ArgumentException or LdapException or InvalidOperationException or DirectoryOperationException)
     { return Results.BadRequest(new { error = "LDAPS configuration not accepted: check hostname, certificate, bind identity, base DN and mapped group DNs" }); }
+    finally { identitySettingsGate.Release(); }
 }).RequireAuthorization(p => p.RequireRole("Administrator"));
 app.MapPost("/admin/api/directory/test", async (HttpContext ctx) =>
 {
@@ -1327,10 +1454,13 @@ app.MapPost("/admin/api/inventory", async (HttpContext ctx, InventoryInput input
     await gate.WaitAsync();
     try
     {
+        var before = externalAuditIntent is null ? Array.Empty<byte>() : AuditStateBytes(inventoryPath);
         var entries = ReadInventory();
         if (entries.Any(x => x.Id == input.Id)) return Results.Conflict(new { error = "ID already exists" });
         entries.Add(input);
-        File.WriteAllText(inventoryPath, JsonSerializer.Serialize(entries));
+        var proposed = JsonSerializer.SerializeToUtf8Bytes(entries);
+        var denied = await ConfirmAndWriteResourceMutation(ctx, inventoryPath, before, proposed, "INVENTORY_ADD_INTENT", false);
+        if (denied is not null) return denied;
         await Audit(Actor(ctx), "INVENTORY_ADDED", new { input.Id, input.Type });
         return Results.Ok(new { added = input.Id });
     }
@@ -1341,10 +1471,13 @@ app.MapDelete("/admin/api/inventory/{id}", async (HttpContext ctx, string id) =>
     await gate.WaitAsync();
     try
     {
+        var before = externalAuditIntent is null ? Array.Empty<byte>() : AuditStateBytes(inventoryPath);
         var items = ReadInventory();
         var changed = items.RemoveAll(x => x.Id == id);
         if (changed == 0) return Results.NotFound();
-        File.WriteAllText(inventoryPath, JsonSerializer.Serialize(items));
+        var proposed = JsonSerializer.SerializeToUtf8Bytes(items);
+        var denied = await ConfirmAndWriteResourceMutation(ctx, inventoryPath, before, proposed, "INVENTORY_DELETE_INTENT", false);
+        if (denied is not null) return denied;
         await Audit(Actor(ctx), "INVENTORY_DELETED", new { id });
         return Results.Ok(new { deleted = id });
     }
@@ -1399,6 +1532,14 @@ app.MapGet("/admin/api/state", () =>
 
 app.MapGet("/admin/api/audit", async () =>
     Results.Ok(await localAudit.ReadRecentAsync())).RequireAuthorization();
+
+app.MapGet("/admin/api/audit/delivery", () =>
+{
+    if (auditOutbox is null) return Results.Ok(new { enabled = false, pending = 0, storageFault = false, deliveryBlocked = false });
+    var status = auditOutbox.Status();
+    return Results.Ok(new { enabled = true, pending = status.Pending, storageFault = status.StorageFault,
+        deliveryBlocked = status.DeliveryBlocked });
+}).RequireAuthorization(p => p.RequireRole("Administrator"));
 
 // Explicit, on-demand connectivity probes: these are not YARP's own destination health states.
 app.MapPost("/admin/api/probe", async (IHttpClientFactory factory) =>
@@ -1682,8 +1823,16 @@ app.MapPost("/admin/api/change-requests", async (HttpContext ctx) =>
         ["id"] = id, ["requestedBy"] = Actor(ctx), ["createdUtc"] = DateTimeOffset.UtcNow.ToString("O"),
         ["status"] = "Pending", ["changeReason"] = reason, ["payload"] = payload.DeepClone()
     };
-    await changeGate.WaitAsync();
-    try { await File.WriteAllTextAsync(Path.Combine(changeFolder, id + ".json"), item.ToJsonString()); }
+    await changeGate.WaitAsync(ctx.RequestAborted);
+    try
+    {
+        var path = Path.Combine(changeFolder, id + ".json");
+        if (File.Exists(path)) return Results.Conflict(new { error = "Change request ID already exists" });
+        var proposed = Encoding.UTF8.GetBytes(item.ToJsonString());
+        var denied = await ConfirmStateMutation(ctx, path, Array.Empty<byte>(), proposed, "CHANGE_REQUEST_INTENT", false);
+        if (denied is not null) return denied;
+        WriteAuditedState(path, proposed);
+    }
     finally { changeGate.Release(); }
     await Audit(Actor(ctx), "CHANGE_REQUESTED", new { id, reason });
     return Results.Ok(new { id, status = "Pending", message = "A different administrator must review and approve" });
@@ -1700,7 +1849,8 @@ app.MapPost("/admin/api/change-requests/{id}/decision", async (HttpContext ctx, 
     {
         var path = Path.Combine(changeFolder, id + ".json");
         if (!File.Exists(path)) return Results.NotFound();
-        var item = JsonNode.Parse(await File.ReadAllTextAsync(path))!.AsObject();
+        var before = File.ReadAllBytes(path);
+        var item = JsonNode.Parse(before)!.AsObject();
         if (item["status"]?.ToString() != "Pending") return Results.Conflict(new { error = "Already reviewed" });
         if (string.Equals(item["requestedBy"]?.ToString(), Actor(ctx), StringComparison.OrdinalIgnoreCase))
             return Results.Json(new { error = "Two-person control: requester cannot approve or reject own change" }, statusCode: 403);
@@ -1714,8 +1864,13 @@ app.MapPost("/admin/api/change-requests/{id}/decision", async (HttpContext ctx, 
         item["status"] = input.Decision == "approve" ? "Approved" : "Rejected";
         item["reviewedBy"] = Actor(ctx); item["reviewUtc"] = DateTimeOffset.UtcNow.ToString("O");
         item["reviewReason"] = reason;
-        await File.WriteAllTextAsync(path + ".tmp", item.ToJsonString());
-        File.Move(path + ".tmp", path, overwrite: true);
+        var proposed = Encoding.UTF8.GetBytes(item.ToJsonString());
+        if (input.Decision == "reject")
+        {
+            var denied = await ConfirmStateMutation(ctx, path, before, proposed, "CHANGE_REJECT_INTENT", true);
+            if (denied is not null) return denied;
+        }
+        WriteAuditedState(path, proposed);
         await Audit(Actor(ctx), "CHANGE_" + item["status"]!.ToString().ToUpperInvariant(), new { id, reason });
         return Results.Ok(new { id, status = item["status"]?.ToString() });
     }
@@ -1765,15 +1920,12 @@ app.MapPost("/admin/api/restore/{name}", async (HttpContext ctx, string name) =>
 // not enabled: an approved distributed-transaction/rollback protocol is required first.
 var fleetPath = Path.Combine(privateDir, "fleet-gateways.json");
 var fleetGate = new SemaphoreSlim(1, 1);
+var rolloutGate = new SemaphoreSlim(1, 1);
+var rolloutFolder = Path.Combine(privateDir, "fleet-rollouts");
+Directory.CreateDirectory(rolloutFolder);
 List<FleetGateway> ReadFleet() => File.Exists(fleetPath)
     ? JsonSerializer.Deserialize<List<FleetGateway>>(File.ReadAllText(fleetPath), jsonOptions) ?? new()
     : new();
-void WriteFleet(List<FleetGateway> rows)
-{
-    var temp = fleetPath + ".tmp";
-    File.WriteAllText(temp, JsonSerializer.Serialize(rows));
-    File.Move(temp, fleetPath, true);
-}
 app.MapGet("/admin/api/fleet", () => Results.Ok(ReadFleet())).RequireAuthorization();
 app.MapPost("/admin/api/fleet", async (HttpContext ctx, FleetGateway row) =>
 {
@@ -1785,9 +1937,15 @@ app.MapPost("/admin/api/fleet", async (HttpContext ctx, FleetGateway row) =>
     await fleetGate.WaitAsync();
     try
     {
+        if (FleetRolloutJournal.HasUnresolved(rolloutFolder))
+            return Results.Conflict(new { error = "Resolve the unfinished rollout before changing fleet membership." });
+        var before = externalAuditIntent is null ? Array.Empty<byte>() : AuditStateBytes(fleetPath);
         var list = ReadFleet();
         if (list.Any(x => x.Id.Equals(row.Id, StringComparison.OrdinalIgnoreCase))) return Results.Conflict(new { error = "Duplicate gateway ID" });
-        list.Add(row); WriteFleet(list);
+        list.Add(row);
+        var proposed = JsonSerializer.SerializeToUtf8Bytes(list);
+        var denied = await ConfirmAndWriteResourceMutation(ctx, fleetPath, before, proposed, "FLEET_REGISTER_INTENT", true);
+        if (denied is not null) return denied;
         await Audit(Actor(ctx), "FLEET_GATEWAY_REGISTERED", new { row.Id, row.Url });
         return Results.Ok(new { registered = true });
     }
@@ -1799,9 +1957,14 @@ app.MapDelete("/admin/api/fleet/{id}", async (HttpContext ctx, string id) =>
     await fleetGate.WaitAsync();
     try
     {
+        if (FleetRolloutJournal.HasUnresolved(rolloutFolder))
+            return Results.Conflict(new { error = "Resolve the unfinished rollout before changing fleet membership." });
+        var before = externalAuditIntent is null ? Array.Empty<byte>() : AuditStateBytes(fleetPath);
         var list = ReadFleet();
         if (list.RemoveAll(x => x.Id == id) != 1) return Results.NotFound();
-        WriteFleet(list);
+        var proposed = JsonSerializer.SerializeToUtf8Bytes(list);
+        var denied = await ConfirmAndWriteResourceMutation(ctx, fleetPath, before, proposed, "FLEET_UNREGISTER_INTENT", true);
+        if (denied is not null) return denied;
         await Audit(Actor(ctx), "FLEET_GATEWAY_UNREGISTERED", new { id });
         return Results.Ok(new { removed = id });
     }
@@ -1884,105 +2047,200 @@ app.MapGet("/admin/api/fleet/status", async () =>
 // Controlled fleet rollout: the only accepted payload comes from a previously
 // approved two-person local change request. Every agent validates its revision.
 // No general-purpose remote shell or arbitrary filesystem access is exposed.
-var rolloutGate = new SemaphoreSlim(1, 1);
-var rolloutFolder = Path.Combine(privateDir, "fleet-rollouts");
-Directory.CreateDirectory(rolloutFolder);
+string FleetDigest() => Convert.ToHexString(SHA256.HashData(AuditStateBytes(fleetPath)));
+async Task<List<string>> RollbackAttempted(string logPath, JsonObject journal, List<FleetGateway> gateways)
+{
+    var errors = new List<string>();
+    foreach (var target in FleetRolloutJournal.Targets(journal).Where(FleetRolloutJournal.NeedsRollback))
+    {
+        var id = target["id"]!.GetValue<string>();
+        try
+        {
+            var row = gateways.Single(x => x.Id == id);
+            FleetRolloutJournal.Log(logPath, journal, id, "rollback", "dispatching");
+            using var client = CreateFleetClient(row);
+            using var response = await client.PostAsJsonAsync(new Uri(new Uri(row.Url), "agent/v1/config/rollback"),
+                new { TransactionId = journal["id"]!.GetValue<string>() });
+            response.EnsureSuccessStatusCode();
+            var reply = JsonNode.Parse(await response.Content.ReadAsStringAsync());
+            using var status = await client.GetAsync(new Uri(new Uri(row.Url), "agent/v1/status"));
+            status.EnsureSuccessStatusCode();
+            var observed = JsonNode.Parse(await status.Content.ReadAsStringAsync())?["revision"]?.ToString();
+            if (reply?["state"]?.ToString() != "rolled-back" || reply["rollbackFenced"]?.GetValue<bool>() != true ||
+                reply["revision"]?.ToString() != observed ||
+                !FleetRolloutJournal.CompleteRollback(target, observed))
+                throw new InvalidOperationException("Rollback revision not independently confirmed");
+            FleetRolloutJournal.Log(logPath, journal, id, "rollback", "verified", observed);
+        }
+        catch (Exception ex)
+        {
+            errors.Add(id + ": " + ex.GetType().Name);
+            FleetRolloutJournal.Log(logPath, journal, id, "rollback", "unresolved", ex.GetType().Name);
+        }
+    }
+    journal["status"] = errors.Count == 0 ? "rollback-verified" : "manual-intervention-required";
+    FleetRolloutJournal.Log(logPath, journal, "fleet", "finish", journal["status"]!.GetValue<string>());
+    return errors;
+}
 app.MapPost("/admin/api/fleet/rollout/{changeId}", async (HttpContext ctx, string changeId) =>
 {
     if (!Regex.IsMatch(changeId, "^change-[0-9]{8}T[0-9]{13,}Z-[A-F0-9]{10}$"))
         return Results.BadRequest(new { error = "Invalid change ID" });
-    var changePath = Path.Combine(changeFolder,changeId+".json");
-    if (!File.Exists(changePath)) return Results.NotFound();
-    var change = JsonNode.Parse(await File.ReadAllTextAsync(changePath))?.AsObject();
-    if (change?["status"]?.ToString() != "Approved" || change["reviewedBy"] is null ||
-        string.Equals(change["requestedBy"]?.ToString(),change["reviewedBy"]?.ToString(),StringComparison.OrdinalIgnoreCase))
-        return Results.Conflict(new { error="An independent administrator must have approved this change" });
-    if (change["payload"] is not JsonObject payload || payload["routes"] is not JsonObject routes ||
-        payload["clusters"] is not JsonObject clusters)
-        return Results.BadRequest(new {error="Approved change has no route and cluster payload"});
-    var gateways=ReadFleet();
-    if (gateways.Count < 2 || gateways.Count > 20)
-        return Results.Conflict(new {error="Register at least two managed gateways; maximum 20"});
-    if (!await rolloutGate.WaitAsync(0)) return Results.Conflict(new {error="Another rollout is running"});
-    var txId="rollout_"+Convert.ToHexString(RandomNumberGenerator.GetBytes(12));
-    var result=new JsonObject { ["id"]=txId,["changeId"]=changeId,
-       ["initiator"]=Actor(ctx),["createdUtc"]=DateTimeOffset.UtcNow.ToString("O"),
-       ["status"]="starting",["details"]=new JsonArray() };
-    var logPath=Path.Combine(rolloutFolder,txId+".json");
-    async Task Log(string gateway,string stage,string state,string? detail=null)
-    {
-        ((JsonArray)result["details"]!).Add(new JsonObject { ["utc"]=DateTimeOffset.UtcNow.ToString("O"),
-            ["gateway"]=gateway,["stage"]=stage,["state"]=state,["detail"]=detail });
-        await File.WriteAllTextAsync(logPath+".tmp",result.ToJsonString());
-        File.Move(logPath+".tmp",logPath,true);
-    }
+    if (!await rolloutGate.WaitAsync(0)) return Results.Conflict(new { error = "Another rollout is running" });
+    bool fleetHeld = false, persisted = false;
+    JsonObject? journal = null;
+    var gateways = new List<FleetGateway>();
+    var txId = "rollout_" + Convert.ToHexString(RandomNumberGenerator.GetBytes(12));
+    var logPath = Path.Combine(rolloutFolder, txId + ".json");
     try
     {
-        var proxy = new JsonObject { ["Routes"]=routes.DeepClone(),["Clusters"]=clusters.DeepClone() };
+        await fleetGate.WaitAsync(ctx.RequestAborted);
+        fleetHeld = true;
+        if (FleetRolloutJournal.HasUnresolved(rolloutFolder))
+            return Results.Conflict(new { error = "An earlier rollout is unresolved. Recover it before starting another." });
+        if (!AuditActorCurrent(ctx, true)) return Results.StatusCode(403);
+        var changePath = Path.Combine(changeFolder, changeId + ".json");
+        if (!File.Exists(changePath)) return Results.NotFound();
+        var changeBytes = File.ReadAllBytes(changePath);
+        var change = JsonNode.Parse(changeBytes)?.AsObject();
+        if (change?["status"]?.ToString() != "Approved" || change["reviewedBy"] is null ||
+            string.Equals(change["requestedBy"]?.ToString(), change["reviewedBy"]?.ToString(), StringComparison.OrdinalIgnoreCase))
+            return Results.Conflict(new { error = "An independent administrator must have approved this change" });
+        if (change["payload"] is not JsonObject payload || payload["routes"] is not JsonObject routes ||
+            payload["clusters"] is not JsonObject clusters)
+            return Results.BadRequest(new { error = "Approved change has no route and cluster payload" });
+        gateways = ReadFleet();
+        if (gateways.Count < 2 || gateways.Count > 20)
+            return Results.Conflict(new { error = "Register at least two managed gateways; maximum 20" });
+        var fleetDigest = FleetDigest();
+        var proxy = new JsonObject { ["Routes"] = routes.DeepClone(), ["Clusters"] = clusters.DeepClone() };
         var signingKeyPath = Path.Combine(privateDir, "fleet-signing-private.pem");
         if (!File.Exists(signingKeyPath))
-            throw new InvalidOperationException("Fleet signing key not provisioned. Signed deployment is required.");
-        var signingKeyPem = await File.ReadAllTextAsync(signingKeyPath);
-        // Monotonic independent of application config revision or rollback.
-        // The rolloutGate serializes allocation for this single controller instance.
-        var sequence = FleetSequenceState.AllocateNext(Path.Combine(privateDir, "fleet-sequence.txt"));
-        var prepared = new List<(FleetGateway Gateway,string Revision)>();
+            return Results.Conflict(new { error = "Fleet signing key not provisioned" });
+        var signingKeyPem = await File.ReadAllTextAsync(signingKeyPath, ctx.RequestAborted);
+        var targets = new JsonArray();
+        // Preflight every target before authorizing or dispatching any mutation.
         foreach (var row in gateways)
         {
             using var client = CreateFleetClient(row);
-            var statusResponse=await client.GetAsync(new Uri(new Uri(row.Url),"agent/v1/status"));
+            using var statusResponse = await client.GetAsync(new Uri(new Uri(row.Url), "agent/v1/status"), ctx.RequestAborted);
             statusResponse.EnsureSuccessStatusCode();
-            var status=JsonNode.Parse(await statusResponse.Content.ReadAsStringAsync());
-            var revision=status?["revision"]?.ToString();
-            if (string.IsNullOrWhiteSpace(revision)) throw new InvalidOperationException(row.Id+": no revision / deployment disabled");
-            var expires = DateTimeOffset.UtcNow.AddMinutes(3).ToUnixTimeSeconds();
-            var signed = FleetConfigSignature.SignV2(signingKeyPem, txId, revision, proxy, expires, sequence);
-            using var response=await client.PostAsJsonAsync(new Uri(new Uri(row.Url),"agent/v1/config/prepare"),
-                new {TransactionId=txId,ExpectedRevision=revision,ReverseProxy=proxy,
-                    signed.ExpiresUnixSeconds, signed.Sequence, signed.KeyId, signed.Signature});
-            if (!response.IsSuccessStatusCode) throw new InvalidOperationException(row.Id+": prepare HTTP "+(int)response.StatusCode);
-            var staged=JsonNode.Parse(await response.Content.ReadAsStringAsync());
-            var revisionStaged=staged?["preparedRevision"]?.ToString();
-            if (string.IsNullOrWhiteSpace(revisionStaged)) throw new InvalidOperationException("Missing staged hash");
-            prepared.Add((row,revisionStaged));
-            await Log(row.Id,"prepare","ok",revisionStaged);
+            var status = JsonNode.Parse(await statusResponse.Content.ReadAsStringAsync(ctx.RequestAborted));
+            var revision = status?["revision"]?.ToString();
+            if (!FleetRolloutJournal.IsDigest(revision) || status?["rollbackFenceProtocol"]?.GetValue<int>() != 1)
+                throw new InvalidOperationException("Agent configuration revision unavailable");
+            targets.Add(new JsonObject { ["id"] = row.Id, ["originalRevision"] = revision,
+                ["prepareSent"] = false, ["activateSent"] = false, ["rollbackVerified"] = false });
         }
-        foreach (var item in prepared)
+        journal = new JsonObject { ["schema"] = 2, ["id"] = txId, ["changeId"] = changeId,
+            ["initiator"] = Actor(ctx), ["createdUtc"] = DateTimeOffset.UtcNow.ToString("O"),
+            ["status"] = "starting", ["fleetDigest"] = fleetDigest,
+            ["changeDigest"] = Convert.ToHexString(SHA256.HashData(changeBytes)), ["targets"] = targets,
+            ["details"] = new JsonArray() };
+        var initial = JsonSerializer.SerializeToUtf8Bytes(journal);
+        var denied = await ConfirmStateMutation(ctx, logPath, Array.Empty<byte>(), initial, "FLEET_ROLLOUT_INTENT", true);
+        if (denied is not null) return denied;
+        bool CurrentPlan() => AuditActorCurrent(ctx, true) && !ctx.RequestAborted.IsCancellationRequested &&
+            OnboardingApi.IsMultiGatewayDesign(privateDir) && FleetDigest() == fleetDigest &&
+            File.Exists(changePath) && File.ReadAllBytes(changePath).AsSpan().SequenceEqual(changeBytes);
+        if (!CurrentPlan()) return Results.Conflict(new { error = "Rollout authorization or plan changed" });
+        WriteAuditedState(logPath, initial);
+        persisted = true;
+        var sequence = FleetSequenceState.AllocateNext(Path.Combine(privateDir, "fleet-sequence.txt"));
+        journal["sequence"] = sequence;
+        journal["status"] = "preparing";
+        FleetRolloutJournal.Write(logPath, journal);
+        foreach (var target in FleetRolloutJournal.Targets(journal))
         {
-            using var client=CreateFleetClient(item.Gateway);
-            using var response=await client.PostAsJsonAsync(new Uri(new Uri(item.Gateway.Url),"agent/v1/config/activate"),
-                new {TransactionId=txId,PreparedRevision=item.Revision});
-            if (!response.IsSuccessStatusCode) throw new InvalidOperationException(item.Gateway.Id+": activation HTTP "+(int)response.StatusCode);
-            await Log(item.Gateway.Id,"activate","ok");
+            if (!CurrentPlan()) throw new InvalidOperationException("Rollout authorization or plan changed");
+            var row = gateways.Single(x => x.Id == target["id"]!.GetValue<string>());
+            var revision = target["originalRevision"]!.GetValue<string>();
+            var signed = FleetConfigSignature.SignV2(signingKeyPem, txId, revision, proxy,
+                DateTimeOffset.UtcNow.AddMinutes(3).ToUnixTimeSeconds(), sequence);
+            using var client = CreateFleetClient(row);
+            target["prepareSent"] = true;
+            FleetRolloutJournal.Log(logPath, journal, row.Id, "prepare", "dispatching");
+            using var response = await client.PostAsJsonAsync(new Uri(new Uri(row.Url), "agent/v1/config/prepare"),
+                new { TransactionId = txId, ExpectedRevision = revision, ReverseProxy = proxy,
+                    signed.ExpiresUnixSeconds, signed.Sequence, signed.KeyId, signed.Signature }, ctx.RequestAborted);
+            response.EnsureSuccessStatusCode();
+            var staged = JsonNode.Parse(await response.Content.ReadAsStringAsync(ctx.RequestAborted));
+            var prepared = staged?["preparedRevision"]?.ToString();
+            if (staged?["transactionId"]?.ToString() != txId || staged["originalRevision"]?.ToString() != revision ||
+                !FleetRolloutJournal.IsDigest(prepared)) throw new InvalidOperationException("Invalid prepare acknowledgment");
+            target["preparedRevision"] = prepared;
+            FleetRolloutJournal.Log(logPath, journal, row.Id, "prepare", "ok", prepared);
         }
-        result["status"]="activated-pending-health-validation";
-        await Log("fleet","finish","activation-complete","Verify real application health and failover before treating as successful");
-        await Audit(Actor(ctx),"FLEET_ROLLOUT_ACTIVATED",new {txId,changeId});
-        return Results.Ok(result);
+        journal["status"] = "activating";
+        FleetRolloutJournal.Write(logPath, journal);
+        foreach (var target in FleetRolloutJournal.Targets(journal))
+        {
+            if (!CurrentPlan()) throw new InvalidOperationException("Rollout authorization or plan changed");
+            var row = gateways.Single(x => x.Id == target["id"]!.GetValue<string>());
+            var prepared = target["preparedRevision"]!.GetValue<string>();
+            using var client = CreateFleetClient(row);
+            target["activateSent"] = true;
+            FleetRolloutJournal.Log(logPath, journal, row.Id, "activate", "dispatching");
+            using var response = await client.PostAsJsonAsync(new Uri(new Uri(row.Url), "agent/v1/config/activate"),
+                new { TransactionId = txId, PreparedRevision = prepared }, ctx.RequestAborted);
+            response.EnsureSuccessStatusCode();
+            var activated = JsonNode.Parse(await response.Content.ReadAsStringAsync(ctx.RequestAborted));
+            if (activated?["transactionId"]?.ToString() != txId || activated["revision"]?.ToString() != prepared)
+                throw new InvalidOperationException("Invalid activation acknowledgment");
+            FleetRolloutJournal.Log(logPath, journal, row.Id, "activate", "ok", prepared);
+        }
+        journal["status"] = "activated-pending-health-validation";
+        FleetRolloutJournal.Log(logPath, journal, "fleet", "finish", "activation-complete", "Live application health is not verified");
+        await Audit(Actor(ctx), "FLEET_ROLLOUT_ACTIVATED", new { txId, changeId });
+        return Results.Ok(journal);
     }
-    catch(Exception ex)
+    catch (Exception ex)
     {
-        var rollbackErrors=new List<string>();
-        foreach(var row in gateways)
-        {
-            try
-            {
-                using var client=CreateFleetClient(row);
-                using var response=await client.PostAsJsonAsync(new Uri(new Uri(row.Url),"agent/v1/config/rollback"),
-                    new {TransactionId=txId});
-                if (!response.IsSuccessStatusCode) rollbackErrors.Add(row.Id+": HTTP "+(int)response.StatusCode);
-                await Log(row.Id,"rollback",response.IsSuccessStatusCode?"ok":"failed");
-            }
-            catch(Exception rollbackEx)
-            {rollbackErrors.Add(row.Id+": "+rollbackEx.GetType().Name);await Log(row.Id,"rollback","failed",rollbackEx.GetType().Name);}
-        }
-        result["status"]=rollbackErrors.Count==0?"rollback-attempted":"manual-intervention-required";
-        await Log("fleet","error","failed",ex.GetType().Name+"; "+string.Join("; ",rollbackErrors));
-        await Audit(Actor(ctx),"FLEET_ROLLOUT_FAILED",new {txId,changeId,rollbackErrors});
-        return Results.Json(new {transactionId=txId,status=result["status"]?.ToString(),
-            error="Deployment failed. Inspect journal and verify both gateways.",rollbackErrors},statusCode:502);
+        if (!persisted || journal is null)
+            return Results.Json(new { error = "Rollout preflight failed", errorType = ex.GetType().Name }, statusCode: 502);
+        // Compensation is covered by the authorized initial plan; never
+        // suppress it because the original request or session was cancelled.
+        journal["status"] = "recovering";
+        FleetRolloutJournal.Log(logPath, journal, "fleet", "error", "failed", ex.GetType().Name);
+        var rollbackErrors = await RollbackAttempted(logPath, journal, gateways);
+        await Audit(Actor(ctx), "FLEET_ROLLOUT_FAILED", new { txId, changeId, rollbackErrors });
+        return Results.Json(new { transactionId = txId, status = journal["status"]?.ToString(),
+            error = "Deployment failed; inspect durable journal", rollbackErrors }, statusCode: 502);
     }
-    finally {rolloutGate.Release();}
+    finally { if (fleetHeld) fleetGate.Release(); rolloutGate.Release(); }
+}).RequireAuthorization(p => p.RequireRole("Administrator"));
+
+app.MapPost("/admin/api/fleet/rollouts/{id}/recover", async (HttpContext ctx, string id) =>
+{
+    if (!FleetRolloutJournal.IsTransaction(id)) return Results.BadRequest();
+    if (!await rolloutGate.WaitAsync(0)) return Results.Conflict(new { error = "Another rollout is running" });
+    bool fleetHeld = false;
+    try
+    {
+        await fleetGate.WaitAsync(ctx.RequestAborted);
+        fleetHeld = true;
+        var path = Path.Combine(rolloutFolder, id + ".json");
+        if (!File.Exists(path)) return Results.NotFound();
+        var before = File.ReadAllBytes(path);
+        var journal = FleetRolloutJournal.Read(path);
+        var gateways = ReadFleet();
+        if (!FleetRolloutJournal.RecoveryAllowed(journal, id, FleetDigest()) ||
+            !FleetRolloutJournal.Targets(journal).Select(x => x["id"]!.GetValue<string>())
+                .SequenceEqual(gateways.Select(x => x.Id)))
+            return Results.Conflict(new { error = "Recovery requires original inventory and a valid unfinished v2 journal" });
+        journal["status"] = "recovering";
+        var proposed = JsonSerializer.SerializeToUtf8Bytes(journal);
+        var denied = await ConfirmStateMutation(ctx, path, before, proposed, "FLEET_RECOVERY_INTENT", true);
+        if (denied is not null) return denied;
+        if (!AuditActorCurrent(ctx, true) || ctx.RequestAborted.IsCancellationRequested)
+            return Results.StatusCode(403);
+        WriteAuditedState(path, proposed);
+        var errors = await RollbackAttempted(path, journal, gateways);
+        await Audit(Actor(ctx), "FLEET_ROLLOUT_RECOVERY", new { id, errors });
+        return errors.Count == 0 ? Results.Ok(journal) :
+            Results.Json(new { transactionId = id, status = "manual-intervention-required", errors }, statusCode: 502);
+    }
+    finally { if (fleetHeld) fleetGate.Release(); rolloutGate.Release(); }
 }).RequireAuthorization(p => p.RequireRole("Administrator"));
 app.MapGet("/admin/api/fleet/rollouts", () => Results.Ok(
     Directory.GetFiles(rolloutFolder,"rollout_*.json").OrderByDescending(x=>x).Take(30)
@@ -1999,13 +2257,13 @@ HttpClient CreateFleetClient(FleetGateway row)
     if(matches.Count != 1 || !matches[0].HasPrivateKey) throw new InvalidOperationException("Missing controller certificate for "+row.Id);
     var handler=new HttpClientHandler {AllowAutoRedirect=false,UseProxy=false};
     handler.ClientCertificates.Add(matches[0]);
-    return new HttpClient(handler,disposeHandler:true) {Timeout=TimeSpan.FromSeconds(8)};
+    return new HttpClient(handler,disposeHandler:true) {Timeout=TimeSpan.FromSeconds(8), MaxResponseContentBufferSize=65536};
 }
 
 // Version 0.1 setup APIs and independently verified YARP runtime state.
-app.MapSetupCenter(privateDir);
+app.MapSetupCenter(privateDir, Audit);
 app.MapCapabilityRegistry();
-app.MapOnboardingApi(privateDir);
+app.MapOnboardingApi(privateDir, ConfirmStateMutation, WriteAuditedState, Audit);
 // Enforce onboarding state server-side; hiding navigation is never a security boundary.
 app.Use(async (ctx, next) =>
 {
@@ -2076,7 +2334,7 @@ if (peerSyncSettings is not null && peerStateJournal is not null && peerSigner i
         return Results.NoContent();
     });
 }
-app.MapOrganizationProfile(privateDir);
+app.MapOrganizationProfile(privateDir, Audit);
 app.MapTlsInventory();
 app.MapReverseProxy(proxyPipeline =>
 {

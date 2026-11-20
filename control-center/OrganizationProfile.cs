@@ -50,7 +50,7 @@ public static class OrganizationProfileModule
         return null;
     }
 
-    public static void MapOrganizationProfile(this WebApplication app, string stateDir)
+    public static void MapOrganizationProfile(this WebApplication app, string stateDir, Func<string, string, object?, Task> audit)
     {
         app.MapGet("/admin/api/organization", () => Results.Ok(Read(stateDir)))
             .RequireAuthorization();
@@ -80,12 +80,8 @@ public static class OrganizationProfileModule
                     File.Move(tmp, dest, true);
                 }
                 finally { if (File.Exists(tmp)) File.Delete(tmp); }
-                // Local audit is informative, NOT independently immutable evidence.
-                var audit = new { utc = DateTimeOffset.UtcNow, actor = next.UpdatedBy,
-                    action = "ORGANIZATION_PROFILE_UPDATED", revision = next.Revision,
-                    organizationName = next.OrganizationName, sector = next.Sector };
-                await File.AppendAllTextAsync(Path.Combine(stateDir, "admin-audit.jsonl"),
-                    JsonSerializer.Serialize(audit, Json) + Environment.NewLine, ctx.RequestAborted);
+                await audit(next.UpdatedBy, "ORGANIZATION_PROFILE_UPDATED",
+                    new { revision = next.Revision, organizationName = next.OrganizationName, sector = next.Sector });
                 return (IResult)Results.Ok(next);
             }
             finally { Gate.Release(); }

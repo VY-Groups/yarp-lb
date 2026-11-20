@@ -80,4 +80,55 @@ try
     Must(failedClosed, "corrupt sequence state fails closed");
 }
 finally { Directory.Delete(sequenceDirectory, recursive: true); }
+var journalDir = Directory.CreateTempSubdirectory("fleet-journal-");
+try
+{
+    var id = "rollout_" + new string('A', 24);
+    var path = Path.Combine(journalDir.FullName, id + ".json");
+    var digest = new string('B', 64);
+    var original = new string('C', 64);
+    var journal = new JsonObject { ["schema"] = 2, ["id"] = id, ["fleetDigest"] = digest,
+        ["status"] = "starting", ["details"] = new JsonArray(),
+        ["targets"] = new JsonArray(
+            new JsonObject { ["id"] = "one", ["originalRevision"] = original, ["prepareSent"] = false, ["rollbackVerified"] = false },
+            new JsonObject { ["id"] = "two", ["originalRevision"] = original, ["prepareSent"] = false, ["rollbackVerified"] = false }) };
+    Must(!FleetRolloutJournal.HasUnresolved(journalDir.FullName), "empty journal permits rollout");
+    FleetRolloutJournal.Write(path, journal);
+    Must(FleetRolloutJournal.HasUnresolved(journalDir.FullName), "persisted initial plan blocks overlapping rollout after restart");
+    var first = FleetRolloutJournal.Targets(journal)[0];
+    first["prepareSent"] = true;
+    journal["status"] = "preparing";
+    FleetRolloutJournal.Log(path, journal, "one", "prepare", "dispatching");
+    var recovered = FleetRolloutJournal.Read(path);
+    Must(FleetRolloutJournal.RecoveryAllowed(recovered, id, digest), "recovery uses valid durable original inventory");
+    Must(!FleetRolloutJournal.RecoveryAllowed(recovered, id, new string('D',64)), "changed inventory rejects recovery");
+    Must(!FleetRolloutJournal.RecoveryAllowed(recovered, "rollout_"+new string('F',24), digest), "wrong transaction rejects recovery");
+    var targets = FleetRolloutJournal.Targets(recovered);
+    Must(targets.Count(FleetRolloutJournal.NeedsRollback) == 1 && FleetRolloutJournal.NeedsRollback(targets[0]),
+        "crash after dispatch marker recovers attempted target only");
+    Must(!FleetRolloutJournal.CompleteRollback(targets[0], new string('E',64)) &&
+        FleetRolloutJournal.NeedsRollback(targets[0]), "wrong rollback revision remains unresolved");
+    Must(!FleetRolloutJournal.CompleteRollback(targets[1], original), "never dispatched target cannot be reported restored");
+    Must(FleetRolloutJournal.CompleteRollback(targets[0], original), "original revision marks attempted target restored");
+    recovered["status"] = "rollback-verified";
+    FleetRolloutJournal.Write(path, recovered);
+    Must(!FleetRolloutJournal.HasUnresolved(journalDir.FullName) &&
+        FleetRolloutJournal.Targets(FleetRolloutJournal.Read(path)).All(t => !FleetRolloutJournal.NeedsRollback(t)),
+        "verified rollback survives restart and clears roll-forward fence");
+    targets[0]["rollbackVerified"] = false;
+    FleetRolloutJournal.Write(path, recovered);
+    Must(FleetRolloutJournal.HasUnresolved(journalDir.FullName), "terminal label alone cannot hide unresolved target");
+    targets[0]["rollbackVerified"] = true;
+    recovered["status"] = "rollback-attempted";
+    recovered.Remove("schema");
+    FleetRolloutJournal.Write(path, recovered);
+    Must(FleetRolloutJournal.HasUnresolved(journalDir.FullName) &&
+        !FleetRolloutJournal.RecoveryAllowed(recovered, id, digest), "legacy ambiguous rollback requires reconciliation");
+    File.WriteAllText(path, "{invalid");
+    var failedClosed = false;
+    try { FleetRolloutJournal.HasUnresolved(journalDir.FullName); }
+    catch (System.Text.Json.JsonException) { failedClosed = true; }
+    Must(failedClosed, "corrupt journal cannot allow new rollout");
+}
+finally { journalDir.Delete(recursive: true); }
 Console.WriteLine("ALL fleet config signature acceptance tests passed.");
