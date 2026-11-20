@@ -426,14 +426,14 @@ def main():
                 "email":"operator@example.invalid","role":"Operator"})
         with Idp(root,origin,idp_key,idp_cert) as idp:
             config=root/"oidc.json"
-            secret=Path(sd)/"client-secret"
-            write_private_fixture_file(secret, idp.secret)
+            client_secret_path=Path(sd)/"client-secret"
+            write_private_fixture_file(client_secret_path, idp.secret)
             # ClientSecretFile is a path reference, not the secret value.
-            config.write_text(json.dumps({"Issuer":idp.issuer,"ClientId":idp.client,"ClientSecretFile":str(secret),
+            config.write_text(json.dumps({"Issuer":idp.issuer,"ClientId":idp.client,"ClientSecretFile":str(client_secret_path),
                 "ManagementOrigin":origin,"RequiredAcr":"urn:fixture:fido","RequiredAmr":"fido2",
                 "BreakGlassUsername":"recovery","Accounts":[{"Subject":"operator-subject",
                    "Username":"operator","Group":"gateway-operators","Role":"Operator"}]}))
-            for path in (config,secret): path.chmod(0o600)
+            config.chmod(0o600)
             with patch.dict(os.environ,{"GATEWAY_OIDC_CONFIG_FILE":str(config),"SSL_CERT_FILE":str(trust)}):
                 with gateway(cwd,dll,root,hp,tlsport) as base:
                     a,_=browser(origin,ctx)
