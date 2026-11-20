@@ -862,6 +862,68 @@ async Task<IResult?> ConfirmAccountMutation(HttpContext ctx, byte[] before, List
         return Results.Conflict(new { error = "Account state changed during external audit confirmation" });
     return null;
 }
+// Call only under the writer lock for the target file. The proposed bytes
+// are persisted verbatim, so the signed digest describes the actual state.
+byte[] AuditStateBytes(string path) => File.Exists(path) ? File.ReadAllBytes(path) : [];
+bool AuditActorCurrent(HttpContext ctx, bool administratorOnly)
+{
+    var active = ReadUsers().SingleOrDefault(x => x.Username.Equals(Actor(ctx), StringComparison.OrdinalIgnoreCase));
+    if (active is null || !active.Enabled || active.SecurityStamp != ctx.User.FindFirst("stamp")?.Value ||
+        active.Role != ctx.User.FindFirst(ClaimTypes.Role)?.Value ||
+        (administratorOnly ? active.Role != "Administrator" : active.Role is not ("Administrator" or "Operator")))
+        return false;
+    return oidcPolicy is null || oidcPolicy.IsBreakGlass(active.Username) ||
+        (oidcPolicy.SessionValid(ctx.User, active.Username, active.Role, DateTimeOffset.UtcNow, stepUp: true) &&
+         EnterpriseOidcPolicy.AfterRevocation(ctx.User, active.OidcRevokedBefore));
+}
+async Task<IResult?> ConfirmStateMutation(HttpContext ctx, string path, byte[] before, byte[] proposed,
+    string operation, bool administratorOnly)
+{
+    if (externalAuditIntent is null)
+    {
+        WriteAuditedState(path, proposed);
+        return null;
+    }
+    if (!AuditActorCurrent(ctx, administratorOnly)) return Results.StatusCode(403);
+    if (!AuditStateBytes(path).AsSpan().SequenceEqual(before))
+        return Results.Conflict(new { error = "State changed before external audit confirmation" });
+    if (!await externalAuditIntent.ConfirmAsync(Actor(ctx), operation,
+        Convert.ToHexString(SHA256.HashData(before)), Convert.ToHexString(SHA256.HashData(proposed)),
+        ctx.RequestAborted) || ctx.RequestAborted.IsCancellationRequested)
+        return Results.Json(new { error = "External audit receipt unavailable; state unchanged" }, statusCode: 503);
+
+    // Account updates use the same lock. Acquire it only after collector I/O,
+    // then hold it across final authorization/baseline checks and the write so
+    // an account disable/reset commits either before or after this mutation.
+    try { await loginGate.WaitAsync(ctx.RequestAborted); }
+    catch (OperationCanceledException)
+    { return Results.Json(new { error = "Account mutation commit cancelled; state unchanged" }, statusCode: 503); }
+    try
+    {
+        if (!AuditActorCurrent(ctx, administratorOnly)) return Results.StatusCode(403);
+        if (!AuditStateBytes(path).AsSpan().SequenceEqual(before))
+            return Results.Conflict(new { error = "State changed during external audit confirmation" });
+        WriteAuditedState(path, proposed);
+        return null;
+    }
+    finally { loginGate.Release(); }
+}
+void WriteAuditedState(string path, byte[] proposed)
+{
+    var temp = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+    try
+    {
+        var options = new FileStreamOptions { Mode = FileMode.CreateNew, Access = FileAccess.Write, Share = FileShare.None };
+        if (!OperatingSystem.IsWindows()) options.UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
+        using (var stream = new FileStream(temp, options))
+        {
+            stream.Write(proposed);
+            stream.Flush(flushToDisk: true);
+        }
+        File.Move(temp, path, true);
+    }
+    finally { if (File.Exists(temp)) File.Delete(temp); }
+}
 Task Audit(string actor, string action, object? details = null) =>
     localAudit.AppendAsync(actor, action, details);
 IResult SignInResult(AdminUser user, HttpContext ctx)
@@ -1327,10 +1389,13 @@ app.MapPost("/admin/api/inventory", async (HttpContext ctx, InventoryInput input
     await gate.WaitAsync();
     try
     {
+        var before = externalAuditIntent is null ? Array.Empty<byte>() : AuditStateBytes(inventoryPath);
         var entries = ReadInventory();
         if (entries.Any(x => x.Id == input.Id)) return Results.Conflict(new { error = "ID already exists" });
         entries.Add(input);
-        File.WriteAllText(inventoryPath, JsonSerializer.Serialize(entries));
+        var proposed = JsonSerializer.SerializeToUtf8Bytes(entries);
+        var denied = await ConfirmStateMutation(ctx, inventoryPath, before, proposed, "INVENTORY_ADD_INTENT", false);
+        if (denied is not null) return denied;
         await Audit(Actor(ctx), "INVENTORY_ADDED", new { input.Id, input.Type });
         return Results.Ok(new { added = input.Id });
     }
@@ -1341,10 +1406,13 @@ app.MapDelete("/admin/api/inventory/{id}", async (HttpContext ctx, string id) =>
     await gate.WaitAsync();
     try
     {
+        var before = externalAuditIntent is null ? Array.Empty<byte>() : AuditStateBytes(inventoryPath);
         var items = ReadInventory();
         var changed = items.RemoveAll(x => x.Id == id);
         if (changed == 0) return Results.NotFound();
-        File.WriteAllText(inventoryPath, JsonSerializer.Serialize(items));
+        var proposed = JsonSerializer.SerializeToUtf8Bytes(items);
+        var denied = await ConfirmStateMutation(ctx, inventoryPath, before, proposed, "INVENTORY_DELETE_INTENT", false);
+        if (denied is not null) return denied;
         await Audit(Actor(ctx), "INVENTORY_DELETED", new { id });
         return Results.Ok(new { deleted = id });
     }
@@ -1768,12 +1836,6 @@ var fleetGate = new SemaphoreSlim(1, 1);
 List<FleetGateway> ReadFleet() => File.Exists(fleetPath)
     ? JsonSerializer.Deserialize<List<FleetGateway>>(File.ReadAllText(fleetPath), jsonOptions) ?? new()
     : new();
-void WriteFleet(List<FleetGateway> rows)
-{
-    var temp = fleetPath + ".tmp";
-    File.WriteAllText(temp, JsonSerializer.Serialize(rows));
-    File.Move(temp, fleetPath, true);
-}
 app.MapGet("/admin/api/fleet", () => Results.Ok(ReadFleet())).RequireAuthorization();
 app.MapPost("/admin/api/fleet", async (HttpContext ctx, FleetGateway row) =>
 {
@@ -1785,9 +1847,13 @@ app.MapPost("/admin/api/fleet", async (HttpContext ctx, FleetGateway row) =>
     await fleetGate.WaitAsync();
     try
     {
+        var before = externalAuditIntent is null ? Array.Empty<byte>() : AuditStateBytes(fleetPath);
         var list = ReadFleet();
         if (list.Any(x => x.Id.Equals(row.Id, StringComparison.OrdinalIgnoreCase))) return Results.Conflict(new { error = "Duplicate gateway ID" });
-        list.Add(row); WriteFleet(list);
+        list.Add(row);
+        var proposed = JsonSerializer.SerializeToUtf8Bytes(list);
+        var denied = await ConfirmStateMutation(ctx, fleetPath, before, proposed, "FLEET_REGISTER_INTENT", true);
+        if (denied is not null) return denied;
         await Audit(Actor(ctx), "FLEET_GATEWAY_REGISTERED", new { row.Id, row.Url });
         return Results.Ok(new { registered = true });
     }
@@ -1799,9 +1865,12 @@ app.MapDelete("/admin/api/fleet/{id}", async (HttpContext ctx, string id) =>
     await fleetGate.WaitAsync();
     try
     {
+        var before = externalAuditIntent is null ? Array.Empty<byte>() : AuditStateBytes(fleetPath);
         var list = ReadFleet();
         if (list.RemoveAll(x => x.Id == id) != 1) return Results.NotFound();
-        WriteFleet(list);
+        var proposed = JsonSerializer.SerializeToUtf8Bytes(list);
+        var denied = await ConfirmStateMutation(ctx, fleetPath, before, proposed, "FLEET_UNREGISTER_INTENT", true);
+        if (denied is not null) return denied;
         await Audit(Actor(ctx), "FLEET_GATEWAY_UNREGISTERED", new { id });
         return Results.Ok(new { removed = id });
     }
