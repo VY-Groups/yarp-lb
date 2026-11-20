@@ -840,6 +840,28 @@ void WriteUsers(List<AdminUser> users)
     }
     finally { if (File.Exists(tmp)) File.Delete(tmp); }
 }
+// Capture the exact persisted account baseline under the existing login gate.
+byte[] AccountSnapshot() => File.Exists(usersPath) ? File.ReadAllBytes(usersPath) : [];
+async Task<IResult?> ConfirmAccountMutation(HttpContext ctx, byte[] before, List<AdminUser> proposed, string operation)
+{
+    if (externalAuditIntent is null) return null;
+    if (!AccountSnapshot().AsSpan().SequenceEqual(before))
+        return Results.Conflict(new { error = "Account state changed before external audit confirmation" });
+    // Recheck the authenticated actor under the account mutation lock: a
+    // request may have queued behind another account's offboarding/reset.
+    var active = ReadUsers().SingleOrDefault(x => x.Username.Equals(Actor(ctx), StringComparison.OrdinalIgnoreCase));
+    if (active is null || !active.Enabled || active.Role != "Administrator" ||
+        active.SecurityStamp != ctx.User.FindFirst("stamp")?.Value)
+        return Results.StatusCode(403);
+    if (!await externalAuditIntent.ConfirmAsync(Actor(ctx), operation,
+            Convert.ToHexString(SHA256.HashData(before)),
+            Convert.ToHexString(SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(proposed))), ctx.RequestAborted) ||
+        ctx.RequestAborted.IsCancellationRequested)
+        return Results.Json(new { error = "External audit receipt unavailable; account state unchanged" }, statusCode: 503);
+    if (!AccountSnapshot().AsSpan().SequenceEqual(before))
+        return Results.Conflict(new { error = "Account state changed during external audit confirmation" });
+    return null;
+}
 Task Audit(string actor, string action, object? details = null) =>
     localAudit.AppendAsync(actor, action, details);
 IResult SignInResult(AdminUser user, HttpContext ctx)
@@ -1094,10 +1116,13 @@ app.MapPost("/admin/api/users", async (HttpContext ctx, UserInput input) =>
     await loginGate.WaitAsync();
     try
     {
+        var before = externalAuditIntent is null ? Array.Empty<byte>() : AccountSnapshot();
         var users = ReadUsers();
         if (users.Any(x => x.Username.Equals(input.Username, StringComparison.OrdinalIgnoreCase)))
             return Results.Conflict(new { error = "Username exists" });
         users.Add(NewUser(input.Username, input.Role, input.Password, input.Email));
+        var denied = await ConfirmAccountMutation(ctx, before, users, "USER_CREATE_INTENT");
+        if (denied is not null) return denied;
         WriteUsers(users);
         await Audit(Actor(ctx), "USER_CREATED", new { input.Username, input.Role });
         return Results.Ok(new { created = input.Username });
@@ -1110,6 +1135,7 @@ app.MapPost("/admin/api/users/{username}/password", async (HttpContext ctx, stri
     await loginGate.WaitAsync();
     try
     {
+        var before = externalAuditIntent is null ? Array.Empty<byte>() : AccountSnapshot();
         var users = ReadUsers();
         var user = users.FirstOrDefault(x => x.Username.Equals(username, StringComparison.OrdinalIgnoreCase));
         if (user is null) return Results.NotFound();
@@ -1118,6 +1144,8 @@ app.MapPost("/admin/api/users/{username}/password", async (HttpContext ctx, stri
         { Enabled = user.Enabled, OidcRevokedBefore = user.OidcRevokedBefore,
             OidcLogoutAuditThrough = user.OidcLogoutAuditThrough };
         users[users.IndexOf(user)] = updated;
+        var denied = await ConfirmAccountMutation(ctx, before, users, "USER_PASSWORD_RESET_INTENT");
+        if (denied is not null) return denied;
         WriteUsers(users);
         await Audit(Actor(ctx), "PASSWORD_RESET", new { username });
         return Results.Ok(new { changed = true, reLoginRequired = true });
@@ -1132,11 +1160,15 @@ app.MapPost("/admin/api/users/{username}/disable", async (HttpContext ctx, strin
     try
     {
         if (string.Equals(username, Actor(ctx), StringComparison.OrdinalIgnoreCase)) return Results.BadRequest(new { error = "Cannot disable own account" });
+        var before = externalAuditIntent is null ? Array.Empty<byte>() : AccountSnapshot();
         var users = ReadUsers(); var i = users.FindIndex(x => x.Username.Equals(username, StringComparison.OrdinalIgnoreCase));
         if (i < 0) return Results.NotFound();
         if (users[i].Role == "Administrator" && users.Count(x => x.Enabled && x.Role == "Administrator") <= 1)
             return Results.BadRequest(new { error = "Last active administrator cannot be disabled" });
-        users[i] = users[i] with { Enabled = false, SecurityStamp = Convert.ToHexString(RandomNumberGenerator.GetBytes(24)) }; WriteUsers(users);
+        users[i] = users[i] with { Enabled = false, SecurityStamp = Convert.ToHexString(RandomNumberGenerator.GetBytes(24)) };
+        var denied = await ConfirmAccountMutation(ctx, before, users, "USER_DISABLE_INTENT");
+        if (denied is not null) return denied;
+        WriteUsers(users);
         await Audit(Actor(ctx), "USER_OFFBOARDED", new { username });
         return Results.Ok(new { disabled = username });
     }
@@ -1147,9 +1179,13 @@ app.MapPost("/admin/api/users/{username}/enable", async (HttpContext ctx, string
     await loginGate.WaitAsync();
     try
     {
+        var before = externalAuditIntent is null ? Array.Empty<byte>() : AccountSnapshot();
         var users = ReadUsers(); var i = users.FindIndex(x => x.Username.Equals(username, StringComparison.OrdinalIgnoreCase));
         if (i < 0) return Results.NotFound();
-        users[i] = users[i] with { Enabled = true, SecurityStamp = Convert.ToHexString(RandomNumberGenerator.GetBytes(24)) }; WriteUsers(users);
+        users[i] = users[i] with { Enabled = true, SecurityStamp = Convert.ToHexString(RandomNumberGenerator.GetBytes(24)) };
+        var denied = await ConfirmAccountMutation(ctx, before, users, "USER_ENABLE_INTENT");
+        if (denied is not null) return denied;
+        WriteUsers(users);
         await Audit(Actor(ctx), "USER_REENABLED", new { username });
         return Results.Ok(new { enabled = username });
     }
