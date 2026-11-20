@@ -14,7 +14,8 @@ tcpA.Start(); tcpB.Start();
 var proxyBackend = new TcpListener(IPAddress.Loopback,19113);
 var idleBackend = new TcpListener(IPAddress.Loopback,19114);
 var halfCloseBackend = new TcpListener(IPAddress.Loopback,19115);
-proxyBackend.Start(); idleBackend.Start(); halfCloseBackend.Start();
+var admissionBackend = new TcpListener(IPAddress.Loopback,19116);
+proxyBackend.Start(); idleBackend.Start(); halfCloseBackend.Start(); admissionBackend.Start();
 using var udpA = new UdpClient(new IPEndPoint(IPAddress.Loopback, 19121));
 using var udpB = new UdpClient(new IPEndPoint(IPAddress.Loopback, 19122));
 long udpAReceived = 0;
@@ -22,7 +23,7 @@ long udpBReceived = 0;
 var workers = new [] {
     TcpEcho(tcpA, "A", stop.Token), TcpEcho(tcpB, "B", stop.Token),
     ProxyProtocolBackend(proxyBackend, stop.Token), IdleBackend(idleBackend, stop.Token),
-    HalfCloseBackend(halfCloseBackend, stop.Token),
+    HalfCloseBackend(halfCloseBackend, stop.Token), AdmissionBackend(admissionBackend, stop.Token),
     UdpEcho(udpA, "A", stop.Token, () => Interlocked.Increment(ref udpAReceived)),
     UdpEcho(udpB, "B", stop.Token, () => Interlocked.Increment(ref udpBReceived))
 };
@@ -42,15 +43,20 @@ File.WriteAllText(configFile, JsonSerializer.Serialize(new {
       new { Name = "tcp-half-close", ListenHost="127.0.0.1", ListenPort=19015,
         TcpIdleTimeoutSeconds=5,
         Backends = new [] { new { Host="127.0.0.1", Port=19115 } } },
+      new { Name = "tcp-admission", ListenHost="127.0.0.1", ListenPort=19016,
+        TcpMaxConnections=2, TcpIdleTimeoutSeconds=30,
+        Backends = new [] { new { Host="127.0.0.1", Port=19116 } } },
       new { Name = "tcp-drain", ListenHost="127.0.0.1", ListenPort=19014,
         Backends = new [] { new { Host="127.0.0.1", Port=19111, DrainNewConnections=true },
           new { Host="127.0.0.1", Port=19112, DrainNewConnections=false } } } },
-    Udp = new [] { new { Name = "udp-echo", ListenHost="127.0.0.1", ListenPort=19021, UdpIdleTimeoutSeconds=30,
+    Udp = new object [] { new { Name = "udp-echo", ListenHost="127.0.0.1", ListenPort=19021, UdpIdleTimeoutSeconds=30,
       Backends = new [] { new { Host="127.0.0.1", Port=19121, DrainNewConnections=false }, new { Host="127.0.0.1", Port=19122, DrainNewConnections=false } } },
       new { Name = "udp-drain", ListenHost="127.0.0.1", ListenPort=19022, UdpIdleTimeoutSeconds=30,
       Backends = new [] { new { Host="127.0.0.1", Port=19121, DrainNewConnections=true }, new { Host="127.0.0.1", Port=19122, DrainNewConnections=false } } },
       new { Name = "udp-idle", ListenHost="127.0.0.1", ListenPort=19024, UdpIdleTimeoutSeconds=2,
       Backends = new [] { new { Host="127.0.0.1", Port=19121, DrainNewConnections=false }, new { Host="127.0.0.1", Port=19122, DrainNewConnections=false } } },
+      new { Name = "udp-admission", ListenHost="127.0.0.1", ListenPort=19025, UdpMaxSessions=1, UdpIdleTimeoutSeconds=2,
+      Backends = new [] { new { Host="127.0.0.1", Port=19121, DrainNewConnections=false } } },
       new { Name = "udp-all-drained", ListenHost="127.0.0.1", ListenPort=19023, UdpIdleTimeoutSeconds=30,
       Backends = new [] { new { Host="127.0.0.1", Port=19121, DrainNewConnections=true }, new { Host="127.0.0.1", Port=19122, DrainNewConnections=true } } } }
 }));
@@ -60,6 +66,7 @@ info.ArgumentList.Add(dll); info.ArgumentList.Add(configFile);
 using var proxy=Process.Start(info) ?? throw new Exception("Unable to start L4 process");
 var udpReady = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 var idleRetired = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+var admissionRetired = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 var stdout=ReadProxyOutput();
 async Task<string> ReadProxyOutput()
 {
@@ -69,13 +76,16 @@ async Task<string> ReadProxyOutput()
         "L4_UDP_READY udp-echo 127.0.0.1:19021",
         "L4_UDP_READY udp-drain 127.0.0.1:19022",
         "L4_UDP_READY udp-all-drained 127.0.0.1:19023",
-        "L4_UDP_READY udp-idle 127.0.0.1:19024"
+        "L4_UDP_READY udp-idle 127.0.0.1:19024",
+        "L4_UDP_READY udp-admission 127.0.0.1:19025",
+        "L4_TCP_READY tcp-admission 127.0.0.1:19016"
     };
     while (await proxy.StandardOutput.ReadLineAsync() is { } line)
     {
         output.AppendLine(line);
         expected.Remove(line);
         if (line == "L4_UDP_RETIRED udp-idle count=1") idleRetired.TrySetResult();
+        if (line == "L4_UDP_RETIRED udp-admission count=1") admissionRetired.TrySetResult();
         if (expected.Count == 0) udpReady.TrySetResult();
     }
     if (expected.Count != 0)
@@ -160,6 +170,7 @@ try
     Assert(await ValidateProxyHeader(), "PROXY v1 reports source and destination before application bytes");
     Assert(await ValidateTcpHalfClose(), "client half-close reaches backend while backend response still drains");
     Assert(await ValidateTcpIdle(), "idle TCP stream closed by configured timeout");
+    await ValidateAdmission();
     // Verify active health rejects down nodes rather than repeatedly relying on connect exceptions.
     tcpA.Stop();
     await Task.Delay(2600);
@@ -172,7 +183,7 @@ try
 finally
 {
     stop.Cancel();
-    tcpA.Stop();tcpB.Stop();proxyBackend.Stop();idleBackend.Stop();halfCloseBackend.Stop();
+    tcpA.Stop();tcpB.Stop();proxyBackend.Stop();idleBackend.Stop();halfCloseBackend.Stop();admissionBackend.Stop();
     if(!proxy.HasExited)proxy.Kill(entireProcessTree:true);
     await proxy.WaitForExitAsync();
     try { await Task.WhenAll(workers); } catch {}
@@ -216,6 +227,60 @@ async Task<bool> ValidateProxyHeader()
         tokens[2]=="127.0.0.1" && tokens[3]=="127.0.0.1" &&
         int.TryParse(tokens[4],out var sourcePort) && sourcePort>0 &&
         int.TryParse(tokens[5],out var targetPort) && targetPort==19012;
+}
+async Task ValidateAdmission()
+{
+    async Task<TcpClient> Connect()
+    {
+        var client = new TcpClient(AddressFamily.InterNetwork);
+        try { await client.ConnectAsync(IPAddress.Loopback,19016); return client; }
+        catch { client.Dispose(); throw; }
+    }
+    async Task<bool> Ready(TcpClient client)
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+        try { return await client.GetStream().ReadAsync(new byte[1],timeout.Token) == 1; }
+        catch (IOException) { return false; }
+        catch (SocketException) { return false; }
+    }
+    using var one = await Connect();
+    using var two = await Connect();
+    Assert(await Ready(one) && await Ready(two), "two TCP streams acquire configured slots");
+    using (var extra = await Connect())
+        Assert(!await Ready(extra), "TCP overload closes extra connection before backend greeting");
+    one.Client.Shutdown(SocketShutdown.Send);
+    using (var eof = new CancellationTokenSource(TimeSpan.FromSeconds(3)))
+        Assert(await one.GetStream().ReadAsync(new byte[1],eof.Token)==0, "half-close releases first TCP stream");
+    await WaitFor(async () =>
+    {
+        using var recovered = await Connect();
+        return await Ready(recovered);
+    });
+    await two.GetStream().WriteAsync(new byte[] { 42 });
+    using (var response = new CancellationTokenSource(TimeSpan.FromSeconds(3)))
+    {
+        var echoed = new byte[1];
+        Assert(await two.GetStream().ReadAsync(echoed,response.Token)==1 && echoed[0]==42,
+            "TCP overload and slot recovery preserve established stream");
+    }
+
+    using var first = new UdpClient(AddressFamily.InterNetwork);
+    using var extraUdp = new UdpClient(AddressFamily.InterNetwork);
+    first.Connect(IPAddress.Loopback,19025); extraUdp.Connect(IPAddress.Loopback,19025);
+    Assert((await UdpRoundTrip(first,"admitted")).EndsWith("admitted"), "UDP first session acquires slot");
+    var before = Interlocked.Read(ref udpAReceived);
+    await extraUdp.SendAsync(Encoding.UTF8.GetBytes("must-not-forward"));
+    using (var noReply = new CancellationTokenSource(TimeSpan.FromMilliseconds(500)))
+    {
+        var reply = false;
+        try { await extraUdp.ReceiveAsync(noReply.Token); reply = true; }
+        catch (OperationCanceledException) when (noReply.IsCancellationRequested) { }
+        catch (SocketException ex) when (OperatingSystem.IsWindows() && ex.SocketErrorCode==SocketError.ConnectionReset) { }
+        Assert(!reply && Interlocked.Read(ref udpAReceived)==before, "UDP full table drops new session without forwarding");
+    }
+    Assert((await UdpRoundTrip(first,"preserved")).EndsWith("preserved"), "UDP capacity preserves existing session");
+    await admissionRetired.Task.WaitAsync(TimeSpan.FromSeconds(6));
+    Assert((await UdpRoundTrip(extraUdp,"recovered")).EndsWith("recovered"), "UDP capacity recovers after idle expiry");
 }
 async Task<bool> ValidateTcpIdle()
 {
@@ -404,4 +469,33 @@ static async Task HalfCloseBackend(TcpListener listener, CancellationToken token
     }
     catch(OperationCanceledException) { }
     catch(SocketException) when(token.IsCancellationRequested) { }
+}
+
+static async Task AdmissionBackend(TcpListener listener, CancellationToken token)
+{
+    try
+    {
+        while (!token.IsCancellationRequested)
+        {
+            var client = await listener.AcceptTcpClientAsync(token);
+            _ = Task.Run(async () =>
+            {
+                using (client)
+                {
+                    try
+                    {
+                        var stream = client.GetStream();
+                        await stream.WriteAsync(new byte[] { 1 },token);
+                        var buffer = new byte[64];
+                        int count;
+                        while ((count = await stream.ReadAsync(buffer,token)) > 0)
+                            await stream.WriteAsync(buffer.AsMemory(0,count),token);
+                    }
+                    catch (Exception ex) when (ex is IOException or SocketException or OperationCanceledException) { }
+                }
+            });
+        }
+    }
+    catch (OperationCanceledException) when (token.IsCancellationRequested) { }
+    catch (SocketException) when (token.IsCancellationRequested) { }
 }

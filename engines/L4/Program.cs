@@ -27,6 +27,8 @@ foreach (var listener in listeners)
         bind.AddressFamily != AddressFamily.InterNetwork ||
         (!config.AllowNonLoopbackListeners && !IPAddress.IsLoopback(bind)) ||
         listener.Backends is not { Length: > 0 and <= 16 } ||
+        listener.TcpMaxConnections is < 1 or > 4096 ||
+        listener.UdpMaxSessions is < 1 or > 4096 ||
         listener.TcpIdleTimeoutSeconds is < 1 or > 3600 ||
         listener.UdpIdleTimeoutSeconds is < 1 or > 3600 ||
         listener.ProbeIntervalSeconds is < 1 or > 60 ||
@@ -40,6 +42,7 @@ Console.CancelKeyPress += (_, e) => { e.Cancel = true; stop.Cancel(); };
 using var sigterm = OperatingSystem.IsLinux()
     ? PosixSignalRegistration.Create(PosixSignal.SIGTERM, e => { e.Cancel = true; stop.Cancel(); })
     : null;
+using var forceTcpStop = new CancellationTokenSource();
 var activeTcp = new ConcurrentDictionary<long, Task>();
 long nextTcp = 0;
 var loops = new List<Task>();
@@ -54,7 +57,12 @@ finally
 {
     // Existing TCP streams may finish before forceful process exit.
     var all = Task.WhenAll(activeTcp.Values.ToArray());
-    await Task.WhenAny(all, Task.Delay(TimeSpan.FromSeconds(5)));
+    if (await Task.WhenAny(all, Task.Delay(TimeSpan.FromSeconds(5))) != all)
+    {
+        forceTcpStop.Cancel();
+        await Task.WhenAny(all, Task.Delay(TimeSpan.FromSeconds(2)));
+    }
+    if (all.IsCompleted) await all;
 }
 return 0;
 
@@ -64,7 +72,16 @@ async Task RunTcp(L4Listener cfg, CancellationToken token)
     listener.Start(256);
     Console.WriteLine($"L4_TCP_READY {cfg.Name} {cfg.ListenHost}:{cfg.ListenPort}");
     long cursor = -1;
+    int admitted = 0;
+    long rejected = 0;
     var targets = cfg.Backends.Select(b => new TcpTarget(b)).ToArray();
+    async Task ForwardAdmitted(TcpClient client, long chosen)
+    {
+        try { await ProxyTcp(client, cfg, targets, chosen, token, forceTcpStop.Token); }
+        catch (Exception ex) when (ex is IOException or SocketException or ObjectDisposedException or OperationCanceledException)
+        { /* A transport failure terminates this stream, never replays bytes. */ }
+        finally { client.Dispose(); Interlocked.Decrement(ref admitted); }
+    }
     var probes = ProbeTcpTargets(targets, cfg.ProbeIntervalSeconds, token);
     try
     {
@@ -74,15 +91,30 @@ async Task RunTcp(L4Listener cfg, CancellationToken token)
             try { client = await listener.AcceptTcpClientAsync(token); }
             catch (OperationCanceledException) when (token.IsCancellationRequested) { break; }
             catch (SocketException) when (token.IsCancellationRequested) { break; }
+            // Only the accept loop acquires slots; every forwarding exit
+            // releases one. Reject before allocating upstream sockets/pumps.
+            if (Interlocked.Increment(ref admitted) > cfg.TcpMaxConnections)
+            {
+                Interlocked.Decrement(ref admitted);
+                Interlocked.Increment(ref rejected);
+                client.Dispose();
+                continue;
+            }
             var id = Interlocked.Increment(ref nextTcp);
-            var task = ProxyTcp(client, cfg, targets, Interlocked.Increment(ref cursor), token);
+            var task = ForwardAdmitted(client, Interlocked.Increment(ref cursor));
             activeTcp[id] = task;
-            _ = task.ContinueWith(completed => { activeTcp.TryRemove(id, out var removed); }, TaskScheduler.Default);
+            _ = task.ContinueWith(completed =>
+            {
+                activeTcp.TryRemove(id, out _);
+                // Observe unexpected faults even after the task leaves the registry.
+                if (completed.IsFaulted) _ = completed.Exception;
+            }, TaskScheduler.Default);
         }
     }
     finally
     {
         listener.Stop();
+        Console.WriteLine($"L4_TCP_ADMISSION_STOP {cfg.Name} active={Volatile.Read(ref admitted)} rejected={Interlocked.Read(ref rejected)}");
         try { await probes; }
         catch (OperationCanceledException) when (token.IsCancellationRequested) { }
     }
@@ -113,7 +145,8 @@ async Task ProbeTcpTargets(TcpTarget[] targets, int intervalSeconds, Cancellatio
     }
     catch (OperationCanceledException) when (token.IsCancellationRequested) { }
 }
-async Task ProxyTcp(TcpClient downstream, L4Listener cfg, TcpTarget[] targets, long chosen, CancellationToken stopToken)
+async Task ProxyTcp(TcpClient downstream, L4Listener cfg, TcpTarget[] targets, long chosen,
+    CancellationToken stopToken, CancellationToken forceToken)
 {
     using (downstream)
     {
@@ -128,7 +161,8 @@ async Task ProxyTcp(TcpClient downstream, L4Listener cfg, TcpTarget[] targets, l
         // Try another target only during CONNECT, before any application payload is sent.
         for (var i = 0; i < candidates.Length; i++)
         {
-            var target = candidates[(int)((chosen + i) % candidates.Length)].Backend;
+            if (stopToken.IsCancellationRequested) return;
+            var target = candidates[(int)((ulong)(chosen + i) % (ulong)candidates.Length)].Backend;
             var next = new TcpClient(AddressFamily.InterNetwork) { NoDelay = true };
             try
             {
@@ -145,6 +179,11 @@ async Task ProxyTcp(TcpClient downstream, L4Listener cfg, TcpTarget[] targets, l
         {
             using var clientStream = downstream.GetStream();
             using var serverStream = upstream.GetStream();
+            // The same idle/forced-stop bound covers the optional header and
+            // both pumps. Shutdown allows established streams a bounded drain.
+            using var idle = CancellationTokenSource.CreateLinkedTokenSource(forceToken);
+            var timeout = TimeSpan.FromSeconds(cfg.TcpIdleTimeoutSeconds);
+            idle.CancelAfter(timeout);
             // Explicitly opt in only when the upstream knows and TRUSTS PROXY v1.
             if (cfg.SendProxyProtocolV1)
             {
@@ -152,13 +191,11 @@ async Task ProxyTcp(TcpClient downstream, L4Listener cfg, TcpTarget[] targets, l
                 var destination = (IPEndPoint)downstream.Client.LocalEndPoint!;
                 var header = Encoding.ASCII.GetBytes(
                     $"PROXY TCP4 {source.Address} {destination.Address} {source.Port} {destination.Port}\r\n");
-                await serverStream.WriteAsync(header);
+                await serverStream.WriteAsync(header, idle.Token);
+                idle.CancelAfter(timeout);
             }
             // Shared idle timer is refreshed by successful traffic in EITHER direction.
             // Closing idle streams never triggers replay to a different backend.
-            using var idle = new CancellationTokenSource();
-            var timeout = TimeSpan.FromSeconds(cfg.TcpIdleTimeoutSeconds);
-            idle.CancelAfter(timeout);
             var towardBackend = Pump(clientStream, serverStream, upstream.Client, idle, timeout);
             var towardClient = Pump(serverStream, clientStream, downstream.Client, idle, timeout);
             await Task.WhenAll(towardBackend, towardClient);
@@ -242,7 +279,7 @@ async Task RunUdp(L4Listener cfg, CancellationToken token)
                 session.Close();
                 session = null;
             }
-            if (session is null && sessions.Count < 1024 && eligibleBackends.Length != 0)
+            if (session is null && sessions.Count < cfg.UdpMaxSessions && eligibleBackends.Length != 0)
             {
                 var selected = eligibleBackends[(int)((ulong)Interlocked.Increment(ref cursor) % (ulong)eligibleBackends.Length)];
                 var peer = new UdpClient(AddressFamily.InterNetwork);
@@ -294,6 +331,8 @@ static async Task RelayUdpResponse(UdpSession session, Socket downstream, long i
 sealed record L4Config(bool AllowNonLoopbackListeners, L4Listener[] Tcp, L4Listener[] Udp);
 sealed record L4Listener(string Name, string ListenHost, int ListenPort, L4Backend[] Backends)
 {
+    public int TcpMaxConnections { get; init; } = 1024;
+    public int UdpMaxSessions { get; init; } = 1024;
     public int TcpIdleTimeoutSeconds { get; init; } = 300;
     public int UdpIdleTimeoutSeconds { get; init; } = 30;
     public int ProbeIntervalSeconds { get; init; } = 2;
