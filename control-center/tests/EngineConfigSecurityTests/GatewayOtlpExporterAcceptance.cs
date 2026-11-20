@@ -320,8 +320,7 @@ public static class GatewayOtlpExporterAcceptance
     private static void EmitAccessLog(IServiceProvider provider)
     {
         var logger = provider.GetRequiredService<ILoggerFactory>().CreateLogger("GatewayCore.AccessLog");
-        logger.LogInformation(
-            "GATEWAY_ACCESS timestampUtc={TimestampUtc:o} clientIp={ClientIp} clientIpSource={ClientIpSource} method={Method} routeId={RouteId} statusCode={StatusCode} durationMs={DurationMs}",
+        GatewayOpenTelemetry.LogAccess(logger,
             DateTimeOffset.UtcNow, "203.0.113.17", "remote", "GET", "route_acceptance", 200, 12.5);
     }
 
