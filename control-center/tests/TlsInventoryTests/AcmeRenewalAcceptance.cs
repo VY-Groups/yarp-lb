@@ -370,6 +370,10 @@ internal static class AcmeRenewalAcceptance
             })
             {
                 fixedLength.Content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/json");
+                // A 413 may terminate the HTTP/1.1 connection without draining the
+                // rejected body. Do not reuse that socket for the chunked probe.
+                fixedLength.Headers.ConnectionClose = true;
+                fixedLength.Headers.ExpectContinue = true;
                 using var response = await client.SendAsync(fixedLength);
                 check(response.StatusCode == HttpStatusCode.RequestEntityTooLarge,
                     "Kestrel rejects an oversized Content-Length revocation body before JSON parsing");
@@ -382,7 +386,9 @@ internal static class AcmeRenewalAcceptance
             {
                 chunked.Content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/json");
                 chunked.Headers.TransferEncodingChunked = true;
-                using var response = await client.SendAsync(chunked);
+                chunked.Headers.ConnectionClose = true;
+                using var chunkedClient = new HttpClient { BaseAddress = new Uri(address) };
+                using var response = await chunkedClient.SendAsync(chunked);
                 check(response.StatusCode == HttpStatusCode.RequestEntityTooLarge,
                     "Kestrel rejects an oversized chunked revocation body");
             }
