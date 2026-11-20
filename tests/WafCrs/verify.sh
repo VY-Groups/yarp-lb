@@ -5,6 +5,16 @@ cd "$ROOT"
 DIR="$PWD/artifacts/waf-crs"
 mkdir -p "$DIR"
 COMPOSE="$ROOT/integrations/WafCrs/compose.lab.yml"
+# An explicitly chosen image must be immutable, from the expected upstream.
+# Omitted selection remains a rolling-tag disposable lab, never production.
+if [[ -n "${WAF_IMAGE:-}" && ! "$WAF_IMAGE" =~ ^owasp/modsecurity-crs@sha256:[a-f0-9]{64}$ ]]; then
+  echo "WAF_IMAGE must be an upstream repository digest" >&2
+  exit 64
+fi
+for phase in direct blocking detection proxy-only restored; do
+  rm -f "$DIR/benchmark-$phase.json"
+done
+rm -f "$DIR/benchmark-summary.json" "$DIR/waf-selected-image.txt"
 # Clear only this run's known synthetic result files; never count stale
 # evidence from an earlier invocation as a successful observation.
 for result in last-benign-status json-http-status xml-http-status large-json-http-status benign-query-http-status xss-http-status sqli-http-status traversal-http-status; do
@@ -73,6 +83,41 @@ waf_id="$(docker compose -f "$COMPOSE" ps --quiet waf)"
 waf_image_id="$(docker inspect "$waf_id" --format '{{.Image}}')"
 printf '%s\n' "$waf_image_id" > "$DIR/waf-image-id.txt"
 docker image inspect "$waf_image_id" --format '{{json .RepoDigests}}' > "$DIR/waf-image-digests.json"
+# Freeze the exact pulled image for every subsequent mode change.
+selected_digest="$(python3 - "$DIR/waf-image-digests.json" <<'PY'
+import json, re, sys
+digests = json.load(open(sys.argv[1], encoding="utf-8"))
+matches = sorted(d for d in digests or [] if re.fullmatch(r"owasp/modsecurity-crs@sha256:[a-f0-9]{64}", d))
+if len(matches) != 1:
+    raise SystemExit("Missing or ambiguous upstream WAF repository digest")
+print(matches[0])
+PY
+)"
+if [[ -n "${WAF_IMAGE:-}" && "$WAF_IMAGE" != "$selected_digest" ]]; then
+  echo "Pulled image does not match requested digest" >&2; exit 1
+fi
+export WAF_IMAGE="$selected_digest"
+printf '%s\n' "$WAF_IMAGE" > "$DIR/waf-selected-image.txt"
+assert_same_image() {
+  local id
+  id="$(docker compose -f "$COMPOSE" ps --quiet waf)"
+  [[ "$(docker inspect "$id" --format '{{.Image}}')" == "$waf_image_id" ]] ||
+    { echo "FAIL: immutable WAF image changed during mode switch" >&2; exit 1; }
+}
+benchmark() {
+  local phase="$1"
+  docker compose -f "$COMPOSE" --profile benchmark run --rm --no-deps -T benchmark "$phase" \
+    > "$DIR/benchmark-$phase.json"
+}
+wait_waf() {
+  local i
+  for i in $(seq 1 90); do
+    if [[ "$(curl --silent --max-time 2 -o /dev/null -w '%{http_code}' \
+      http://127.0.0.1:18888/ || true)" == 200 ]]; then return 0; fi
+    sleep 0.6
+  done
+  echo "FAIL: WAF mode restart not ready" >&2; return 1
+}
 ready=0
 for i in $(seq 1 150); do
   code="$(curl --silent --max-time 2 -w '%{http_code}' "http://127.0.0.1:18888/" -o "$DIR/benign-body.txt" || true)"
@@ -171,6 +216,10 @@ if ! grep -q 'Request body limit is marked to reject the request' "$DIR/blocking
   echo "FAIL: expected ModSecurity body-limit rejection diagnostic absent" >&2; exit 1
 fi
 echo "PASS: oversized request rejected by configured ModSecurity body limit (HTTP $body_code)"
+# Matched request counts, concurrency and payloads from an isolated
+# Docker-network client; the direct origin has no published host port.
+benchmark direct
+benchmark blocking
 # Detection-only deployment must allow the same attack to reach the backend;
 # this is not proof of useful alerts until its audit is reviewed and tuned.
 WAF_MODE=DetectionOnly docker compose -f "$COMPOSE" up -d --force-recreate --no-deps waf
@@ -196,6 +245,36 @@ fi
 observe_id="$(docker compose -f "$COMPOSE" ps --quiet waf)"
 [[ "$(docker inspect "$observe_id" --format '{{.Image}}')" == "$waf_image_id" ]] || { echo "FAIL: WAF image changed between modes" >&2; exit 1; }
 echo "PASS: CRS attack corpus, benign JSON/XML/large upload corpus, body cap, benign query and detection-only forwarding"
+benchmark detection
+# Proxy-only baseline is a disposable, isolated nginx mode, NOT a
+# production bypass and NOT a YARP performance measurement.
+WAF_MODE=Off docker compose -f "$COMPOSE" up -d --force-recreate --no-deps waf
+wait_waf
+assert_same_image
+benchmark proxy-only
+# Restore the blocking policy on the identical immutable image, then
+# prove that benign traffic passes and a known malicious input is blocked.
+WAF_MODE=On docker compose -f "$COMPOSE" up -d --force-recreate --no-deps waf
+wait_waf
+assert_same_image
+restored_code="$(curl --silent --show-error --max-time 8 --get \
+  --data-urlencode 'q=<script>alert(1)</script>' \
+  -o "$DIR/restored-block-response.txt" -w '%{http_code}' http://127.0.0.1:18888/)"
+[[ "$restored_code" == 403 ]] || { echo "FAIL: restored blocking policy did not block XSS" >&2; exit 1; }
+benchmark restored
+python3 - "$DIR" <<'PY'
+import json, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+phases = ("direct", "proxy-only", "blocking", "detection", "restored")
+rows = {p: json.loads((root / f"benchmark-{p}.json").read_text()) for p in phases}
+assert all(v["complete"] and v["errors"] == 0 for v in rows.values())
+assert len({(v["requests"], v["concurrency"], v["workload"]) for v in rows.values()}) == 1
+report = {"schemaVersion": 1, "scope": "synthetic-lab-not-production-capacity",
+          "wafImage": (root / "waf-selected-image.txt").read_text().strip(),
+          "phases": rows}
+(root / "benchmark-summary.json").write_text(json.dumps(report, indent=2) + "\n")
+print("PASS: matched direct, nginx-only, blocking, detection and restored-mode benchmarks")
+PY
 # Compose 'port' output is not proof of a host port binding; inspect Docker's
 # actual NetworkSettings.Ports and reject any published HostIp/HostPort.
 app_id="$(docker compose -f "$COMPOSE" ps --quiet protected-app)"
