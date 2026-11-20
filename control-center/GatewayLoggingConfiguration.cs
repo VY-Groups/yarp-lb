@@ -20,6 +20,14 @@ public static class GatewayLoggingConfiguration
         // forwarded request; keep actionable YARP warnings and errors.
         logging.AddFilter<NonBlockingConsoleLoggerProvider>(
             "Yarp.ReverseProxy", LogLevel.Warning);
+        // The gateway emits its own timestamped GatewayCore.AccessLog entry for
+        // every request. ASP.NET's hosting start/finish and endpoint-selection
+        // Information records duplicate that per-request stream and format
+        // strings on the request path; retain their warnings and errors.
+        logging.AddFilter<NonBlockingConsoleLoggerProvider>(
+            "Microsoft.AspNetCore.Hosting.Diagnostics", LogLevel.Warning);
+        logging.AddFilter<NonBlockingConsoleLoggerProvider>(
+            "Microsoft.AspNetCore.Routing.EndpointMiddleware", LogLevel.Warning);
         var provider = new NonBlockingConsoleLoggerProvider(output, capacity, maxLineChars);
         logging.AddProvider(provider);
         return provider;
