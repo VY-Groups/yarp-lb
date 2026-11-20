@@ -383,9 +383,9 @@ authorityKeyIdentifier = keyid,issuer
 
             # Mutations must use production chain validation on both OSes.
             # On Windows provision only the unique disposable CA into the
-            # runner's current-user root store and remove it after the test.
+            # hosted runner's machine root store and remove it after the test.
             # Never perform these mutations on a developer or customer host.
-            if os.environ.get("GITHUB_ACTIONS") == "true":
+            if os.environ.get("GITHUB_ACTIONS") == "true" and os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted":
                 windows_root_pin = None
                 if os.name == "nt":
                     windows_root_pin=run(openssl,"x509","-in",str(temp/"root.pem"),"-noout","-fingerprint","-sha1").split("=",1)[1].replace(":","").strip()
@@ -450,9 +450,9 @@ authorityKeyIdentifier = keyid,issuer
                 try:
                     if windows_root_pin:
                         # Mark before installing so cleanup is attempted even if
-                        # certutil reports failure after changing the store.
+                        # the provisioning subprocess fails after changing trust.
                         root_installed=True
-                        run("certutil","-f","-user","-addstore","Root",str(temp/"fleet-root.cer"))
+                        invoke("install-root")
                     start_node(0);start_node(1)
                     if os.name == "nt":
                         invoke("prepare")
@@ -532,7 +532,7 @@ authorityKeyIdentifier = keyid,issuer
                         if client_installed: invoke("remove-client")
                     finally:
                         if root_installed:
-                            run("certutil","-user","-delstore","Root",windows_root_pin)
+                            invoke("remove-root")
             else:
                 print("NOTICE: mutating fleet recovery requires a disposable GitHub Actions runner",flush=True)
 

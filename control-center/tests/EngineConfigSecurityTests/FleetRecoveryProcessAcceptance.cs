@@ -10,17 +10,49 @@ internal static class FleetRecoveryProcessAcceptance
     // Production helper and normal HTTPS transport; no product test bypass.
     internal static async Task RunAsync(string[] args)
     {
-        if (args.Length != 8 || args[0] is not ("prepare" or "recover" or "verify" or "install-client" or "remove-client"))
+        if (args.Length != 8 || args[0] is not ("prepare" or "recover" or "verify" or "install-client" or "remove-client" or "install-root" or "remove-root"))
             throw new ArgumentException("Expected operation, root, cert, key, server cert, two ports and journal path");
         var (mode, root, certPath, keyPath, serverPath, firstPort, secondPort, path) =
             (args[0],args[1],args[2],args[3],args[4],int.Parse(args[5]),int.Parse(args[6]),args[7]);
+        if (mode is "install-root" or "remove-root")
+        {
+            // Use the elevated hosted runner's machine Root store rather
+            // than CurrentUser Root, whose trust-consent UI can hang CI.
+            if (!OperatingSystem.IsWindows() ||
+                Environment.GetEnvironmentVariable("GITHUB_ACTIONS") != "true" ||
+                Environment.GetEnvironmentVariable("RUNNER_ENVIRONMENT") != "github-hosted")
+                throw new InvalidOperationException("Temporary root provisioning requires Windows GitHub-hosted CI");
+            using var ca = X509CertificateLoader.LoadCertificateFromFile(Path.Combine(root,"fleet-root.cer"));
+            if (!ca.Subject.Contains("CN=GatewayCore disposable CRL root",StringComparison.Ordinal) ||
+                ca.Subject != ca.Issuer || !ca.Extensions.OfType<X509BasicConstraintsExtension>().Any(x=>x.CertificateAuthority))
+                throw new InvalidDataException("Unexpected disposable root certificate");
+            using var roots = new X509Store(StoreName.Root,StoreLocation.LocalMachine);
+            roots.Open(OpenFlags.ReadWrite);
+            if (mode == "install-root")
+            {
+                roots.Add(ca);
+                if (roots.Certificates.Find(X509FindType.FindByThumbprint,ca.Thumbprint,false).Count != 1)
+                    throw new InvalidOperationException("Temporary root installation not observed");
+                Console.WriteLine("PASS: disposable Windows machine root installed");
+            }
+            else
+            {
+                foreach (var match in roots.Certificates.Find(X509FindType.FindByThumbprint,ca.Thumbprint,false))
+                    using (match) roots.Remove(match);
+                if (roots.Certificates.Find(X509FindType.FindByThumbprint,ca.Thumbprint,false).Count != 0)
+                    throw new InvalidOperationException("Temporary root was not removed");
+                Console.WriteLine("PASS: disposable Windows machine root removed");
+            }
+            return;
+        }
         using var pem = X509Certificate2.CreateFromPemFile(certPath,keyPath);
         using var controller = X509CertificateLoader.LoadPkcs12(pem.Export(X509ContentType.Pkcs12),null,
             OperatingSystem.IsWindows() ? X509KeyStorageFlags.UserKeySet : X509KeyStorageFlags.EphemeralKeySet);
         if (mode is "install-client" or "remove-client")
         {
             // Only the disposable Linux runner's current-user certificate store.
-            if (!OperatingSystem.IsLinux() || Environment.GetEnvironmentVariable("GITHUB_ACTIONS") != "true")
+            if (!OperatingSystem.IsLinux() || Environment.GetEnvironmentVariable("GITHUB_ACTIONS") != "true" ||
+                Environment.GetEnvironmentVariable("RUNNER_ENVIRONMENT") != "github-hosted")
                 throw new InvalidOperationException("Fixture store provisioning is restricted to Linux CI");
             using var store = new X509Store(StoreName.My,StoreLocation.CurrentUser);
             store.Open(OpenFlags.ReadWrite);
