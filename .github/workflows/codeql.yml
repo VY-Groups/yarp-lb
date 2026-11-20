@@ -103,3 +103,68 @@ jobs:
       uses: github/codeql-action/analyze@v4
       with:
         category: "/language:${{matrix.language}}"
+        output: ${{ runner.temp }}/gatewaycore-codeql-results
+
+    # A successful analysis job is not evidence of zero findings. Retain a
+    # minimal inventory without source snippets, data-flow traces or messages.
+    - name: Record CodeQL findings inventory
+      shell: bash
+      env:
+        SARIF_DIRECTORY: ${{ runner.temp }}/gatewaycore-codeql-results
+        INVENTORY_DIRECTORY: ${{ runner.temp }}/gatewaycore-codeql-inventory
+        SCAN_LANGUAGE: ${{ matrix.language }}
+      run: |
+        python3 - <<'PY'
+        import collections
+        import json
+        import os
+        from pathlib import Path
+
+        files = sorted(Path(os.environ["SARIF_DIRECTORY"]).rglob("*.sarif"))
+        if not files:
+            raise SystemExit("CodeQL inventory: no SARIF output")
+        counts = collections.Counter()
+        run_count = 0
+        for file in files:
+            document = json.loads(file.read_text(encoding="utf-8"))
+            if document.get("version") != "2.1.0" or not document.get("runs"):
+                raise SystemExit("CodeQL inventory: invalid SARIF output")
+            for run in document["runs"]:
+                run_count += 1
+                results = run.get("results", [])
+                if not isinstance(results, list):
+                    raise SystemExit("CodeQL inventory: invalid results")
+                for result in results:
+                    rule = result.get("ruleId") or "(unknown rule)"
+                    counts[rule] += 1
+        inventory = {
+            "commit": os.environ["GITHUB_SHA"],
+            "ref": os.environ["GITHUB_REF"],
+            "run_id": os.environ["GITHUB_RUN_ID"],
+            "run_attempt": os.environ["GITHUB_RUN_ATTEMPT"],
+            "language": os.environ["SCAN_LANGUAGE"],
+            "sarif_runs": run_count,
+            "observed_results": sum(counts.values()),
+            "by_rule": dict(sorted(counts.items())),
+            "scope": "Raw SARIF result counts, not GitHub alert closure status",
+        }
+        destination = Path(os.environ["INVENTORY_DIRECTORY"])
+        destination.mkdir(parents=True, exist_ok=True)
+        (destination / "findings.json").write_text(
+            json.dumps(inventory, indent=2) + "\n", encoding="utf-8")
+        with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+            summary.write("## CodeQL findings inventory\n\n")
+            summary.write(f"Analyzed commit: `{inventory['commit']}`\n\n")
+            summary.write(f"Raw results: **{inventory['observed_results']}**\n\n")
+            summary.write("See the findings inventory artifact for counts by rule. ")
+            summary.write("These counts are not GitHub alert closure status.\n")
+        PY
+
+    - name: Upload CodeQL findings inventory
+      uses: actions/upload-artifact@v4
+      with:
+        name: codeql-findings-${{ matrix.language }}-${{ github.run_attempt }}
+        path: ${{ runner.temp }}/gatewaycore-codeql-inventory/findings.json
+        if-no-files-found: error
+        retention-days: 14
+
