@@ -115,6 +115,10 @@ public static class EngineConfigContract
                 !used.Add(name) || !Ip(listener["ListenHost"],out var address) ||
                 !Num(listener["ListenPort"],1025,65535) ||
                 (!IPAddress.IsLoopback(address) && (!allowPublicBind || !publicOptIn)) ||
+                (listener.TryGetPropertyValue("TcpMaxConnections", out var tcpLimit) &&
+                 !Num(tcpLimit,1,4096)) ||
+                (listener.TryGetPropertyValue("UdpMaxSessions", out var udpLimit) &&
+                 !Num(udpLimit,1,4096)) ||
                 (listener["TcpIdleTimeoutSeconds"] is not null &&
                  !Num(listener["TcpIdleTimeoutSeconds"],1,3600)) ||
                 (listener.TryGetPropertyValue("UdpIdleTimeoutSeconds", out var udpIdle) &&

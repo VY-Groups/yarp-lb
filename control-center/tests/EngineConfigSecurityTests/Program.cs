@@ -185,6 +185,28 @@ Must(EngineConfigContract.Validate("l4",remote,true),
 var invalid=l4.DeepClone().AsObject();
 invalid["Tcp"]![0]!["Backends"]![0]!["Port"]=0;
 Must(!EngineConfigContract.Validate("l4",invalid,false), "invalid backend port rejected");
+var admissionConfig = l4.DeepClone().AsObject();
+var admissionListener = admissionConfig["Tcp"]![0]!.AsObject();
+foreach (var field in new[] { "TcpMaxConnections", "UdpMaxSessions" })
+{
+    foreach (var value in new[] { 1, 1024, 4096 })
+    {
+        admissionListener[field] = value;
+        Must(EngineConfigContract.Validate("l4",admissionConfig,false),
+            "signed L4 admission accepts " + field + "=" + value);
+    }
+    foreach (var value in new[] { 0, -1, 4097 })
+    {
+        admissionListener[field] = value;
+        Must(!EngineConfigContract.Validate("l4",admissionConfig,false),
+            "signed L4 admission rejects " + field + "=" + value);
+    }
+    admissionListener[field] = null;
+    Must(!EngineConfigContract.Validate("l4",admissionConfig,false), "signed L4 admission rejects null");
+    admissionListener[field] = "2";
+    Must(!EngineConfigContract.Validate("l4",admissionConfig,false), "signed L4 admission rejects strings");
+    admissionListener.Remove(field);
+}
 var udpIdleConfig = l4.DeepClone().AsObject();
 var udpIdleListener = udpIdleConfig["Tcp"]![0]!.DeepClone().AsObject();
 udpIdleListener.Remove("TcpIdleTimeoutSeconds");
