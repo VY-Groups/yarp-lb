@@ -314,7 +314,7 @@ var authorityFenceStore = config.AuthorityFence is null ? null : new AuthorityFe
         config.ProbeIntervalSeconds, config.MaxConcurrentHealthProbes,
         groups.Where(pair => pair.Value.Dnssec is not null)
             .ToDictionary(pair => pair.Key, pair => pair.Value.Dnssec!, StringComparer.OrdinalIgnoreCase),
-        geoIpIdentity: geoIpDatabase.AuthorityIdentity),
+        geoIpIdentity: geoIpDatabase.AuthorityIdentity, loadedAgentStore: reportStore),
     authorityTargets);
 using var authorityFenceStoreLifetime = authorityFenceStore;
 await using var authorityFenceRuntime = authorityFenceStore is null || config.AuthorityFence is null
