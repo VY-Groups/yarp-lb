@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Text;
 using StackExchange.Redis;
@@ -10,6 +11,8 @@ internal sealed class SharedOidcRevocation : IDisposable
     private readonly ConnectionMultiplexer connection;
     private readonly string issuer;
     private readonly string clientId;
+    // Fixed population from the validated OIDC mapping (at most 512 subjects).
+    private readonly ConcurrentDictionary<string, long> observed;
 
     private const string CutoffScript = """
         if redis.call('PTTL', KEYS[1]) ~= -1 then return -1 end
@@ -18,6 +21,8 @@ internal sealed class SharedOidcRevocation : IDisposable
         if #raw > 1 and string.sub(raw, 1, 1) == '0' then return -1 end
         local current = tonumber(raw)
         if not current or current < 0 or current > 253402300799 then return -1 end
+        local floor = tonumber(ARGV[2])
+        if not floor or current < floor then return -1 end
         if ARGV[1] ~= '' then
             local proposed = tonumber(ARGV[1])
             if not proposed or proposed <= 0 or proposed > 253402300799 then return -1 end
@@ -30,7 +35,12 @@ internal sealed class SharedOidcRevocation : IDisposable
         """;
 
     private SharedOidcRevocation(ConnectionMultiplexer connection, OidcSettings settings)
-    { this.connection = connection; issuer = settings.Issuer; clientId = settings.ClientId; }
+    {
+        this.connection = connection; issuer = settings.Issuer; clientId = settings.ClientId;
+        observed = new ConcurrentDictionary<string, long>(
+            settings.Accounts.Select(a => new KeyValuePair<string, long>(a.Subject, 0L)),
+            StringComparer.Ordinal);
+    }
 
     internal static SharedOidcRevocation? FromFile(string? path, EnterpriseOidcPolicy? policy)
     {
@@ -72,14 +82,20 @@ internal sealed class SharedOidcRevocation : IDisposable
 
     internal async Task<long?> ReadOrAdvanceAsync(string subject, long? cutoff = null)
     {
-        if (cutoff is <= 0 or > MaxCutoff) return null;
+        if (cutoff is <= 0 or > MaxCutoff || !observed.TryGetValue(subject, out var floor)) return null;
         try
         {
             // EVAL uses the primary; no cached or replica authorization read.
             var value = (long)await connection.GetDatabase().ScriptEvaluateAsync(CutoffScript,
                 new RedisKey[] { Key(subject) },
-                new RedisValue[] { cutoff?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "" });
-            return value is >= 0 and <= MaxCutoff ? value : null;
+                new RedisValue[] {
+                    cutoff?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "",
+                    floor.ToString(System.Globalization.CultureInfo.InvariantCulture) });
+            if (value is < 0 or > MaxCutoff) return null;
+            // A concurrent newer observation must not be overwritten by this
+            // response. Reject an older reply conservatively.
+            var latest = observed.AddOrUpdate(subject, value, (_, previous) => Math.Max(previous, value));
+            return value == latest ? value : null;
         }
         catch (Exception ex) when (ex is RedisException or InvalidOperationException or TimeoutException)
         { return null; }

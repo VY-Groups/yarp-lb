@@ -334,18 +334,38 @@ def distributed_revocation(cwd,dll):
                         backchannel(origin2,ctx,notice,200)
                         check(fresh.session()["authenticated"],"late replay on second replica preserves newer authentication")
                         check(cli("GET",cutoff_key)==str(stamp),"shared cutoff persisted monotonically")
+                        # Simulate an unsafe stale restore while both running
+                        # nodes have observed the newer cutoff. Never permit
+                        # fresh login or a replay to repair an older authority.
+                        check(cli("SET",cutoff_key,"0")=="OK","stale authority rollback fixture")
+                        check(not fresh.session()["authenticated"],"observed cutoff rollback denies existing session")
+                        backchannel(origin1,ctx,notice,503)
+                        backchannel(origin2,ctx,notice,503)
+                        check(cli("GET",cutoff_key)=="0","rejected replay does not overwrite rolled-back cutoff")
+                        rollback_browser,_=browser(origin2,ctx)
+                        rollback_browser.request("GET","/admin/oidc/start",expect=403)
+                        check(not rollback_browser.session()["authenticated"],"rolled-back authority denies fresh callback")
+                        # Explicitly restore the exact known good cutoff in the
+                        # disposable fixture only; never auto-repair production.
+                        check(cli("SET",cutoff_key,str(stamp))=="OK","fixture restores known cutoff")
+                        fresh,_=browser(origin2,ctx);fresh.request("GET","/admin/oidc/start")
+                        check(fresh.session()["authenticated"],"known cutoff restoration permits fresh authentication")
                         stop_redis(redis_proc)
                         check(not fresh.session()["authenticated"],"authority outage denies existing federated cookie")
                         backchannel(origin1,ctx,notice,503)
                         redis_proc=start_redis()
                         check(cli("GET",cutoff_key)==str(stamp),"authority restart recovers durable cutoff")
-                        deadline=time.monotonic()+15
-                        while True:
-                            try:
-                                backchannel(origin1,ctx,notice,200);break
-                            except AssertionError:
-                                if time.monotonic()>=deadline: raise
-                                time.sleep(.25)
+                        # Multiplexers reconnect independently. Check that each
+                        # actually accepts the same signed, idempotent notice
+                        # before attempting a new browser login (no login retry).
+                        for origin in (origin1,origin2):
+                            deadline=time.monotonic()+15
+                            while True:
+                                try:
+                                    backchannel(origin,ctx,notice,200);break
+                                except AssertionError:
+                                    if time.monotonic()>=deadline: raise
+                                    time.sleep(.25)
                         fresh2,_=browser(origin2,ctx);fresh2.request("GET","/admin/oidc/start")
                         check(fresh2.session()["authenticated"],"fresh authentication after durable authority recovery")
                         cli("DEL",cutoff_key)
