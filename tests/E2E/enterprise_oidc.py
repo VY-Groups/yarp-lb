@@ -201,7 +201,7 @@ def federated_logout(client):
         "RP-initiated logout returns through the OIDC signed-out callback")
 
 def csrfless_logout(client):
-    req=Request(client.base+"/admin/api/logout",data=urlencode({}).encode(),
+    req=Request(client.base+"/admin/api/logout",data=urlencode({"csrf":""}).encode(),
         headers={"Content-Type":"application/x-www-form-urlencoded"},method="POST")
     try:
         with client.opener.open(req,timeout=10) as response: status=response.status
