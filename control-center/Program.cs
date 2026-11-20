@@ -845,26 +845,8 @@ void WriteUsers(List<AdminUser> users)
 }
 // Capture the exact persisted account baseline under the existing login gate.
 byte[] AccountSnapshot() => File.Exists(usersPath) ? File.ReadAllBytes(usersPath) : [];
-async Task<IResult?> ConfirmAccountMutation(HttpContext ctx, byte[] before, List<AdminUser> proposed, string operation)
-{
-    if (externalAuditIntent is null) return null;
-    if (!AccountSnapshot().AsSpan().SequenceEqual(before))
-        return Results.Conflict(new { error = "Account state changed before external audit confirmation" });
-    // Recheck the authenticated actor under the account mutation lock: a
-    // request may have queued behind another account's offboarding/reset.
-    var active = ReadUsers().SingleOrDefault(x => x.Username.Equals(Actor(ctx), StringComparison.OrdinalIgnoreCase));
-    if (active is null || !active.Enabled || active.Role != "Administrator" ||
-        active.SecurityStamp != ctx.User.FindFirst("stamp")?.Value)
-        return Results.StatusCode(403);
-    if (!await externalAuditIntent.ConfirmAsync(Actor(ctx), operation,
-            Convert.ToHexString(SHA256.HashData(before)),
-            Convert.ToHexString(SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(proposed))), ctx.RequestAborted) ||
-        ctx.RequestAborted.IsCancellationRequested)
-        return Results.Json(new { error = "External audit receipt unavailable; account state unchanged" }, statusCode: 503);
-    if (!AccountSnapshot().AsSpan().SequenceEqual(before))
-        return Results.Conflict(new { error = "Account state changed during external audit confirmation" });
-    return null;
-}
+Task<IResult?> ConfirmAccountMutation(HttpContext ctx, byte[] before, List<AdminUser> proposed, string operation) =>
+    ConfirmStateMutation(ctx, usersPath, before, JsonSerializer.SerializeToUtf8Bytes(proposed), operation, true);
 // Call only under the writer lock for the target file. The proposed bytes
 // are persisted verbatim, so the signed digest describes the actual state.
 byte[] AuditStateBytes(string path) => File.Exists(path) ? File.ReadAllBytes(path) : [];
@@ -1768,8 +1750,16 @@ app.MapPost("/admin/api/change-requests", async (HttpContext ctx) =>
         ["id"] = id, ["requestedBy"] = Actor(ctx), ["createdUtc"] = DateTimeOffset.UtcNow.ToString("O"),
         ["status"] = "Pending", ["changeReason"] = reason, ["payload"] = payload.DeepClone()
     };
-    await changeGate.WaitAsync();
-    try { await File.WriteAllTextAsync(Path.Combine(changeFolder, id + ".json"), item.ToJsonString()); }
+    await changeGate.WaitAsync(ctx.RequestAborted);
+    try
+    {
+        var path = Path.Combine(changeFolder, id + ".json");
+        if (File.Exists(path)) return Results.Conflict(new { error = "Change request ID already exists" });
+        var proposed = Encoding.UTF8.GetBytes(item.ToJsonString());
+        var denied = await ConfirmStateMutation(ctx, path, Array.Empty<byte>(), proposed, "CHANGE_REQUEST_INTENT", false);
+        if (denied is not null) return denied;
+        WriteAuditedState(path, proposed);
+    }
     finally { changeGate.Release(); }
     await Audit(Actor(ctx), "CHANGE_REQUESTED", new { id, reason });
     return Results.Ok(new { id, status = "Pending", message = "A different administrator must review and approve" });
@@ -1786,7 +1776,8 @@ app.MapPost("/admin/api/change-requests/{id}/decision", async (HttpContext ctx, 
     {
         var path = Path.Combine(changeFolder, id + ".json");
         if (!File.Exists(path)) return Results.NotFound();
-        var item = JsonNode.Parse(await File.ReadAllTextAsync(path))!.AsObject();
+        var before = File.ReadAllBytes(path);
+        var item = JsonNode.Parse(before)!.AsObject();
         if (item["status"]?.ToString() != "Pending") return Results.Conflict(new { error = "Already reviewed" });
         if (string.Equals(item["requestedBy"]?.ToString(), Actor(ctx), StringComparison.OrdinalIgnoreCase))
             return Results.Json(new { error = "Two-person control: requester cannot approve or reject own change" }, statusCode: 403);
@@ -1800,8 +1791,13 @@ app.MapPost("/admin/api/change-requests/{id}/decision", async (HttpContext ctx, 
         item["status"] = input.Decision == "approve" ? "Approved" : "Rejected";
         item["reviewedBy"] = Actor(ctx); item["reviewUtc"] = DateTimeOffset.UtcNow.ToString("O");
         item["reviewReason"] = reason;
-        await File.WriteAllTextAsync(path + ".tmp", item.ToJsonString());
-        File.Move(path + ".tmp", path, overwrite: true);
+        var proposed = Encoding.UTF8.GetBytes(item.ToJsonString());
+        if (input.Decision == "reject")
+        {
+            var denied = await ConfirmStateMutation(ctx, path, before, proposed, "CHANGE_REJECT_INTENT", true);
+            if (denied is not null) return denied;
+        }
+        WriteAuditedState(path, proposed);
         await Audit(Actor(ctx), "CHANGE_" + item["status"]!.ToString().ToUpperInvariant(), new { id, reason });
         return Results.Ok(new { id, status = item["status"]?.ToString() });
     }
@@ -2094,7 +2090,7 @@ HttpClient CreateFleetClient(FleetGateway row)
 // Version 0.1 setup APIs and independently verified YARP runtime state.
 app.MapSetupCenter(privateDir);
 app.MapCapabilityRegistry();
-app.MapOnboardingApi(privateDir);
+app.MapOnboardingApi(privateDir, ConfirmStateMutation, WriteAuditedState, Audit);
 // Enforce onboarding state server-side; hiding navigation is never a security boundary.
 app.Use(async (ctx, next) =>
 {
