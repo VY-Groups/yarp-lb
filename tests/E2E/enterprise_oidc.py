@@ -321,8 +321,14 @@ def distributed_revocation(cwd,dll):
                         b,_=browser(origin2,ctx);b.request("GET","/admin/oidc/start")
                         check(a.session()["authenticated"] and b.session()["authenticated"],
                             "two independent shipping gateways establish federated sessions")
+                        inventory=first/"state"/"inventory.json"
+                        a.request("POST","/admin/api/inventory",{"id":"shared-fixture","name":"Shared fixture",
+                            "type":"Service","address":"fixture.example.invalid","notes":"no external collector"})
+                        before=inventory.read_bytes()
                         notice,stamp=idp.logout_notice()
                         backchannel(origin1,ctx,notice,200)
+                        a.request("DELETE","/admin/api/inventory/shared-fixture",expect=401)
+                        check(inventory.read_bytes()==before,"revoked federated operator cannot mutate inventory without external collector")
                         check(not a.session()["authenticated"] and not b.session()["authenticated"],
                             "one provider notice revokes both management replicas")
                         idp.auth_override=stamp

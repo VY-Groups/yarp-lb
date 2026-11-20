@@ -87,6 +87,20 @@ internal static class EnterpriseOidcPolicyTests
         var replaced = new EnterpriseOidcPolicy(settings with { RequiredAcr = "urn:changed" });
         Check(!replaced.SessionValid(ticket, "alice", "Operator", now),
             "policy change revokes existing federated session");
+        var recovery = Principal([new(EnterpriseOidcPolicy.RecoveryClaim,policy.Fingerprint)]);
+        Check(policy.RecoverySessionValid(recovery,"recovery","Administrator","Local") &&
+              !policy.RecoverySessionValid(recovery,"recovery","Operator","Local") &&
+              !policy.RecoverySessionValid(recovery,"recovery","Administrator","AD") &&
+              !policy.RecoverySessionValid(recovery,"alice","Administrator","Local"),
+            "recovery authorization requires designated local administrator");
+        Check(!policy.RecoverySessionValid(Principal([]),"recovery","Administrator","Local") &&
+              !policy.RecoverySessionValid(Principal([new(EnterpriseOidcPolicy.RecoveryClaim,"wrong")]),"recovery","Administrator","Local") &&
+              !policy.RecoverySessionValid(Principal([new(EnterpriseOidcPolicy.RecoveryClaim,policy.Fingerprint),
+                  new(EnterpriseOidcPolicy.RecoveryClaim,policy.Fingerprint)]),"recovery","Administrator","Local") &&
+              !policy.RecoverySessionValid(Principal([new(EnterpriseOidcPolicy.RecoveryClaim,policy.Fingerprint),
+                  new(EnterpriseOidcPolicy.SubjectClaim,"immutable-subject")]),"recovery","Administrator","Local") &&
+              !replaced.RecoverySessionValid(recovery,"recovery","Administrator","Local"),
+            "missing, ambiguous, mixed or stale recovery claims fail closed");
         if (OperatingSystem.IsWindows()) WindowsAclChecks();
     }
 
