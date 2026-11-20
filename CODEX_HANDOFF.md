@@ -1,6 +1,45 @@
 # GatewayCore — Codex handoff, verified repository snapshot
 
-## Current continuation update (2026-11-20)
+## Current continuation update — physical GSLB acceptance (2026-11-20)
+
+This update supersedes the earlier same-date snapshot below for physical
+acceptance. The live main ref is 47fbc0403d9bde5f7bcff62b1f55fd7730469623,
+including merged PR #285. The six post-merge workflows reported for that exact
+main commit passed. The live open issue list is #34, #36, #37, #48, #49, #51,
+#52, #53, #100, #101 and #109.
+
+- Two physical EC2 acceptance phases ran against GatewayCore binaries built
+  from this main commit. The observer-quorum phase used two DNS authorities in
+  Mumbai and Osaka plus three separately enrolled signed mTLS observers on
+  three Amazon Linux 2023 hosts, assigned three configured vantage groups.
+  Actual geographic and network-path diversity was not independently verified.
+- In the observer phase, both authorities returned authoritative NOERROR/A
+  over UDP and TCP with three fresh reports. One expired observer was
+  tolerated; after a second distinct configured group expired, both returned
+  authoritative SERVFAIL with no answers. Fresh reports restored service.
+- In the AuthorityFence phase, two authorities exchanged mutually
+  authenticated, signed 2-of-2 snapshots and both returned NOERROR/A. Reciprocal
+  temporary host-route blackholes for each peer's public /32 caused both to
+  return SERVFAIL after the configured 8-second lease. Removing the routes
+  restored NOERROR only after fresh signed snapshots. The Osaka authority was
+  also restarted while the peer routes were blocked, retaining its protected
+  epoch/replay state; both authorities stayed SERVFAIL until routes were
+  restored and fresh snapshots arrived.
+- Temporary peer /32 blackhole routes were removed and normal VPC gateway
+  routes restored. All temporary binaries, configs, certs, state, watchdogs and
+  processes were removed. Apache remained active and returned HTTP 200 on all
+  three hosts; ports 53 and 15444 no longer listened. No AWS security-group,
+  Apache or system-service configuration was changed. Full scope and limits:
+  ops/acceptance/gslb-physical-observer-quorum-20261120.md.
+- This advances #109's physical quorum, authority partition and restart
+  evidence, but does not complete it. Actual geography/path independence was
+  not proven; DNSSEC/public delegation, malicious-frame fuzzing, one-hour soak,
+  500 Mbps capacity, VRRP/ECMP and annual availability remain untested here.
+  Keep #109 open. Production remains NO-GO and annual 99.9% is unmeasured.
+- PR #285 is merged but issue #38 remains open; do not infer complete federated
+  logout or distributed identity revocation from that increment.
+
+## Previous continuation update (2026-11-20)
 
 This update supersedes the 2026-11-19 continuation snapshot below. Live GitHub
 and exact post-merge CI were checked on 2026-11-20:
