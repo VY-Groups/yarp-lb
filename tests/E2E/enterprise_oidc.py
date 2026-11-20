@@ -48,6 +48,8 @@ class Idp:
         self.codes={}
         self.exchanges=0
         self.logout_requests=[]
+        self.end_session_endpoint=None
+        self.insecure_logout_hits=0
         self.signing=root/"jwt.pem"
         cmd("openssl","genpkey","-algorithm","RSA","-pkeyopt","rsa_keygen_bits:2048","-out",str(self.signing))
         self.signing.chmod(0o600)
@@ -66,7 +68,7 @@ class Idp:
                 if parsed.path=="/.well-known/openid-configuration":
                     self.reply(200,{"issuer":owner.issuer,"authorization_endpoint":owner.issuer+"/authorize",
                       "token_endpoint":owner.issuer+"/token","jwks_uri":owner.issuer+"/keys",
-                      "end_session_endpoint":owner.issuer+"/logout",
+                      "end_session_endpoint":owner.end_session_endpoint or owner.issuer+"/logout",
                       "response_types_supported":["code"],"subject_types_supported":["public"],
                       "id_token_signing_alg_values_supported":["RS256"],"code_challenge_methods_supported":["S256"],
                       "token_endpoint_auth_methods_supported":["client_secret_post","client_secret_basic"],
@@ -138,6 +140,15 @@ class Idp:
             def log_message(self,*_): pass
         self.server=ThreadingHTTPServer(("127.0.0.2",0),Handler)
         self.issuer=f"https://127.0.0.2:{self.server.server_address[1]}"
+        class InsecureLogoutHandler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                owner.insecure_logout_hits+=1
+                self.send_response(204)
+                self.send_header("Content-Length","0")
+                self.end_headers()
+            def log_message(self,*_): pass
+        self.insecure_server=ThreadingHTTPServer(("127.0.0.2",0),InsecureLogoutHandler)
+        self.insecure_logout_endpoint=f"http://127.0.0.2:{self.insecure_server.server_address[1]}/logout"
         tls=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         tls.load_cert_chain(str(cert),str(tlskey))
         self.server.socket=tls.wrap_socket(self.server.socket,server_side=True)
@@ -167,11 +178,16 @@ class Idp:
 
     def __enter__(self):
         self.thread.start()
+        self.insecure_thread=threading.Thread(target=self.insecure_server.serve_forever,daemon=True)
+        self.insecure_thread.start()
         return self
     def __exit__(self,*_):
         self.server.shutdown()
         self.server.server_close()
         self.thread.join(timeout=5)
+        self.insecure_server.shutdown()
+        self.insecure_server.server_close()
+        self.insecure_thread.join(timeout=5)
 
 def browser(origin,ctx):
     jar=CookieJar()
@@ -209,6 +225,19 @@ def csrfless_logout(client):
         status=error.code
         error.read()
     check(status==403,"RP logout without its CSRF token is rejected")
+
+def insecure_logout_endpoint_is_rejected(client,idp):
+    req=Request(client.base+"/admin/api/logout",data=urlencode({"csrf":client.csrf}).encode(),
+        headers={"Content-Type":"application/x-www-form-urlencoded"},method="POST")
+    try:
+        with client.opener.open(req,timeout=10) as response:
+            status=response.status
+            response.read()
+    except HTTPError as error:
+        status=error.code
+        error.read()
+    check(status==502 and idp.insecure_logout_hits==0,
+        "HTTP end-session metadata fails closed without contacting its endpoint")
 
 def main():
     parser=argparse.ArgumentParser()
@@ -335,6 +364,23 @@ def main():
                     stale.request("GET","/admin/oidc/start",expect=403)
                     check(not stale.session()["authenticated"],"persisted cutoff rejects old authentication after restart")
                     idp.auth_override=None
+                # Restart with a fresh discovery cache advertising an HTTP
+                # end-session URI. The gateway must refuse it before the
+                # browser or server contacts that endpoint.
+                idp.end_session_endpoint=idp.insecure_logout_endpoint
+                bad_hp,bad_tlsport=port(),port()
+                while bad_hp==bad_tlsport: bad_tlsport=port()
+                bad_origin=f"https://127.0.0.1:{bad_tlsport}"
+                oidc_config=json.loads(config.read_text())
+                oidc_config["ManagementOrigin"]=bad_origin
+                config.write_text(json.dumps(oidc_config))
+                config.chmod(0o600)
+                with gateway(cwd,dll,root,bad_hp,bad_tlsport):
+                    bad_admin,_=browser(bad_origin,ctx)
+                    bad_admin.request("GET","/admin/oidc/start")
+                    check(bad_admin.session()["authenticated"],
+                        "HTTP end-session fixture establishes an otherwise valid OIDC session")
+                    insecure_logout_endpoint_is_rejected(bad_admin,idp)
             print("ENTERPRISE_OIDC_HTTPS_SUCCESS",flush=True)
 
 if __name__=="__main__": main()

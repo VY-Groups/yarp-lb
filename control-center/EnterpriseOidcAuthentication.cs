@@ -67,6 +67,18 @@ internal static class EnterpriseOidcAuthentication
             };
             options.Events.OnRedirectToIdentityProviderForSignOut = ctx =>
             {
+                // The framework enforces HTTPS for discovery, but the
+                // end-session URL is supplied by discovery metadata. Never
+                // send a browser to a cleartext endpoint from that document.
+                if (!Uri.TryCreate(ctx.ProtocolMessage.IssuerAddress, UriKind.Absolute, out var endSessionUri) ||
+                    !string.Equals(endSessionUri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase) ||
+                    string.IsNullOrEmpty(endSessionUri.Host) || !string.IsNullOrEmpty(endSessionUri.UserInfo) ||
+                    !string.IsNullOrEmpty(endSessionUri.Fragment))
+                {
+                    ctx.HandleResponse();
+                    ctx.Response.StatusCode = StatusCodes.Status502BadGateway;
+                    return Task.CompletedTask;
+                }
                 // Tokens are deliberately not persisted in the local ticket.
                 // RP-Initiated Logout permits client_id when id_token_hint is
                 // unavailable; the exact callback must be registered at the OP.
