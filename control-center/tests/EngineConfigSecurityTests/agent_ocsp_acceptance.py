@@ -172,6 +172,9 @@ authorityInfoAccess = OCSP;URI:http://127.0.0.1:{root_port}
 basicConstraints = critical,CA:FALSE
 keyUsage = critical,digitalSignature
 extendedKeyUsage = critical,OCSPSigning
+# RFC 6960 delegated responder: do not recursively require OCSP for
+# the short-lived responder certificate itself.
+noCheck = ignored
 subjectKeyIdentifier = hash
 authorityKeyIdentifier = keyid,issuer
 """, encoding="ascii")
@@ -217,6 +220,9 @@ subjectAltName = DNS:localhost,IP:127.0.0.1
 basicConstraints = critical,CA:FALSE
 keyUsage = critical,digitalSignature
 extendedKeyUsage = critical,OCSPSigning
+# RFC 6960 delegated responder: do not recursively require OCSP for
+# the short-lived responder certificate itself.
+noCheck = ignored
 subjectKeyIdentifier = hash
 authorityKeyIdentifier = keyid,issuer
 """, encoding="ascii")
@@ -290,6 +296,34 @@ authorityKeyIdentifier = keyid,issuer
 
         ocsp_debug: list[str] = []
         ocsp_requests: list[str] = []
+        # Prove that the fixture actually produces correctly signed, fresh
+        # responses for each verdict before relying on OS chain diagnostics.
+        def check_responder(index: Path, signer: Path, signer_key: Path,
+                            issuer: Path, certificate: Path, expected: str) -> None:
+            query = root / "preflight-query.der"
+            response = root / "preflight-response.der"
+            run(openssl, "ocsp", "-issuer", str(issuer), "-cert", str(certificate),
+                "-no_nonce", "-reqout", str(query))
+            run(openssl, "ocsp", "-index", str(index), "-rsigner", str(signer),
+                "-rkey", str(signer_key), "-CA", str(issuer), "-reqin", str(query),
+                "-nmin", "5", "-respout", str(response))
+            verified = subprocess.run([openssl, "ocsp", "-respin", str(response),
+                "-issuer", str(issuer), "-cert", str(certificate), "-no_nonce",
+                "-CAfile", str(root / "root.pem"), "-verify_other",
+                str(root / "intermediate.pem")], check=True, capture_output=True,
+                text=True, timeout=15)
+            if "Response verify OK" not in verified.stderr or not any(
+                    line.strip().endswith(": " + expected)
+                    for line in verified.stdout.splitlines()):
+                raise AssertionError("OCSP fixture did not produce verified " + expected + " response")
+            print("PASS: independently verified signed OCSP fixture verdict " + expected, flush=True)
+
+        check_responder(root / "root-index.txt", root_ocsp_cert, root_ocsp_key,
+                        root / "root.pem", root / "intermediate.pem", "good")
+        for certificate, expected in ((good_cert, "good"), (revoked_cert, "revoked"),
+                                      (unknown_cert, "unknown")):
+            check_responder(root / "index.txt", ocsp_cert, ocsp_key,
+                            root / "intermediate.pem", certificate, expected)
         class OcspHandler(http.server.BaseHTTPRequestHandler):
             index_file = root / "index.txt"
             signing_cert = ocsp_cert
@@ -309,7 +343,7 @@ authorityKeyIdentifier = keyid,issuer
                     run(openssl, "ocsp", "-index", str(self.index_file),
                         "-rsigner", str(self.signing_cert), "-rkey", str(self.signing_key),
                         "-CA", str(self.issuer_cert), "-reqin", str(request_file),
-                        "-respout", str(response_file))
+                        "-nmin", "5", "-respout", str(response_file))
                     response = response_file.read_bytes()
                     self.send_response(200)
                     self.send_header("Content-Type", "application/ocsp-response")
@@ -427,7 +461,9 @@ authorityKeyIdentifier = keyid,issuer
                     for thumbprint, statuses, label in rejections:
                         lines = [line for line in logs.splitlines() if prefix + thumbprint in line]
                         if not any(status in line for line in lines for status in statuses):
-                            raise AssertionError(f"{label}: chain rejection {statuses} absent from logs:\n{logs}")
+                            raise AssertionError(f"{label}: chain rejection {statuses} absent from logs; "
+                                                 f"responder requests={ocsp_requests}; "
+                                                 f"responder errors={ocsp_debug}:\n{logs}")
                     expected = (0, 1) if os.name == "nt" else (0, -15)
                     if not alive or process.returncode not in expected:
                         raise RuntimeError(f"OCSP GatewayAgent exited unexpectedly: {process.returncode}")
