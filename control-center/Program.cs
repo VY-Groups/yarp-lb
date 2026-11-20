@@ -1847,6 +1847,9 @@ app.MapPost("/admin/api/restore/{name}", async (HttpContext ctx, string name) =>
 // not enabled: an approved distributed-transaction/rollback protocol is required first.
 var fleetPath = Path.Combine(privateDir, "fleet-gateways.json");
 var fleetGate = new SemaphoreSlim(1, 1);
+var rolloutGate = new SemaphoreSlim(1, 1);
+var rolloutFolder = Path.Combine(privateDir, "fleet-rollouts");
+Directory.CreateDirectory(rolloutFolder);
 List<FleetGateway> ReadFleet() => File.Exists(fleetPath)
     ? JsonSerializer.Deserialize<List<FleetGateway>>(File.ReadAllText(fleetPath), jsonOptions) ?? new()
     : new();
@@ -1861,6 +1864,8 @@ app.MapPost("/admin/api/fleet", async (HttpContext ctx, FleetGateway row) =>
     await fleetGate.WaitAsync();
     try
     {
+        if (FleetRolloutJournal.HasUnresolved(rolloutFolder))
+            return Results.Conflict(new { error = "Resolve the unfinished rollout before changing fleet membership." });
         var before = externalAuditIntent is null ? Array.Empty<byte>() : AuditStateBytes(fleetPath);
         var list = ReadFleet();
         if (list.Any(x => x.Id.Equals(row.Id, StringComparison.OrdinalIgnoreCase))) return Results.Conflict(new { error = "Duplicate gateway ID" });
@@ -1880,6 +1885,8 @@ app.MapDelete("/admin/api/fleet/{id}", async (HttpContext ctx, string id) =>
     await fleetGate.WaitAsync();
     try
     {
+        if (FleetRolloutJournal.HasUnresolved(rolloutFolder))
+            return Results.Conflict(new { error = "Resolve the unfinished rollout before changing fleet membership." });
         var before = externalAuditIntent is null ? Array.Empty<byte>() : AuditStateBytes(fleetPath);
         var list = ReadFleet();
         if (list.RemoveAll(x => x.Id == id) != 1) return Results.NotFound();
@@ -1969,9 +1976,6 @@ app.MapGet("/admin/api/fleet/status", async () =>
 // Controlled fleet rollout: the only accepted payload comes from a previously
 // approved two-person local change request. Every agent validates its revision.
 // No general-purpose remote shell or arbitrary filesystem access is exposed.
-var rolloutGate = new SemaphoreSlim(1, 1);
-var rolloutFolder = Path.Combine(privateDir, "fleet-rollouts");
-Directory.CreateDirectory(rolloutFolder);
 string FleetDigest() => Convert.ToHexString(SHA256.HashData(AuditStateBytes(fleetPath)));
 async Task<List<string>> RollbackAttempted(string logPath, JsonObject journal, List<FleetGateway> gateways)
 {
@@ -1991,7 +1995,8 @@ async Task<List<string>> RollbackAttempted(string logPath, JsonObject journal, L
             using var status = await client.GetAsync(new Uri(new Uri(row.Url), "agent/v1/status"));
             status.EnsureSuccessStatusCode();
             var observed = JsonNode.Parse(await status.Content.ReadAsStringAsync())?["revision"]?.ToString();
-            if (reply?["state"]?.ToString() != "rolled-back" || reply["revision"]?.ToString() != observed ||
+            if (reply?["state"]?.ToString() != "rolled-back" || reply["rollbackFenced"]?.GetValue<bool>() != true ||
+                reply["revision"]?.ToString() != observed ||
                 !FleetRolloutJournal.CompleteRollback(target, observed))
                 throw new InvalidOperationException("Rollback revision not independently confirmed");
             FleetRolloutJournal.Log(logPath, journal, id, "rollback", "verified", observed);
