@@ -20,7 +20,6 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.RateLimiting;
 using System.Threading.RateLimiting;
-using Certes.Acme.Resource;
 using Yarp.ReverseProxy.LoadBalancing;
 
 // Windows neutral-identity deployments use a new ProgramData root. Refuse
