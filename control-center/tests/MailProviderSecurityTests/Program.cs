@@ -127,6 +127,39 @@ try
 }
 finally { Directory.Delete(auditRoot, recursive: true); }
 
+var outboxRoot = Directory.CreateTempSubdirectory("gateway-audit-outbox-");
+try
+{
+    using var signing = System.Security.Cryptography.RSA.Create(2048);
+    using var transport = new ExternalAuditIntent(new Uri("https://collector.example.invalid/audit/v1/intents"),
+        "node-test", new byte[32], signing.ExportSubjectPublicKeyInfoPem(),
+        new HttpClient(new CapturingHandler(HttpStatusCode.ServiceUnavailable, "")));
+    var digest = new string('A',64);
+    string persisted;
+    using (var queue = new DurableAuditOutbox(outboxRoot.FullName, transport))
+    {
+        queue.Enqueue("operator", "LOGIN_SUCCESS", DateTimeOffset.UtcNow, digest);
+        persisted = Directory.GetFiles(outboxRoot.FullName, "*.event").Single();
+        Check(!await queue.DeliverOneAsync(CancellationToken.None) && File.Exists(persisted) &&
+              queue.Status() is { Pending: 1, DeliveryBlocked: true }, "collector outage never deletes queued audit event");
+    }
+    using (var queue = new DurableAuditOutbox(outboxRoot.FullName, transport))
+        Check(queue.Status().Pending == 1, "audit queue survives process disposal and re-open");
+    var raw = File.ReadAllText(persisted);
+    File.WriteAllText(persisted, raw.Replace("operator", "changed") + "invalid");
+    bool rejected = false;
+    try { using var bad = new DurableAuditOutbox(outboxRoot.FullName, transport); }
+    catch (JsonException) { rejected = true; }
+    Check(rejected, "corrupt queued record refuses startup");
+    File.WriteAllText(persisted, raw);
+    File.WriteAllText(Path.Combine(outboxRoot.FullName, "incomplete.tmp"), "partial");
+    rejected = false;
+    try { using var bad = new DurableAuditOutbox(outboxRoot.FullName, transport); }
+    catch (InvalidDataException) { rejected = true; }
+    Check(rejected, "incomplete journal cannot silently disappear");
+}
+finally { outboxRoot.Delete(recursive: true); }
+
 sealed class CapturingHandler : HttpMessageHandler
 {
     readonly HttpStatusCode status;
