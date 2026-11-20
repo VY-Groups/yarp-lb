@@ -42,7 +42,9 @@ public sealed class BoundedTransportFailureHealthPolicy : IPassiveHealthCheckPol
                (!int.TryParse(rawFailures,out requiredFailures) || requiredFailures is < 1 or > 10))
                 return;
         }
-        var total = cluster.Model.Config.Destinations.Count;
+        var destinations = cluster.Model.Config.Destinations;
+        if (destinations is null) return;
+        var total = destinations.Count;
         var cap=EjectionBudget.Allowed(total,configuredPercent,minimumRemaining);
         if (cap<=0) return;
         var cooldown = cluster.Model.Config.HealthCheck?.Passive?.ReactivationPeriod ??
