@@ -3,6 +3,12 @@ using System.Security.Cryptography.X509Certificates;
 using Microsoft.AspNetCore.Http;
 using System.Text.Json.Nodes;
 
+if (args.Length > 0 && args[0] == "--fleet-recovery-fixture")
+{
+    await FleetRecoveryProcessAcceptance.RunAsync(args[1..]);
+    return;
+}
+
 await GatewayLogFilteringAcceptance.RunAsync();
 
 static void Must(bool condition, string name)

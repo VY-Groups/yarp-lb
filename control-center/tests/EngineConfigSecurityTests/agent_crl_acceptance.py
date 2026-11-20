@@ -381,6 +381,161 @@ authorityKeyIdentifier = keyid,issuer
                 if not was_stopped_by_test(process.returncode, terminated_by_test):
                     raise RuntimeError(f"GatewayAgent exited {process.returncode}; logs:\n" + logs)
 
+            # Mutations must use production chain validation on both OSes.
+            # On Windows provision only the unique disposable CA into the
+            # hosted runner's machine root store and remove it after the test.
+            # Never perform these mutations on a developer or customer host.
+            if os.environ.get("GITHUB_ACTIONS") == "true" and os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted":
+                windows_root_pin = None
+                if os.name == "nt":
+                    windows_root_pin=run(openssl,"x509","-in",str(temp/"root.pem"),"-noout","-fingerprint","-sha1").split("=",1)[1].replace(":","").strip()
+                    run(openssl,"x509","-in",str(temp/"root.pem"),"-outform","DER","-out",str(temp/"fleet-root.cer"))
+                recovery_dll = os.environ.get("GATEWAY_FLEET_RECOVERY_TEST_DLL")
+                if not recovery_dll or not Path(recovery_dll).is_file():
+                    raise AssertionError("missing shared recovery helper fixture executable")
+                run(openssl,"ecparam","-name","prime256v1","-genkey","-noout","-out",str(temp/"fleet-private.pem"))
+                run(openssl,"ec","-in",str(temp/"fleet-private.pem"),"-pubout","-out",str(temp/"fleet-public.pem"))
+                recovery_ports = [free_port(),free_port()]
+                while recovery_ports[0] == recovery_ports[1]:
+                    recovery_ports[1] = free_port()
+                processes = [None,None]
+                streams = []
+                controller_root = temp/"fleet-controller"
+                journal_dir = (controller_root/"state"/"fleet-rollouts" if os.name != "nt" else temp/"fleet-journals")
+                journal_dir.mkdir(parents=True,mode=0o700)
+                journal_path = journal_dir/"rollout_AAAAAAAAAAAAAAAAAAAAAAAA.json"
+                def start_node(i):
+                    node = temp/f"recovery-node-{i}"
+                    node.mkdir(exist_ok=True)
+                    config_file = node/"gateway.json"
+                    if not config_file.exists():
+                        config_file.write_text('{"ReverseProxy":{"Routes":{},"Clusters":{}},"fixture":"original"}')
+                    child = dict(env, Agent__EnableConfigChanges="true",
+                        Agent__GatewayConfigPath=str(config_file), Agent__StageDirectory=str(node/"stage"),
+                        Agent__ControllerSigningPublicKeyPath=str(temp/"fleet-public.pem"),
+                        Kestrel__Endpoints__AgentHttps__Url=f"https://127.0.0.1:{recovery_ports[i]}")
+                    child.pop("Agent__LabOnlyClientCaCertificatePath",None)
+                    child.pop("Agent__LabOnlyClientCaCheckRevocation",None)
+                    for key in tuple(child):
+                        if key.startswith("Agent__TrustedClientThumbprints__") and key != "Agent__TrustedClientThumbprints__0":
+                            del child[key]
+                    stream = (node/"agent.log").open("a",encoding="utf-8")
+                    streams.append(stream)
+                    processes[i]=subprocess.Popen(["dotnet",str(AGENT)],cwd=node,env=child,stdout=stream,stderr=subprocess.STDOUT)
+                    wait_for_listener(recovery_ports[i],processes[i],"fleet recovery agent")
+                    deadline=time.monotonic()+12
+                    while True:
+                        try:
+                            if request_status(recovery_ports[i],good_cert,good_key,temp/"root.pem")==200:
+                                break
+                        except (OSError,http.client.HTTPException):
+                            pass
+                        if time.monotonic()>=deadline:
+                            raise TimeoutError("fleet recovery agent did not admit production mTLS")
+                        time.sleep(.1)
+                def stop_node(i):
+                    proc=processes[i]
+                    if proc is not None and proc.poll() is None:
+                        proc.kill()
+                        proc.wait(timeout=5)
+                def invoke(mode):
+                    result=subprocess.run(["dotnet",recovery_dll,"--fleet-recovery-fixture",mode,str(temp),
+                        str(good_cert),str(good_key),str(temp/"server.pem"),
+                        str(recovery_ports[0]),str(recovery_ports[1]),str(journal_path)],
+                        check=True,capture_output=True,text=True,timeout=35)
+                    print(result.stdout,flush=True)
+                    return result.stdout
+                root_installed=False
+                client_installed=False
+                try:
+                    if windows_root_pin:
+                        # Mark before installing so cleanup is attempted even if
+                        # the provisioning subprocess fails after changing trust.
+                        root_installed=True
+                        invoke("install-root")
+                    start_node(0);start_node(1)
+                    if os.name == "nt":
+                        invoke("prepare")
+                        stop_node(1)
+                        if "FLEET_RECOVERY_PARTIAL" not in invoke("recover"):
+                            raise AssertionError("expected partial recovery while second agent unavailable")
+                        start_node(1)
+                        if "FLEET_RECOVERY_COMPLETE" not in invoke("recover"):
+                            raise AssertionError("expected resumed verified recovery")
+                        print("PASS: Windows production-chain mutating fleet recovery completed",flush=True)
+                    else:
+                        # Exercise the shipping controller, not just its shared
+                        # recovery helper. Signed prepares simulate a lost ACK;
+                        # controller restart consumes the persisted journal.
+                        import json
+                        from unittest.mock import patch
+                        sys.path.insert(0,str(REPO/"tests"/"E2E"))
+                        from real_control_center import Client, gateway, openssl_state, backend, check
+                        cwd=REPO/"control-center"
+                        dll=cwd/"bin/Release/net10.0/GatewayCoreYarp.dll"
+                        client_installed=True
+                        invoke("install-client")
+                        with patch.dict(os.environ,{"SSL_CERT_FILE":str(temp/"root.pem")}), backend() as upstream:
+                            openssl_state(controller_root,upstream)
+                            node_rows=[{"id":name,"url":f"https://127.0.0.1:{recovery_ports[i]}/",
+                                "clientCertificateThumbprint":pins[0]} for i,name in enumerate(("one","two"))]
+                            plan={"mode":"ha-pair","controlPlane":"single-controller","dataStore":"local-file",
+                                "accessPattern":"segmented","publicVip":"fixture-vip.example.invalid",
+                                "upstreamHealthAware":True,"requireIndependentApproval":True,
+                                "gateways":[{"id":row["id"],"hostname":f"gateway-{i}.example.invalid","agentUrl":row["url"]}
+                                    for i,row in enumerate(node_rows)],
+                                "workloads":[{"id":name,"application":"fixture","zone":"restricted","hostingEngine":"http",
+                                    "url":f"http://127.0.0.1:{upstream}/"} for name in ("origin-a","origin-b")]}
+                            with gateway(cwd,dll,controller_root,free_port()) as base:
+                                admin=Client(base)
+                                admin.bootstrap("fleetadmin","Disposable-fleet-admin-123!","fleetadmin@example.invalid")
+                                admin.request("POST","/admin/api/users",{"username":"fleetoperator",
+                                    "password":"Disposable-fleet-operator-123!","email":"fleetoperator@example.invalid","role":"Operator"})
+                                topology=admin.request("GET","/admin/api/onboarding")
+                                check(admin.request("POST","/admin/api/onboarding/validate",{"plan":plan})["issues"]==[],
+                                      "recovery fixture topology validates")
+                                for confirmed in (False,True):
+                                    topology=admin.request("POST","/admin/api/onboarding",{"plan":plan,
+                                        "confirmDesign":confirmed,"expectedRevision":topology["revision"]})
+                                for row in node_rows:
+                                    admin.request("POST","/admin/api/fleet",row)
+                                invoke("prepare")
+                            stop_node(1)
+                            endpoint="/admin/api/fleet/rollouts/"+journal_path.stem+"/recover"
+                            with gateway(cwd,dll,controller_root,free_port()) as base:
+                                admin=Client(base);admin.login("fleetadmin","Disposable-fleet-admin-123!")
+                                operator=Client(base);operator.login("fleetoperator","Disposable-fleet-operator-123!")
+                                before=journal_path.read_bytes()
+                                Client(base).request("POST",endpoint,{},expect=401)
+                                operator.request("POST",endpoint,{},expect=403)
+                                admin.request("POST",endpoint,{},csrf=False,expect=403)
+                                check(journal_path.read_bytes()==before,"unauthenticated, unauthorized and missing-CSRF recovery leave journal unchanged")
+                                admin.request("DELETE","/admin/api/fleet/two",expect=409)
+                                admin.request("POST",endpoint,{},expect=502)
+                                state=json.loads(journal_path.read_bytes())
+                                check(state["status"]=="manual-intervention-required" and
+                                      state["targets"][0]["rollbackVerified"] and not state["targets"][1]["rollbackVerified"],
+                                      "real controller API records partial recovery and preserves unresolved target")
+                            start_node(1)
+                            with gateway(cwd,dll,controller_root,free_port()) as base:
+                                admin=Client(base);admin.login("fleetadmin","Disposable-fleet-admin-123!")
+                                restored=admin.request("POST",endpoint,{})
+                                check(restored["status"]=="rollback-verified","real controller API resumes recovery after restart")
+                                admin.request("POST",endpoint,{},expect=409)
+                                if "FLEET_RECOVERY_COMPLETE" not in invoke("verify"):
+                                    raise AssertionError("expected independent original revision and late-activation proof")
+                            print("PASS: real controller HTTP recovery with RBAC, CSRF, restart and production mTLS",flush=True)
+                finally:
+                    try:
+                        for i in range(2): stop_node(i)
+                        for stream in streams: stream.close()
+                        if client_installed: invoke("remove-client")
+                    finally:
+                        if root_installed:
+                            invoke("remove-root")
+            else:
+                print("NOTICE: mutating fleet recovery requires a disposable GitHub Actions runner",flush=True)
+
             # Windows caches CRLs by issuer. Use a distinct one-use CA and agent
             # for the outage case so the good CRL above cannot satisfy it from cache.
             offline_dir = temp / "offline"

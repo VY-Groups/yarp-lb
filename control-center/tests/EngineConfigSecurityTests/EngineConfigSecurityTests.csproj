@@ -10,6 +10,7 @@
     <Compile Include="../../GatewayAgent/AgentPinSetRevisionAudit.cs" Link="AgentPinSetRevisionAudit.cs" />
     <Compile Include="../../GatewayAgent/GslbRuntimeMetricsSnapshot.cs" Link="GslbRuntimeMetricsSnapshot.cs" />
     <Compile Include="../../FleetSequenceState.cs" Link="FleetSequenceState.cs" />
+    <Compile Include="../../FleetRolloutJournal.cs" Link="FleetRolloutJournal.cs" />
     <Compile Include="../../OtlpEndpointPolicy.cs" Link="OtlpEndpointPolicy.cs" />
     <Compile Include="../../GatewayOpenTelemetry.cs" Link="GatewayOpenTelemetry.cs" />
     <Compile Include="../../NonBlockingConsoleLogging.cs" Link="NonBlockingConsoleLogging.cs" />

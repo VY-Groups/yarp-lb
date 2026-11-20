@@ -63,5 +63,9 @@ jobs:
       - name: Exercise real authenticated administrative HTTP API and security gates
         run: python tests/E2E/real_control_center.py --root control-center
 
+      - name: Install disposable Redis authority for shared OIDC acceptance
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq redis-server redis-tools
       - name: Exercise real HTTPS OIDC callback and negative token cases
         run: python tests/E2E/enterprise_oidc.py --root control-center

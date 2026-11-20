@@ -231,6 +231,7 @@ app.MapGet("/agent/v1/status", () => Results.Ok(new
     utc = DateTimeOffset.UtcNow,
     serviceManagementEnabled = allowActions,
     configDeploymentEnabled = allowConfigChanges,
+    rollbackFenceProtocol = 1,
     engineConfigStagingEnabled = allowEngineConfigChanges,
     revision = allowConfigChanges ? Sha(File.ReadAllBytes(gatewayConfigPath)) : null,
     allowedServiceNames = allowedServices,
@@ -357,6 +358,8 @@ app.MapPost("/agent/v1/config/activate", async (ConfigActivate input) =>
         var tx = Path.Combine(stageRoot,input.TransactionId);
         var prepared = Path.Combine(tx,"prepared.json");
         if (!File.Exists(prepared)) return Results.NotFound();
+        if (File.Exists(Path.Combine(tx, "rollback-fence")))
+            return Results.Conflict(new { error = "Transaction fenced by rollback" });
         var seqFile = Path.Combine(tx, "sequence.txt");
         if (!File.Exists(seqFile) ||
             !long.TryParse(await File.ReadAllTextAsync(seqFile), out var preparedSequence) ||
@@ -396,9 +399,26 @@ app.MapPost("/agent/v1/config/rollback", async (ConfigRollback input) =>
         // Never overwrite config mutated by another operator since rollout.
         if (Sha(actual)!=Sha(staged) && Sha(actual)!=Sha(original))
             return Results.Conflict(new {error="Cannot rollback: gateway has diverged"});
-        await File.WriteAllBytesAsync(gatewayConfigPath+".next", original);
-        File.Move(gatewayConfigPath+".next",gatewayConfigPath,true);
-        return Results.Ok(new {state="rolled-back",revision=Sha(original)});
+        // Fence activation BEFORE restoring the original. A crash cannot make
+        // this transaction eligible for a delayed activation after rollback.
+        var fence = Path.Combine(tx, "rollback-fence");
+        if (!File.Exists(fence))
+        {
+            using var journal = new FileStream(fence, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+            journal.WriteByte(1);
+            journal.Flush(flushToDisk: true);
+        }
+        if (Sha(actual) != Sha(original))
+        {
+            var next = gatewayConfigPath + ".next";
+            using (var journal = new FileStream(next, FileMode.Create, FileAccess.Write, FileShare.None))
+            {
+                journal.Write(original);
+                journal.Flush(flushToDisk: true);
+            }
+            File.Move(next, gatewayConfigPath, true);
+        }
+        return Results.Ok(new {state="rolled-back",revision=Sha(original),rollbackFenced=true});
     }
     finally {revisionLock.Release();}
 });
