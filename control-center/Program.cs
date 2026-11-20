@@ -1972,102 +1972,199 @@ app.MapGet("/admin/api/fleet/status", async () =>
 var rolloutGate = new SemaphoreSlim(1, 1);
 var rolloutFolder = Path.Combine(privateDir, "fleet-rollouts");
 Directory.CreateDirectory(rolloutFolder);
+string FleetDigest() => Convert.ToHexString(SHA256.HashData(AuditStateBytes(fleetPath)));
+async Task<List<string>> RollbackAttempted(string logPath, JsonObject journal, List<FleetGateway> gateways)
+{
+    var errors = new List<string>();
+    foreach (var target in FleetRolloutJournal.Targets(journal).Where(FleetRolloutJournal.NeedsRollback))
+    {
+        var id = target["id"]!.GetValue<string>();
+        try
+        {
+            var row = gateways.Single(x => x.Id == id);
+            FleetRolloutJournal.Log(logPath, journal, id, "rollback", "dispatching");
+            using var client = CreateFleetClient(row);
+            using var response = await client.PostAsJsonAsync(new Uri(new Uri(row.Url), "agent/v1/config/rollback"),
+                new { TransactionId = journal["id"]!.GetValue<string>() });
+            response.EnsureSuccessStatusCode();
+            var reply = JsonNode.Parse(await response.Content.ReadAsStringAsync());
+            using var status = await client.GetAsync(new Uri(new Uri(row.Url), "agent/v1/status"));
+            status.EnsureSuccessStatusCode();
+            var observed = JsonNode.Parse(await status.Content.ReadAsStringAsync())?["revision"]?.ToString();
+            if (reply?["state"]?.ToString() != "rolled-back" || reply["revision"]?.ToString() != observed ||
+                !FleetRolloutJournal.CompleteRollback(target, observed))
+                throw new InvalidOperationException("Rollback revision not independently confirmed");
+            FleetRolloutJournal.Log(logPath, journal, id, "rollback", "verified", observed);
+        }
+        catch (Exception ex)
+        {
+            errors.Add(id + ": " + ex.GetType().Name);
+            FleetRolloutJournal.Log(logPath, journal, id, "rollback", "unresolved", ex.GetType().Name);
+        }
+    }
+    journal["status"] = errors.Count == 0 ? "rollback-verified" : "manual-intervention-required";
+    FleetRolloutJournal.Log(logPath, journal, "fleet", "finish", journal["status"]!.GetValue<string>());
+    return errors;
+}
 app.MapPost("/admin/api/fleet/rollout/{changeId}", async (HttpContext ctx, string changeId) =>
 {
     if (!Regex.IsMatch(changeId, "^change-[0-9]{8}T[0-9]{13,}Z-[A-F0-9]{10}$"))
         return Results.BadRequest(new { error = "Invalid change ID" });
-    var changePath = Path.Combine(changeFolder,changeId+".json");
-    if (!File.Exists(changePath)) return Results.NotFound();
-    var change = JsonNode.Parse(await File.ReadAllTextAsync(changePath))?.AsObject();
-    if (change?["status"]?.ToString() != "Approved" || change["reviewedBy"] is null ||
-        string.Equals(change["requestedBy"]?.ToString(),change["reviewedBy"]?.ToString(),StringComparison.OrdinalIgnoreCase))
-        return Results.Conflict(new { error="An independent administrator must have approved this change" });
-    if (change["payload"] is not JsonObject payload || payload["routes"] is not JsonObject routes ||
-        payload["clusters"] is not JsonObject clusters)
-        return Results.BadRequest(new {error="Approved change has no route and cluster payload"});
-    var gateways=ReadFleet();
-    if (gateways.Count < 2 || gateways.Count > 20)
-        return Results.Conflict(new {error="Register at least two managed gateways; maximum 20"});
-    if (!await rolloutGate.WaitAsync(0)) return Results.Conflict(new {error="Another rollout is running"});
-    var txId="rollout_"+Convert.ToHexString(RandomNumberGenerator.GetBytes(12));
-    var result=new JsonObject { ["id"]=txId,["changeId"]=changeId,
-       ["initiator"]=Actor(ctx),["createdUtc"]=DateTimeOffset.UtcNow.ToString("O"),
-       ["status"]="starting",["details"]=new JsonArray() };
-    var logPath=Path.Combine(rolloutFolder,txId+".json");
-    async Task Log(string gateway,string stage,string state,string? detail=null)
-    {
-        ((JsonArray)result["details"]!).Add(new JsonObject { ["utc"]=DateTimeOffset.UtcNow.ToString("O"),
-            ["gateway"]=gateway,["stage"]=stage,["state"]=state,["detail"]=detail });
-        await File.WriteAllTextAsync(logPath+".tmp",result.ToJsonString());
-        File.Move(logPath+".tmp",logPath,true);
-    }
+    if (!await rolloutGate.WaitAsync(0)) return Results.Conflict(new { error = "Another rollout is running" });
+    bool fleetHeld = false, persisted = false;
+    JsonObject? journal = null;
+    var gateways = new List<FleetGateway>();
+    var txId = "rollout_" + Convert.ToHexString(RandomNumberGenerator.GetBytes(12));
+    var logPath = Path.Combine(rolloutFolder, txId + ".json");
     try
     {
-        var proxy = new JsonObject { ["Routes"]=routes.DeepClone(),["Clusters"]=clusters.DeepClone() };
+        await fleetGate.WaitAsync(ctx.RequestAborted);
+        fleetHeld = true;
+        if (FleetRolloutJournal.HasUnresolved(rolloutFolder))
+            return Results.Conflict(new { error = "An earlier rollout is unresolved. Recover it before starting another." });
+        if (!AuditActorCurrent(ctx, true)) return Results.StatusCode(403);
+        var changePath = Path.Combine(changeFolder, changeId + ".json");
+        if (!File.Exists(changePath)) return Results.NotFound();
+        var changeBytes = File.ReadAllBytes(changePath);
+        var change = JsonNode.Parse(changeBytes)?.AsObject();
+        if (change?["status"]?.ToString() != "Approved" || change["reviewedBy"] is null ||
+            string.Equals(change["requestedBy"]?.ToString(), change["reviewedBy"]?.ToString(), StringComparison.OrdinalIgnoreCase))
+            return Results.Conflict(new { error = "An independent administrator must have approved this change" });
+        if (change["payload"] is not JsonObject payload || payload["routes"] is not JsonObject routes ||
+            payload["clusters"] is not JsonObject clusters)
+            return Results.BadRequest(new { error = "Approved change has no route and cluster payload" });
+        gateways = ReadFleet();
+        if (gateways.Count < 2 || gateways.Count > 20)
+            return Results.Conflict(new { error = "Register at least two managed gateways; maximum 20" });
+        var fleetDigest = FleetDigest();
+        var proxy = new JsonObject { ["Routes"] = routes.DeepClone(), ["Clusters"] = clusters.DeepClone() };
         var signingKeyPath = Path.Combine(privateDir, "fleet-signing-private.pem");
         if (!File.Exists(signingKeyPath))
-            throw new InvalidOperationException("Fleet signing key not provisioned. Signed deployment is required.");
-        var signingKeyPem = await File.ReadAllTextAsync(signingKeyPath);
-        // Monotonic independent of application config revision or rollback.
-        // The rolloutGate serializes allocation for this single controller instance.
-        var sequence = FleetSequenceState.AllocateNext(Path.Combine(privateDir, "fleet-sequence.txt"));
-        var prepared = new List<(FleetGateway Gateway,string Revision)>();
+            return Results.Conflict(new { error = "Fleet signing key not provisioned" });
+        var signingKeyPem = await File.ReadAllTextAsync(signingKeyPath, ctx.RequestAborted);
+        var targets = new JsonArray();
+        // Preflight every target before authorizing or dispatching any mutation.
         foreach (var row in gateways)
         {
             using var client = CreateFleetClient(row);
-            var statusResponse=await client.GetAsync(new Uri(new Uri(row.Url),"agent/v1/status"));
+            using var statusResponse = await client.GetAsync(new Uri(new Uri(row.Url), "agent/v1/status"), ctx.RequestAborted);
             statusResponse.EnsureSuccessStatusCode();
-            var status=JsonNode.Parse(await statusResponse.Content.ReadAsStringAsync());
-            var revision=status?["revision"]?.ToString();
-            if (string.IsNullOrWhiteSpace(revision)) throw new InvalidOperationException(row.Id+": no revision / deployment disabled");
-            var expires = DateTimeOffset.UtcNow.AddMinutes(3).ToUnixTimeSeconds();
-            var signed = FleetConfigSignature.SignV2(signingKeyPem, txId, revision, proxy, expires, sequence);
-            using var response=await client.PostAsJsonAsync(new Uri(new Uri(row.Url),"agent/v1/config/prepare"),
-                new {TransactionId=txId,ExpectedRevision=revision,ReverseProxy=proxy,
-                    signed.ExpiresUnixSeconds, signed.Sequence, signed.KeyId, signed.Signature});
-            if (!response.IsSuccessStatusCode) throw new InvalidOperationException(row.Id+": prepare HTTP "+(int)response.StatusCode);
-            var staged=JsonNode.Parse(await response.Content.ReadAsStringAsync());
-            var revisionStaged=staged?["preparedRevision"]?.ToString();
-            if (string.IsNullOrWhiteSpace(revisionStaged)) throw new InvalidOperationException("Missing staged hash");
-            prepared.Add((row,revisionStaged));
-            await Log(row.Id,"prepare","ok",revisionStaged);
+            var status = JsonNode.Parse(await statusResponse.Content.ReadAsStringAsync(ctx.RequestAborted));
+            var revision = status?["revision"]?.ToString();
+            if (!FleetRolloutJournal.IsDigest(revision))
+                throw new InvalidOperationException("Agent configuration revision unavailable");
+            targets.Add(new JsonObject { ["id"] = row.Id, ["originalRevision"] = revision,
+                ["prepareSent"] = false, ["activateSent"] = false, ["rollbackVerified"] = false });
         }
-        foreach (var item in prepared)
+        journal = new JsonObject { ["schema"] = 2, ["id"] = txId, ["changeId"] = changeId,
+            ["initiator"] = Actor(ctx), ["createdUtc"] = DateTimeOffset.UtcNow.ToString("O"),
+            ["status"] = "starting", ["fleetDigest"] = fleetDigest,
+            ["changeDigest"] = Convert.ToHexString(SHA256.HashData(changeBytes)), ["targets"] = targets,
+            ["details"] = new JsonArray() };
+        var initial = JsonSerializer.SerializeToUtf8Bytes(journal);
+        var denied = await ConfirmStateMutation(ctx, logPath, Array.Empty<byte>(), initial, "FLEET_ROLLOUT_INTENT", true);
+        if (denied is not null) return denied;
+        bool CurrentPlan() => AuditActorCurrent(ctx, true) && !ctx.RequestAborted.IsCancellationRequested &&
+            OnboardingApi.IsMultiGatewayDesign(privateDir) && FleetDigest() == fleetDigest &&
+            File.Exists(changePath) && File.ReadAllBytes(changePath).AsSpan().SequenceEqual(changeBytes);
+        if (!CurrentPlan()) return Results.Conflict(new { error = "Rollout authorization or plan changed" });
+        WriteAuditedState(logPath, initial);
+        persisted = true;
+        var sequence = FleetSequenceState.AllocateNext(Path.Combine(privateDir, "fleet-sequence.txt"));
+        journal["sequence"] = sequence;
+        journal["status"] = "preparing";
+        FleetRolloutJournal.Write(logPath, journal);
+        foreach (var target in FleetRolloutJournal.Targets(journal))
         {
-            using var client=CreateFleetClient(item.Gateway);
-            using var response=await client.PostAsJsonAsync(new Uri(new Uri(item.Gateway.Url),"agent/v1/config/activate"),
-                new {TransactionId=txId,PreparedRevision=item.Revision});
-            if (!response.IsSuccessStatusCode) throw new InvalidOperationException(item.Gateway.Id+": activation HTTP "+(int)response.StatusCode);
-            await Log(item.Gateway.Id,"activate","ok");
+            if (!CurrentPlan()) throw new InvalidOperationException("Rollout authorization or plan changed");
+            var row = gateways.Single(x => x.Id == target["id"]!.GetValue<string>());
+            var revision = target["originalRevision"]!.GetValue<string>();
+            var signed = FleetConfigSignature.SignV2(signingKeyPem, txId, revision, proxy,
+                DateTimeOffset.UtcNow.AddMinutes(3).ToUnixTimeSeconds(), sequence);
+            using var client = CreateFleetClient(row);
+            target["prepareSent"] = true;
+            FleetRolloutJournal.Log(logPath, journal, row.Id, "prepare", "dispatching");
+            using var response = await client.PostAsJsonAsync(new Uri(new Uri(row.Url), "agent/v1/config/prepare"),
+                new { TransactionId = txId, ExpectedRevision = revision, ReverseProxy = proxy,
+                    signed.ExpiresUnixSeconds, signed.Sequence, signed.KeyId, signed.Signature }, ctx.RequestAborted);
+            response.EnsureSuccessStatusCode();
+            var staged = JsonNode.Parse(await response.Content.ReadAsStringAsync(ctx.RequestAborted));
+            var prepared = staged?["preparedRevision"]?.ToString();
+            if (staged?["transactionId"]?.ToString() != txId || staged["originalRevision"]?.ToString() != revision ||
+                !FleetRolloutJournal.IsDigest(prepared)) throw new InvalidOperationException("Invalid prepare acknowledgment");
+            target["preparedRevision"] = prepared;
+            FleetRolloutJournal.Log(logPath, journal, row.Id, "prepare", "ok", prepared);
         }
-        result["status"]="activated-pending-health-validation";
-        await Log("fleet","finish","activation-complete","Verify real application health and failover before treating as successful");
-        await Audit(Actor(ctx),"FLEET_ROLLOUT_ACTIVATED",new {txId,changeId});
-        return Results.Ok(result);
+        journal["status"] = "activating";
+        FleetRolloutJournal.Write(logPath, journal);
+        foreach (var target in FleetRolloutJournal.Targets(journal))
+        {
+            if (!CurrentPlan()) throw new InvalidOperationException("Rollout authorization or plan changed");
+            var row = gateways.Single(x => x.Id == target["id"]!.GetValue<string>());
+            var prepared = target["preparedRevision"]!.GetValue<string>();
+            using var client = CreateFleetClient(row);
+            target["activateSent"] = true;
+            FleetRolloutJournal.Log(logPath, journal, row.Id, "activate", "dispatching");
+            using var response = await client.PostAsJsonAsync(new Uri(new Uri(row.Url), "agent/v1/config/activate"),
+                new { TransactionId = txId, PreparedRevision = prepared }, ctx.RequestAborted);
+            response.EnsureSuccessStatusCode();
+            var activated = JsonNode.Parse(await response.Content.ReadAsStringAsync(ctx.RequestAborted));
+            if (activated?["transactionId"]?.ToString() != txId || activated["revision"]?.ToString() != prepared)
+                throw new InvalidOperationException("Invalid activation acknowledgment");
+            FleetRolloutJournal.Log(logPath, journal, row.Id, "activate", "ok", prepared);
+        }
+        journal["status"] = "activated-pending-health-validation";
+        FleetRolloutJournal.Log(logPath, journal, "fleet", "finish", "activation-complete", "Live application health is not verified");
+        await Audit(Actor(ctx), "FLEET_ROLLOUT_ACTIVATED", new { txId, changeId });
+        return Results.Ok(journal);
     }
-    catch(Exception ex)
+    catch (Exception ex)
     {
-        var rollbackErrors=new List<string>();
-        foreach(var row in gateways)
-        {
-            try
-            {
-                using var client=CreateFleetClient(row);
-                using var response=await client.PostAsJsonAsync(new Uri(new Uri(row.Url),"agent/v1/config/rollback"),
-                    new {TransactionId=txId});
-                if (!response.IsSuccessStatusCode) rollbackErrors.Add(row.Id+": HTTP "+(int)response.StatusCode);
-                await Log(row.Id,"rollback",response.IsSuccessStatusCode?"ok":"failed");
-            }
-            catch(Exception rollbackEx)
-            {rollbackErrors.Add(row.Id+": "+rollbackEx.GetType().Name);await Log(row.Id,"rollback","failed",rollbackEx.GetType().Name);}
-        }
-        result["status"]=rollbackErrors.Count==0?"rollback-attempted":"manual-intervention-required";
-        await Log("fleet","error","failed",ex.GetType().Name+"; "+string.Join("; ",rollbackErrors));
-        await Audit(Actor(ctx),"FLEET_ROLLOUT_FAILED",new {txId,changeId,rollbackErrors});
-        return Results.Json(new {transactionId=txId,status=result["status"]?.ToString(),
-            error="Deployment failed. Inspect journal and verify both gateways.",rollbackErrors},statusCode:502);
+        if (!persisted || journal is null)
+            return Results.Json(new { error = "Rollout preflight failed", errorType = ex.GetType().Name }, statusCode: 502);
+        // Compensation is covered by the authorized initial plan; never
+        // suppress it because the original request or session was cancelled.
+        journal["status"] = "recovering";
+        FleetRolloutJournal.Log(logPath, journal, "fleet", "error", "failed", ex.GetType().Name);
+        var rollbackErrors = await RollbackAttempted(logPath, journal, gateways);
+        await Audit(Actor(ctx), "FLEET_ROLLOUT_FAILED", new { txId, changeId, rollbackErrors });
+        return Results.Json(new { transactionId = txId, status = journal["status"]?.ToString(),
+            error = "Deployment failed; inspect durable journal", rollbackErrors }, statusCode: 502);
     }
-    finally {rolloutGate.Release();}
+    finally { if (fleetHeld) fleetGate.Release(); rolloutGate.Release(); }
+}).RequireAuthorization(p => p.RequireRole("Administrator"));
+
+app.MapPost("/admin/api/fleet/rollouts/{id}/recover", async (HttpContext ctx, string id) =>
+{
+    if (!FleetRolloutJournal.IsTransaction(id)) return Results.BadRequest();
+    if (!await rolloutGate.WaitAsync(0)) return Results.Conflict(new { error = "Another rollout is running" });
+    bool fleetHeld = false;
+    try
+    {
+        await fleetGate.WaitAsync(ctx.RequestAborted);
+        fleetHeld = true;
+        var path = Path.Combine(rolloutFolder, id + ".json");
+        if (!File.Exists(path)) return Results.NotFound();
+        var before = File.ReadAllBytes(path);
+        var journal = FleetRolloutJournal.Read(path);
+        var gateways = ReadFleet();
+        if (!FleetRolloutJournal.RecoveryAllowed(journal, id, FleetDigest()) ||
+            !FleetRolloutJournal.Targets(journal).Select(x => x["id"]!.GetValue<string>())
+                .SequenceEqual(gateways.Select(x => x.Id)))
+            return Results.Conflict(new { error = "Recovery requires original inventory and a valid unfinished v2 journal" });
+        journal["status"] = "recovering";
+        var proposed = JsonSerializer.SerializeToUtf8Bytes(journal);
+        var denied = await ConfirmStateMutation(ctx, path, before, proposed, "FLEET_RECOVERY_INTENT", true);
+        if (denied is not null) return denied;
+        if (!AuditActorCurrent(ctx, true) || ctx.RequestAborted.IsCancellationRequested)
+            return Results.StatusCode(403);
+        WriteAuditedState(path, proposed);
+        var errors = await RollbackAttempted(path, journal, gateways);
+        await Audit(Actor(ctx), "FLEET_ROLLOUT_RECOVERY", new { id, errors });
+        return errors.Count == 0 ? Results.Ok(journal) :
+            Results.Json(new { transactionId = id, status = "manual-intervention-required", errors }, statusCode: 502);
+    }
+    finally { if (fleetHeld) fleetGate.Release(); rolloutGate.Release(); }
 }).RequireAuthorization(p => p.RequireRole("Administrator"));
 app.MapGet("/admin/api/fleet/rollouts", () => Results.Ok(
     Directory.GetFiles(rolloutFolder,"rollout_*.json").OrderByDescending(x=>x).Take(30)
@@ -2084,7 +2181,7 @@ HttpClient CreateFleetClient(FleetGateway row)
     if(matches.Count != 1 || !matches[0].HasPrivateKey) throw new InvalidOperationException("Missing controller certificate for "+row.Id);
     var handler=new HttpClientHandler {AllowAutoRedirect=false,UseProxy=false};
     handler.ClientCertificates.Add(matches[0]);
-    return new HttpClient(handler,disposeHandler:true) {Timeout=TimeSpan.FromSeconds(8)};
+    return new HttpClient(handler,disposeHandler:true) {Timeout=TimeSpan.FromSeconds(8), MaxResponseContentBufferSize=65536};
 }
 
 // Version 0.1 setup APIs and independently verified YARP runtime state.
