@@ -23,6 +23,10 @@ long udpLossA = 0, udpLossB = 0;
 var udpLost = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 using var resetBackend = new TcpListener(IPAddress.Loopback, 19117);
 resetBackend.Start();
+using var refusedPortListener = new TcpListener(IPAddress.Loopback, 0);
+refusedPortListener.Start();
+var refusedPort = ((IPEndPoint)refusedPortListener.LocalEndpoint).Port;
+refusedPortListener.Stop();
 long resetRequests = 0, replayRequests = 0;
 var resetSeen = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 long udpBReceived = 0;
@@ -61,6 +65,11 @@ File.WriteAllText(configFile, JsonSerializer.Serialize(new {
       new { Name = "tcp-reset", ListenHost="127.0.0.1", ListenPort=19017,
         TcpIdleTimeoutSeconds=3,
         Backends = new [] { new { Host="127.0.0.1", Port=19117 }, new { Host="127.0.0.1", Port=19112 } } },
+      new { Name = "tcp-connect-failure", ListenHost="127.0.0.1", ListenPort=19028,
+        ProbeIntervalSeconds=60, Backends = new [] { new { Host="127.0.0.1", Port=refusedPort } } },
+      new { Name = "tcp-all-drained", ListenHost="127.0.0.1", ListenPort=19029,
+        Backends = new [] { new { Host="127.0.0.1", Port=19111, DrainNewConnections=true },
+          new { Host="127.0.0.1", Port=19112, DrainNewConnections=true } } },
       new { Name = "tcp-drain", ListenHost="127.0.0.1", ListenPort=19014,
         Backends = new [] { new { Host="127.0.0.1", Port=19111, DrainNewConnections=true },
           new { Host="127.0.0.1", Port=19112, DrainNewConnections=false } } } },
@@ -101,6 +110,8 @@ async Task<string> ReadProxyOutput()
         "L4_UDP_READY udp-health 127.0.0.1:19026",
         "L4_TCP_READY tcp-admission 127.0.0.1:19016",
         "L4_TCP_READY tcp-reset 127.0.0.1:19017",
+        "L4_TCP_READY tcp-connect-failure 127.0.0.1:19028",
+        "L4_TCP_READY tcp-all-drained 127.0.0.1:19029",
         "L4_UDP_READY udp-loss 127.0.0.1:19027"
     };
     while (await proxy.StandardOutput.ReadLineAsync() is { } line)
@@ -226,6 +237,7 @@ try
     Assert(await ValidateTcpHalfClose(), "client half-close reaches backend while backend response still drains");
     Assert(await ValidateTcpIdle(), "idle TCP stream closed by configured timeout");
     await ValidateAdmission();
+    await ValidateTcpFailureBoundaries();
     await ValidateNoReplay();
     // Verify active health rejects down nodes rather than repeatedly relying on connect exceptions.
     tcpA.Stop();
@@ -377,6 +389,23 @@ async Task ValidateNoReplay()
         "new UDP endpoint can reach alternate backend");
     Assert(Interlocked.Read(ref udpLossA) == 1 && Interlocked.Read(ref udpLossB) == 0,
         "lost UDP transaction delivered exactly once to original backend and never replayed");
+}
+async Task ValidateTcpFailureBoundaries()
+{
+    using (var failedConnect = new TcpClient(AddressFamily.InterNetwork))
+    {
+        await failedConnect.ConnectAsync(IPAddress.Loopback, 19028);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+        Assert(await failedConnect.GetStream().ReadAsync(new byte[1], timeout.Token) == 0,
+            "failed upstream connect closes downstream without forwarding application bytes");
+    }
+    using (var allDrained = new TcpClient(AddressFamily.InterNetwork))
+    {
+        await allDrained.ConnectAsync(IPAddress.Loopback, 19029);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+        Assert(await allDrained.GetStream().ReadAsync(new byte[1], timeout.Token) == 0,
+            "all-drained TCP listener rejects new streams without selecting a backend");
+    }
 }
 async Task<bool> ValidateProxyHeader()
 {

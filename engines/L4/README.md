@@ -41,4 +41,6 @@ A listener bind or runtime failure shuts down sibling listeners and exits nonzer
 
 The real-process fault fixture sends a unique TCP transaction to a backend that resets after receiving its bytes, then checks the next independent connection succeeds without replaying the old transaction. It also deliberately drops one UDP response, counts receipt on both backends, and checks source-affinity and new-endpoint routing without retransmission by the proxy. These are loopback software contracts, not packet-loss/WAN benchmarks.
 
+The fixture also checks a refused upstream connection and an all-drained TCP listener: both close new downstream connections without forwarding application data. These do not test backend recovery after an established stream; the reset and UDP-drop cases separately verify no replay after forwarding begins.
+
 Linux real-process SIGTERM acceptance exercises two established TCP streams: admission stops, one transaction finishes and half-closes during drain, the other is cancelled within the bounded shutdown budget, and the UDP port is released. Windows console-control shutdown is a separate acceptance requirement; Linux SIGTERM coverage must not be reported as Windows graceful-stop verification.
