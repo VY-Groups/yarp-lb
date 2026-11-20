@@ -228,33 +228,32 @@ public sealed class AcmeRenewalCoordinator(IAcmeCertificateIssuer issuer,
         string? stagePath = null;
         string? rollbackPath = null;
         byte[]? activePfxBackup = null;
+        byte[]? installedPfx = null;
+        string? originalPassword = null;
         IDisposable? lifecycleLease = null;
         var activePfxReplaced = false;
         try
         {
-            var activeInfo = new FileInfo(activePfxPath);
-            if (activeInfo.Length is < 512 or > 1_048_576)
-                throw new CryptographicException("Active traffic PFX is outside the configured size bound.");
-            activePfxBackup = await File.ReadAllBytesAsync(activePfxPath, operationToken);
-            var activeCertificate = LoadActiveCertificate(activePfxPath, passwordFilePath);
-            using (activeCertificate)
+            activePfxBackup = await ReadBoundedPfxAsync(activePfxPath, operationToken);
+            originalPassword = await ReadBoundedPasswordAsync(passwordFilePath, operationToken);
+            var flags = OperatingSystem.IsWindows() ? X509KeyStorageFlags.UserKeySet : X509KeyStorageFlags.EphemeralKeySet;
+            using (var activeCertificate = X509CertificateLoader.LoadPkcs12(activePfxBackup, originalPassword, flags))
             {
                 var notAfter = new DateTimeOffset(activeCertificate.NotAfter.ToUniversalTime());
                 if (notAfter - clock.GetUtcNow() > renewBeforeExpiry)
                     return new AcmeRenewalResult(false, notAfter, "certificate-is-outside-renewal-window");
             }
 
-            var password = File.ReadAllText(passwordFilePath).TrimEnd('\r', '\n');
-            if (password.Length == 0) throw new InvalidOperationException("Traffic PFX password cannot be empty.");
             var issued = await issuer.IssueHttp01Async(directoryUrl, target.NormalizedDnsName!,
-                contactEmail, password, challenges, operationToken).WaitAsync(operationToken);
+                contactEmail, originalPassword, challenges, operationToken).WaitAsync(operationToken);
             if (!string.Equals(issued.DnsName, target.NormalizedDnsName, StringComparison.Ordinal) ||
                 issued.Pfx.Length is < 512 or > 1_048_576)
                 throw new CryptographicException("ACME issuer returned an invalid identity or bounded PFX payload.");
 
             var directory = Path.GetDirectoryName(Path.GetFullPath(activePfxPath))!;
             stagePath = Path.Combine(directory, ".gatewaycore-acme-" + Guid.NewGuid().ToString("N") + ".pfx");
-            await WritePrivatePfxAsync(stagePath, issued.Pfx, operationToken);
+            installedPfx = issued.Pfx.ToArray();
+            await WritePrivatePfxAsync(stagePath, installedPfx, operationToken);
             using (var validated = new TrafficCertificateRotation(stagePath, passwordFilePath,
                        [target.NormalizedDnsName!], validationPolicy))
             {
@@ -262,12 +261,16 @@ public sealed class AcmeRenewalCoordinator(IAcmeCertificateIssuer issuer,
                 var notAfter = new DateTimeOffset(leaf.NotAfter.ToUniversalTime());
                 var renewedThumbprint = leaf.Thumbprint;
                 // A CA that returns the same leaf is not treated as successful renewal.
-                using var active = LoadActiveCertificate(activePfxPath, passwordFilePath);
+                using var active = X509CertificateLoader.LoadPkcs12(activePfxBackup, originalPassword, flags);
                 if (string.Equals(leaf.Thumbprint, active.Thumbprint, StringComparison.OrdinalIgnoreCase))
                     throw new CryptographicException("ACME renewal returned the currently active certificate.");
                 // Serialize the atomic PFX replacement and live listener activation with
                 // operator revocation so the leaf cannot change during its active check.
                 lifecycleLease = await certificateLifecycle.EnterAsync(operationToken);
+                if (!await MatchesActiveAsync(activePfxPath, passwordFilePath, activePfxBackup,
+                        originalPassword, operationToken))
+                    throw new InvalidOperationException("Active certificate or password changed during ACME renewal; refusing stale replacement.");
+                operationToken.ThrowIfCancellationRequested();
                 File.Move(stagePath, activePfxPath, overwrite: true);
                 stagePath = null;
                 activePfxReplaced = true;
@@ -287,13 +290,16 @@ public sealed class AcmeRenewalCoordinator(IAcmeCertificateIssuer issuer,
         {
             // If runtime activation is wired and failed after the atomic swap, put the
             // last-good encrypted PFX back and let the same watcher restore it.
-            if (activePfxReplaced && activePfxBackup is not null && File.Exists(activePfxPath))
+            if (activePfxReplaced && activePfxBackup is not null && installedPfx is not null && originalPassword is not null)
             {
                 var directory = Path.GetDirectoryName(Path.GetFullPath(activePfxPath))!;
                 rollbackPath = Path.Combine(directory, ".gatewaycore-acme-rollback-" + Guid.NewGuid().ToString("N") + ".pfx");
                 try
                 {
                     await WritePrivatePfxAsync(rollbackPath, activePfxBackup, CancellationToken.None);
+                    if (!await MatchesActiveAsync(activePfxPath, passwordFilePath, installedPfx,
+                            originalPassword, CancellationToken.None))
+                        throw new InvalidOperationException("Active certificate or password changed after ACME installation; refusing stale rollback.");
                     File.Move(rollbackPath, activePfxPath, overwrite: true);
                     rollbackPath = null;
                 }
@@ -309,16 +315,58 @@ public sealed class AcmeRenewalCoordinator(IAcmeCertificateIssuer issuer,
             if (stagePath is not null) try { File.Delete(stagePath); } catch (IOException) { }
             if (rollbackPath is not null) try { File.Delete(rollbackPath); } catch (IOException) { }
             if (activePfxBackup is not null) CryptographicOperations.ZeroMemory(activePfxBackup);
+            if (installedPfx is not null) CryptographicOperations.ZeroMemory(installedPfx);
             lifecycleLease?.Dispose();
             renewalGate.Release();
         }
     }
 
-    private static X509Certificate2 LoadActiveCertificate(string pfxPath, string passwordPath)
+    private static async Task<byte[]> ReadBoundedPfxAsync(string path, CancellationToken token)
     {
-        var password = File.ReadAllText(passwordPath).TrimEnd('\r', '\n');
-        var flags = OperatingSystem.IsWindows() ? X509KeyStorageFlags.UserKeySet : X509KeyStorageFlags.EphemeralKeySet;
-        return X509CertificateLoader.LoadPkcs12FromFile(pfxPath, password, flags);
+        await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read,
+            FileShare.Read, 16_384, FileOptions.Asynchronous);
+        if (stream.Length is < 512 or > 1_048_576)
+            throw new CryptographicException("Active traffic PFX is outside the configured size bound.");
+        var bytes = new byte[checked((int)stream.Length)];
+        try
+        {
+            await stream.ReadExactlyAsync(bytes, token);
+            if (stream.ReadByte() != -1) throw new InvalidDataException("PFX changed during read.");
+            return bytes;
+        }
+        catch { CryptographicOperations.ZeroMemory(bytes); throw; }
+    }
+
+    private static async Task<string> ReadBoundedPasswordAsync(string path, CancellationToken token)
+    {
+        await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read,
+            FileShare.Read, 4096, FileOptions.Asynchronous);
+        if (stream.Length is < 1 or > 16_384) throw new InvalidDataException("PFX password file exceeds bound.");
+        var bytes = new byte[checked((int)stream.Length)];
+        try
+        {
+            await stream.ReadExactlyAsync(bytes, token);
+            if (stream.ReadByte() != -1) throw new InvalidDataException("PFX password changed during read.");
+            // Preserve UTF-8 BOM compatibility with File.ReadAllText.
+            var offset = bytes.AsSpan().StartsWith(new byte[] { 0xef, 0xbb, 0xbf }) ? 3 : 0;
+            var password = new UTF8Encoding(false, true).GetString(bytes, offset, bytes.Length - offset).TrimEnd('\r','\n');
+            if (password.Length == 0) throw new InvalidDataException("Traffic PFX password cannot be empty.");
+            return password;
+        }
+        finally { CryptographicOperations.ZeroMemory(bytes); }
+    }
+
+    private static async Task<bool> MatchesActiveAsync(string pfxPath, string passwordPath,
+        byte[] expectedPfx, string expectedPassword, CancellationToken token)
+    {
+        var current = await ReadBoundedPfxAsync(pfxPath, token);
+        try
+        {
+            return current.AsSpan().SequenceEqual(expectedPfx) &&
+                string.Equals(await ReadBoundedPasswordAsync(passwordPath, token),
+                    expectedPassword, StringComparison.Ordinal);
+        }
+        finally { CryptographicOperations.ZeroMemory(current); }
     }
 
     private static async Task WritePrivatePfxAsync(string path, byte[] pfx, CancellationToken cancellationToken)

@@ -110,3 +110,7 @@ by this process-local gate and must not run concurrently with GatewayCore's ACME
 operations. The acceptance test holds a fake CA revocation response while a
 renewal attempts activation and verifies that the leaf and PFX remain unchanged
 until revocation completes.
+
+### Renewal write and rollback state fence
+
+ACME captures and validates one bounded live PFX byte snapshot (512 bytes–1 MiB) and its UTF-8 password (1–16384 bytes, optional BOM). Under the local lifecycle gate it compares current PFX bytes and normalized password before replacement. If the active file or password changed while awaiting the CA, the order may have succeeded at the CA but the candidate is not installed. Activation-failure rollback also checks that the still-current bytes are the exact installed candidate and the password is unchanged; on conflict it fails without replacing the newer files. This is optimistic local fencing, not an OS-level compare-and-swap or multi-host lock; administrative/manual writes must be coordinated with renewal. UTF-8 password file required. No auto-revocation or replay of an orphaned order. The fake CA acceptance adds a concurrent manual-PFX replacement scenario; original activation rollback and revocation serialization checks remain.
