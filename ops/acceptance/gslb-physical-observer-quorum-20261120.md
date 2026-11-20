@@ -2,7 +2,7 @@
 
 **Run:** 2026-11-20 01:12–01:21 UTC  
 **Source:** main commit 47fbc0403d9bde5f7bcff62b1f55fd7730469623  
-**Environment:** three disposable Amazon Linux 2023 EC2 hosts; two DNS authorities (Mumbai and Osaka), with three independently enrolled signed mTLS health observers across three hosts. Apache remained the observed backend on each host. The zone was gslb-acceptance.invalid.  
+**Environment:** three disposable Amazon Linux 2023 EC2 hosts; two DNS authorities (Mumbai and Osaka), with three separately enrolled signed mTLS health observers on three hosts, assigned three configured vantage groups. Actual geographic and network-path diversity was not independently verified. Apache remained the observed backend on each host. The zone was gslb-acceptance.invalid.  
 **Scope:** External DNS wire behavior and the merged signed asynchronous agent-report quorum. This is a partial #109 acceptance record, not a production certification.
 
 ## Results
