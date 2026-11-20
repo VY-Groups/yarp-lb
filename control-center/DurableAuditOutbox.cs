@@ -56,6 +56,7 @@ internal sealed class DurableAuditOutbox : IDisposable
     private string[] Entries()
     {
         CheckDirectory();
+        CheckFile(Path.Combine(directory, "owner.lock"));
         var paths = new List<string>();
         foreach (var path in Directory.EnumerateFileSystemEntries(directory))
         {
@@ -92,7 +93,7 @@ internal sealed class DurableAuditOutbox : IDisposable
             if (storageFault) throw new IOException("Audit outbox storage fault is latched");
             try
             {
-                if (Entries().Length >= MaxEntries) throw new IOException("Audit outbox full; no event discarded");
+                if (Entries().Length >= MaxEntries) throw new QueueFullException();
                 var row = transport.CreateEvent(actor, action, utc, digest);
                 var target = Path.Combine(directory, row.Id + ".event");
                 var bytes = JsonSerializer.SerializeToUtf8Bytes(row);
@@ -107,10 +108,13 @@ internal sealed class DurableAuditOutbox : IDisposable
                 }
                 File.Move(temp, target, overwrite: false);
             }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or InvalidOperationException)
+            catch (QueueFullException) { throw; }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or InvalidOperationException or InvalidDataException)
             { storageFault = true; throw; }
         }
     }
+
+    private sealed class QueueFullException() : IOException("Audit outbox full; no event discarded");
 
     internal async Task<bool> DeliverOneAsync(CancellationToken ct)
     {
@@ -130,7 +134,7 @@ internal sealed class DurableAuditOutbox : IDisposable
                     path = paths[0];
                     row = Read(path);
                 }
-                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or InvalidOperationException)
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or InvalidOperationException or InvalidDataException)
                 { storageFault = true; return false; }
             }
             var received = await transport.DeliverEventAsync(row, ct);
@@ -146,7 +150,7 @@ internal sealed class DurableAuditOutbox : IDisposable
                     File.Delete(path);
                     return true;
                 }
-                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or InvalidOperationException)
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or InvalidOperationException or InvalidDataException)
                 { storageFault = true; return false; }
             }
         }
@@ -158,7 +162,7 @@ internal sealed class DurableAuditOutbox : IDisposable
         lock (gate)
         {
             try { return (Entries().Length, storageFault, deliveryBlocked); }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException)
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException or InvalidDataException)
             { storageFault = true; return (-1, true, deliveryBlocked); }
         }
     }
