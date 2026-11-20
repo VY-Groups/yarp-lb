@@ -7,7 +7,8 @@ and exact post-merge CI were checked on 2026-11-20:
 
 - `main` is `c0b3668984547ed6de8927516ebceccdae10f6e6` (squash merge of PR #282).
   All **17/17** GitHub Actions checks on this exact `main` commit passed. There
-  were **zero open PRs** and **12 open issues** at the check time: #34, #36,
+  were **zero open PRs** and **12 open issues** immediately after #282 merged,
+  before this handoff PR was created: #34, #36,
   #37, #38, #48, #49, #51, #52, #53, #100, #101 and #109.
 - PR #282 fixed proxy-span lifecycle completion (`Activity.Stop()` after final
   tags/status) and passed route/cluster/destination dimensions into the lab
@@ -22,13 +23,12 @@ and exact post-merge CI were checked on 2026-11-20:
   #34 remains open.
 - A three-EC2 Amazon Linux 2023 test exercised the #109 two-authority mTLS
   fencing subset using Mumbai and Osaka authorities plus a third lab host.
-  Each authority recorded 354 successful peer HTTP 204 acknowledgements. Both
-  authorities answered authoritative NOERROR over UDP/TCP at baseline; during
-  a timed reciprocal host-route `/32` partition, both returned authoritative
-  SERVFAIL with no answers; after route recovery, both returned NOERROR over
-  UDP/TCP within four seconds. Test processes, routes, timers and temporary
-  files were removed; Apache remained running on all three hosts. This was a
-  host-route partition, not a switch/security-group or VRRP/ECMP test. It does
+  Both authorities answered authoritative NOERROR over UDP/TCP at baseline;
+  during a timed reciprocal host-route `/32` partition, both returned
+  authoritative SERVFAIL with no answers; after route recovery, both returned
+  NOERROR over UDP/TCP. Test processes, routes, timers and temporary files were
+  removed; Apache remained running on all three hosts. This was a host-route
+  partition, not a switch/security-group or VRRP/ECMP test. It does
   not complete #109's multi-vantage, observer quorum, adversarial, scale or
   soak acceptance, so #109 remains open.
 - PRs #258 and #260–#264 are merged. PR #265 is closed **without merge**; do
