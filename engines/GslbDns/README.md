@@ -803,3 +803,43 @@ reload/restart. This must not be used as an automated DNS-01 provider or
 production staging acceptance claim. Pair it with a future reviewed
 publisher implementation and explicit authority convergence before enabling
 ACME DNS-01 automatic renewal. Issue #52 remains open for broader conformance.
+
+### Private two-authority operator lease diagnostics (#109)
+
+When the optional two-authority fencing store and private metrics listener
+are enabled, the DNS engine exposes `GET /authority-fence-status` **only**
+on the existing dedicated loopback `MetricsListenHost:MetricsListenPort`.
+The DNS public port, agent-report port and peer mTLS listener do not expose
+this route. When no authority fence is configured, it returns 404.
+Responses have `Cache-Control: no-store` and contain no peer IP address,
+client certificate, signing PEM, private key, trust pin or raw agent reports.
+
+The versioned status returns configured authority IDs, replay high-water
+epoch/sequence, local epoch, durable replay integrity, independent inbound
+signed-snapshot freshness and outbound acknowledgement freshness, and
+monotonic milliseconds remaining for each lease. Its
+`PeerFenceReady` state is true only when **both** peer leases are fresh
+and local durable state is intact. `EligiblePeerTargets` counts positive
+peer decisions only when that two-way fence is ready; a locally unready,
+quarantined, validation-stale or agent-below-quorum backend is still blocked
+independently by the live DNS admission policy. No status request calls
+probe callbacks or advances leases.
+
+The same bounded metrics are reported on the loopback Prometheus endpoint
+without variable labels or site names:
+
+- `gatewaycore_gslb_authority_fence_ready`
+- `gatewaycore_gslb_authority_durable_state_trusted`
+- `gatewaycore_gslb_authority_peer_eligible_targets`
+- `gatewaycore_gslb_authority_snapshot_remaining_ms`
+- `gatewaycore_gslb_authority_ack_remaining_ms`
+
+Acceptance checks one-way partitions, fresh matching dual leases, signed
+negative decisions, replay high-water metadata and durable file loss: every
+unsafe state returns zero effective peer eligibility. Host operators should
+use a controlled authenticated SSH tunnel for remote access to private
+loopback diagnostics, not expose metrics or diagnostic ports publicly.
+This is read-only two-node visibility. It does **not** implement a Control
+Center RBAC dashboard, more-than-two authority quorum, a configuration
+controller, distributed repair, audit workflow, or a real multi-site DR
+exercise; those #109 requirements remain open.
