@@ -1,4 +1,6 @@
 using System.Text.Json;
+using System.Security.Cryptography;
+using GatewayCore.Gslb.Contracts;
 
 /// <summary>Single gateway process, bounded persistent queue of authenticated
 /// historical events. Never queues or retries a mutation-authorizing intent.</summary>
@@ -47,6 +49,11 @@ internal sealed class DurableAuditOutbox : IDisposable
     {
         if (!Directory.Exists(directory)) throw new IOException("Audit outbox directory missing");
         CheckPrivate(directory);
+        // Ancestor symlinks may redirect a private final directory to an
+        // untrusted parent. Validate the entire opened Linux directory chain.
+        if (OperatingSystem.IsLinux())
+            PrivateKeyFileSecurity.ValidateLinuxPrivateStateDirectory(
+                directory, "Durable external audit outbox");
     }
     private static void CheckFile(string path)
     {
@@ -75,15 +82,20 @@ internal sealed class DurableAuditOutbox : IDisposable
     private ExternalAuditIntent.QueuedEvent Read(string path)
     {
         CheckFile(path);
-        using var file = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
-        if (file.Length is < 1 or > MaxEntryBytes) throw new InvalidDataException("Invalid audit outbox record size");
-        var bytes = new byte[(int)file.Length];
-        file.ReadExactly(bytes);
-        var row = JsonSerializer.Deserialize<ExternalAuditIntent.QueuedEvent>(bytes)
-            ?? throw new InvalidDataException("Invalid audit outbox record");
-        if (Path.GetFileName(path) != row.Id + ".event" || !transport.ValidEvent(row))
-            throw new InvalidDataException("Audit outbox record authentication failed");
-        return row;
+        // Open the same bounded regular file that is parsed, without
+        // following Linux path components. Prevent read-time replacement
+        // between a prior symlink check and the FileStream.Open call.
+        var bytes = PrivateKeyFileSecurity.ReadPrivateFileBytes(
+            path, "Durable external audit queued event", MaxEntryBytes);
+        try
+        {
+            var row = JsonSerializer.Deserialize<ExternalAuditIntent.QueuedEvent>(bytes)
+                ?? throw new InvalidDataException("Invalid audit outbox record");
+            if (Path.GetFileName(path) != row.Id + ".event" || !transport.ValidEvent(row))
+                throw new InvalidDataException("Audit outbox record authentication failed");
+            return row;
+        }
+        finally { CryptographicOperations.ZeroMemory(bytes); }
     }
 
     internal void Enqueue(string actor, string action, DateTimeOffset utc, string digest, string? intentId = null)

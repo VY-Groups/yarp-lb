@@ -91,3 +91,17 @@ key is added to the gateway. Disposable Windows/Linux tests cover a valid
 key, missing key, Linux owner-only mode and linked key/parent rejection.
 This tightens local key loading but does not provide tamper-proof WORM storage,
 a distributed gateway audit authority or production TLS trust acceptance.
+
+### No-follow audit queue ingestion
+
+The bounded historical-event outbox now checks its complete Linux directory
+ancestry and parses each 8-KiB-or-smaller queued event from a validated,
+no-follow opened regular-file handle rather than opening the path after a
+separate symlink check. Temporary parse byte arrays are cleared on success
+or failure. Linux tests reject a symlinked ancestor even when its target
+queue has private permissions and retain readability from the actual path.
+Windows retains its existing final reparse-point check and local deployment
+ACL requirements. This is local spool tamper-resistance, not independent
+WORM/retention attestation, cross-process anti-rollback or a solution to
+compromise of the service identity. The external collector and operation
+receipt requirements remain mandatory.
