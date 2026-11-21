@@ -121,21 +121,38 @@ public static class LinuxKeyProtection
             try { bytes = PrivateKeyFileSecurity.ReadPrivateFileBytes(path, "Linux key-ring XML", 1024 * 1024); }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException)
             { throw new InvalidOperationException("Unsafe existing Linux key-ring XML", ex); }
-            using var stream = new MemoryStream(bytes, writable: false);
-            using var reader = XmlReader.Create(stream, new XmlReaderSettings
+            try
             {
-                DtdProcessing = DtdProcessing.Prohibit,
-                XmlResolver = null,
-                MaxCharactersInDocument = 1024 * 1024
-            });
-            var root = XDocument.Load(reader).Root;
-            // ASP.NET stores revocations separately from master key XML.
-            if (root?.Name == "revocation") continue;
-            if (root?.Name != "key" ||
-                root.Descendants().Any(element => element.Name.LocalName == "masterKey") ||
-                root.Descendants(protection + "encryptedSecret").Count() != 1)
-                throw new InvalidOperationException(
-                    "Existing Linux key ring is not certificate-wrapped; isolate and recover an approved protected backup");
+                using var stream = new MemoryStream(bytes, writable: false);
+                using var reader = XmlReader.Create(stream, new XmlReaderSettings
+                {
+                    DtdProcessing = DtdProcessing.Prohibit,
+                    XmlResolver = null,
+                    MaxCharactersInDocument = 1024 * 1024
+                });
+                var root = XDocument.Load(reader).Root;
+                // Revocation files never contain master key material. A forged
+                // revocation wrapper must not bypass our plaintext-ring guard.
+                if (root?.Name == "revocation")
+                {
+                    if (root.Descendants().Any(element =>
+                        element.Name.LocalName is "masterKey" or "encryptedSecret"))
+                        throw new InvalidOperationException(
+                            "Linux key-ring revocation XML contains unexpected key material");
+                    continue;
+                }
+                if (root?.Name != "key" ||
+                    root.Descendants().Any(element => element.Name.LocalName == "masterKey") ||
+                    root.Descendants(protection + "encryptedSecret").Count() != 1)
+                    throw new InvalidOperationException(
+                        "Existing Linux key ring is not certificate-wrapped; isolate and recover an approved protected backup");
+            }
+            finally
+            {
+                // Legacy plaintext key XML is deliberately read for rejection;
+                // do not leave those secret bytes in a managed heap after failure.
+                CryptographicOperations.ZeroMemory(bytes);
+            }
         }
     }
 
