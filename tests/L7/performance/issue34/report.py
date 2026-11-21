@@ -60,6 +60,13 @@ def _validate_measurement(measurement: dict[str, Any], path: str) -> None:
         _number(measurement.get(key), path + "." + key)
     if measurement["rps"] <= 0:
         raise ValueError(f"{path}: request rate must be positive")
+    expected_rps = requests / duration
+    # k6's rate uses its active sample window while duration_seconds is the
+    # outer process wall time. Allow modest startup/teardown timing skew, but
+    # reject rates that cannot describe the recorded request count.
+    rps_tolerance = max(1.0, expected_rps * 0.15)
+    if abs(measurement["rps"] - expected_rps) > rps_tolerance:
+        raise ValueError(f"{path}: request rate does not match request count and duration")
     if measurement["allocated_bytes"] < 0:
         raise ValueError(f"{path}: allocated bytes decreased/reset")
     for key in ("gc0_delta", "gc1_delta", "gc2_delta", "gc_pause_ms_delta"):

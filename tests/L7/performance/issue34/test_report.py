@@ -184,6 +184,14 @@ class ReportTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, reason):
                     build_report(samples, "before-sha", "after-sha")
 
+    def test_rejects_rps_inconsistent_with_request_count_and_duration(self):
+        for impossible_rps in (1e100, 1e-100):
+            with self.subTest(rps=impossible_rps):
+                samples = records()
+                samples[0]["proxy"]["rps"] = impossible_rps
+                with self.assertRaisesRegex(ValueError, "does not match request count"):
+                    build_report(samples, "before-sha", "after-sha")
+
     def test_rejects_missing_or_unbounded_workload_metadata(self):
         cases = (
             ("vus", 0, "virtual-user"),

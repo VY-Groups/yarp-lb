@@ -13,7 +13,9 @@ Artifacts include raw per-run summaries and gateway counters, paired JSON report
 ## Report-evidence validation (strict, no threshold relaxation)
 
 The paired report validator now rejects non-integer request/error counts,
-out-of-range check rates, nonpositive RPS, negative or reversed p95/p99
+out-of-range check rates, nonpositive or count/duration-inconsistent RPS (with
+a 15% allowance for the difference between k6 active time and outer process
+wall time), negative or reversed p95/p99
 measurements, and missing or malformed VU/duration/payload/connection-reuse
 metadata. It continues enforcing the existing 30–115 second, minimum-request,
 failed-request, check and latency gates. Beyond the tabulated Student-t degrees
