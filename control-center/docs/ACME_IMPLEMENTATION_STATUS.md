@@ -269,3 +269,14 @@ RFC 2136 server or public DNS operation. No automatic scheduler/provider
 configuration or CA staging validation is enabled by this PR; external DNS
 network credentials, signed response trust, live DNSSEC/TSIG interoperability,
 fleet coordination and physical #36 remain pending.
+
+For the updater executable, the Linux integrity preflight follows every
+parent directory with no symlink traversal and rejects the **immediate**
+executable directory when group/other identities can write it. Trusted
+root-managed public executable directories such as `/usr/bin` (mode 0755)
+are supported; the private 0700 directory requirement applies to the TSIG
+secret/state paths, not normal installed system binaries. Explicit symlinked
+binaries/ancestors and group-writable executable directories remain denied.
+An approved, independently pinned SHA-256 hash is checked before every
+operation, and deployments must update that pin only after reviewing a
+verified executable replacement.
