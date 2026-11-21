@@ -49,6 +49,14 @@ the separate opt-in `GeoIpEcs` policy below.
 
 Each site `Address` may now be an IPv4 or IPv6 literal. A queries select only
 configured IPv4 site addresses, and AAAA queries only configured IPv6 sites.
+A backend `Address`, authoritative `NameServers[].Address` or delegated
+`NameServers[].Address` must be a usable unicast destination: startup rejects
+IPv4 0/8, link-local 169.254/16, multicast/reserved 224/4 and 240/4,
+IPv4-mapped IPv6, IPv6 unspecified/multicast/link-local/site-local and scoped
+zone-ID addresses. RFC1918 private IPv4 and IPv6 unique-local unicast are valid
+for on-premises routing. Loopback addresses remain available for isolated
+test fixtures but are not proof of valid public DNS delegation; review all
+published addresses and glue against the intended real network before release.
 Health, optional priority and existing weights are applied within that family.
 When no site is configured for the requested family, the authoritative result
 is **NODATA with negative SOA**, not SERVFAIL or an incorrectly typed answer.
