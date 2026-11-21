@@ -809,6 +809,48 @@ foreach (var duplicateHost in new[]
         "duplicate same-family glue rejects startup, including case/trailing-dot normalized hostnames");
     File.Delete(invalidPath);
 }
+// A dual-stack name-server hostname can have A and AAAA, but never two A
+// entries disguised by case or an optional DNS root dot.
+foreach (var duplicateHost in new[]
+         {
+             "ns1.dualstack-ns.integration.test",
+             "NS1.DUALSTACK-NS.INTEGRATION.TEST."
+         })
+{
+    var invalidConfig = JsonNode.Parse(File.ReadAllText(configuration))!.AsObject();
+    var dualZone = invalidConfig["Zones"]!.AsArray().Single(zone =>
+        string.Equals((string?)zone?["Name"], "dualstack-ns.integration.test", StringComparison.Ordinal))
+        ?? throw new InvalidDataException("Dual-stack authoritative NS fixture is absent");
+    dualZone["NameServers"]!.AsArray().Add(new JsonObject
+    {
+        ["Host"] = duplicateHost,
+        ["Address"] = "198.51.100.53"
+    });
+    var invalidPath = Path.Combine(temp, "duplicate-apex-ns-" + Guid.NewGuid().ToString("N") + ".json");
+    await File.WriteAllTextAsync(invalidPath, invalidConfig.ToJsonString());
+    try
+    {
+        var invalidInfo = new ProcessStartInfo("dotnet")
+        {
+            UseShellExecute = false, CreateNoWindow = true,
+            WorkingDirectory = Path.GetDirectoryName(dll)!,
+            RedirectStandardOutput = true, RedirectStandardError = true
+        };
+        invalidInfo.ArgumentList.Add(dll);
+        invalidInfo.ArgumentList.Add(invalidPath);
+        using var invalidDns = Process.Start(invalidInfo) ??
+            throw new Exception("Invalid authoritative DNS fixture did not start");
+        var invalidStdout = invalidDns.StandardOutput.ReadToEndAsync();
+        var invalidStderr = invalidDns.StandardError.ReadToEndAsync();
+        using var invalidDeadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await invalidDns.WaitForExitAsync(invalidDeadline.Token);
+        var invalidOutput = (await invalidStdout) + (await invalidStderr);
+        Must(invalidDns.ExitCode != 0 &&
+             invalidOutput.Contains("Duplicate authoritative name-server address family", StringComparison.Ordinal),
+            "duplicate authoritative same-family NS glue rejected including case/root-dot aliases");
+    }
+    finally { File.Delete(invalidPath); }
+}
 var info=new ProcessStartInfo("dotnet"){ UseShellExecute=false,CreateNoWindow=true,
  WorkingDirectory=Path.GetDirectoryName(dll)!,RedirectStandardOutput=true,RedirectStandardError=true };
 info.ArgumentList.Add(dll);info.ArgumentList.Add(configuration);
