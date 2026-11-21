@@ -6,12 +6,16 @@ on:
     branches: [main, "ci/**", "feature/**"]
     paths:
       - "control-center/**"
+      - "ops/acceptance/**"
+      - "tests/CI/branding/**"
       - ".github/workflows/control-center-ci.yml"
       - "tests/E2E/peer_delta_http.py"
       - "tests/E2E/real_control_center.py"
   pull_request:
     paths:
       - "control-center/**"
+      - "ops/acceptance/**"
+      - "tests/CI/branding/**"
       - ".github/workflows/control-center-ci.yml"
       - "tests/E2E/peer_delta_http.py"
       - "tests/E2E/real_control_center.py"
