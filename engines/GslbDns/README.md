@@ -768,3 +768,38 @@ handling is preserved. Windows/Linux network acceptance probes malformed
 version 0 and version 1 packets and then a valid EDNS query to ensure the
 listener remains available. This is a focused parser-hardening increment,
 not complete authoritative DNS certification.
+
+### Bounded static ACME DNS-01 TXT snapshots (#52)
+
+For explicitly provisioned authoritative zones, an optional `AcmeTxtRecords`
+array can contain up to **16 static TXT entries**, at most four distinct
+canonical SHA-256 base64url (43-byte) values per owner. Every owner must be
+an in-bailiwick `_acme-challenge.<hostname>` below that zone and outside
+all delegated child cuts. Invalid names, duplicate values, broad/unrecognized
+TXT values or noncanonical encodings reject configuration at startup.
+Example inside a zone object:
+
+```json
+"AcmeTxtRecords": [
+  {"Host": "_acme-challenge.api.example.com",
+   "Value": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}
+]
+```
+
+The engine emits standard RFC 1035 TXT RDATA (one length byte followed by the
+43-byte ASCII digest), correct NODATA for other types at the existing TXT
+owner and its empty non-terminals, and NXDOMAIN for unknown names. DNSSEC
+signed zones include every TXT owner and its ancestors in NSEC/NSEC3 denial
+bitmaps and sign the TXT RRset on DNSSEC DO requests. Unit and real TCP
+acceptance cover these contracts. The example digest is **synthetic**; do not
+use it as a real CA authorization token.
+
+**Security and deployment limitation:** These are operator-configured,
+process-static snapshots. There is no authorized DNS update endpoint,
+lease, expiration, TTL-driven cleanup, atomic serial update, on-the-fly
+DNSSEC signing or distributed multi-authority synchronization yet. Changing
+`AcmeTxtRecords` requires a controlled configuration update and DNS service
+reload/restart. This must not be used as an automated DNS-01 provider or
+production staging acceptance claim. Pair it with a future reviewed
+publisher implementation and explicit authority convergence before enabling
+ACME DNS-01 automatic renewal. Issue #52 remains open for broader conformance.

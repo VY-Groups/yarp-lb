@@ -13,6 +13,76 @@ using GatewayCore.Gslb.Contracts;
 
 PrivateKeyFileSecurityTests.Run();
 AuthorityFenceTests.Run();
+
+// A locally configured ACME TXT owner must exist for both TXT queries and
+// NODATA on other types; DNSSEC signing/denial-chain owners must agree.
+{
+    const string origin = "acme-rrset.unit.test";
+    const string owner = "_acme-challenge.api.acme-rrset.unit.test";
+    const string emptyAncestor = "api.acme-rrset.unit.test";
+    const string txtValue1 = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    const string txtValue2 = "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBA";
+    DnsTxtRecord Txt(string value) =>
+        new(owner, new byte[] {43}.Concat(Encoding.ASCII.GetBytes(value)).ToArray());
+    var txtRows = new[] { Txt(txtValue1), Txt(txtValue2) };
+    var server = new DnsNameServer("ns1.acme-rrset.unit.test", IPAddress.Parse("192.0.2.53"));
+    var site = new Site(IPAddress.Parse("192.0.2.80"), null, 1, 0, 1, 1,
+        "Http", 0, null, null, []) { Healthy = 1 };
+    var root = Path.Combine(Path.GetTempPath(), "gslb-acme-txt-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(root);
+    if (OperatingSystem.IsLinux())
+        File.SetUnixFileMode(root, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+    try
+    {
+        var keyPath = Path.Combine(root, "signing.pem");
+        using (var key = ECDsa.Create(ECCurve.NamedCurves.nistP256))
+            File.WriteAllText(keyPath, key.ExportECPrivateKeyPem());
+        if (OperatingSystem.IsLinux())
+            File.SetUnixFileMode(keyPath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+        var group = new SiteGroup([site], 10, true, [server],
+            "hostmaster.acme-rrset.unit.test", 1, "Weighted",
+            null, false, null,
+            dnssecPrivateKeyPath: keyPath, zoneName: origin,
+            acmeTxtRecords: txtRows);
+        try
+        {
+            var zones = new Dictionary<string, SiteGroup> { [origin] = group };
+            byte[] Answer(string qname, ushort type, bool doBit = false) =>
+                DnsWireProtocol.Build(DnsRequest(qname, type,
+                    doBit ? (byte)0 : null), zones, tcp: true,
+                    resolverIp: IPAddress.Loopback)!;
+            var txt = Answer(owner, 16);
+            if (Dns16(txt, 6) != 2 ||
+                !DnsRecordTypes(txt, 0).SequenceEqual(new ushort[] { 16, 16 }) ||
+                txt.AsSpan().IndexOf(Encoding.ASCII.GetBytes(txtValue1)) < 0 ||
+                txt.AsSpan().IndexOf(Encoding.ASCII.GetBytes(txtValue2)) < 0)
+                throw new Exception("FAIL: authoritative ACME TXT multi-value RRset malformed");
+
+            var signed = Answer(owner, 16, doBit: true);
+            if (!DnsRecordTypes(signed, 0).Contains((ushort)46) ||
+                !DnsRecordTypes(signed, 0).Contains((ushort)16) ||
+                group.Dnssec?.NsecAt(owner) is null)
+                throw new Exception("FAIL: DNSSEC signed ACME TXT owner or NSEC chain missing");
+            foreach (var (name, type, rcode) in new[]
+            {
+                (owner, (ushort)1, 0), // existing TXT owner, absent A: NODATA
+                (emptyAncestor, (ushort)16, 0), // empty nonterminal: NODATA
+                ("missing.acme-rrset.unit.test", (ushort)16, 3) // NXDOMAIN
+            })
+            {
+                var reply = Answer(name, type);
+                if ((Dns16(reply, 2) & 15) != rcode ||
+                    Dns16(reply, 6) != 0 || Dns16(reply, 8) != 1 ||
+                    !DnsRecordTypes(reply, 1).SequenceEqual(new ushort[] { 6 }))
+                    throw new Exception("FAIL: TXT owner/ancestor NXDOMAIN or NODATA incorrect");
+            }
+            Console.WriteLine("PASS: in-bailiwick ACME TXT, DNSSEC signatures and correct NXDOMAIN/NODATA");
+        }
+        finally { group.Dnssec?.Dispose(); }
+    }
+    finally { Directory.Delete(root, recursive: true); }
+}
+
 var nsec3Vector = DnssecZoneSigner.Base32Hex(DnssecZoneSigner.Nsec3Hash(
     "ns1.example.", Convert.FromHexString("AABBCCDD"), 12));
 if (!string.Equals(nsec3Vector, "2T7B4G4VSA5SMI47K61MV5BV1A22BOJR", StringComparison.Ordinal))
@@ -786,7 +856,10 @@ File.WriteAllText(configuration,JsonSerializer.Serialize(new {
       Sites=new[]{new {Address="192.0.2.80",HealthUrl="http://127.0.0.1:19711/ready",Weight=1,Priority=0,HealthCheckType="Http",TcpPort=0}},
       NameServers=new[]{
           new {Host="ns1.dualstack-ns.integration.test",Address="192.0.2.53"},
-          new {Host="ns1.dualstack-ns.integration.test",Address="2001:db8::53"}}},
+          new {Host="ns1.dualstack-ns.integration.test",Address="2001:db8::53"}},
+      AcmeTxtRecords=new[]{
+          new {Host="_acme-challenge.api.dualstack-ns.integration.test",
+               Value="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}}},
  new {Name="chain.integration.test",TtlSeconds=10,Sites=chainSites,
       NameServers=new[]{new {Host="ns.chain.integration.test",Address="127.0.0.31"}},
       RoutingPolicy="WeightedFailover",FailureThreshold=1,SuccessThreshold=1,
@@ -970,6 +1043,61 @@ foreach (var duplicateHost in new[]
     }
     finally { File.Delete(invalidPath); }
 }
+// The real configured DNS listener must fail startup for malformed TXT
+// authorizations. Never fall back to serving a modified or partial RRset.
+foreach (var (label, expectedError, mutate) in new
+    (string Label, string Expected, Action<JsonObject> Mutate)[]
+{
+    ("duplicate-case-alias", "unique canonical SHA-256", zone =>
+        zone["AcmeTxtRecords"]!.AsArray().Add(new JsonObject {
+            ["Host"] = "_ACME-CHALLENGE.API.DUALSTACK-NS.INTEGRATION.TEST.",
+            ["Value"] = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" })),
+    ("out-of-zone", "in-bailiwick", zone =>
+        zone["AcmeTxtRecords"]![0]!["Host"] = "_acme-challenge.other.invalid"),
+    ("truncated-digest", "Invalid bounded ACME TXT record", zone =>
+        zone["AcmeTxtRecords"]![0]!["Value"] = "short"),
+    ("noncanonical-base64", "unique canonical SHA-256", zone =>
+        zone["AcmeTxtRecords"]![0]!["Value"] =
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB"),
+    ("too-many-values", "At most four TXT values", zone =>
+    {
+        foreach (var prefix in new[] { "B", "C", "D", "E" })
+            zone["AcmeTxtRecords"]!.AsArray().Add(new JsonObject {
+                ["Host"] = "_acme-challenge.api.dualstack-ns.integration.test",
+                ["Value"] = prefix + new string('A', 42)
+            });
+    })
+})
+{
+    var invalidConfig = JsonNode.Parse(File.ReadAllText(configuration))!.AsObject();
+    var zone = invalidConfig["Zones"]!.AsArray().Single(value =>
+        string.Equals((string?)value?["Name"], "dualstack-ns.integration.test",
+            StringComparison.Ordinal))!.AsObject();
+    mutate(zone);
+    var invalidPath = Path.Combine(temp, "invalid-acme-txt-" + Guid.NewGuid().ToString("N") + ".json");
+    await File.WriteAllTextAsync(invalidPath, invalidConfig.ToJsonString());
+    try
+    {
+        var invalidInfo = new ProcessStartInfo("dotnet") {
+            UseShellExecute = false, CreateNoWindow = true,
+            WorkingDirectory = Path.GetDirectoryName(dll)!,
+            RedirectStandardOutput = true, RedirectStandardError = true };
+        invalidInfo.ArgumentList.Add(dll);
+        invalidInfo.ArgumentList.Add(invalidPath);
+        using var invalidDns = Process.Start(invalidInfo) ??
+            throw new Exception("TXT invalid-config fixture failed to start");
+        var stdout = invalidDns.StandardOutput.ReadToEndAsync();
+        var stderr = invalidDns.StandardError.ReadToEndAsync();
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await invalidDns.WaitForExitAsync(deadline.Token);
+        var output = (await stdout) + (await stderr);
+        Must(invalidDns.ExitCode != 0 &&
+             output.Contains(expectedError, StringComparison.Ordinal),
+             "ACME TXT startup rejects " + label);
+    }
+    finally { File.Delete(invalidPath); }
+}
+Console.WriteLine("PASS: malformed DNS-01 TXT configuration fails closed before serving DNS");
 var info=new ProcessStartInfo("dotnet"){ UseShellExecute=false,CreateNoWindow=true,
  WorkingDirectory=Path.GetDirectoryName(dll)!,RedirectStandardOutput=true,RedirectStandardError=true };
 info.ArgumentList.Add(dll);info.ArgumentList.Add(configuration);
@@ -1039,6 +1167,23 @@ try
     Must((Dns16(dualHostMx, 2) & 0xF) == 0 && Dns16(dualHostMx, 6) == 0 &&
          DnsRecordTypes(dualHostMx, 1).SequenceEqual(new ushort[] { 6 }),
          "existing dual-stack name-server hostname returns NODATA for unconfigured RR type");
+    var configuredAcmeOwner = "_acme-challenge.api.dualstack-ns.integration.test";
+    var liveTxt = await TcpQuery(DnsRequest(configuredAcmeOwner, 16));
+    if (Dns16(liveTxt, 6) != 1 ||
+        !DnsRecordTypes(liveTxt, 0).SequenceEqual(new ushort[] {16}) ||
+        liveTxt.AsSpan().IndexOf(Encoding.ASCII.GetBytes(
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")) < 0)
+        throw new Exception("FAIL: configured DNS-01 TXT did not reach the real DNS listener");
+    var liveNodata = await TcpQuery(DnsRequest(configuredAcmeOwner, 1));
+    var emptyNonTerminal = await TcpQuery(DnsRequest("api.dualstack-ns.integration.test", 16));
+    var missingTxt = await TcpQuery(DnsRequest("missing.dualstack-ns.integration.test", 16));
+    if ((Dns16(liveNodata, 2) & 15) != 0 ||
+        (Dns16(emptyNonTerminal, 2) & 15) != 0 ||
+        (Dns16(missingTxt, 2) & 15) != 3 ||
+        Dns16(liveNodata, 6) != 0 ||
+        Dns16(emptyNonTerminal, 6) != 0)
+        throw new Exception("FAIL: configured TXT owner/ancestor/extraneous name incorrectly classified");
+    Console.WriteLine("PASS: real authoritative DNS-01 TXT, existing owner NODATA and missing NXDOMAIN");
     Console.WriteLine("PASS: dual-stack authoritative NS deduplication, A/AAAA glue and NODATA");
     var delegatedNsTcp = await TcpQuery(delegatedNsRequest);
     foreach (var delegatedNs in new[] { delegatedNsUdp, delegatedNsTcp })

@@ -257,6 +257,43 @@ foreach(var zone in config.Zones)
         servers.Any(server => delegations.Any(cut => server.Host.Equals(cut.Name, StringComparison.OrdinalIgnoreCase) ||
             server.Host.EndsWith("." + cut.Name, StringComparison.OrdinalIgnoreCase))))
         throw new InvalidDataException("Nested cuts and parent name servers below a child delegation are unsupported");
+    // Bounded, operator-configured ACME DNS-01 TXT snapshots. These do not
+    // mutate zone data live or grant an ACME provider permission to write.
+    var txt = new List<DnsTxtRecord>();
+    var txtRows = zone.AcmeTxtRecords ?? [];
+    var txtPairs = new HashSet<string>(StringComparer.Ordinal);
+    var txtOwners = new Dictionary<string, int>(StringComparer.Ordinal);
+    if (txtRows.Length > 16)
+        throw new InvalidDataException("At most sixteen configured ACME TXT records are permitted per zone");
+    foreach (var row in txtRows)
+    {
+        if (row is null || !DnsWireProtocol.ValidName(row.Host?.TrimEnd('.') ?? "") ||
+            row.Value is not { Length: 43 })
+            throw new InvalidDataException("Invalid bounded ACME TXT record");
+        var owner = row.Host.TrimEnd('.').ToLowerInvariant();
+        if (!owner.StartsWith("_acme-challenge.", StringComparison.Ordinal) ||
+            !owner.EndsWith("." + origin, StringComparison.Ordinal) ||
+            delegations.Any(cut => owner == cut.Name ||
+                owner.EndsWith("." + cut.Name, StringComparison.Ordinal)))
+            throw new InvalidDataException("ACME TXT must be strictly in-bailiwick and outside delegations");
+        var value = row.Value;
+        if (value.Any(ch => !char.IsAsciiLetterOrDigit(ch) && ch is not ('-' or '_')))
+            throw new InvalidDataException("ACME TXT value must be base64url SHA-256");
+        byte[] decoded;
+        try { decoded = Convert.FromBase64String(value.Replace('-', '+').Replace('_', '/') + "="); }
+        catch (FormatException ex) { throw new InvalidDataException("Malformed ACME TXT base64url", ex); }
+        if (decoded.Length != 32 || Convert.ToBase64String(decoded).TrimEnd('=')
+                .Replace('+', '-').Replace('/', '_') != value ||
+            !txtPairs.Add(owner + "\n" + value))
+            throw new InvalidDataException("ACME TXT must be a unique canonical SHA-256 value");
+        var count = txtOwners.GetValueOrDefault(owner) + 1;
+        if (count > 4) throw new InvalidDataException("At most four TXT values per ACME owner");
+        txtOwners[owner] = count;
+        var rdata = new byte[44];
+        rdata[0] = 43; // single RFC 1035 character-string
+        Encoding.ASCII.GetBytes(value).CopyTo(rdata, 1);
+        txt.Add(new DnsTxtRecord(owner, rdata));
+    }
     var contact = (zone.SoaContact ?? ("hostmaster." + origin)).TrimEnd('.').ToLowerInvariant();
     if (!DnsWireProtocol.ValidName(contact))
         throw new InvalidDataException("Invalid SOA contact name");
@@ -279,7 +316,8 @@ foreach(var zone in config.Zones)
         zone.RoutingPolicy,cidrTable,zone.EnableEcsGeoRouting,trustedEcsResolvers,geoIpTable,
         delegations.ToArray(), zone.DnssecPrivateKeyPath, origin,
         zone.DnssecPrepublishPublicKeyPaths, zone.DnssecAdditionalSigningKeyPaths,
-        denialMode, zone.DnssecNsec3SaltHex, zone.DnssecNsec3Iterations ?? 0));
+        denialMode, zone.DnssecNsec3SaltHex, zone.DnssecNsec3Iterations ?? 0,
+        txt.ToArray()));
     if (groups[origin].Dnssec is { } dnssec)
     {
         foreach (var entry in dnssec.ParentDsMaterial)
@@ -551,6 +589,7 @@ sealed record DnsZone(string Name,int TtlSeconds,DnsSite[] Sites,
     bool FailClosedWhenAllSitesDown=false)
 {
     public DnsNameServerConfig[]? NameServers { get; init; }
+    public DnsAcmeTxtConfig[]? AcmeTxtRecords { get; init; }
     public string? SoaContact { get; init; }
     public uint SoaSerial { get; init; } = 1;
     public string RoutingPolicy { get; init; } = "Weighted";
@@ -569,6 +608,8 @@ sealed record DnsZone(string Name,int TtlSeconds,DnsSite[] Sites,
     public string? DnssecNsec3SaltHex { get; init; }
     public int? DnssecNsec3Iterations { get; init; }
 }
+sealed record DnsAcmeTxtConfig(string Host, string Value);
+sealed record DnsTxtRecord(string Host, byte[] Rdata);
 sealed record DnsNameServerConfig(string Host,string Address);
 sealed record DnsNameServer(string Host,IPAddress Address)
 {
@@ -633,8 +674,10 @@ sealed class SiteGroup
         IReadOnlyList<string>? dnssecPrepublishPublicKeyPaths = null,
         IReadOnlyList<string>? dnssecAdditionalSigningKeyPaths = null,
         string dnssecDenialMode = "Nsec", string? dnssecNsec3SaltHex = null,
-        int dnssecNsec3Iterations = 0)
+        int dnssecNsec3Iterations = 0,
+        DnsTxtRecord[]? acmeTxtRecords = null)
     {
+        AcmeTxtRecords = acmeTxtRecords ?? [];
         (Sites,Ttl,FailClosedWhenAllSitesDown,NameServers,SoaContact,SoaSerial,RoutingPolicy,CidrTable)
             =(sites,ttl,failClosedWhenAllSitesDown,nameServers,soaContact,soaSerial,routingPolicy,cidrTable);
         EnableEcsGeoRouting=enableEcsGeoRouting;
@@ -647,7 +690,8 @@ sealed class SiteGroup
                 Delegations, sites.Any(s => s.Address.AddressFamily == AddressFamily.InterNetwork),
                 sites.Any(s => s.Address.AddressFamily == AddressFamily.InterNetworkV6),
                 dnssecPrepublishPublicKeyPaths, dnssecAdditionalSigningKeyPaths,
-                dnssecDenialMode, dnssecNsec3SaltHex, dnssecNsec3Iterations);
+                dnssecDenialMode, dnssecNsec3SaltHex, dnssecNsec3Iterations,
+                AcmeTxtRecords);
     }
     public string RoutingPolicy { get; }
     // 3 local successful measurements; at most 3 probe periods, clamped 6..60s.
@@ -658,6 +702,7 @@ sealed class SiteGroup
     public DnsCidrRegionTable? TrustedEcsResolvers { get; }
     public GeoIpEcsRegionTable? GeoIpTable { get; }
     public DnsNameServer[] NameServers { get; }
+    public DnsTxtRecord[] AcmeTxtRecords { get; }
     public DnsDelegation[] Delegations { get; }
     public DnssecZoneSigner? Dnssec { get; }
     public string SoaContact { get; }
