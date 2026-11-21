@@ -52,8 +52,9 @@ internal sealed class AgentHealthReportServer : IAsyncDisposable
             config.ListenPort is < 1025 or > 65535 ||
             !Path.IsPathFullyQualified(config.ServerCertificatePem) ||
             !Path.IsPathFullyQualified(config.ServerKeyPem) ||
-            config.MaxTtlSeconds < 1 || config.MaxAgeSeconds < 1 ||
-            config.MaxClockSkewSeconds < 0 || config.MaxReportsPerMinute is < 1 or > 10000 ||
+            !AgentReportTimeBounds.Valid(config.MaxTtlSeconds,
+                config.MaxAgeSeconds, config.MaxClockSkewSeconds) ||
+            config.MaxReportsPerMinute is < 1 or > 10000 ||
             config.Agents is not { Length: >= 2 and <= 64 } ||
             config.RevokedCertificateSha256 is null || config.RevokedCertificateSha256.Length > 256)
             throw new InvalidDataException("Invalid or unbounded signed health report listener configuration");
