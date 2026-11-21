@@ -729,3 +729,15 @@ reserved Z or nonzero query RCODE are rejected. Valid resolver query flags RD,
 AD and CD remain accepted. Windows/Linux GSLB acceptance exercises malformed
 header drops alongside the existing packet-shape, EDNS and amplification tests.
 A successful lab result is not independent public recursive-resolver qualification.
+
+### ECS response scope during health fallback
+
+With opt-in `CidrRegion` ECS routing and a trusted resolver, a successfully
+mapped client prefix is reflected in the DNS response **only if a backend
+in that mapped region remains eligible**. If all matched-region backends
+fail health/readiness and the normal policy selects a different healthy
+region, the response omits the ECS option instead of advertising the
+unused client prefix as a valid cache scope. The resolver-source fallback
+still works as before. A deterministic wire regression checks regional
+failure and recovery. This is one #52 DNS cache/privacy correctness fix;
+it does not certify multi-network DNS routing or full DNS conformance.
