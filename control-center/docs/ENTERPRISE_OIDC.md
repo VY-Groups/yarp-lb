@@ -9,7 +9,7 @@ GatewayCore uses the ASP.NET Core OpenID Connect handler for Authorization Code 
 3. Choose an exact IdP-specific phishing-resistant ACR and one exact method from fido2, webauthn, passkey, hwk. The ACR must be documented by the IdP as requiring phishing-resistant authentication, not merely hardware-key presence. Check the real provider's signed claims; not every IdP emits these claims by default. Unsupported profiles fail closed.
 4. Create an owner-only config and separate client secret file, with absolute paths and protected parent directories. On Windows, set the file owner to the service identity, SYSTEM or local Administrators and grant access only to the service identity, SYSTEM and local Administrators; GatewayCore verifies the file owner and rejects any other allow ACE at startup/read time. On Linux use mode 0600. Keep parent directories protected as well. OIDC JSON rejects unknown fields and duplicate property names, including case-only aliases at nested account records. No real secret in Git or logs.
 
-Set GATEWAY_OIDC_CONFIG_FILE to the absolute JSON configuration file. Example (replace all illustrative values):
+Set `GATEWAY_OIDC_CONFIG_FILE` to the absolute JSON configuration file. `ClientSecretFile` may remain in that file as shown, or its absolute owner-only path can be supplied through `GATEWAY_OIDC_CLIENT_SECRET_FILE`; the environment override takes precedence. This keeps the secret-file location out of the JSON config when service managers need that separation. Example (replace all illustrative values):
 ```json
 {
   "Issuer": "https://idp.example.invalid/realm/gateway",

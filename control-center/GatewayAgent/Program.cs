@@ -53,6 +53,9 @@ var sequencePath = Path.Combine(stageRoot, "last-accepted-sequence.txt");
 var revisionLock = new SemaphoreSlim(1,1);
 static string Sha(byte[] data) => Convert.ToHexString(SHA256.HashData(data));
 static bool ValidTx(string id) => Regex.IsMatch(id, "^[A-Za-z0-9_-]{12,80}$");
+// Keep request-derived fields on a single physical log record. Do not change the operation input.
+static string SafeLogField(string value) => value.Replace("\\", "\\\\").Replace("\r", "\\r").Replace("\n", "\\n")
+    .Replace("\u0085", "\\u0085").Replace("\u2028", "\\u2028").Replace("\u2029", "\\u2029");
 _ = AgentClientCertificatePolicy.ParsePinnedThumbprints(allowedThumbprints); // Fail closed at startup
 if (allowedServices.Any(x => !Regex.IsMatch(x, "^[A-Za-z0-9_.-]{1,64}$")))
     throw new InvalidOperationException("Invalid allowlisted Windows service name");
@@ -305,7 +308,7 @@ app.MapPost("/agent/v1/services/{serviceName}/action", async (HttpContext ctx, s
     // Integrate with two-person signed approval and central immutable audit before enabling in CA production.
     var result = await RunSc(body.Action, serviceName);
     app.Logger.LogWarning("Agent service action {Action} on {Service} by controller {Cert}: exit {Code}",
-        body.Action, serviceName, ctx.Connection.ClientCertificate?.Thumbprint, result.exitCode);
+        SafeLogField(body.Action), SafeLogField(serviceName), ctx.Connection.ClientCertificate?.Thumbprint, result.exitCode);
     return Results.Ok(new { serviceName, action = body.Action, result.exitCode, output = result.output[..Math.Min(result.output.Length, 4000)] });
 });
 // Only ReverseProxy routing configuration may be remotely changed.
@@ -507,7 +510,7 @@ app.MapPost("/agent/v1/engines/{engineId}/config/activate", async (string engine
             return Results.Conflict(new {error="Engine config changed after prepare"});
         await File.WriteAllBytesAsync(configPath+".next",proposed);
         File.Move(configPath+".next",configPath,true);
-        app.Logger.LogWarning("Engine {Engine} config activated transaction {Tx}; restart NOT performed",engineId,input.TransactionId);
+        app.Logger.LogWarning("Engine {Engine} config activated transaction {Tx}; restart NOT performed",SafeLogField(engineId),SafeLogField(input.TransactionId));
         return Results.Ok(new {engineId,state="activated-file-only",revision=Sha(proposed),requiresRestart=true});
     }
     finally {revisionLock.Release();}
@@ -538,7 +541,7 @@ app.MapPost("/agent/v1/engines/{engineId}/config/rollback", async (string engine
             return Results.Conflict(new {error="Engine config drift; manual recovery required"});
         await File.WriteAllBytesAsync(configPath+".next",original);
         File.Move(configPath+".next",configPath,true);
-        app.Logger.LogWarning("Engine {Engine} config rolled back transaction {Tx}; restart NOT performed",engineId,input.TransactionId);
+        app.Logger.LogWarning("Engine {Engine} config rolled back transaction {Tx}; restart NOT performed",SafeLogField(engineId),SafeLogField(input.TransactionId));
         return Results.Ok(new {engineId,state="rolled-back-file-only",revision=Sha(original),requiresRestart=true});
     }
     finally {revisionLock.Release();}

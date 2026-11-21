@@ -1,5 +1,33 @@
 # GatewayCore — Codex handoff, verified repository snapshot
 
+## Continuation snapshot — security review and release status (2026-11-20)
+
+This is the latest verified continuation state; older same-day snapshots below
+are historical when their branch, issue, or CI state differs.
+
+- `main` is `5c4efabd999efa9f58726725f2df77ab49a00b54`, including PR #321
+  (L4 fault acceptance), #323 (DNS capability documentation correction), and
+  #324 (selected CodeQL TLS/logging/receipt hardening). PR #324 passed all
+  exact-head checks, including Windows/Linux integration and ten Windows HA
+  repetitions, before merge. It did not close any remaining feature issue.
+- Ten issues remain open: #34, #36, #37, #38, #48, #49, #51, #52, #53, and
+  #109. PR #325 is the only open development PR. Its latest changes merge the
+  current main and move the OIDC client-secret file path out of serialized JSON
+  when `GATEWAY_OIDC_CLIENT_SECRET_FILE` is configured. Exact-head CI and
+  CodeQL must pass before merge; the earlier PR head had one high CodeQL alert.
+- #53 remains open for Windows console/service graceful-stop acceptance;
+  physical WAN/loss/soak/capacity remains in #36. #52 and #109 still require
+  software acceptance not delivered by documentation or the selected security
+  fixes in #324/#325.
+- CodeQL alerts #1–#6 (disposable test-secret file writes) and #14 (pinned
+  client-certificate policy) are not claimed resolved until the latest scan
+  confirms it. No scanner findings are dismissed or suppressed in code.
+- Latest release is `v0.1.0-test.12` (2026-11-14). A verified release with
+  SHA-256 checksums, offline install, upgrade, and rollback evidence has not
+  been published. Production remains **NO-GO**; annual 99.9% availability is
+  unmeasured.
+
+
 ## Current continuation update — L4 acceptance and open security work (2026-11-20)
 
 This section supersedes older “current state” statements below where they

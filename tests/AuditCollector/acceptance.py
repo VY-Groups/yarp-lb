@@ -21,10 +21,32 @@ import uuid
 from unittest.mock import patch
 from contextlib import contextmanager
 
+# These Linux-only CI fixtures must exercise the shipping file-based secret
+# readers. Use an owner-only RAM-backed directory, never ordinary disk or
+# uploaded artifacts, and create each secret file with permissions atomically.
+def fixture_secret_directory():
+    with open("/proc/mounts", encoding="utf-8") as mounts:
+        if not any(line.split()[1:3] == ["/dev/shm", "tmpfs"] for line in mounts):
+            raise RuntimeError("CI requires /dev/shm tmpfs for disposable credentials")
+    return tempfile.TemporaryDirectory(prefix="gatewaycore-ci-secrets-", dir="/dev/shm")
+
+def write_private_fixture_file(path, data):
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "wb") as stream:
+        stream.write(data if isinstance(data, bytes) else data.encode("utf-8"))
+    if path.stat().st_mode & 0o777 != 0o600:
+        raise RuntimeError("Fixture secret file permissions are not owner-only")
+
 def check(condition, message):
     if not condition:
         raise AssertionError(message)
     print("PASS: " + message, flush=True)
+
+def safe_receipt_response(status, response_body, receipt):
+    """Reject malformed signed receipts instead of forwarding a modified value."""
+    if receipt and ("\r" in receipt or "\n" in receipt):
+        return 503, b"", None
+    return status, response_body, receipt
 
 def run(*args, **kw):
     return subprocess.run(args, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, **kw)
@@ -71,6 +93,10 @@ class ReceiptProxy:
                     owner.hold_entered.set()
                     if not owner.release_held.wait(20):
                         status, response_body, receipt = 503, b"", None
+                # A malformed signed receipt must fail closed; stripping its
+                # bytes would produce a different value from the one signed.
+                status, response_body, receipt = safe_receipt_response(
+                    status, response_body, receipt)
                 self.send_response(status)
                 if receipt:
                     self.send_header("X-GC-Audit-Receipt", receipt)
@@ -88,6 +114,7 @@ class ReceiptProxy:
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self.server.daemon_threads = True
         server_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        server_context.minimum_version = ssl.TLSVersion.TLSv1_2
         server_context.load_cert_chain(str(cert), str(tlskey))
         self.server.socket = server_context.wrap_socket(self.server.socket, server_side=True)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
@@ -123,23 +150,29 @@ def fixture_smtp_trust(ca):
 def main():
     if os.environ.get("GITHUB_ACTIONS") != "true":
         raise SystemExit("Disposable CI only")
+    check(safe_receipt_response(201, b"ok", "signed") ==
+          (201, b"ok", "signed"), "valid signed receipt is forwarded unchanged")
+    for malformed in ("signed\rInjected: true", "signed\nInjected: true"):
+        check(safe_receipt_response(201, b"ok", malformed) ==
+              (503, b"", None), "CR/LF in signed receipt fails closed")
     dll = Path(sys.argv[1]).resolve()
-    with tempfile.TemporaryDirectory(prefix="audit-fixture-") as tmp:
+    with tempfile.TemporaryDirectory(prefix="audit-fixture-") as tmp, fixture_secret_directory() as sd:
         root = Path(tmp)
-        keys = root / "keys"
+        private = Path(sd)
+        keys = private / "keys"
         keys.mkdir(mode=0o700)
         secret = secrets.token_bytes(32)
-        (keys / "node-a.key").write_bytes(secret)
+        write_private_fixture_file(keys / "node-a.key", secret)
         ledger = root / "ledger.jsonl"
         ledger.touch()
-        signing = root / "signing.pem"
+        signing = private / "signing.pem"
         public = root / "public.pem"
         cert = root / "tls.crt"
-        tlskey = root / "tls.key"
-        pfx = root / "tls.pfx"
+        tlskey = private / "tls.key"
+        pfx = private / "tls.pfx"
         password = secrets.token_hex(16)
-        pwd = root / "pfx-password"
-        pwd.write_text(password)
+        pwd = private / "pfx-password"
+        write_private_fixture_file(pwd, password)
         run("openssl","genpkey","-algorithm","RSA","-pkeyopt","rsa_keygen_bits:2048","-out",str(signing))
         run("openssl","pkey","-in",str(signing),"-pubout","-out",str(public))
         run("openssl","req","-x509","-newkey","rsa:2048","-nodes","-days","2",
@@ -156,6 +189,7 @@ def main():
             AUDIT_LEDGER_FILE=str(ledger), AUDIT_NODE_KEYS_DIR=str(keys), AUDIT_SIGNING_PEM=str(signing),
             AUDIT_TLS_PFX=str(pfx), AUDIT_TLS_PASSWORD_FILE=str(pwd))
         ctx = ssl.create_default_context(cafile=str(cert))
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
         def request(body, event, key=secret, recorded=False):
             digest=hashlib.sha256(body).hexdigest().upper()
             purpose="GatewayCore-Audit-Event-v2" if recorded else "GatewayCore-Audit-Intent-v1"
