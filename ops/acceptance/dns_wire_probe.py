@@ -44,6 +44,10 @@ def read_exact(sock, length):
 
 
 def exchange(host, port, payload, tcp, timeout):
+    # DNS over TCP has a 16-bit length prefix (RFC 1035). Reject an
+    # unframeable request before opening a socket or contacting a listener.
+    # UDP cannot carry more than the maximum IP datagram payload either.
+    require(0 < len(payload) <= 65535, "DNS query exceeds wire message limit")
     family = socket.AF_INET6 if ipaddress.ip_address(host).version == 6 else socket.AF_INET
     with socket.socket(family, socket.SOCK_STREAM if tcp else socket.SOCK_DGRAM) as sock:
         sock.settimeout(timeout)
