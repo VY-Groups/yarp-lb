@@ -45,3 +45,16 @@ repeated spans to force buffer growth and reuse. This targets **trace-export
 instrumentation** only; it does not prove any overall gateway
 allocated-bytes/request reduction. Issue #34 still requires three-or-more
 paired, pinned whole-proxy profiles and Windows/Ubuntu runtime evidence.
+
+### Sampled trace ID validation and allocation reduction
+
+The sampled-span route/cluster/destination ID checks now use a strict,
+allocation-free ASCII character scan instead of the regular-expression
+engine and LINQ string enumeration. IDs must be 1–80 characters of
+`A–Z`, `a–z`, `0–9`, `_` or `-`; a trailing newline is rejected even
+though the previous regex `$` anchor could match before a final LF.
+Per-request metric dimension validation continues using the same bounded
+character set. Tests cover 80/81-character limits, controls, slashes, Unicode
+and actual OTLP removal of a rejected route ID. This is an isolated profiler
+candidate, not a proven whole-proxy ~8.6 KiB/request reduction until a new
+exact-head paired allocation profile completes.
