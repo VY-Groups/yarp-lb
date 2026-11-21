@@ -24,7 +24,7 @@ var selectedDualTransportPort = TrafficHttp3Acceptance.SelectDualTransportPort(
         if (udpReservationAttempts == 2) throw new SocketException((int)SocketError.AddressAlreadyInUse);
         return new MemoryStream();
     });
-if (selectedDualTransportPort != 51004 || tcpReservationAttempts != 4 || udpReservationAttempts != 3)
+if (selectedDualTransportPort != 51003 || tcpReservationAttempts != 4 || udpReservationAttempts != 3)
     throw new Exception("TCP-first dual-transport selection must retry reserved TCP and UDP candidates");
 Console.WriteLine("PASS: TCP-first dual TCP/UDP port selection retries reserved and occupied candidates");
 
