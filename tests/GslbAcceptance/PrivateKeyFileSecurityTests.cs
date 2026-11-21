@@ -58,6 +58,23 @@ internal static class PrivateKeyFileSecurityTests
                 throw new Exception("FAIL: opened-handle digest differs from SHA-256 payload");
             MustReject(() => PrivateKeyFileSecurity.HashPrivateFileSha256(file, "observer replay", 4),
                 "oversized replay file in bounded hash");
+            File.WriteAllText(trustedPem, publicPem);
+            if (OperatingSystem.IsLinux())
+            {
+                File.SetUnixFileMode(trustedPem, UnixFileMode.UserRead | UnixFileMode.UserWrite |
+                    UnixFileMode.GroupRead | UnixFileMode.OtherRead);
+                if (PrivateKeyFileSecurity.ReadTrustedPublicKeyPem(trustedPem, "trusted signing key") != publicPem)
+                    throw new Exception("FAIL: read-only 0644 trust anchor was rejected");
+                File.SetUnixFileMode(trustedPem, UnixFileMode.UserRead | UnixFileMode.UserWrite |
+                    UnixFileMode.GroupRead);
+                if (PrivateKeyFileSecurity.ReadTrustedPublicKeyPem(trustedPem, "trusted signing key") != publicPem)
+                    throw new Exception("FAIL: read-only 0640 trust anchor was rejected");
+                File.SetUnixFileMode(trustedPem, UnixFileMode.UserRead | UnixFileMode.UserWrite |
+                    UnixFileMode.GroupRead | UnixFileMode.GroupWrite);
+                MustReject(() => PrivateKeyFileSecurity.ReadTrustedPublicKeyPem(
+                    trustedPem, "trusted signing key"), "group-writable trust anchor");
+            }
+
             if (OperatingSystem.IsLinux())
             {
                 var linkedParent = Path.Combine(root, "linked-parent");
