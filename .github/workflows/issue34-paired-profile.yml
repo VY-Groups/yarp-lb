@@ -19,7 +19,7 @@ concurrency:
 jobs:
   paired-profile:
     runs-on: ubuntu-24.04
-    timeout-minutes: 35
+    timeout-minutes: 55
     steps:
       - name: Checkout candidate revision
         uses: actions/checkout@v4
@@ -77,6 +77,27 @@ jobs:
             --dotnet-trace "$RUNNER_TEMP/dotnet-tools/dotnet-trace" \
             --rounds 3 --vus 75 --duration 45s --warmup 10s \
             --trace-seconds 25 --payload-bytes 0
+      - name: Run three separate unobserved-OTLP before/after pairs with bounded traces
+        id: unobserved_profile
+        env:
+          BASELINE_COMMIT: ${{ github.event.pull_request.base.sha || 'd2b135f760e92fb2646ec5542d89a7dc309eb88c' }}
+          CANDIDATE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+          # The no-listener fast path in #34 is not exercised by the
+          # OTLP-active scenario above. Preserve matching baseline/head
+          # instrumentation, payloads, VUs and k6 load profile.
+          YARP_LAB_OTEL_OVERHEAD: "0"
+        run: |
+          python3 source/candidate/tests/L7/performance/issue34/run_paired_profile.py \
+            --baseline-dir source/baseline \
+            --candidate-dir source/candidate \
+            --workspace "$GITHUB_WORKSPACE" \
+            --load-script "$GITHUB_WORKSPACE/source/candidate/tests/L7/performance/load.js" \
+            --output "$GITHUB_WORKSPACE/artifacts/issue34/unobserved" \
+            --baseline-commit "$BASELINE_COMMIT" \
+            --candidate-commit "$CANDIDATE_COMMIT" \
+            --dotnet-trace "$RUNNER_TEMP/dotnet-tools/dotnet-trace" \
+            --rounds 3 --vus 75 --duration 45s --warmup 10s \
+            --trace-seconds 25 --payload-bytes 0
       - name: Add paired measurement summary
         if: always()
         run: |
@@ -120,6 +141,38 @@ jobs:
                     f"(95% CI {s['ci95_low']} to {s['ci95_high']}); {s['interpretation']}", file=out)
           PY
           fi
+      - name: Require and summarize unobserved-OTLP paired evidence
+        if: always()
+        env:
+          PROFILE_OUTCOME: ${{ steps.unobserved_profile.outcome }}
+        run: |
+          if [[ "$PROFILE_OUTCOME" != "success" ]]; then
+            echo "## Issue 34 no-listener paired profile incomplete" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          for path in \
+            artifacts/issue34/unobserved/paired-report.json \
+            artifacts/issue34/unobserved/trace-index.json \
+            artifacts/issue34/unobserved/traces/before-gc-verbose.nettrace \
+            artifacts/issue34/unobserved/traces/after-gc-verbose.nettrace; do
+            if [[ ! -s "$path" ]]; then
+              echo "Missing no-listener profile evidence: $path" >> "$GITHUB_STEP_SUMMARY"
+              exit 1
+            fi
+          done
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          report = json.loads(Path("artifacts/issue34/unobserved/paired-report.json").read_text())
+          delta = report["paired_extra_allocation_delta"]
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as output:
+              print("## No-OTLP subscription paired allocation evidence", file=output)
+              print(f"Allocation delta: {delta['mean']} B/request "
+                    f"(95% CI {delta['ci95_low']} to {delta['ci95_high']}); "
+                    f"{delta['interpretation']}", file=output)
+              print("Isolated CI evidence only, not production 500 Mbps acceptance.", file=output)
+          PY
       - if: always()
         uses: actions/upload-artifact@v4
         with:

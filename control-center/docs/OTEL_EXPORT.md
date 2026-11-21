@@ -55,3 +55,46 @@ than matching the old regular-expression `$` anchor. Regression tests verify
 actual rejection and preservation in the privacy processor. This is a
 trace-instrumentation candidate, not a demonstrated 8.6 KiB/request reduction;
 new exact-head paired profiling and independent review are required.
+
+### No-listener proxy metrics fast path (#34)
+
+When no `MeterListener` observes the proxy request count or duration
+instruments, request telemetry no longer resolves the reverse-proxy feature,
+registers route/cluster/destination dimension tuples, derives status classes,
+or creates metric tags solely for export. The hot path checks each instrument's
+runtime `Enabled` state; a listener registering later immediately receives
+measurements without requiring a gateway restart.
+
+The private local-rejection marker is still removed from `HttpContext.Items`
+on every request, even when telemetry is disabled. A listener subscribing
+**only** to `gateway.proxy.local_rejections` receives the original allowlisted
+reason, and a counter-only subscriber receives counter updates without
+requiring a duration histogram subscriber. Isolated acceptance tests cover
+these cases and bound warmed unobserved-call allocations to <=2 bytes/call.
+
+This may reduce overhead in no-OTLP or selectively collected configurations;
+it does **not** bypass YARP, privacy filtering, access logging, forwarding or
+the configured OTel exporter when its instruments have active subscribers.
+The per-helper allocation bound is not whole-proxy throughput or memory
+evidence. Issue #34 remains subject to three paired pinned before/after
+whole-gateway tests, allocation stack attribution, correctness/TLS/POST/streaming
+matrix and independent reviewer approval.
+
+#### Exact-head two-mode #34 paired profile
+
+The `Issue 34 - paired allocation profile` workflow now performs **two**
+separate pinned three-pair before/after runs for the same PR base/head, VUs,
+payload and k6 load script. It first profiles with an actual OTLP receiver
+and active instrumentation. It then runs an **additional no-OTLP/no-subscriber
+profile**, because `Instrument.Enabled` is the optimization boundary of the
+unobserved request-metrics fast path. Both modes record bounded allocation
+traces and separate 95% paired uncertainty intervals in the workflow summary
+and artifact tree:
+
+- `artifacts/issue34/paired-report.json`: OTLP-enabled result
+- `artifacts/issue34/unobserved/paired-report.json`: OTLP-disabled result
+
+The test does not aggregate unlike modes into one result or label a negative
+delta in either mode as 500 Mbps production acceptance. Missing off-mode
+paired reports or trace files fail the job. Actual Windows paired execution
+and deployed one-hour, 500 Mbps physical/operational soak remain unverified.

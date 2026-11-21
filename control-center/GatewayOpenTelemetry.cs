@@ -57,7 +57,12 @@ public static partial class GatewayOpenTelemetry
             finally
             {
                 var elapsedMs = Stopwatch.GetElapsedTime(started).TotalMilliseconds;
-                var feature = context.Features.Get<IReverseProxyFeature>();
+                // When there is no trace or request-metric subscriber, do
+                // not allocate/resolve YARP's proxy feature solely for OTLP.
+                // afterRequest still runs for access logs and other middleware.
+                var feature = activity is not null || ProxyRequests.Enabled || ProxyDuration.Enabled
+                    ? context.Features.Get<IReverseProxyFeature>()
+                    : null;
                 var destination = feature?.ProxiedDestination;
                 CompleteProxyActivity(activity, context, destination?.DestinationId);
                 RecordProxyResult(context, elapsedMs,
@@ -161,6 +166,7 @@ public static partial class GatewayOpenTelemetry
     public static Activity? StartProxyActivity(HttpContext context)
     {
         var activity = ActivitySource.StartActivity("gateway.proxy.request", ActivityKind.Internal);
+        if (activity is null) return null;
         var proxy = context.Features.Get<IReverseProxyFeature>();
         SetBoundedId(activity, "gateway.route.id", proxy?.Route?.Config.RouteId);
         SetBoundedId(activity, "gateway.cluster.id", proxy?.Cluster?.Config.ClusterId);
@@ -180,25 +186,35 @@ public static partial class GatewayOpenTelemetry
     public static void RecordProxyResult(HttpContext context, double elapsedMs,
         string? routeId = null, string? clusterId = null, string? destinationId = null)
     {
-        var statusClass = context.Response.StatusCode switch
+        // Instrument.Enabled is true only while a MeterListener collects the
+        // instrument. Avoid allocating tag metadata, registering dimension
+        // tuples or even reading Response.StatusCode for unobserved traffic.
+        // An on-demand listener can enable instruments later without restart.
+        var countEnabled = ProxyRequests.Enabled;
+        var durationEnabled = ProxyDuration.Enabled;
+        if (countEnabled || durationEnabled)
         {
-            >= 200 and < 300 => "2xx",
-            >= 300 and < 400 => "3xx",
-            >= 400 and < 500 => "4xx",
-            >= 500 and < 600 => "5xx",
-            _ => "other"
-        };
-        var tags = DimensionBudget.CreateTags(routeId, clusterId, destinationId, statusClass);
-        ProxyRequests.Add(1, tags);
-        ProxyDuration.Record(elapsedMs, tags);
+            var statusClass = context.Response.StatusCode switch
+            {
+                >= 200 and < 300 => "2xx",
+                >= 300 and < 400 => "3xx",
+                >= 400 and < 500 => "4xx",
+                >= 500 and < 600 => "5xx",
+                _ => "other"
+            };
+            var tags = DimensionBudget.CreateTags(routeId, clusterId, destinationId, statusClass);
+            if (countEnabled) ProxyRequests.Add(1, tags);
+            if (durationEnabled) ProxyDuration.Record(elapsedMs, tags);
+        }
 
-        // The private context marker is written by GatewayCore's local rejection
-        // middleware. Do not derive metric labels from response headers: an upstream
-        // application can return arbitrary headers.
+        // Always remove the private request-scoped rejection marker, even if
+        // no OTLP listener exists. Never depend on a public response header.
+        // A subscriber to ONLY local rejections must still receive its event.
         if (context.Items.TryGetValue(LocalRejectionItemKey, out var markedReason))
         {
             context.Items.Remove(LocalRejectionItemKey);
-            if (markedReason is string rejectionValue &&
+            if (LocalProxyRejections.Enabled &&
+                markedReason is string rejectionValue &&
                 TryGetLocalRejectionReason(rejectionValue, out var rejectionReason))
                 LocalProxyRejections.Add(1, new TagList
                 {
