@@ -961,17 +961,24 @@ async Task<bool> AuditActorCurrent(HttpContext ctx, bool administratorOnly)
         oidcPolicy.SessionValid(ctx.User, current.Username, current.Role, DateTimeOffset.UtcNow, stepUp: true);
 }
 async Task<IResult?> ConfirmStateMutation(HttpContext ctx, string path, byte[] before, byte[] proposed,
-    string operation, bool administratorOnly)
+    string operation, bool administratorOnly, Action<string>? onConfirmedIntent = null)
 {
     if (externalAuditIntent is null && oidcPolicy is null) return null;
     if (!await AuditActorCurrent(ctx, administratorOnly)) return Results.StatusCode(403);
     if (!AuditStateBytes(path).AsSpan().SequenceEqual(before))
         return Results.Conflict(new { error = "State changed before external audit confirmation" });
-    if (externalAuditIntent is not null &&
-        !await externalAuditIntent.ConfirmAsync(Actor(ctx), operation,
-            Convert.ToHexString(SHA256.HashData(before)), Convert.ToHexString(SHA256.HashData(proposed)),
-            ctx.RequestAborted))
-        return Results.Json(new { error = "External audit receipt unavailable; state unchanged" }, statusCode: 503);
+    if (externalAuditIntent is not null)
+    {
+        var verifiedId = await externalAuditIntent.ConfirmWithIdAsync(Actor(ctx), operation,
+            Convert.ToHexString(SHA256.HashData(before)),
+            Convert.ToHexString(SHA256.HashData(proposed)), ctx.RequestAborted);
+        if (verifiedId is null)
+            return Results.Json(new { error = "External audit receipt unavailable; state unchanged" }, statusCode: 503);
+        // Only callers enforcing a durable PREPARED outbox need this ID.
+        // This callback never grants authorization by itself: actor, state
+        // and cancellation checks below still apply.
+        onConfirmedIntent?.Invoke(verifiedId);
+    }
     if (!await AuditActorCurrent(ctx, administratorOnly)) return Results.StatusCode(403);
     if (ctx.RequestAborted.IsCancellationRequested)
         return Results.Json(new { error = "Mutation cancelled; state unchanged" }, statusCode: 503);
@@ -989,7 +996,9 @@ async Task<IResult?> ConfirmAndWriteResourceMutation(HttpContext ctx, string pat
         WriteAuditedState(path, proposed);
         return null;
     }
-    var denied = await ConfirmStateMutation(ctx, path, before, proposed, operation, administratorOnly);
+    string? confirmedIntentId = null;
+    var denied = await ConfirmStateMutation(ctx, path, before, proposed,
+        operation, administratorOnly, id => confirmedIntentId = id);
     if (denied is not null) return denied;
     try { await loginGate.WaitAsync(ctx.RequestAborted); }
     catch (OperationCanceledException)
@@ -1003,6 +1012,48 @@ async Task<IResult?> ConfirmAndWriteResourceMutation(HttpContext ctx, string pat
             return Results.Json(new { error = "Resource mutation commit cancelled; state unchanged" }, statusCode: 503);
         if (!AuditStateBytes(path).AsSpan().SequenceEqual(before))
             return Results.Conflict(new { error = "State changed during external audit confirmation" });
+
+        if (auditOutbox is not null)
+        {
+            // A remote signed INTENT receipt is not evidence that the
+            // post-receipt resource mutation was even attempted. Persist
+            // the correlation and exact proposed/prior digests to a durable
+            // outbox BEFORE changing inventory/fleet configuration bytes.
+            // Failure here refuses the mutation; the signed intent alone
+            // never permits a write with a broken audit queue.
+            if (confirmedIntentId is null)
+                return Results.Json(new { error = "Resource mutation audit intent missing; state unchanged" },
+                    statusCode: 503);
+            try
+            {
+                await localAudit.AppendAsync(Actor(ctx), "RESOURCE_MUTATION_PREPARED",
+                    new
+                    {
+                        operation,
+                        revision = Convert.ToHexString(SHA256.HashData(before)),
+                        targetDigest = Convert.ToHexString(SHA256.HashData(proposed))
+                    }, confirmedIntentId);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or
+                InvalidOperationException or InvalidDataException)
+            {
+                return Results.Json(new { error = "Resource audit preparation unavailable; state unchanged" },
+                    statusCode: 503);
+            }
+        }
+
+        // The queue operation can yield and the account or request may have
+        // been revoked meanwhile. Recheck every authority after that await.
+        if (ctx.RequestAborted.IsCancellationRequested)
+            return Results.Json(new { error = "Resource mutation audit cancelled; state unchanged" },
+                statusCode: 503);
+        if (!await AuditActorCurrent(ctx, administratorOnly))
+            return Results.StatusCode(403);
+        if (ctx.RequestAborted.IsCancellationRequested)
+            return Results.Json(new { error = "Resource mutation commit cancelled; state unchanged" },
+                statusCode: 503);
+        if (!AuditStateBytes(path).AsSpan().SequenceEqual(before))
+            return Results.Conflict(new { error = "State changed during durable audit preparation" });
         WriteAuditedState(path, proposed);
         return null;
     }
@@ -2376,7 +2427,10 @@ HttpClient CreateFleetClient(FleetGateway row)
 // Version 0.1 setup APIs and independently verified YARP runtime state.
 app.MapSetupCenter(privateDir, Audit);
 app.MapCapabilityRegistry();
-app.MapOnboardingApi(privateDir, ConfirmStateMutation, WriteAuditedState, Audit);
+app.MapOnboardingApi(privateDir,
+    (ctx, path, before, proposed, operation, administratorOnly) =>
+        ConfirmStateMutation(ctx, path, before, proposed, operation, administratorOnly),
+    WriteAuditedState, Audit);
 // Enforce onboarding state server-side; hiding navigation is never a security boundary.
 app.Use(async (ctx, next) =>
 {

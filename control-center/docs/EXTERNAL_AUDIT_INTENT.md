@@ -105,3 +105,37 @@ ACL requirements. This is local spool tamper-resistance, not independent
 WORM/retention attestation, cross-process anti-rollback or a solution to
 compromise of the service identity. The external collector and operation
 receipt requirements remain mandatory.
+
+### Durable correlated resource PREPARED gate (#38)
+
+When the external collector and durable outbox are configured, the common
+inventory and fleet file-mutation path now requires **two independent steps
+before committing any resource bytes**:
+
+1. The existing signed external intent receipt, bound to the exact
+   pre-revision digest and proposed-state digest; the caller's actor,
+   role/session/revocation, cancellation and prior state are rechecked.
+2. A correlated `RESOURCE_MUTATION_PREPARED` event persisted in the
+   owner-only local durable outbox **before** writing the new inventory/fleet
+   file. The event authenticates the same intent ID (as a SHA-256 correlation
+   digest) and records the operation and before/after digests in the local
+   evidence line. The outbox is flush-to-disk and refuses mutation when full,
+   corrupted, inaccessible, non-private or structurally incomplete.
+
+The implementation retains the resource serialization lock and final
+account/revocation/cancellation/prior-state checks **after** the asynchronous
+preparation step. A missing external receipt, failed durable write or
+intervening state change now leaves the resource file unchanged. A crash
+between PREPARED and the file write leaves an unresolved **attempt**, not a
+false claim that a mutation succeeded; the signed collector receipt and local
+spool must be reconciled by an operator. Existing account PREPARED semantics
+are unchanged. Linux/Windows security acceptance checks correlated
+resource events, missing intent rejection and a damaged spool's sticky fault.
+
+This is **not** a complete distributed immutable audit deployment:
+post-commit outcomes still need robust reconciliation/acknowledgement,
+signed retention/WORM policy and cross-replica delivery, and Control Center
+OIDC/FIDO2 session-revocation/step-up/privileged-event coverage remain
+incomplete. Physical WORM infrastructure and actual IdP/passkey trials
+belong in #36 after verified software completion. Do not close #38 on this
+single fail-closed mutation path.

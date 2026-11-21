@@ -103,10 +103,13 @@ internal sealed class DurableAuditOutbox : IDisposable
         lock (gate)
         {
             if (storageFault) throw new IOException("Audit outbox storage fault is latched");
+            // Validate caller-supplied event data before entering the storage
+            // fault boundary. A malformed/uncorrelated event must fail closed
+            // without poisoning an otherwise healthy durable queue.
+            var row = transport.CreateEvent(actor, action, utc, digest, intentId);
             try
             {
                 if (Entries().Length >= MaxEntries) throw new QueueFullException();
-                var row = transport.CreateEvent(actor, action, utc, digest, intentId);
                 var target = Path.Combine(directory, row.Id + ".event");
                 var bytes = JsonSerializer.SerializeToUtf8Bytes(row);
                 if (bytes.Length > MaxEntryBytes) throw new InvalidDataException("Audit queue record too large");

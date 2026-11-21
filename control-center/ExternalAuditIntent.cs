@@ -140,8 +140,9 @@ internal sealed class ExternalAuditIntent : IDisposable
         Convert.ToBase64String(HMACSHA256.HashData(senderKey, SignatureInput(
             recorded ? "GatewayCore-Audit-Event-v2" : "GatewayCore-Audit-Intent-v1", id, payload)));
 
-    internal static bool AccountCorrelationAction(string action) => action is
-        "ACCOUNT_MUTATION_PREPARED" or "USER_CREATED" or "PASSWORD_RESET" or "USER_OFFBOARDED" or "USER_REENABLED";
+    internal static bool CorrelatedMutationAction(string action) => action is
+        "ACCOUNT_MUTATION_PREPARED" or "RESOURCE_MUTATION_PREPARED" or
+        "USER_CREATED" or "PASSWORD_RESET" or "USER_OFFBOARDED" or "USER_REENABLED";
 
     internal QueuedEvent CreateEvent(string actor, string action, DateTimeOffset utc, string localDigest,
         string? intentId = null)
@@ -150,11 +151,12 @@ internal sealed class ExternalAuditIntent : IDisposable
             actor = "invalid-actor:" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(actor)));
         if (action.Length is < 1 or > 96 || !action.All(c => c is >= 'A' and <= 'Z' or >= '0' and <= '9' or '_') ||
             !IsDigest(localDigest)) throw new InvalidDataException("Invalid recorded audit event");
-        if (intentId is not null && (!AccountCorrelationAction(action) ||
+        if (intentId is not null && (!CorrelatedMutationAction(action) ||
             !Guid.TryParseExact(intentId, "N", out var intent) || intent.ToString("N") != intentId))
             throw new InvalidDataException("Invalid account audit correlation");
-        if (action == "ACCOUNT_MUTATION_PREPARED" && intentId is null)
-            throw new InvalidDataException("Prepared account audit requires confirmed intent");
+        if ((action == "ACCOUNT_MUTATION_PREPARED" ||
+             action == "RESOURCE_MUTATION_PREPARED") && intentId is null)
+            throw new InvalidDataException("Prepared mutation audit requires confirmed intent");
         var correlation = intentId is null ? new string('0', 64) :
             Convert.ToHexString(SHA256.HashData(Encoding.ASCII.GetBytes(intentId)));
         var id = Guid.NewGuid().ToString("N");
