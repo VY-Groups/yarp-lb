@@ -8,7 +8,6 @@ import http.client
 import json
 import os
 from pathlib import Path
-import re
 import secrets
 import socket
 import ssl
@@ -49,7 +48,9 @@ def safe_receipt_response(status, response_body, receipt):
     # bounded ASCII alphabet before placing it in an HTTP response header.
     # Keep the value unchanged: the gateway verifies the exact signed bytes.
     if receipt is not None and (
-        len(receipt) > 1024 or re.fullmatch(r"[A-Za-z0-9+/]+={0,2}", receipt) is None
+        len(receipt) > 1024 or not receipt or len(receipt) % 4 != 0 or
+        any(character not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/="
+            for character in receipt) or receipt.count("=") > 2 or "=" in receipt[:-2]
     ):
         return 503, b"", None
     return status, response_body, receipt
@@ -160,8 +161,8 @@ def fixture_smtp_trust(ca):
 def main():
     if os.environ.get("GITHUB_ACTIONS") != "true":
         raise SystemExit("Disposable CI only")
-    check(safe_receipt_response(201, b"ok", "signed") ==
-          (201, b"ok", "signed"), "valid signed receipt is forwarded unchanged")
+    check(safe_receipt_response(201, b"ok", "c2lnbmVk") ==
+          (201, b"ok", "c2lnbmVk"), "valid base64 receipt is forwarded unchanged")
     for malformed in ("signed\rInjected: true", "signed\nInjected: true", "signed\x00", "signed\x09", "signed\u2028", "x" * 1025):
         check(safe_receipt_response(201, b"ok", malformed) ==
               (503, b"", None), "invalid or oversized signed receipt fails closed")
