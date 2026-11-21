@@ -30,12 +30,25 @@ public static class LinuxKeyProtection
         root = Path.GetFullPath(root);
         if (root == "/" || root == "/tmp" || root == "/var" || root == "/var/lib")
             throw new InvalidOperationException("Refusing unsafe Linux data-protection state root");
-        if (!Directory.Exists(root))
-            Directory.CreateDirectory(root, PrivateDirectoryMode);
-        CheckPrivateDirectory(root);
+        // Path-based CreateDirectory can traverse a parent symlink before
+        // CheckPrivateDirectory ever runs. Create/inspect each component
+        // relative to already-opened no-follow Linux directory handles.
+        // Reject a linked (including dangling-linked) ancestor *before*
+        // creating anything beneath its target.
         var keyDir = Path.Combine(root, "data-protection-keys");
-        if (!Directory.Exists(keyDir))
-            Directory.CreateDirectory(keyDir, PrivateDirectoryMode);
+        try
+        {
+            PrivateKeyFileSecurity.EnsureLinuxPrivateStateDirectory(
+                root, "Linux Data Protection state");
+            PrivateKeyFileSecurity.EnsureLinuxPrivateStateDirectory(
+                keyDir, "Linux Data Protection key ring");
+        }
+        catch (InvalidDataException ex)
+        {
+            throw new InvalidOperationException(
+                "Unsafe Linux Data Protection directory bootstrap", ex);
+        }
+        CheckPrivateDirectory(root);
         CheckPrivateDirectory(keyDir);
         return root;
     }
