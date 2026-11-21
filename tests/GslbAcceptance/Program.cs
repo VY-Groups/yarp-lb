@@ -13,6 +13,76 @@ using GatewayCore.Gslb.Contracts;
 
 PrivateKeyFileSecurityTests.Run();
 AuthorityFenceTests.Run();
+
+// A locally configured ACME TXT owner must exist for both TXT queries and
+// NODATA on other types; DNSSEC signing/denial-chain owners must agree.
+{
+    const string origin = "acme-rrset.unit.test";
+    const string owner = "_acme-challenge.api.acme-rrset.unit.test";
+    const string emptyAncestor = "api.acme-rrset.unit.test";
+    const string txtValue1 = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    const string txtValue2 = "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBA";
+    DnsTxtRecord Txt(string value) =>
+        new(owner, new byte[] {43}.Concat(Encoding.ASCII.GetBytes(value)).ToArray());
+    var txtRows = new[] { Txt(txtValue1), Txt(txtValue2) };
+    var server = new DnsNameServer("ns1.acme-rrset.unit.test", IPAddress.Parse("192.0.2.53"));
+    var site = new Site(IPAddress.Parse("192.0.2.80"), null, 1, 0, 1, 1,
+        "Http", 0, null, null, []) { Healthy = 1 };
+    var root = Path.Combine(Path.GetTempPath(), "gslb-acme-txt-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(root);
+    if (OperatingSystem.IsLinux())
+        File.SetUnixFileMode(root, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+    try
+    {
+        var keyPath = Path.Combine(root, "signing.pem");
+        using (var key = ECDsa.Create(ECCurve.NamedCurves.nistP256))
+            File.WriteAllText(keyPath, key.ExportECPrivateKeyPem());
+        if (OperatingSystem.IsLinux())
+            File.SetUnixFileMode(keyPath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+        var group = new SiteGroup([site], 10, true, [server],
+            "hostmaster.acme-rrset.unit.test", 1, "Weighted",
+            null, false, null,
+            dnssecPrivateKeyPath: keyPath, zoneName: origin,
+            acmeTxtRecords: txtRows);
+        try
+        {
+            var zones = new Dictionary<string, SiteGroup> { [origin] = group };
+            byte[] Answer(string qname, ushort type, bool doBit = false) =>
+                DnsWireProtocol.Build(DnsRequest(qname, type,
+                    doBit ? (byte)0 : null), zones, tcp: true,
+                    resolverIp: IPAddress.Loopback)!;
+            var txt = Answer(owner, 16);
+            if (Dns16(txt, 6) != 2 ||
+                !DnsRecordTypes(txt, 0).SequenceEqual(new ushort[] { 16, 16 }) ||
+                txt.AsSpan().IndexOf(Encoding.ASCII.GetBytes(txtValue1)) < 0 ||
+                txt.AsSpan().IndexOf(Encoding.ASCII.GetBytes(txtValue2)) < 0)
+                throw new Exception("FAIL: authoritative ACME TXT multi-value RRset malformed");
+
+            var signed = Answer(owner, 16, doBit: true);
+            if (!DnsRecordTypes(signed, 0).Contains((ushort)46) ||
+                !DnsRecordTypes(signed, 0).Contains((ushort)16) ||
+                group.Dnssec?.NsecAt(owner) is null)
+                throw new Exception("FAIL: DNSSEC signed ACME TXT owner or NSEC chain missing");
+            foreach (var (name, type, rcode) in new[]
+            {
+                (owner, (ushort)1, 0), // existing TXT owner, absent A: NODATA
+                (emptyAncestor, (ushort)16, 0), // empty nonterminal: NODATA
+                ("missing.acme-rrset.unit.test", (ushort)16, 3) // NXDOMAIN
+            })
+            {
+                var reply = Answer(name, type);
+                if ((Dns16(reply, 2) & 15) != rcode ||
+                    Dns16(reply, 6) != 0 || Dns16(reply, 8) != 1 ||
+                    !DnsRecordTypes(reply, 1).SequenceEqual(new ushort[] { 6 }))
+                    throw new Exception("FAIL: TXT owner/ancestor NXDOMAIN or NODATA incorrect");
+            }
+            Console.WriteLine("PASS: in-bailiwick ACME TXT, DNSSEC signatures and correct NXDOMAIN/NODATA");
+        }
+        finally { group.Dnssec?.Dispose(); }
+    }
+    finally { Directory.Delete(root, recursive: true); }
+}
+
 var nsec3Vector = DnssecZoneSigner.Base32Hex(DnssecZoneSigner.Nsec3Hash(
     "ns1.example.", Convert.FromHexString("AABBCCDD"), 12));
 if (!string.Equals(nsec3Vector, "2T7B4G4VSA5SMI47K61MV5BV1A22BOJR", StringComparison.Ordinal))
