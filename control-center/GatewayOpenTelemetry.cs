@@ -2,7 +2,6 @@ using System.Buffers;
 using System.Diagnostics;
 using System.Diagnostics.Metrics;
 using System.Collections.Concurrent;
-using System.Text.RegularExpressions;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Http.Features;
@@ -255,10 +254,18 @@ public static partial class GatewayOpenTelemetry
         return ratio;
     }
 
+    internal static bool IsSafeTelemetryId(string? value)
+    {
+        if (value is not { Length: > 0 and <= 80 }) return false;
+        foreach (var character in value)
+            if (!char.IsAsciiLetterOrDigit(character) && character is not ('_' or '-'))
+                return false;
+        return true;
+    }
+
     private static void SetBoundedId(Activity? activity, string key, string? value)
     {
-        if (activity is not null && value is { Length: > 0 and <= 80 } &&
-            Regex.IsMatch(value, "^[A-Za-z0-9_-]+$", RegexOptions.CultureInvariant))
+        if (activity is not null && IsSafeTelemetryId(value))
             activity.SetTag(key, value);
     }
 }
@@ -383,8 +390,7 @@ internal sealed class GatewayTelemetryPrivacyProcessor : BaseProcessor<Activity>
     private static bool IsAllowed(string key, object? value) => key switch
     {
         "gateway.route.id" or "gateway.cluster.id" or "gateway.destination.id" =>
-            value is string id && id.Length is > 0 and <= 80 &&
-            id.All(c => char.IsAsciiLetterOrDigit(c) || c is '_' or '-'),
+            value is string id && GatewayOpenTelemetry.IsSafeTelemetryId(id),
         "http.request.method" => value is string method && IsKnownMethod(method),
         "http.response.status_code" => value is int status && status is >= 100 and <= 599
             || value is long longStatus && longStatus is >= 100 and <= 599,
