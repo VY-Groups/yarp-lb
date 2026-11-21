@@ -29,7 +29,7 @@ if (args.Length == 2 && args[0] == "validate")
 {
     try
     {
-        var result = PlanEngine.Validate(await File.ReadAllTextAsync(args[1]));
+        var result = PlanEngine.Validate(await ReadBoundedJsonAsync(args[1]));
         Console.WriteLine(JsonSerializer.Serialize(result, new JsonSerializerOptions { WriteIndented = true }));
         return 0;
     }
@@ -48,7 +48,7 @@ if (args.Length != 3 || args[0] != "plan")
 
 try
 {
-    var result = PlanEngine.Build(await File.ReadAllTextAsync(args[1]), await File.ReadAllTextAsync(args[2]));
+    var result = PlanEngine.Build(await ReadBoundedJsonAsync(args[1]), await ReadBoundedJsonAsync(args[2]));
     Console.WriteLine(JsonSerializer.Serialize(result, new JsonSerializerOptions { WriteIndented = true }));
     return 0;
 }
@@ -56,4 +56,25 @@ catch (Exception ex) when (ex is ArgumentException or IOException)
 {
     Console.Error.WriteLine(ex.Message);
     return 1;
+}
+
+static async Task<string> ReadBoundedJsonAsync(string path)
+{
+    using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+    if (stream.Length is < 1 or > 512 * 1024)
+        throw new ArgumentException("Planner input must be between 1 byte and 512 KiB");
+    var bytes = new byte[checked((int)stream.Length)];
+    try
+    {
+        await stream.ReadExactlyAsync(bytes);
+        if (stream.ReadByte() != -1)
+            throw new ArgumentException("Planner input changed during read");
+        try { return new System.Text.UTF8Encoding(false, true).GetString(bytes); }
+        catch (System.Text.DecoderFallbackException)
+        { throw new ArgumentException("Planner input is not valid UTF-8"); }
+    }
+    finally
+    {
+        System.Security.Cryptography.CryptographicOperations.ZeroMemory(bytes);
+    }
 }
