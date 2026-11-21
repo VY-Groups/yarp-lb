@@ -81,6 +81,82 @@ var allocationMeasurement = MeasureWarmDimensionTagAllocations(new GatewayTeleme
 Console.WriteLine($"DIMENSION_TAG_WARM_ALLOCATIONS bytes={allocationMeasurement} calls=100000 bytes_per_call={allocationMeasurement / 100000.0:F3}");
 Must(allocationMeasurement <= 100_000,
     "warmed OTLP dimension tag creation stays at or below 1 allocated byte per request after registration");
+{
+    // When OTLP is unconfigured, the gateway must not build request metrics
+    // merely because the proxy forwards traffic. Preserve request-local
+    // rejection cleanup and allow a subscriber to start at any time.
+    var unobserved = new DefaultHttpContext();
+    unobserved.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+    GatewayOpenTelemetry.MarkLocalRejection(unobserved, "gateway_shutdown");
+    GatewayOpenTelemetry.RecordProxyResult(unobserved, 12.5,
+        "route_a", "cluster_a", "destination_a");
+    Must(unobserved.Items.Count == 0,
+        "unobserved proxy telemetry still clears the local rejection marker");
+
+    long rejectionMeasurements = 0;
+    string? observedReason = null;
+    using (var onlyRejectionListener = new System.Diagnostics.Metrics.MeterListener())
+    {
+        onlyRejectionListener.InstrumentPublished = (instrument, subscriber) =>
+        {
+            if (instrument.Meter.Name == GatewayOpenTelemetry.ActivitySourceName &&
+                instrument.Name == "gateway.proxy.local_rejections")
+                subscriber.EnableMeasurementEvents(instrument);
+        };
+        onlyRejectionListener.SetMeasurementEventCallback<long>((instrument, value, tags, _) =>
+        {
+            if (instrument.Name != "gateway.proxy.local_rejections") return;
+            rejectionMeasurements += value;
+            foreach (var tag in tags)
+                if (tag.Key == "gateway.proxy.rejection.reason")
+                    observedReason = tag.Value as string;
+        });
+        onlyRejectionListener.Start();
+        var rejected = new DefaultHttpContext();
+        GatewayOpenTelemetry.MarkLocalRejection(rejected, "gateway_shutdown");
+        GatewayOpenTelemetry.RecordProxyResult(rejected, 5.0);
+        Must(rejectionMeasurements == 1 && observedReason == "gateway_shutdown" &&
+            rejected.Items.Count == 0,
+            "rejection-only listener receives its private metric without proxy request listeners");
+    }
+
+    long requestMeasurements = 0;
+    using (var requestOnlyListener = new System.Diagnostics.Metrics.MeterListener())
+    {
+        requestOnlyListener.InstrumentPublished = (instrument, subscriber) =>
+        {
+            if (instrument.Meter.Name == GatewayOpenTelemetry.ActivitySourceName &&
+                instrument.Name == "gateway.proxy.requests")
+                subscriber.EnableMeasurementEvents(instrument);
+        };
+        requestOnlyListener.SetMeasurementEventCallback<long>((instrument, value, tags, _) =>
+        {
+            if (instrument.Name == "gateway.proxy.requests") requestMeasurements += value;
+        });
+        requestOnlyListener.Start();
+        var request = new DefaultHttpContext();
+        request.Response.StatusCode = StatusCodes.Status200OK;
+        GatewayOpenTelemetry.RecordProxyResult(request, 1.2,
+            "route_a", "cluster_a", "destination_a");
+        Must(requestMeasurements == 1,
+            "on-demand count-only subscriber receives request metric without duration subscriber");
+    }
+
+    var warm = new DefaultHttpContext();
+    for (var index = 0; index < 20_000; index++)
+        GatewayOpenTelemetry.RecordProxyResult(warm, 1.0, "route_a", "cluster_a", "destination_a");
+    GC.Collect();
+    GC.WaitForPendingFinalizers();
+    GC.Collect();
+    var startBytes = GC.GetAllocatedBytesForCurrentThread();
+    for (var index = 0; index < 100_000; index++)
+        GatewayOpenTelemetry.RecordProxyResult(warm, 1.0, "route_a", "cluster_a", "destination_a");
+    var idleBytes = GC.GetAllocatedBytesForCurrentThread() - startBytes;
+    Console.WriteLine($"PROXY_METRIC_UNOBSERVED_ALLOCATIONS bytes={idleBytes} calls=100000");
+    Must(idleBytes <= 200_000,
+        "unobserved proxy metric path stays at or below two allocated bytes per call");
+}
+
 using (var privacyActivity = new System.Diagnostics.Activity("privacy-contract"))
 {
     privacyActivity.SetTag("client.address", "203.0.113.8");
