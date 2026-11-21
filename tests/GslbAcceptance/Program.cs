@@ -14,6 +14,28 @@ using GatewayCore.Gslb.Contracts;
 PrivateKeyFileSecurityTests.Run();
 AuthorityFenceTests.Run();
 
+// DNS endpoints advertised in A/AAAA and NS/glue responses must be usable
+// unicast addresses; malformed or scoped aliases cannot become zone data.
+foreach (var invalidAddress in new[]
+{
+    "0.0.0.0", "0.1.2.3", "169.254.10.20", "224.0.0.1",
+    "239.255.255.250", "240.0.0.1", "255.255.255.255",
+    "::", "::ffff:192.0.2.10", "ff02::1", "fe80::abcd",
+    "fe80::abcd%2", "fe80::abcd%3", "fec0::1"
+})
+    if (DnsWireProtocol.ValidPublishedUnicastAddress(IPAddress.Parse(invalidAddress)))
+        throw new Exception("FAIL: DNS published non-unicast or scoped backend/NS address " + invalidAddress);
+foreach (var validAddress in new[]
+{
+    "192.0.2.80", "198.51.100.53", "10.1.2.3", "172.16.1.5",
+    "192.168.1.10", "127.0.0.1", "2001:db8::1", "fd00::2", "::1"
+})
+    if (!DnsWireProtocol.ValidPublishedUnicastAddress(IPAddress.Parse(validAddress)))
+        throw new Exception("FAIL: valid DNS published unicast endpoint rejected " + validAddress);
+if (DnsWireProtocol.ValidPublishedUnicastAddress(null))
+    throw new Exception("FAIL: null published endpoint accepted");
+Console.WriteLine("PASS: authoritative backend and name-server address publication requires unicast");
+
 // A locally configured ACME TXT owner must exist for both TXT queries and
 // NODATA on other types; DNSSEC signing/denial-chain owners must agree.
 {
