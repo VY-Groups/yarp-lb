@@ -9,12 +9,10 @@ the remaining development issues are completed**. No commercial licensing
 module, license server, subscription enforcement or customer activation scheme
 is implemented or authorized by this statement.
 
-**Reference-only clarification from the owner (2026-11-21):** OpenGSLB was
-consulted only to understand feature behavior. GatewayCore's DNSSEC NSEC3
-functionality is independently implemented in C# against RFC 5155. The current
-checkout has no root `LICENSE` file, and earlier repository revisions included
-project-wide AGPL license text. Review that licensing history before making
-distribution claims.
+GatewayCore's DNSSEC NSEC3 functionality is implemented in C# against RFC
+5155. The current checkout has no root `LICENSE` file, and earlier repository
+revisions included project-wide AGPL license text. Review that licensing
+history before making distribution claims.
 
 Repository visibility is separate from copyright: a GitHub repository can be
 public without being an offered open-source product, but public source remains
@@ -125,7 +123,7 @@ For PR acceptance, inspect **all required workflows on the exact PR head SHA**, 
 | Current implementation gaps and tests | [GitHub issues](../../issues), [open pull requests](../../pulls) and [Actions](../../actions) |
 | Physical GO / NO-GO | [On-prem production gates](control-center/docs/ONPREM_PRODUCTION_GO_GATES.md) |
 
-**Licensing and redistribution:** Proprietary customer licensing is a future project phase, not a feature in this release. See [ownership and licensing status](#ownership-and-future-commercial-licensing) and [reference and license status](REFERENCE_AND_LICENSE_STATUS.md). Earlier project-wide license terms require review before distribution claims.
+**Licensing and redistribution:** Proprietary customer licensing is a future project phase, not a feature in this release. See [ownership and licensing status](#ownership-and-future-commercial-licensing) and [project license status](PROJECT_LICENSE_STATUS.md). Earlier project-wide license terms require review before distribution claims.
 
 ## Latest published Windows test build
 
@@ -215,12 +213,11 @@ DNS interoperability and physical DC/DR failover remain open.
 
 - [GSLB configuration, behavior and limitations](engines/GslbDns/README.md)
 - [Enterprise feature-parity and release evidence matrix](engines/GslbDns/GSLB_CAPABILITY_PARITY.md)
-- [Updated OpenGSLB source review and licensing boundary](engines/GslbDns/OPENGSLB_REFERENCE_REVIEW.md)
+- [GatewayCore GSLB feature status](engines/GslbDns/GSLB_FEATURE_STATUS.md)
 - [P0 authoritative GSLB issue #52](../../issues/52)
 
-The `gslb` branch contains OpenGSLB, which was consulted only as a feature
-reference. GatewayCore's NSEC3 behavior is independently implemented against
-RFC 5155. The separate reference project's license does not describe GatewayCore.
+GatewayCore's GSLB feature status and remaining acceptance work are tracked in
+the feature status document. DNSSEC behavior follows RFC 5155.
 Feature and cost tables are requirements inputs, not vendor certifications.
 
 ## SMTP providers and security verification

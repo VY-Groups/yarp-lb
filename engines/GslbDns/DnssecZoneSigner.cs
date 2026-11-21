@@ -6,7 +6,6 @@ using GatewayCore.Gslb.Contracts;
 
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // GatewayCore's NSEC3 implementation follows RFC 5155 for its zone model.
-// OpenGSLB was consulted only as a feature reference.
 
 internal sealed record DnsResource(string Owner, ushort Type, uint Ttl, byte[] Rdata);
 
