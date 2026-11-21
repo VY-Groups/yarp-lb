@@ -37,7 +37,7 @@ def paged(path, token):
         if isinstance(payload, list):
             batch = payload
         else:
-            batch = payload.get("workflow_runs")
+            batch = payload.get("workflow_runs", payload.get("jobs"))
             if not isinstance(batch, list):
                 raise ValueError("Unexpected GitHub API collection")
         records.extend(batch)
