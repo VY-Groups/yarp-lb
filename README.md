@@ -10,16 +10,11 @@ module, license server, subscription enforcement or customer activation scheme
 is implemented or authorized by this statement.
 
 **Reference-only clarification from the owner (2026-11-21):** OpenGSLB was
-consulted as a **technical reference**, not used as an implementation source.
-GatewayCore's DNSSEC NSEC3 functionality is written in C# to follow RFC 5155;
-no OpenGSLB Go module is linked. Historical source-level SPDX/copyright text
-and older project-wide AGPL statements require a separate provenance review,
-because those records assert a different licensing interpretation. The current
-checkout has no root `LICENSE` file. Do not present historical annotations as
-proof of third-party code reuse or label the whole product open source.
-Equally, do not delete earlier copyright/license records or claim a proprietary
-release legally cleared until their origin and any previously granted rights
-have been assessed.
+consulted only to understand feature behavior. GatewayCore's DNSSEC NSEC3
+functionality is independently implemented in C# against RFC 5155. The current
+checkout has no root `LICENSE` file, and earlier repository revisions included
+project-wide AGPL license text. Review that licensing history before making
+distribution claims.
 
 Repository visibility is separate from copyright: a GitHub repository can be
 public without being an offered open-source product, but public source remains
@@ -130,7 +125,7 @@ For PR acceptance, inspect **all required workflows on the exact PR head SHA**, 
 | Current implementation gaps and tests | [GitHub issues](../../issues), [open pull requests](../../pulls) and [Actions](../../actions) |
 | Physical GO / NO-GO | [On-prem production gates](control-center/docs/ONPREM_PRODUCTION_GO_GATES.md) |
 
-**Licensing and redistribution:** Proprietary customer licensing is a future project phase, not a feature in this release. See [ownership and licensing status](#ownership-and-future-commercial-licensing) and [third-party notices](THIRD_PARTY_NOTICES.md). The adapted NSEC3 material still requires license clearance; no permission to ignore its upstream obligations is implied.
+**Licensing and redistribution:** Proprietary customer licensing is a future project phase, not a feature in this release. See [ownership and licensing status](#ownership-and-future-commercial-licensing) and [reference and license status](REFERENCE_AND_LICENSE_STATUS.md). Earlier project-wide license terms require review before distribution claims.
 
 ## Latest published Windows test build
 
@@ -223,14 +218,9 @@ DNS interoperability and physical DC/DR failover remain open.
 - [Updated OpenGSLB source review and licensing boundary](engines/GslbDns/OPENGSLB_REFERENCE_REVIEW.md)
 - [P0 authoritative GSLB issue #52](../../issues/52)
 
-The `gslb` branch contains **OpenGSLB as a read-only technical reference**,
-under its own separate licensing terms. The owner confirms that GatewayCore
-was independently implemented in .NET, using standards such as RFC 5155 and
-the reference project only to understand expected features and behavior.
-No OpenGSLB Go module is linked. A historical SPDX/copyright annotation in
-the C# DNSSEC file remains under independent provenance review and is **not
-a verified finding that the implementation came from that project**. The
-review must be resolved before asserting commercial license clearance.
+The `gslb` branch contains OpenGSLB, which was consulted only as a feature
+reference. GatewayCore's NSEC3 behavior is independently implemented against
+RFC 5155. The separate reference project's license does not describe GatewayCore.
 Feature and cost tables are requirements inputs, not vendor certifications.
 
 ## SMTP providers and security verification

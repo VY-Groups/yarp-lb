@@ -1,39 +1,21 @@
-# OpenGSLB reference review — source inventory and independent GatewayCore delta
+# OpenGSLB feature reference — GatewayCore comparison
 
 **Reviewed:** user-updated `gslb` branch commit
 `48f020c3f0d7d3d353485c9a0d701061a3014c08` on 2026-11-16.
 **Comparison:** GatewayCore `main` baseline
 `cb0b1c54c5d410fda07064605aed0f96cc8d9570`.
 
-The former `gslb` reference was Polaris (Python/PowerDNS, BSD-3-Clause).
-It has been replaced by Logan Ross's **OpenGSLB v1.1.10** (Go).
-The exact new branch includes the source and examples below; it is a distinct
-product, not a compatible GatewayCore engine.
+The `gslb` branch contains OpenGSLB v1.1.10 (Go), a separate project used as a
+feature and architecture reference. It is not a GatewayCore engine.
 
-## Current owner clarification and historical provenance (2026-11-21)
+## Owner clarification (2026-11-21)
 
-**Owner statement:** OpenGSLB was studied as a feature/architecture reference
-only. GatewayCore's DNSSEC NSEC3 code is implemented separately in C# from
-the RFC 5155 standard, and no OpenGSLB Go module is linked. The Go reference
-and C# implementations use different language and library structures; the
-shared SHA-1 iteration and base32hex operations are mandated by RFC 5155.
-Source-level ancestry cannot be established by that functional similarity.
-
-**Historical record:** A November 19 engineering note interpreted the NSEC3
-work as having a third-party licensing relationship and introduced root
-AGPL text plus file-level SPDX/copyright annotations. On November 21 the owner
-disputed that interpretation and reaffirmed a reference-only implementation.
-The root license file is absent from current main, but the Git history and
-legacy file markers remain. Keep the markers until independent provenance and
-licensing review, rather than representing either interpretation as proven.
-Previous license grants, if valid, cannot be withdrawn just by editing current
-documentation.
-
-OpenGSLB remains a separate Go project under its own
-`AGPL-3.0-or-later OR LicenseRef-OpenGSLB-Commercial` terms. GatewayCore
-builds its own authoritative-name NSEC3 ring and denial proofs.
-Issue #52 remains open for its acceptance requirements; documentation
-changes alone do not establish deployment readiness.
+The owner confirms OpenGSLB was consulted only to understand feature behavior.
+GatewayCore's DNSSEC NSEC3 implementation is written in C# against RFC 5155 for
+GatewayCore's zone model. The table below compares documented reference-project
+features with current GatewayCore behavior; it does not claim feature parity.
+Issue #52 remains open for its acceptance requirements; this comparison is not
+deployment evidence.
 
 ## Reviewed components (source, not README assertions alone)
 

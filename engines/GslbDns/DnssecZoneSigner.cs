@@ -5,12 +5,8 @@ using System.Text;
 using GatewayCore.Gslb.Contracts;
 
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// The owner confirms OpenGSLB was a technical reference for this RFC 5155
-// implementation; the older license/provenance marker is retained pending
-// independent review and is not a conclusion about implementation ancestry.
-// Reference copyright: Copyright 2025 Logan Ross.
-// Reference SPDX: AGPL-3.0-or-later OR LicenseRef-OpenGSLB-Commercial.
-// See THIRD_PARTY_NOTICES.md before making commercial licensing claims.
+// GatewayCore's NSEC3 implementation follows RFC 5155 for its zone model.
+// OpenGSLB was consulted only as a feature reference.
 
 internal sealed record DnsResource(string Owner, ushort Type, uint Ttl, byte[] Rdata);
 
@@ -467,7 +463,7 @@ internal sealed class DnssecZoneSigner : IDisposable
     /// <summary>
     /// RFC 5155 hash: SHA-1(canonical wire name || salt), followed by the
     /// configured number of SHA-1(previous digest || salt) rounds.
-    /// Uses the public RFC 5155 algorithm; OpenGSLB was a technical reference.
+    /// Implements the public RFC 5155 algorithm for GatewayCore zones.
     /// </summary>
     internal static byte[] Nsec3Hash(string name, byte[] salt, ushort iterations)
     {

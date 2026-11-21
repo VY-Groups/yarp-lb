@@ -2,7 +2,7 @@
 
 ## Ownership/licensing direction (2026-11-21; current owner instruction)
 
-The owner intends GatewayCore to be **proprietary** and to postpone commercial licensing/activation development until software issues close. Owner clarification on 2026-11-21: **OpenGSLB was consulted only as a technical reference, not as a source for GatewayCore code**. The .NET NSEC3 functionality follows RFC 5155, and no OpenGSLB Go module is linked. Earlier commits included project-wide AGPL text and the C# source retains older SPDX/copyright metadata; those assertions do **not** establish implementation provenance without independent review. Preserve that history and existing legal markers until an assessment determines which grants or obligations apply. Do not present the entire product as open source, or claim all commercial redistribution rights cleared without review. See `README.md`, `THIRD_PARTY_NOTICES.md`, and `AGENTS.md`; older snapshots below are historical, not the owner's current direction.
+The owner intends GatewayCore to be **proprietary** and to postpone commercial licensing/activation development until software issues close. OpenGSLB was consulted only as a feature reference. The .NET NSEC3 functionality follows RFC 5155. Earlier repository revisions included project-wide AGPL text; review that history before making distribution claims. See `README.md`, `REFERENCE_AND_LICENSE_STATUS.md`, and `AGENTS.md`; older snapshots below are historical, not the owner's current direction.
 
 
 ## Continuation snapshot — security review and release status (2026-11-21)
@@ -218,7 +218,7 @@ You are continuing this repository, **not creating a fresh project**. All source
 - **Safety:** NEVER auto-replay non-idempotent CA signing, OCSP POST, payment or other transactional requests. Distinguish HTTP failover from database replication/consistency.
 - **Independent change approval:** requester must not self-approve live route/security changes; audit, RBAC, CSRF and rollback remain in place.
 - **Do not modify, reset, overwrite, decrypt, delete or migrate existing customer configuration/key rings/users** without an approved migration plan. The renamed GatewayCore Data Protection purposes are incompatible with older branded state without explicit migration.
-- **Licensing:** `gslb` contains OpenGSLB Go source under AGPL-3.0-or-later **OR commercial license**. `ha-praxy` contains GPL-licensed HAProxy C source. **Do not merge either branch or copy a few modules into proprietary GatewayCore casually**: a partial copy still carries license obligations. Review functional requirements and write independent .NET implementations, or obtain licensed permission and legal review.
+- **Reference boundary:** `gslb` and `ha-praxy` are read-only feature references. GatewayCore features should be implemented and tested in .NET. Earlier project-wide license terms require review before distribution claims.
 - **No credentials in code, tests, logs, issues, commits or artifacts**. Use disposable local fixtures with fake credentials and trusted development certs. Do not contact private customer servers from GitHub Actions.
 - Test-only changes and green CI are not proof of physical HA, public authoritative DNS, an acceptable F5/NetScaler feature match, or SLA.
 - Never disable a required workflow, weaken a timeout/threshold, or label a skipped test as PASS just to merge.
@@ -355,7 +355,7 @@ Before choosing a change, open its issue body and read the required acceptance c
 
 - `main`: shipping development baseline. Preserve; no destructive reset.
 - `feature/gslb-observed-latency-policy-20261116`: ongoing draft PR #108; checkout only to inspect/fix that PR.
-- `gslb`: **read-only architecture reference** OpenGSLB Go v1.1.10, commit `48f020c3f0d7d3d353485c9a0d701061a3014c08`, AGPL-3.0-or-later or separate commercial terms; NEVER mass merge/copy code into commercial GatewayCore.
+- `gslb`: read-only feature reference, OpenGSLB Go v1.1.10, commit `48f020c3f0d7d3d353485c9a0d701061a3014c08`.
 - `ha-praxy`: **read-only reference** HAProxy C code, commit `16f808d9c7befbe87c5ad9cd04029ed00036bb79`, GPL; NEVER mass merge or claim native peer-wire parity.
 - `ci/*`, `test/*`, `docs/*`, `fix/*`, `release/*` and most `feature/*`: historical source/test snapshots; inspect diffs carefully, backport only missing validated behavior via fresh independently tested PR.
 
@@ -485,7 +485,7 @@ Never force-push `main`, mass-cherry-pick old branches, replace newer `Program.c
 | `fix/retired-ec2-schedule-ci-20261116` | `a6369f33fae1` | HISTORICAL: merged PR #93 via normal GitHub workflow; do not remerge |
 | `fix/windows-ha-ten-artifact-evidence-20261116` | `0b1111913f7a` | HISTORICAL: merged PR #94 via normal GitHub workflow; do not remerge |
 | `fix/zoho-preset-real-browser-20261114` | `ace395fd7dca` | PRESERVED SNAPSHOT; compare to main, no wholesale merge |
-| `gslb` | `48f020c3f0d7` | REFERENCE: OpenGSLB AGPL/commercial; NO MERGE |
+| `gslb` | `48f020c3f0d7` | Read-only OpenGSLB feature reference |
 | `ha-praxy` | `16f808d9c7be` | REFERENCE: HAProxy GPL C; NO MERGE |
 | `main` | `cdee959d8c5f` | CANONICAL—base all new work here |
 | `ops/onprem-production-gates-20261114` | `f54607832b08` | PRESERVED SNAPSHOT; compare to main, no wholesale merge |
@@ -577,7 +577,7 @@ For every Codex task, produce: (a) short issue-linked scope and current `main` S
 | `AGENTS.md` (root) | Codex-specific non-negotiable safety and workflow instructions |
 | `README.md` | Product shape, test release, project layout and truth boundaries |
 | `engines/GslbDns/README.md` | Lab DNS config and precise supported DNS behavior |
-| `engines/GslbDns/OPENGSLB_REFERENCE_REVIEW.md` | OpenGSLB source/license and independent feature mapping |
+| `engines/GslbDns/OPENGSLB_REFERENCE_REVIEW.md` | OpenGSLB feature reference and GatewayCore behavior notes |
 | `engines/GslbDns/GSLB_CAPABILITY_PARITY.md` | Desired enterprise feature-parity plan; snapshot, not runtime certification |
 | `control-center/docs/BRANCH_73_HAPROXY_AUDIT.md` | Historical branches and why bulk merges are unsafe |
 | `control-center/docs/ONPREM_PRODUCTION_GO_GATES.md` | Real release acceptance and NO-GO reasons |
