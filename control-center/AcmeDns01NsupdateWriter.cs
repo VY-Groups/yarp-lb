@@ -168,6 +168,11 @@ public sealed class AcmeDns01NsupdateWriter : IAcmeDns01Publisher
         }
     }
 
+    // Only privileged configuration can call this at service startup:
+    // no CA order or DNS write may begin with a missing or replaced updater
+    // or an unsafe TSIG file.
+    internal void VerifyPreflight() => ValidateToolsAndKey();
+
     private void ValidateToolsAndKey()
     {
         // Check the executable before every update and cleanup, not only at
