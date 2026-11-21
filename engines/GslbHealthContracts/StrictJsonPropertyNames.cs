@@ -23,6 +23,36 @@ public static class StrictJsonPropertyNames
         }
     }
 
+    /// <summary>
+    /// For signed versioned wire messages, reject absent/extra fields and
+    /// case-insensitive aliases before JSON deserialization. A canonical
+    /// signature over known fields must not authorize unknown envelope data.
+    /// </summary>
+    public static bool HasExactTopLevelProperties(
+        ReadOnlyMemory<byte> utf8Json, IReadOnlySet<string> requiredProperties)
+    {
+        ArgumentNullException.ThrowIfNull(requiredProperties);
+        if (requiredProperties.Count == 0) return false;
+        try
+        {
+            using var document = JsonDocument.Parse(utf8Json,
+                new JsonDocumentOptions { MaxDepth = 32 });
+            if (document.RootElement.ValueKind != JsonValueKind.Object) return false;
+            var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var property in document.RootElement.EnumerateObject())
+            {
+                if (!requiredProperties.Contains(property.Name) ||
+                    !names.Add(property.Name) || !Visit(property.Value))
+                    return false;
+            }
+            return names.Count == requiredProperties.Count;
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+    }
+
     private static bool Visit(JsonElement element)
     {
         switch (element.ValueKind)
