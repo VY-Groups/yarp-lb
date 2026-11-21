@@ -33,6 +33,33 @@ internal static class AcmeRenewalAcceptance
         Directory.CreateDirectory(rootDir);
         if (OperatingSystem.IsLinux()) File.SetUnixFileMode(rootDir,
             UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        // Exercise the actual Certes revocation adapter. Every unapproved
+        // authority must be rejected before loading a persistent account key
+        // or opening any ACME network connection.
+        using (var provider = new ServiceCollection().AddDataProtection().Services.BuildServiceProvider())
+        {
+            var accountPath = Path.Combine(rootDir, "never-created-account.encrypted");
+            var store = new AcmeAccountKeyStore(accountPath,
+                provider.GetRequiredService<IDataProtectionProvider>().CreateProtector("revocation-policy-fixture"));
+            var realIssuer = new CertesAcmeCertificateIssuer(store, agreeToTermsOfService: false);
+            foreach (var invalidDirectory in new[] {
+                "https://127.0.0.1:19001/directory",
+                "https://unapproved.example.invalid/directory",
+                "https://acme-staging-v02.api.letsencrypt.org/directory?next=evil",
+                "https://acme-staging-v02.api.letsencrypt.org:8443/directory"
+            })
+            {
+                var rejected = false;
+                try
+                {
+                    await realIssuer.RevokeCertificateAsync(invalidDirectory, "ops@example.com",
+                        new byte[256], RevocationReason.Unspecified, CancellationToken.None);
+                }
+                catch (InvalidOperationException) { rejected = true; }
+                Check(rejected && !File.Exists(accountPath),
+                    "real ACME revocation adapter refuses unapproved authority before key access");
+            }
+        }
         const string password = "fake-ca-pfx-password";
         var passwordPath = Path.Combine(rootDir, "traffic.pwd");
         var activePfxPath = Path.Combine(rootDir, "traffic.pfx");
