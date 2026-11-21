@@ -236,9 +236,27 @@ internal static class AuthorityFenceTests
                     "inbound peer IP allowlist rejects wrong or missing source addresses");
                 Check(!receiver.IsPeerEligible("fence.example.test", "primary", 101),
                     "inbound lease alone cannot authorize a one-way partition");
+                var oneWay = receiver.Inspect(101);
+                Check(oneWay.DurableStateTrusted && oneWay.PeerSnapshotFresh &&
+                      !oneWay.PeerAcknowledgementFresh && !oneWay.PeerFenceReady &&
+                      oneWay.EligiblePeerTargets == 0 && oneWay.ConfiguredTargets == 1,
+                    "operator diagnostics cannot present a one-way partition as ready");
                 receiver.RecordPeerAcknowledgement(100, 101);
                 Check(receiver.IsPeerEligible("fence.example.test.", "primary", 101),
                     "fresh matching eligible peer lease opens the fence");
+                var readyStatus = receiver.Inspect(101);
+                Check(readyStatus.PeerFenceReady && readyStatus.EligiblePeerTargets == 1 &&
+                      readyStatus.PeerSnapshotRemainingMilliseconds > 0 &&
+                      readyStatus.PeerAcknowledgementRemainingMilliseconds > 0 &&
+                      readyStatus.LastAcceptedPeerEpoch == initial.Epoch &&
+                      readyStatus.LastAcceptedPeerSequence == initial.Sequence,
+                    "operator status reports actual signed epoch, replay high-water and two-way lease readiness");
+                var observedMetrics = new DnsRuntimeMetrics().Render(
+                    Array.Empty<SiteGroup>(), null, Array.Empty<AgentReportTarget>(),
+                    101, receiver);
+                Check(observedMetrics.Contains("gatewaycore_gslb_authority_fence_ready 1", StringComparison.Ordinal) &&
+                      observedMetrics.Contains("gatewaycore_gslb_authority_peer_eligible_targets 1", StringComparison.Ordinal),
+                    "private Prometheus gauges agree with the exact active authority fence");
                 Check(!receiver.TryAccept(initial, tlsA, now, 102), "duplicate authority snapshot is replay rejected");
                 Check(receiver.IsPeerEligible("fence.example.test", "primary", 102),
                     "rejected replay does not clear current lease");
@@ -249,6 +267,9 @@ internal static class AuthorityFenceTests
                 Check(receiver.TryAccept(negative, tlsA, now, 104) &&
                       !receiver.IsPeerEligible("fence.example.test", "primary", 105),
                     "authenticated negative peer decision keeps DNS fence closed");
+                var unhealthy = receiver.Inspect(105);
+                Check(unhealthy.PeerFenceReady && unhealthy.EligiblePeerTargets == 0,
+                    "operator status never counts authenticated negative decisions as eligible");
                 localHealthy = true;
             }
             using (var restartedReceiver = new AuthorityFenceStore(configB, fingerprint, [target]))
@@ -297,6 +318,12 @@ internal static class AuthorityFenceTests
                 File.Delete(deletionConfig.ReplayStatePath);
                 Check(!deletionReceiver.IsPeerEligible("fence.example.test", "primary", 1400),
                     "DNS read detects durable state loss without another incoming snapshot, before lease expiry");
+                var faultedStatus = deletionReceiver.Inspect(1400);
+                Check(!faultedStatus.DurableStateTrusted && !faultedStatus.PeerFenceReady &&
+                      faultedStatus.EligiblePeerTargets == 0 &&
+                      faultedStatus.PeerSnapshotRemainingMilliseconds == 0 &&
+                      faultedStatus.PeerAcknowledgementRemainingMilliseconds == 0,
+                    "operator diagnostics latch a durable replay fault and zero both lease budgets");
                 Check(ThrowsInvalid(() => deletionReceiver.CreateSnapshot(1401)),
                     "faulted authority cannot publish a new positive decision");
                 File.WriteAllBytes(deletionConfig.ReplayStatePath, savedReplay);
