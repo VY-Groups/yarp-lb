@@ -741,3 +741,16 @@ unused client prefix as a valid cache scope. The resolver-source fallback
 still works as before. A deterministic wire regression checks regional
 failure and recovery. This is one #52 DNS cache/privacy correctness fix;
 it does not certify multi-network DNS routing or full DNS conformance.
+
+### Strict EDNS query-side extended response code (#52)
+
+A DNS query's EDNS(0) OPT header must contain a zero upper extended-RCODE
+octet. This octet is defined for *responses* and is not a client capability
+or a query option. Queries that set it are dropped before response
+construction over UDP and TCP, using the same malformed-packet policy as
+invalid DNS headers. Unsupported EDNS versions with the required zero query
+RCODE still return BADVERS as before, and normal EDNS0/unknown-option
+handling is preserved. Windows/Linux network acceptance probes malformed
+version 0 and version 1 packets and then a valid EDNS query to ensure the
+listener remains available. This is a focused parser-hardening increment,
+not complete authoritative DNS certification.
