@@ -131,8 +131,21 @@ public sealed class AcmeAccountKeyStore
         {
             var directory = Path.GetDirectoryName(keyPath)!;
             if (OperatingSystem.IsLinux())
-                System.IO.Directory.CreateDirectory(directory,
-                    UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+            {
+                // A path-based CreateDirectory traverses a symlinked ancestor
+                // before ValidateAccountKeyDirectory can reject it. Bootstrap
+                // the private state only through opened no-follow dirfd walks.
+                try
+                {
+                    PrivateKeyFileSecurity.EnsureLinuxPrivateStateDirectory(
+                        directory, "ACME account key directory");
+                }
+                catch (InvalidDataException ex)
+                {
+                    throw new InvalidOperationException(
+                        "Unsafe ACME account key directory bootstrap", ex);
+                }
+            }
             else
                 System.IO.Directory.CreateDirectory(directory);
             ValidateAccountKeyDirectory(directory);
