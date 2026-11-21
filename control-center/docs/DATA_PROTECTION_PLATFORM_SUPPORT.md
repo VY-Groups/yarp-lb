@@ -164,3 +164,57 @@ still needs separately verified immutable backup checkpoints, shared wrapping
 key custody, version attestation, secure cross-host synchronization and a DR
 rotation exercise. Do not claim full #48 or production acceptance from this
 increment alone.
+
+### Signed, operator-anchored Linux key-ring restore verification (#48)
+
+A new **opt-in restore gate** validates the exact encrypted key-ring inventory
+against an independently signed, versioned checkpoint **before** ASP.NET Data
+Protection imports the restored keys. This gate is intentionally separate from
+the normal on-disk certificate wrapping, key GUID checks and shared-fleet
+operations. It never writes, repairs, rewraps or decrypts a restored key.
+
+For a deliberately staged recovery, provision all three settings:
+
+- `YARP_LINUX_DP_RECOVERY_MANIFEST_FILE`: absolute, 0600, non-symlinked
+  trusted checkpoint JSON, independent of the backup whose integrity is checked
+- `YARP_LINUX_DP_RECOVERY_TRUST_PUBLIC_KEY_FILE`: absolute, 0600, non-symlinked
+  SubjectPublicKeyInfo PEM for an independently managed **ECDSA P-256** signer
+- `YARP_LINUX_DP_RECOVERY_MINIMUM_REVISION`: positive decimal sequence
+  maintained outside the restored snapshot by an independent operator/control
+  authority; a signed older revision is rejected even if otherwise valid
+
+Setting one or two of these values without all three is a startup error. The
+manifest is a JSON object with exactly the `Version` (1), `Revision`,
+`InventorySha256` (64 uppercase hex digits) and `SignatureBase64` fields.
+Unknown fields and duplicate/case-aliased names fail closed. `SignatureBase64`
+is an ECDSA P-256 SHA-256 **IEEE P1363 64-byte** signature, not DER, over the
+canonical ASCII payload:
+
+```text
+GatewayCore.LinuxDP.RecoveryAttestation.v1
+<Revision, invariant unsigned decimal>
+<InventorySha256, uppercase hex>
+```
+
+Each displayed line terminates with a newline (LF). The inventory digest is
+SHA-256 over the exact ASCII prefix
+`GatewayCore.LinuxDP.Inventory.v1\n` followed by, for **each** XML entry
+in ordinal filename order, `<filename>\n<SHA256 of exact XML bytes in uppercase hex>\n`.
+The manifest supports 1–512 XML files, each at most 1 MiB, and every file is
+read from its validated owner-only, non-symlinked handle. The signature
+**must be generated offline** by an operator-approved signing system from a
+reviewed inventory. Do not put a signing private key or an untrusted signer in
+the GatewayCore runtime or inside the restored backup. The verifier only needs
+the independently pinned public key.
+
+CI acceptance uses genuine certificate-wrapped key files and a disposable
+offline signing identity. It verifies an unchanged authenticated session
+survives a signed restore and rejects forged signatures, stale (signed)
+revisions, case-aliased JSON, changed XML bytes and missing attestation inputs.
+This does not prove custody of the signing key, real fleet monotonic counter
+storage, Windows DPAPI cross-host recovery, RHEL deployment or a physical DR
+drill. A privileged attacker who can replace the externally trusted public key
+**and** lower the independently protected minimum revision can still authorize
+an older ring. Operators must safeguard those inputs outside the recovery
+domain. Do not declare fleet-wide anti-rollback or production GO from the
+presence of this optional gate.

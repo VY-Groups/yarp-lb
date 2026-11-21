@@ -24,7 +24,9 @@ Directory.CreateDirectory(secrets,PrivateDir);
 var previousEnv=new[] {
     "YARP_CONTROL_PLANE_DIR","YARP_LINUX_DP_CERT_PFX_PATH",
     "YARP_LINUX_DP_CERT_PASSWORD_FILE",
-    "YARP_LINUX_DP_OLD_CERT_PFX_PATH","YARP_LINUX_DP_OLD_CERT_PASSWORD_FILE"
+    "YARP_LINUX_DP_OLD_CERT_PFX_PATH","YARP_LINUX_DP_OLD_CERT_PASSWORD_FILE",
+    LinuxDpRecoveryEvidence.ManifestEnv, LinuxDpRecoveryEvidence.PublicKeyEnv,
+    LinuxDpRecoveryEvidence.MinimumRevisionEnv
 }.ToDictionary(k=>k,k=>Environment.GetEnvironmentVariable(k));
 void Set(string key,string? value) => Environment.SetEnvironmentVariable(key,value);
 (string Pfx,string PasswordFile) CreateCertificate(string prefix,
@@ -202,6 +204,91 @@ try
             "sensitive-session-value-123",
             "original encrypted session remains decryptable after rejected restore tampering");
 
+    // A trust key held outside the restored ring signs an exact bounded
+    // inventory. The independent minimum revision prevents accepting an
+    // otherwise valid older signed snapshot during a staged recovery.
+    using(var attestationSigner=ECDsa.Create(ECCurve.NamedCurves.nistP256))
+    {
+        var trustedPublicPath=Path.Combine(secrets,"recovery-verifier.pem");
+        var attestationPath=Path.Combine(secrets,"recovery-attestation.json");
+        File.WriteAllText(trustedPublicPath,attestationSigner.ExportSubjectPublicKeyInfoPem());
+        File.SetUnixFileMode(trustedPublicPath,PrivateFile);
+        var keyDirectory=Path.Combine(state,"data-protection-keys");
+        var inventoryHash=LinuxDpRecoveryEvidence.ComputeInventoryDigest(keyDirectory);
+        var revision=42L;
+        LinuxDpRecoveryManifest MakeAttestation(long signedRevision,string digest)
+        {
+            var payload=LinuxDpRecoveryEvidence.CanonicalPayload(signedRevision,digest);
+            var signature=attestationSigner.SignData(payload,HashAlgorithmName.SHA256,
+                DSASignatureFormat.IeeeP1363FixedFieldConcatenation);
+            return new LinuxDpRecoveryManifest(1,signedRevision,digest,Convert.ToBase64String(signature));
+        }
+        var attestation=MakeAttestation(revision,inventoryHash);
+        void WriteAttestation(LinuxDpRecoveryManifest value)
+        {
+            File.WriteAllText(attestationPath,System.Text.Json.JsonSerializer.Serialize(value));
+            File.SetUnixFileMode(attestationPath,PrivateFile);
+        }
+        WriteAttestation(attestation);
+        Set(LinuxDpRecoveryEvidence.ManifestEnv,attestationPath);
+        Set(LinuxDpRecoveryEvidence.PublicKeyEnv,trustedPublicPath);
+        Set(LinuxDpRecoveryEvidence.MinimumRevisionEnv,"42");
+        using(var service=Provider(state))
+            Assert(service.GetRequiredService<IDataProtectionProvider>()
+                .CreateProtector("session-probe").Unprotect(encrypted)=="sensitive-session-value-123",
+                "externally signed exact inventory accepts original encrypted session after restore");
+
+        WriteAttestation(attestation with { InventorySha256 = new string('A',64) });
+        Assert(Throws(()=>{using var _=Provider(state);}),
+            "signed inventory digest substitution rejected");
+        WriteAttestation(MakeAttestation(41,inventoryHash));
+        Assert(Throws(()=>{using var _=Provider(state);}),
+            "correctly signed older checkpoint rejected against external revision floor");
+        WriteAttestation(attestation);
+        File.WriteAllText(attestationPath,
+            System.Text.Json.JsonSerializer.Serialize(attestation)
+                .Replace("\"Revision\":42,", "\"Revision\":42,\"revision\":49,"));
+        File.SetUnixFileMode(attestationPath,PrivateFile);
+        Assert(Throws(()=>{using var _=Provider(state);}),
+            "duplicated and case-aliased recovery manifest fields rejected");
+        WriteAttestation(attestation);
+
+        var wrappedKeyFile=keyFiles[0];
+        var originalWrappedBytes=File.ReadAllBytes(wrappedKeyFile);
+        try
+        {
+            File.AppendAllText(wrappedKeyFile,"<!-- valid XML comment invalidates exact signed snapshot -->");
+            File.SetUnixFileMode(wrappedKeyFile,PrivateFile);
+            Assert(Throws(()=>{using var _=Provider(state);}),
+                "stale signed inventory refused even if restored XML remains valid and wrapped");
+        }
+        finally
+        {
+            File.WriteAllBytes(wrappedKeyFile,originalWrappedBytes);
+            File.SetUnixFileMode(wrappedKeyFile,PrivateFile);
+        }
+        using(var service=Provider(state))
+            Assert(service.GetRequiredService<IDataProtectionProvider>()
+                .CreateProtector("session-probe").Unprotect(encrypted)=="sensitive-session-value-123",
+                "exact original signed ring remains recoverable after rejected tamper");
+
+        using(var wrongSigner=ECDsa.Create(ECCurve.NamedCurves.nistP256))
+        {
+            File.WriteAllText(trustedPublicPath,wrongSigner.ExportSubjectPublicKeyInfoPem());
+            Assert(Throws(()=>{using var _=Provider(state);}),
+                "untrusted recovery verification signing identity rejected");
+        }
+        File.WriteAllText(trustedPublicPath,attestationSigner.ExportSubjectPublicKeyInfoPem());
+        File.SetUnixFileMode(trustedPublicPath,PrivateFile);
+
+        Set(LinuxDpRecoveryEvidence.PublicKeyEnv,null);
+        Assert(Throws(()=>{using var _=Provider(state);}),
+            "incomplete recovery attestation configuration fails closed");
+        Set(LinuxDpRecoveryEvidence.PublicKeyEnv,trustedPublicPath);
+        Set(LinuxDpRecoveryEvidence.ManifestEnv,null);
+        Set(LinuxDpRecoveryEvidence.PublicKeyEnv,null);
+        Set(LinuxDpRecoveryEvidence.MinimumRevisionEnv,null);
+    }
     // Build a real legacy plaintext ring with ASP.NET's unwrapped file
     // repository, then ensure protected mode refuses it without mutation.
     var legacyState=Path.Combine(root,"legacy-plaintext-state");
