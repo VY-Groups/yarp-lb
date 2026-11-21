@@ -175,6 +175,9 @@ try
         new HttpClient(new CapturingHandler(HttpStatusCode.ServiceUnavailable, "")));
     var resourceOutbox = Path.Combine(resourceRoot.FullName, "outbox");
     Directory.CreateDirectory(resourceOutbox);
+    if (!OperatingSystem.IsWindows())
+        File.SetUnixFileMode(resourceOutbox,
+            UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
     using var queue = new DurableAuditOutbox(resourceOutbox, transport);
     // The shipping local JSONL file is separate from the strict outbox
     // spool; the latter contains ONLY owner.lock and authenticated .event files.
