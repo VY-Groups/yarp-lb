@@ -84,9 +84,15 @@ reopening it. On Linux, the loader walks each ancestor with no-follow,
 validates actual opened-object owner and permissions, rejects linked ancestors,
 devices and non-regular inputs, and reads the exact validated file handle.
 Windows uses a reparse-point-aware handle and requires deployment-managed
-service-account ACLs. The public collector verification-key PEM keeps its
-separate size and endpoint validation contract. Sender bytes are cleared on
-all startup paths, including public-key loading failures. No collector signing
+service-account ACLs. The public collector verification-key PEM retains its separate 4 KiB
+size and RSA validation contract, but also uses the same no-follow validated
+opened-handle loader. On Linux, all path components must be trusted and
+non-symlinked; unlike the private HMAC sender secret, a public PEM can be
+group/world readable but never group/world writable. On Windows, the reader
+rejects reparse-point input and the operator must independently restrict
+modification ACLs on the file and every parent directory. A public verification
+key is integrity-sensitive even though it does not contain a secret. Sender
+bytes are cleared on all startup paths, including public-key loading failures. No collector signing
 key is added to the gateway. Disposable Windows/Linux tests cover a valid
 key, missing key, Linux owner-only mode and linked key/parent rejection.
 This tightens local key loading but does not provide tamper-proof WORM storage,
