@@ -204,8 +204,9 @@ try
     var refused = false;
     try { await local.AppendAsync("operator", "RESOURCE_MUTATION_PREPARED"); }
     catch (InvalidDataException) { refused = true; }
-    Check(refused && queue.Status().Pending == 1,
-        "unsigned/uncorrelated resource PREPARED cannot enter durable event spool");
+    var afterUncorrelated = queue.Status();
+    Check(refused && afterUncorrelated is { Pending: 1, StorageFault: false },
+        "unsigned/uncorrelated resource PREPARED is rejected without poisoning the healthy durable queue");
     var invalidEvent = Path.Combine(resourceOutbox, "incomplete.tmp");
     File.WriteAllText(invalidEvent, "partial-append");
     refused = false;
