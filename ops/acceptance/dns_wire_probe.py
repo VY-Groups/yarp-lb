@@ -137,6 +137,20 @@ def parse(response, txid, expected_name, expected_qtype, *, allow_truncated=Fals
             rtype, rclass, ttl, rdlen = struct.unpack_from("!HHIH", response, pos)
             pos += 10
             require(pos + rdlen <= len(response), "truncated RDATA")
+            if rtype == 41:
+                # EDNS option RDATA is a sequence of bounded CODE/LENGTH/DATA
+                # tuples. An RR-level RDLENGTH check alone cannot detect a
+                # truncated option header or an overclaimed option payload.
+                option_pos = pos
+                option_end = pos + rdlen
+                while option_pos < option_end:
+                    require(option_pos + 4 <= option_end,
+                            "truncated EDNS option header")
+                    _, option_length = struct.unpack_from("!HH", response, option_pos)
+                    option_pos += 4
+                    require(option_pos + option_length <= option_end,
+                            "EDNS option overruns OPT RDATA")
+                    option_pos += option_length
             rrsets.append((section, owner, rtype, rclass, ttl))
             pos += rdlen
     require(pos == len(response), "trailing DNS response bytes")
@@ -148,6 +162,44 @@ def has_rr(records, section, owner, rtype):
     return any(record_section == section and record_owner == expected_owner and
                record_type == rtype and record_class == 1
                for record_section, record_owner, record_type, record_class, _ in records)
+
+
+def validate_edns0_response(records):
+    """Validate the response OPT envelope, not just its presence.
+
+    RFC 6891 reserves the OPT TTL low 16 bits for EDNS flags; only DO is
+    defined. An ordinary EDNS0 query without DO must not receive unexpected
+    flags or a nonzero EDNS version.
+    """
+    opts = [(section, owner, rclass, ttl) for section, owner, rtype, rclass, ttl in records
+            if rtype == 41]
+    require(len(opts) == 1, "EDNS0 response must contain exactly one OPT RR")
+    section, owner, payload_size, ttl = opts[0]
+    require(section == "additional", "EDNS0 OPT must be in additional section")
+    require(owner == (), "EDNS0 OPT owner must be the root")
+    require(payload_size >= 512, "EDNS0 response advertised invalid UDP size")
+    require(((ttl >> 16) & 0xFF) == 0, "EDNS0 response version must be zero")
+    require((ttl & 0xFFFF) == 0, "EDNS0 response contains unexpected flags")
+    require((ttl >> 24) == 0, "EDNS0 response has unexpected extended RCODE")
+
+
+def validate_badvers_response(flags, records):
+    """Validate the full EDNS BADVERS response, including its OPT envelope.
+
+    BADVERS is the extended RCODE 16, encoded as OPT extended RCODE 1
+    and legacy header RCODE 0. Version and reserved flags must be zero.
+    """
+    opts = [(section, owner, rclass, ttl) for section, owner, rtype, rclass, ttl in records
+            if rtype == 41]
+    require(len(opts) == 1, "BADVERS response must contain exactly one OPT RR")
+    section, owner, payload_size, ttl = opts[0]
+    require(section == "additional", "BADVERS OPT must be in additional section")
+    require(owner == (), "BADVERS OPT owner must be root")
+    require(payload_size >= 512, "BADVERS advertised invalid UDP size")
+    require(((ttl >> 16) & 0xFF) == 0, "BADVERS response EDNS version must be zero")
+    require((ttl & 0xFFFF) == 0, "BADVERS response contains unexpected flags")
+    require((flags & 0xF) == 0 and (ttl >> 24) == 1,
+            "unsupported EDNS version did not report BADVERS RCODE 16")
 
 
 def validate_parser_guards():
@@ -227,21 +279,15 @@ def run(args):
                 "NXDOMAIN missing negative-caching SOA")
         print(f"PASS NXDOMAIN {'TCP' if tcp else 'UDP'} {size} bytes")
     flags, records, size = check(args.host, args.port, zone, zone, 1, False, args.timeout, edns=True)
-    opts = [(owner, rclass, ttl) for section, owner, rtype, rclass, ttl in records
-            if section == "additional" and rtype == 41]
-    require((flags & 0xF) == 0 and len(opts) == 1 and opts[0][0] == (),
-            "EDNS0 response must contain exactly one root-owned additional OPT RR")
+    require((flags & 0xF) == 0, "EDNS0 response must return NOERROR")
+    validate_edns0_response(records)
     require(size <= 1232, "EDNS0 UDP response exceeded advertised 1232-byte limit")
     print(f"PASS EDNS0 UDP {size} bytes")
     flags, records, _ = check(args.host, args.port, zone, zone, 6, False, args.timeout,
                               edns=True, version=1)
     # RFC 6891: the OPT TTL high byte is the upper eight bits of the
     # twelve-bit RCODE. BADVERS=16 uses extended code 1 and header RCODE 0.
-    badvers_opts = [(owner, ttl) for section, owner, rtype, _, ttl in records
-                    if section == "additional" and rtype == 41]
-    require(len(badvers_opts) == 1 and badvers_opts[0][0] == () and
-            (((badvers_opts[0][1] >> 24) << 4) | (flags & 0xF)) == 16,
-            "unsupported EDNS version did not report BADVERS RCODE 16")
+    validate_badvers_response(flags, records)
     print("PASS EDNS BADVERS")
     # An existing apex with an unsupported RR type is NODATA, not NXDOMAIN.
     for tcp in (False, True):
