@@ -78,6 +78,7 @@ Console.WriteLine("PASS: ACME target preflight rejects unsafe authority, hostnam
 await AcmeHttp01Acceptance.RunAsync();
 await AcmeDns01Acceptance.RunAsync();
 await AcmeDns01WireAcceptance.RunAsync();
+await AcmeDns01NsupdateAcceptance.RunAsync();
 await TrafficHttp3Acceptance.RunAsync();
 await DestinationAdmissionHttp3Acceptance.RunAsync();
 await DestinationAdmissionGrpcAcceptance.RunAsync();
