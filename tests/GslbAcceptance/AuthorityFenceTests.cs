@@ -414,11 +414,6 @@ internal static class AuthorityFenceTests
                 using var sslClientCertificate = X509CertificateLoader.LoadPkcs12(
                     clientCertificate.Export(X509ContentType.Pkcs12), null,
                     X509KeyStorageFlags.Exportable | X509KeyStorageFlags.PersistKeySet);
-                using var handler = new HttpClientHandler { UseProxy = false };
-                handler.ClientCertificates.Add(sslClientCertificate);
-                handler.ServerCertificateCustomValidationCallback = (_, certificate, _, _) =>
-                    AuthorityFenceStore.IsPinnedCertificate(certificate, [receiverPin], "1.3.6.1.5.5.7.3.1");
-                using var client = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(3) };
                 var endpoint = new Uri($"https://127.0.0.1:{port}/authority-fence/v1/snapshot");
                 var sequence = Math.Max(Environment.TickCount64, 10_000_000);
                 var signed = source.CreateSnapshot(sequence);
@@ -438,6 +433,15 @@ internal static class AuthorityFenceTests
 
                 int Post(string payload)
                 {
+                    // A 413 can terminate the HTTP/1.1 connection while the
+                    // oversized body is still being sent. Use a fresh TLS
+                    // connection for each security assertion, so a closed
+                    // transport is not mistaken for replay-state corruption.
+                    using var handler = new HttpClientHandler { UseProxy = false };
+                    handler.ClientCertificates.Add(sslClientCertificate);
+                    handler.ServerCertificateCustomValidationCallback = (_, certificate, _, _) =>
+                        AuthorityFenceStore.IsPinnedCertificate(certificate, [receiverPin], "1.3.6.1.5.5.7.3.1");
+                    using var client = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(3) };
                     using var content = new StringContent(payload, Encoding.UTF8, "application/json");
                     using var response = client.PostAsync(endpoint, content).GetAwaiter().GetResult();
                     return (int)response.StatusCode;
