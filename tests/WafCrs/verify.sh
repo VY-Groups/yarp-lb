@@ -83,6 +83,7 @@ if strict and (not complete or totals["FP"] or totals["FN"]):
     raise SystemExit("FAIL: synthetic WAF blocking corpus incomplete or misclassified")
 PY
 }
+WAF_CERT_TMP=""  # Never act on an inherited environment value during cleanup.
 function teardown {
   # Never upload a private disposable certificate key with the WAF artifacts.
   if [[ -n "${WAF_CERT_TMP:-}" ]]; then rm -rf -- "$WAF_CERT_TMP"; fi
