@@ -13,7 +13,12 @@ public sealed record AcmeDns01AuthorityObservation(string AuthorityId,
 /// </summary>
 public interface IAcmeDns01PublicationLease : IAsyncDisposable
 {
-    /// <summary>Publish the exact TXT value. The lease already exists so DisposeAsync can compensate if this partially fails.</summary>
+    /// <summary>
+    /// Publish the exact TXT value. The lease already exists so DisposeAsync
+    /// can compensate if this partially fails. Disposal must be idempotent,
+    /// remove only this lease's exact owner/value, and preserve unrelated TXT
+    /// values that another validation may have published concurrently.
+    /// </summary>
     Task PublishAsync(CancellationToken cancellationToken);
 }
 
