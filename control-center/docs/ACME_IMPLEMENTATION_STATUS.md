@@ -118,3 +118,19 @@ ACME captures and validates one bounded live PFX byte snapshot (512 bytes–1 Mi
 ### Account-key storage hardening
 
 Account-key creation and reload both require a non-linked immediate parent directory, with private Linux permissions. New Linux directories and temporary ciphertext files are created with restrictive modes rather than tightened after creation. Ciphertext is read through a bounded stream (64–16384 bytes); corrupt, oversized or truncated state fails closed rather than regenerating the account identity. Temporary plaintext PEM byte buffers are cleared after protection. This is not a race-proof filesystem sandbox or protection against a compromised service identity; operators must protect the complete directory ancestry and Windows ACLs. Acceptance includes existing unsafe directory, Linux directory symlink, malformed/oversized ciphertext and recovery of the original account identity.
+
+### Private ACME config ingestion hardening
+
+The opt-in ACME JSON configuration now has a 16 KiB input cap and uses the
+shared no-follow Windows/Linux opened-handle reader. On Linux it verifies the
+opened file's owner/mode and all parent directory components; Windows rejects
+reparse-point leaf files and still requires service-identity ACL policy.
+Configuration must be valid UTF-8 and a single unambiguous JSON object:
+duplicate, mixed-case or Unicode-escaped duplicate property names are rejected
+before deserialization, so a last-value-wins parser cannot silently switch
+`directoryUrl`, `allowProductionCa` or active PFX bindings. Inputs are
+cleared from the temporary byte buffer on every success and error path.
+Disposable Windows/Linux TLS inventory tests validate legitimate settings,
+duplicate aliases, oversize and invalid UTF-8; Linux tests a linked ancestor.
+This is startup-input hardening only: it does not add DNS-01, staging CA
+validation, external renewal notifications or cross-node issuance coordination.

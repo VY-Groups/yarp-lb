@@ -111,6 +111,50 @@ internal static class AcmeRenewalAcceptance
         await File.WriteAllTextAsync(settingsPath, System.Text.Json.JsonSerializer.Serialize(settings));
         SetPrivate(settingsPath);
 
+        // A reviewed ACME target/issuer must not silently change through
+        // duplicate or case/Unicode-aliased JSON keys.
+        var validSettingsJson = System.Text.Json.JsonSerializer.Serialize(settings);
+        bool RejectedConfiguration()
+        {
+            try { _ = AcmeRenewalSettings.Load(settingsPath, activePfxPath, passwordPath, [DnsName]); return false; }
+            catch (InvalidOperationException) { return true; }
+            catch (InvalidDataException) { return true; }
+        }
+        foreach (var duplicate in new[]
+        {
+            validSettingsJson[..^1] + ",\"DirectoryUrl\":\"https://acme-v02.api.letsencrypt.org/directory\"}",
+            validSettingsJson[..^1] + ",\"directoryUrl\":\"https://acme-v02.api.letsencrypt.org/directory\"}",
+            validSettingsJson[..^1] + ",\"Dir\\u0065ctoryUrl\":\"https://acme-v02.api.letsencrypt.org/directory\"}"
+        })
+        {
+            await File.WriteAllTextAsync(settingsPath, duplicate);
+            SetPrivate(settingsPath);
+            Check(RejectedConfiguration(),
+                "duplicate and case/escaped ACME directory aliases are refused");
+        }
+        await File.WriteAllTextAsync(settingsPath, new string(' ', 16 * 1024 + 1));
+        SetPrivate(settingsPath);
+        Check(RejectedConfiguration(), "oversized ACME config rejected before JSON parsing");
+        await File.WriteAllBytesAsync(settingsPath, [0xC3, 0x28]); // Malformed UTF-8.
+        SetPrivate(settingsPath);
+        Check(RejectedConfiguration(), "invalid UTF-8 ACME config rejected");
+        if (OperatingSystem.IsLinux())
+        {
+            await File.WriteAllTextAsync(settingsPath, validSettingsJson);
+            SetPrivate(settingsPath);
+            var alias = Path.Combine(rootDir, "acme-linked-parent");
+            Directory.CreateSymbolicLink(alias, rootDir);
+            var linkedSettingsPath = Path.Combine(alias, "acme.json");
+            var ancestorDenied = false;
+            try { _ = AcmeRenewalSettings.Load(linkedSettingsPath, activePfxPath, passwordPath, [DnsName]); }
+            catch (IOException) { ancestorDenied = true; }
+            Check(ancestorDenied, "ACME config through symlinked parent fails closed");
+        }
+        await File.WriteAllTextAsync(settingsPath, validSettingsJson);
+        SetPrivate(settingsPath);
+        Check(AcmeRenewalSettings.Load(settingsPath, activePfxPath, passwordPath, [DnsName]).DnsName == DnsName,
+            "valid ACME configuration remains compatible after negative tests");
+
         // The account key remains decryptable across provider re-creation, and disk stores
         // only protected ciphertext rather than the ACME private-key PEM.
         var dataProtectionPath = Path.Combine(rootDir, "test-dpkeys");
