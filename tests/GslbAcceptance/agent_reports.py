@@ -909,6 +909,36 @@ def main():
             "replayed signed report was not rejected at the real mTLS HTTP boundary"
         print("PASS: mTLS report ingress rejects valid signed duplicate-field frames in both orders, accepts clean frame, rejects replay")
 
+        # Last phase: eliminate background observer traffic and restart B with
+        # a deliberately small quota so every request in the window is known.
+        for authority in (authority_a, authority_b):
+            for proc in authority["processes"]:
+                if proc.poll() is None:
+                    proc.kill()
+                    proc.wait(timeout=5)
+        b_config = json.loads(authority_b["dns_config"].read_text())
+        b_config["AgentReports"]["MaxReportsPerMinute"] = 3
+        authority_b["dns_config"].write_text(json.dumps(b_config))
+        rate_dns = restart_authority(authority_b)
+        deadline = time.monotonic() + 15
+        while True:
+            assert rate_dns.poll() is None, "rate-limit authority exited"
+            try:
+                with socket.create_connection(("127.0.0.1", authority_b["report_port"]), timeout=.5):
+                    break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    raise AssertionError("rate-limit authority HTTPS listener did not start")
+                time.sleep(.1)
+        for _ in range(3):
+            assert post_agent_report_status(authority_b, agents[1], root / "ca.pem",
+                                            b"{malformed-json") == 400
+        assert post_agent_report_status(authority_b, agents[1], root / "ca.pem",
+                                        b"{malformed-json") == 429, "malformed frames bypassed agent request budget"
+        assert post_agent_report_status(authority_b, agents[2], root / "ca.pem",
+                                        b"{malformed-json") == 400, "one observer exhausted another observer's budget"
+        print("PASS: malformed authenticated reports consume only their own observer request budget")
+
 
 if __name__ == "__main__":
     main()
