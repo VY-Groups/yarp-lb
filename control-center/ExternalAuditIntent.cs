@@ -54,30 +54,26 @@ internal sealed class ExternalAuditIntent : IDisposable
         if (!Uri.TryCreate(url, UriKind.Absolute, out var uri) || node is null ||
             senderKeyFile is null || collectorPublicKeyFile is null)
             throw new InvalidOperationException("External audit configuration must be complete");
-        // The sender HMAC key is security-critical: resolve each Linux path
-        // component without following links, validate the opened object and
-        // its ownership/mode, and read bytes through that exact file handle.
-        // Keep the existing public collector verification-key contract.
+        // Both the sender key and the collector's public verification key
+        // are trust anchors. Public PEM bytes are not secret, but replacing
+        // them could authorize a forged external audit receipt. Validate the
+        // complete Linux directory ancestry and the opened regular-file
+        // handle rather than checking the path and reopening it.
         static byte[] ReadPublicKeyBounded(string file)
         {
-            if (!Path.IsPathFullyQualified(file) || !File.Exists(file) ||
-                (File.GetAttributes(file) & FileAttributes.ReparsePoint) != 0)
-                throw new InvalidOperationException("External audit requires an absolute, non-symlinked public key file");
-            using var f = File.OpenRead(file);
-            if (f.Length is < 1 or > 4096)
-                throw new InvalidOperationException("External audit public key file exceeds allowed size");
-            var bytes = new byte[(int)f.Length];
             try
             {
-                f.ReadExactly(bytes);
-                if (f.ReadByte() != -1)
-                    throw new InvalidOperationException("External audit public key changed during read");
-                return bytes;
+                // Public trust material may be group/world-readable, but no
+                // other identity may write it. Keep the previous 4 KiB cap.
+                return GatewayCore.Gslb.Contracts.PrivateKeyFileSecurity.ReadPrivateFileBytes(
+                    file, "External audit collector verification key", 4096,
+                    allowGroupOrOtherRead: true);
             }
-            catch
+            catch (Exception ex) when (ex is InvalidDataException or IOException
+                                       or UnauthorizedAccessException)
             {
-                CryptographicOperations.ZeroMemory(bytes);
-                throw;
+                throw new InvalidOperationException(
+                    "Unsafe or unavailable external audit collector verification key", ex);
             }
         }
         var sender = GatewayCore.Gslb.Contracts.PrivateKeyFileSecurity.ReadPrivateFileBytes(
