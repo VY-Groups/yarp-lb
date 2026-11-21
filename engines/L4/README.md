@@ -2,6 +2,23 @@
 
 This is a separate .NET 10 process, **not YARP middleware**. It binds explicit TCP and UDP listeners; TCP forwards bidirectional streams with half-close propagation, health-probed connect-time fallback, explicit per-backend admission drain, configurable idle timeout, and opt-in PROXY protocol v1; UDP uses per-client source IP/port sessions with backend replies routed to their original client. Both use round-robin across configured backends. It bounds active TCP streams and UDP sessions to 1,024 each per listener by default and expires idle sessions after 30 seconds of inbound inactivity by default, with a one-second periodic sweep even when no datagrams arrive.
 
+## Capability and configuration matrix
+
+| Capability | Status | Configuration and boundary |
+| --- | --- | --- |
+| TCP stream pass-through and half-close | Supported | Round-robin; connect-time backend fallback only. An established stream is never replayed. |
+| TCP health | Supported, connect-only | `ProbeIntervalSeconds`; not application, TLS, or transaction readiness. |
+| UDP relay and source-endpoint affinity | Supported | Round-robin for new endpoints; existing sessions remain pinned until idle expiry or process stop. Opaque datagrams are forwarded unchanged. |
+| UDP application health | Optional | `UdpProbePayload` and `UdpProbeExpectedResponse` must both be configured; a passing probe gates new sessions only. |
+| Backend drain | Supported at startup | `DrainNewConnections` excludes a backend from new TCP streams or UDP sessions. Live drain controls are not implemented. |
+| Admission and idle limits | Supported | Per listener: 1,024 TCP streams / UDP sessions by default; 1–4,096 allowed. TCP and UDP idle timeouts are configurable; excess TCP connections close and excess UDP endpoints drop without an application queue. |
+| Safe listener binding | Supported | IPv4 literal addresses only. Loopback by default; non-loopback requires `AllowNonLoopbackListeners: true`. |
+| PROXY protocol | Optional TCP v1 only | `SendProxyProtocolV1` defaults to false and requires a backend that explicitly understands the header. |
+| TLS termination, TLS passthrough SNI routing, and PROXY v2 | Unsupported | This engine does not inspect or terminate TLS. |
+| UDP fragmentation controls and multi-host shared state | Unsupported | No fragmentation policy or cross-process session/config coordination is provided. |
+
+The matrix describes this experimental process, not the YARP Control Center's operational capabilities. Keep L4 marked **partial** in the Control Center until enrollment, monitoring, and rollback are verified.
+
 The Windows/Linux socket acceptance includes a TCP half-close case: after the client sends its request and shuts down only its send direction, the backend must observe EOF, produce a complete response, and close its send direction; the client must receive that response through EOF. This verifies bidirectional FIN propagation in the loopback lab only. It does not demonstrate packet-loss behavior or WAN reliability.
 
 ## Lab execution
