@@ -148,8 +148,47 @@ internal static class AcmeRenewalAcceptance
                 passwordPath, RenewalWindowDays: 30, AgreeToTermsOfService: true)));
         SetPrivate(settingsPath);
         var settings = AcmeRenewalSettings.Load(settingsPath, activePfxPath, passwordPath, [DnsName]);
-        Check(settings.DnsName == DnsName && settings.RenewalWindowDays == 30,
-            "strict ACME configuration binds to the configured listener hostname and PFX paths");
+        Check(settings.DnsName == DnsName && settings.RenewalWindowDays == 30 &&
+            !settings.EnableDns01Renewal && settings.Dns01Publisher is null,
+            "strict HTTP-01 configuration remains the default with no hidden DNS writer");
+        var dns01Settings = settings with
+        {
+            EnableDns01Renewal = true,
+            Dns01Publisher = new AcmeDns01PublisherSettings(
+                "example.com", "192.0.2.53", "/usr/bin/nsupdate",
+                new string('A', 64), "/var/lib/gatewaycore/tsig.key",
+                [
+                    new AcmeDns01AuthoritySettings("ns1.example.com", "192.0.2.53"),
+                    new AcmeDns01AuthoritySettings("ns2.example.com", "192.0.2.54")
+                ])
+        };
+        await File.WriteAllTextAsync(settingsPath,
+            System.Text.Json.JsonSerializer.Serialize(dns01Settings));
+        SetPrivate(settingsPath);
+        var loadedDns = AcmeRenewalSettings.Load(settingsPath,
+            activePfxPath, passwordPath, [DnsName]);
+        Check(loadedDns.EnableDns01Renewal &&
+              loadedDns.Dns01Publisher?.Authorities.Length == 2,
+            "explicit DNS-01 scheduler settings bind same traffic TLS rotation paths");
+        foreach (var invalidDns in new[]
+        {
+            dns01Settings with { Dns01Publisher = null },
+            dns01Settings with { EnableDns01Renewal = false },
+            settings with { Dns01Publisher = dns01Settings.Dns01Publisher }
+        })
+        {
+            await File.WriteAllTextAsync(settingsPath,
+                System.Text.Json.JsonSerializer.Serialize(invalidDns));
+            SetPrivate(settingsPath);
+            var rejectedDnsConfig = false;
+            try { _ = AcmeRenewalSettings.Load(settingsPath, activePfxPath, passwordPath, [DnsName]); }
+            catch (InvalidOperationException) { rejectedDnsConfig = true; }
+            Check(rejectedDnsConfig,
+                "DNS-01 cannot enable or receive privileged writer configuration implicitly");
+        }
+        await File.WriteAllTextAsync(settingsPath,
+            System.Text.Json.JsonSerializer.Serialize(settings));
+        SetPrivate(settingsPath);
         await File.WriteAllTextAsync(settingsPath, System.Text.Json.JsonSerializer.Serialize(settings with
         {
             DirectoryUrl = "https://acme-v02.api.letsencrypt.org/directory",
@@ -426,6 +465,37 @@ internal static class AcmeRenewalAcceptance
                 publicHttp01Enabled: true, activePfxPath, passwordPath, TimeSpan.FromDays(30), CancellationToken.None);
             Check(result.Renewed && result.NotAfter > DateTimeOffset.UtcNow.AddDays(80),
                 "due certificate renews through fake ACME and installs the longer-lived chain");
+            // Run the identical PFX validation/atomic swap path using a
+            // separate due certificate, but with DNS-01 and TCP/80 disabled.
+            var dnsPfxPath = Path.Combine(rootDir, "dns01-active.pfx");
+            var oldDnsPfx = ToPfx(activeLeaf);
+            await File.WriteAllBytesAsync(dnsPfxPath, oldDnsPfx);
+            SetPrivate(dnsPfxPath);
+            var dnsCa = new DeterministicFakeAcmeCa(challengeStoreUrl,
+                DnsName, ToPfx(replacementLeaf));
+            var dnsPublisher = new FakeDnsPublisher();
+            var dnsCoordinator = new AcmeRenewalCoordinator(dnsCa, challengeStore,
+                clock, chainPolicy);
+            var dnsResult = await dnsCoordinator.RenewIfDueAsync(
+                DirectoryUrl, DnsName, "admin@example.com",
+                publicHttp01Enabled: false, dnsPfxPath, passwordPath,
+                TimeSpan.FromDays(30), CancellationToken.None, dnsPublisher);
+            Check(dnsResult.Renewed && dnsCa.IssuanceCount == 1 &&
+                  dnsPublisher.Publications == 1 && dnsPublisher.Probes == 1 &&
+                  dnsPublisher.Cleanup == 1 &&
+                  !File.ReadAllBytes(dnsPfxPath).SequenceEqual(oldDnsPfx),
+                "fake DNS-01 CA uses verified TXT, exact cleanup and the standard atomic TLS PFX rotation");
+            var blockedWithoutPublisher = false;
+            try
+            {
+                await dnsCoordinator.RenewIfDueAsync(DirectoryUrl, DnsName,
+                    "admin@example.com", publicHttp01Enabled: false,
+                    dnsPfxPath, passwordPath, TimeSpan.FromDays(30),
+                    CancellationToken.None);
+            }
+            catch (InvalidOperationException) { blockedWithoutPublisher = true; }
+            Check(blockedWithoutPublisher && dnsPublisher.Publications == 1,
+                "disabled public HTTP listener cannot silently downgrade DNS-01 to HTTP-01");
             Check(fakeCa.IssuanceCount == 1 && fakeCa.ChallengeServed,
                 "fake CA retrieves the actual HTTP-01 key authorization from the live GatewayCore endpoint");
             Check(!challengeStore.TryGet(DnsName, fakeCa.LastToken, out _),
@@ -865,6 +935,47 @@ internal static class AcmeRenewalAcceptance
         public void Advance(TimeSpan duration) => current += duration;
     }
 
+    private sealed class FakeDnsPublisher : IAcmeDns01Publisher
+    {
+        public int Publications;
+        public int Cleanup;
+        public int Probes;
+
+        private sealed class Lease(Action cleanup) : IAsyncDisposable
+        {
+            public ValueTask DisposeAsync()
+            {
+                cleanup();
+                return ValueTask.CompletedTask;
+            }
+        }
+
+        public Task<IAsyncDisposable> PublishAsync(string owner, string txtValue,
+            TimeSpan lifetime, CancellationToken token)
+        {
+            token.ThrowIfCancellationRequested();
+            if (owner != "_acme-challenge.api.example.com" ||
+                txtValue != new string('A', 43) ||
+                lifetime > TimeSpan.FromMinutes(10))
+                throw new InvalidOperationException("Unexpected fake DNS-01 publication");
+            Publications++;
+            return Task.FromResult<IAsyncDisposable>(new Lease(() => Cleanup++));
+        }
+
+        public Task<IReadOnlyList<AcmeDns01AuthorityObservation>> ProbeAuthoritativeAsync(
+            string owner, string txtValue, CancellationToken token)
+        {
+            token.ThrowIfCancellationRequested();
+            Probes++;
+            IReadOnlyList<AcmeDns01AuthorityObservation> results =
+            [
+                new("ns1.example.com", [txtValue]),
+                new("ns2.example.com", [txtValue])
+            ];
+            return Task.FromResult(results);
+        }
+    }
+
     private sealed class DeterministicFakeAcmeCa(Uri challengeEndpoint, string dnsName, byte[] initialPfx)
         : IAcmeCertificateIssuer
     {
@@ -903,6 +1014,19 @@ internal static class AcmeRenewalAcceptance
                 return new AcmeIssuedCertificate(NextPfx.ToArray(), dnsName);
             }
             finally { challenges.Remove(dnsName, token); }
+        }
+
+        public async Task<AcmeIssuedCertificate> IssueDns01Async(string directoryUrl, string requestedDns,
+            string contactEmail, string pfxPassword, IAcmeDns01Publisher publisher,
+            CancellationToken cancellationToken)
+        {
+            if (!string.Equals(requestedDns, dnsName, StringComparison.Ordinal))
+                throw new InvalidOperationException("Fake DNS-01 CA received an unexpected domain");
+            await using var lease = await AcmeDns01Publication.PublishAndVerifyAsync(
+                requestedDns, new string('A', 43), publisher, cancellationToken,
+                maximumProbes: 1, probeInterval: TimeSpan.Zero);
+            Interlocked.Increment(ref issuanceCount);
+            return new AcmeIssuedCertificate(NextPfx.ToArray(), dnsName);
         }
 
         public Task RevokeCertificateAsync(string directoryUrl, string contactEmail, byte[] certificateDer,
