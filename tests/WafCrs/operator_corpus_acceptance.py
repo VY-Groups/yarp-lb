@@ -106,7 +106,7 @@ def verified_origin_response(method, content_type, body_size, response_type, pay
     """
     if method == "GET":
         return (response_type == "text/plain; charset=utf-8"
-                and payload == b"YARP-WAF-CI-BENIGN\\n")
+                and payload == b"YARP-WAF-CI-BENIGN\n")
     if method != "POST" or response_type != "application/json" or len(payload) > 4096:
         return False
     try:
