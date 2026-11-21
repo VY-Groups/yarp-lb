@@ -190,8 +190,14 @@ def gateway(cwd:Path, dll:Path, root:Path, listen_port:int, https_port:int|None=
         YARP_LINUX_DP_CERT_PASSWORD_FILE=str(root/"secrets"/"dp-password"),
     )
     if https_port is not None:
+        # Test fixtures may require an independently trusted server TLS
+        # certificate. Keep that distinct from the dedicated RSA Data
+        # Protection wrapping leaf when a tls.pfx was provisioned.
+        tls_pfx = root/"secrets"/"tls.pfx"
+        if not tls_pfx.is_file():
+            tls_pfx = root/"secrets"/"dp.pfx"
         env.update(
-            ASPNETCORE_Kestrel__Certificates__Default__Path=str(root/"secrets"/"dp.pfx"),
+            ASPNETCORE_Kestrel__Certificates__Default__Path=str(tls_pfx),
             ASPNETCORE_Kestrel__Certificates__Default__Password="temporary-e2e-only-password",
         )
     logs=open(root/"gateway.log","a",encoding="utf8")
