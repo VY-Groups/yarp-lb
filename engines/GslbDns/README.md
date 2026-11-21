@@ -741,3 +741,17 @@ unused client prefix as a valid cache scope. The resolver-source fallback
 still works as before. A deterministic wire regression checks regional
 failure and recovery. This is one #52 DNS cache/privacy correctness fix;
 it does not certify multi-network DNS routing or full DNS conformance.
+
+### Pinned mTLS observer certificate usage (#109)
+
+A pinned health observer's TLS **client** certificate must be a currently valid
+X.509 leaf declaring `BasicConstraints: CA=false`, explicit `digitalSignature`
+KeyUsage, and the Client Authentication EKU (`1.3.6.1.5.5.7.3.2`).
+A CA certificate, server-auth-only leaf, missing usage metadata or
+encipherment-only leaf is not a valid observer identity, even if its hash is
+listed among the configured agent pins. SHA-256 pin and signed P-256 report
+key authorization continue to be independent requirements. Existing
+deployments should provision a conforming certificate, overlap old/new pins
+during rotation, and rerun the real multi-authority mTLS acceptance before
+installing this stricter policy. This does not certify production transport,
+distributed health quorum or live geographic authority failover.

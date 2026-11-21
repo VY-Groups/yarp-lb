@@ -306,18 +306,33 @@ internal sealed class AgentHealthReportStore : IDisposable
             StringComparison.Ordinal);
     }
 
-    public string? AgentIdForCertificate(X509Certificate2? certificate,
-        IReadOnlySet<string>? revokedSha256 = null)
+    /// <summary>
+    /// A pinned observer transport certificate must itself be a client-auth
+    /// signing *leaf*, not a pinned CA, server-only certificate or a leaf whose
+    /// permitted key usage cannot perform the TLS client signature.
+    /// </summary>
+    internal static bool IsValidClientAuthenticationCertificate(X509Certificate2? certificate)
     {
         if (certificate is null ||
             certificate.NotBefore.ToUniversalTime() > DateTime.UtcNow ||
             certificate.NotAfter.ToUniversalTime() <= DateTime.UtcNow)
-            return null;
-        var eku = certificate.Extensions.OfType<X509EnhancedKeyUsageExtension>()
-            .Any(extension => extension.EnhancedKeyUsages.Cast<Oid>()
-                .Any(oid => oid.Value == "1.3.6.1.5.5.7.3.2"));
-        if (!eku) return null;
-        var hash = certificate.GetCertHash(HashAlgorithmName.SHA256);
+            return false;
+        var basicConstraints = certificate.Extensions.OfType<X509BasicConstraintsExtension>().ToArray();
+        var usages = certificate.Extensions.OfType<X509KeyUsageExtension>().ToArray();
+        var ekus = certificate.Extensions.OfType<X509EnhancedKeyUsageExtension>().ToArray();
+        return basicConstraints.Length == 1 && !basicConstraints[0].CertificateAuthority &&
+            usages.Length == 1 &&
+            (usages[0].KeyUsages & X509KeyUsageFlags.DigitalSignature) != 0 &&
+            ekus.Length == 1 &&
+            ekus[0].EnhancedKeyUsages.Cast<Oid>()
+                .Any(oid => oid.Value == "1.3.6.1.5.5.7.3.2");
+    }
+
+    public string? AgentIdForCertificate(X509Certificate2? certificate,
+        IReadOnlySet<string>? revokedSha256 = null)
+    {
+        if (!IsValidClientAuthenticationCertificate(certificate)) return null;
+        var hash = certificate!.GetCertHash(HashAlgorithmName.SHA256);
         var hexHash = Convert.ToHexString(hash);
         if (revokedSha256?.Contains(hexHash) == true) return null;
         foreach (var agent in agents)
