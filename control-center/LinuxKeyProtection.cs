@@ -1,7 +1,6 @@
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Xml;
-using System.Xml.Linq;
 using Microsoft.AspNetCore.DataProtection;
 using GatewayCore.Gslb.Contracts;
 
@@ -110,7 +109,7 @@ public static class LinuxKeyProtection
     // Inspect existing XML without modifying it or deserializing key types.
     private static void ValidateExistingKeyRing(string directory)
     {
-        XNamespace protection = "http://schemas.asp.net/2015/03/dataProtection";
+        const string protectionNamespace = "http://schemas.asp.net/2015/03/dataProtection";
         foreach (var path in Directory.EnumerateFiles(directory, "*.xml"))
         {
             if ((File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0)
@@ -121,21 +120,50 @@ public static class LinuxKeyProtection
             try { bytes = PrivateKeyFileSecurity.ReadPrivateFileBytes(path, "Linux key-ring XML", 1024 * 1024); }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException)
             { throw new InvalidOperationException("Unsafe existing Linux key-ring XML", ex); }
-            using var stream = new MemoryStream(bytes, writable: false);
-            using var reader = XmlReader.Create(stream, new XmlReaderSettings
+            try
             {
-                DtdProcessing = DtdProcessing.Prohibit,
-                XmlResolver = null,
-                MaxCharactersInDocument = 1024 * 1024
-            });
-            var root = XDocument.Load(reader).Root;
-            // ASP.NET stores revocations separately from master key XML.
-            if (root?.Name == "revocation") continue;
-            if (root?.Name != "key" ||
-                root.Descendants().Any(element => element.Name.LocalName == "masterKey") ||
-                root.Descendants(protection + "encryptedSecret").Count() != 1)
-                throw new InvalidOperationException(
-                    "Existing Linux key ring is not certificate-wrapped; isolate and recover an approved protected backup");
+                using var stream = new MemoryStream(bytes, writable: false);
+                using var reader = XmlReader.Create(stream, new XmlReaderSettings
+                {
+                    DtdProcessing = DtdProcessing.Prohibit,
+                    XmlResolver = null,
+                    MaxCharactersInDocument = 1024 * 1024
+                });
+                if (reader.MoveToContent() != XmlNodeType.Element)
+                    throw new InvalidOperationException("Existing Linux key-ring XML has no root element");
+                var rootName = reader.LocalName;
+                var rootNamespace = reader.NamespaceURI;
+                var isRevocation = rootName == "revocation" && rootNamespace.Length == 0;
+                var isKey = rootName == "key" && rootNamespace.Length == 0;
+                if (!isRevocation && !isKey)
+                    throw new InvalidOperationException(
+                        "Existing Linux key ring is not certificate-wrapped; isolate and recover an approved protected backup");
+
+                // Walk element names only. Do not materialize the document's
+                // text into an XDocument, where a legacy plaintext master key
+                // would become a long-lived managed string.
+                var encryptedSecretCount = 0;
+                while (reader.Read())
+                {
+                    if (reader.NodeType != XmlNodeType.Element) continue;
+                    if (reader.LocalName == "masterKey" ||
+                        (isRevocation && reader.LocalName == "encryptedSecret"))
+                        throw new InvalidOperationException(
+                            "Existing Linux key-ring XML contains unexpected key material");
+                    if (isKey && reader.LocalName == "encryptedSecret" &&
+                        reader.NamespaceURI == protectionNamespace)
+                        encryptedSecretCount++;
+                }
+                if (isKey && encryptedSecretCount != 1)
+                    throw new InvalidOperationException(
+                        "Existing Linux key ring is not certificate-wrapped; isolate and recover an approved protected backup");
+            }
+            finally
+            {
+                // Clear the bounded source buffer even if XML parsing or a
+                // plaintext-key rejection fails.
+                CryptographicOperations.ZeroMemory(bytes);
+            }
         }
     }
 
