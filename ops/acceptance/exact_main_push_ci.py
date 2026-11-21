@@ -40,6 +40,8 @@ def paged(path, token):
             batch = payload.get("workflow_runs", payload.get("jobs"))
             if not isinstance(batch, list):
                 raise ValueError("Unexpected GitHub API collection")
+        if any(not isinstance(item, dict) for item in batch):
+            raise ValueError("Malformed GitHub API collection item")
         records.extend(batch)
         if len(batch) < 100:
             return records
@@ -54,6 +56,8 @@ def collect(repo, sha, token):
     evidence = []
     for run in exact:
         run_id = run["id"]
+        if not isinstance(run_id, int) or run_id <= 0:
+            raise ValueError("Invalid GitHub Actions run id")
         jobs = paged("/repos/" + encoded + "/actions/runs/" + str(run_id) + "/jobs", token)
         evidence.append({
             "run_id": run_id, "name": run.get("name"),
@@ -83,7 +87,7 @@ def main(argv=None):
         parser.error("Set GH_TOKEN or GITHUB_TOKEN with read-only Actions access")
     try:
         runs = collect(args.repo, args.sha, token)
-    except (urllib.error.URLError, ValueError, KeyError, TimeoutError) as exc:
+    except (urllib.error.URLError, ValueError, KeyError, TypeError, TimeoutError) as exc:
         print("GitHub evidence unavailable: " + str(exc), file=sys.stderr)
         return 2
     ok = bool(runs) and all(
