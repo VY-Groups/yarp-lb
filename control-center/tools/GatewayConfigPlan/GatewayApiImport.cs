@@ -136,10 +136,13 @@ public static class GatewayApiImport
                 var grantSpec = Object(grant["spec"], "from", "to");
                 var from = Object(Array(grantSpec["from"], 1)[0], "group", "kind", "namespace");
                 var to = Object(Array(grantSpec["to"], 1)[0], "group", "kind", "name");
-                if (String(from["group"]) != "gateway.networking.k8s.io" ||
+                // The core Service API group is the explicit empty string;
+                // do not use String(), which intentionally rejects empties.
+                if (to["group"] is not JsonValue groupValue ||
+                    !groupValue.TryGetValue<string>(out var targetGroup) || targetGroup != "" ||
+                    String(from["group"]) != "gateway.networking.k8s.io" ||
                     String(from["kind"]) != "HTTPRoute" ||
                     Name(from["namespace"]) != ns ||
-                    String(to["group"]) != "" ||
                     String(to["kind"]) != "Service")
                     throw Invalid();
                 var targetService = Name(to["name"]);
