@@ -80,7 +80,12 @@ public static class GatewayApiImport
     // API server. Service ports and namespace must be included and verified.
     public static JsonObject Translate(string json)
     {
-        var root = Object(Parse(json), "gatewayClass", "gateway", "httpRoutes", "services");
+        var parsed = Parse(json);
+        // A bundle may declare explicit permission objects, but may never
+        // silently drop an unsupported resource or import unknown fields.
+        var root = parsed.ContainsKey("referenceGrants")
+            ? Object(parsed, "gatewayClass", "gateway", "httpRoutes", "services", "referenceGrants")
+            : Object(parsed, "gatewayClass", "gateway", "httpRoutes", "services");
         var cls = Resource(root["gatewayClass"], V1, "GatewayClass", false);
         if (String(Object(cls["spec"], "controllerName")["controllerName"]) != "gatewaycore.example/offline")
             throw Invalid();
@@ -94,11 +99,13 @@ public static class GatewayApiImport
         if (String(listener["protocol"]) != "HTTP" || Port(listener["port"]) != 80 ||
             String(Object(Object(listener["allowedRoutes"], "namespaces")["namespaces"], "from")["from"]) != "Same")
             throw Invalid();
+        // Service identity is namespace + name, never just a display name.
+        // A cross-namespace Service requires an explicit target-owned grant.
         var services = new Dictionary<string, HashSet<int>>(StringComparer.Ordinal);
         foreach (var n in Array(root["services"], 100))
         {
             var svc = Resource(n, "v1", "Service", true);
-            if (Name(svc["metadata"]!["namespace"]) != ns) throw Invalid();
+            var svcNamespace = Name(svc["metadata"]!["namespace"]);
             var svcName = Name(svc["metadata"]!["name"]);
             var svcSpec = Object(svc["spec"], "type", "ports");
             if (String(svcSpec["type"]) != "ClusterIP") throw Invalid();
@@ -109,7 +116,37 @@ public static class GatewayApiImport
                 if (String(row["protocol"]) != "TCP" ||
                     String(row["appProtocol"]) != "http" || !ports.Add(Port(row["port"]))) throw Invalid();
             }
-            if (!services.TryAdd(svcName, ports)) throw Invalid();
+            if (!services.TryAdd(svcNamespace + "/" + svcName, ports)) throw Invalid();
+        }
+        // ReferenceGrant is owned by the *target* namespace, not the
+        // HTTPRoute namespace. The offline subset accepts only a named
+        // Service and one explicit HTTPRoute source namespace per grant;
+        // broad wildcard grants and unsupported permissions fail closed.
+        var grants = new HashSet<string>(StringComparer.Ordinal);
+        var grantNames = new HashSet<string>(StringComparer.Ordinal);
+        if (root.ContainsKey("referenceGrants"))
+        {
+            foreach (var item in Array(root["referenceGrants"], 32))
+            {
+                var grant = Resource(item, V1, "ReferenceGrant", true);
+                var targetNamespace = Name(grant["metadata"]!["namespace"]);
+                var grantName = Name(grant["metadata"]!["name"]);
+                if (!grantNames.Add(targetNamespace + "/" + grantName))
+                    throw Invalid();
+                var grantSpec = Object(grant["spec"], "from", "to");
+                var from = Object(Array(grantSpec["from"], 1)[0], "group", "kind", "namespace");
+                var to = Object(Array(grantSpec["to"], 1)[0], "group", "kind", "name");
+                if (String(from["group"]) != "gateway.networking.k8s.io" ||
+                    String(from["kind"]) != "HTTPRoute" ||
+                    Name(from["namespace"]) != ns ||
+                    String(to["group"]) != "" ||
+                    String(to["kind"]) != "Service")
+                    throw Invalid();
+                var targetService = Name(to["name"]);
+                if (targetNamespace == ns ||
+                    !grants.Add(targetNamespace + "/" + ns + "/" + targetService))
+                    throw Invalid();
+            }
         }
         var routes = new JsonObject();
         var clusters = new JsonObject();
@@ -130,17 +167,28 @@ public static class GatewayApiImport
             // Prefix "/" matches every absolute path; other prefixes/Exact,
             // hostnames, filters, weights and TLS require runtime conformance.
             if (String(path["type"]) != "PathPrefix" || value != "/") throw Invalid();
-            var backend = Object(Array(rule["backendRefs"], 1)[0], "name", "port");
+            var backendNode = Array(rule["backendRefs"], 1)[0];
+            var backend = backendNode is JsonObject candidate && candidate.ContainsKey("namespace")
+                ? Object(backendNode, "name", "port", "namespace")
+                : Object(backendNode, "name", "port");
             var service = Name(backend["name"]);
+            var serviceNamespace = backend.ContainsKey("namespace")
+                ? Name(backend["namespace"]) : ns;
             var port = Port(backend["port"]);
-            if (!services.TryGetValue(service, out var servicePorts) || !servicePorts.Contains(port)) throw Invalid();
+            if (!services.TryGetValue(serviceNamespace + "/" + service, out var servicePorts) ||
+                !servicePorts.Contains(port)) throw Invalid();
+            if (serviceNamespace != ns && !grants.Remove(serviceNamespace + "/" + ns + "/" + service))
+                throw Invalid(); // Grant absent, wrong target/source or insufficient scope.
             if (routes.Count != 0) throw Invalid(); // root prefix conflicts with any second route
             var clusterId = "svc-" + service + "-" + port.ToString(System.Globalization.CultureInfo.InvariantCulture);
             routes.Add(routeName, new JsonObject { ["ClusterId"] = clusterId,
                 ["Match"] = new JsonObject { ["Path"] = "/{**catch-all}" } });
             clusters.Add(clusterId, new JsonObject { ["Destinations"] = new JsonObject {
-                ["service"] = new JsonObject { ["Address"] = $"http://{service}.{ns}.svc.cluster.local:{port}/" } } });
+                ["service"] = new JsonObject { ["Address"] = $"http://{service}.{serviceNamespace}.svc.cluster.local:{port}/" } } });
         }
+        // Unused grants may have been broad/stale or intended for resources
+        // not represented by this one-route bundle. Never silently ignore.
+        if (grants.Count != 0) throw Invalid();
         var output = new JsonObject { ["schemaVersion"] = 1, ["routes"] = routes, ["clusters"] = clusters };
         _ = PlanEngine.Validate(output.ToJsonString());
         return output;
