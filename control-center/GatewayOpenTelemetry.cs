@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Diagnostics;
 using System.Diagnostics.Metrics;
 using System.Collections.Concurrent;
@@ -343,9 +344,38 @@ internal sealed class GatewayTelemetryPrivacyProcessor : BaseProcessor<Activity>
     // Preserve only explicit, bounded operational attributes.
     public override void OnEnd(Activity data)
     {
-        foreach (var tag in data.TagObjects.ToArray())
-            if (!IsAllowed(tag.Key, tag.Value))
-                data.SetTag(tag.Key, null);
+        // Activity tags cannot be removed while enumerating its live tag
+        // collection. Collect ONLY rejected tag keys into a reusable pooled
+        // buffer, then remove them after enumeration. This replaces the old
+        // per-exported-span KeyValuePair[] materialization while preserving
+        // deny-by-default semantics and all attribute allowlist checks.
+        string[]? rejectedKeys = null;
+        var rejectedCount = 0;
+        try
+        {
+            foreach (var tag in data.TagObjects)
+            {
+                if (IsAllowed(tag.Key, tag.Value)) continue;
+                rejectedKeys ??= ArrayPool<string>.Shared.Rent(16);
+                if (rejectedCount == rejectedKeys.Length)
+                {
+                    var expanded = ArrayPool<string>.Shared.Rent(checked(rejectedKeys.Length * 2));
+                    Array.Copy(rejectedKeys, expanded, rejectedCount);
+                    ArrayPool<string>.Shared.Return(rejectedKeys, clearArray: true);
+                    rejectedKeys = expanded;
+                }
+                rejectedKeys[rejectedCount++] = tag.Key;
+            }
+            for (var index = 0; index < rejectedCount; index++)
+                data.SetTag(rejectedKeys![index], null);
+        }
+        finally
+        {
+            // Never allow a process-wide pooled buffer to retain keys from
+            // sensitive, untrusted trace enrichment after a span is exported.
+            if (rejectedKeys is not null)
+                ArrayPool<string>.Shared.Return(rejectedKeys, clearArray: true);
+        }
         NormalizeAspNetCoreDisplayName(data);
         base.OnEnd(data);
     }
