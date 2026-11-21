@@ -503,6 +503,54 @@ try { _=new DnsCidrRegionTable(new[]{
     new DnsCidrRegionRule("127.0.0.0/8","other")}); }
 catch(ArgumentException){duplicateRejected=true;}
 if(!duplicateRejected)throw new Exception("FAIL: conflicting duplicate CIDR accepted");
+// A trusted ECS-matched region can lose every healthy site. An answer
+// selected from another region must not announce that the inactive client
+// prefix scoped its result or reflect the unused subnet in EDNS.
+{
+    const string zoneName = "ecs-health-fallback.unit.test";
+    var local = new Site(IPAddress.Parse("192.0.2.21"), null, 1, 0, 1, 1, "Http", 0,
+        "local", null, []) { Healthy = 1 };
+    var remote = new Site(IPAddress.Parse("192.0.2.22"), null, 1, 0, 1, 1, "Http", 0,
+        "dr", null, []) { Healthy = 0 };
+    var table = new DnsCidrRegionTable(new[] {
+        new DnsCidrRegionRule("127.0.0.1/32", "local"),
+        new DnsCidrRegionRule("198.51.100.0/24", "dr")
+    });
+    var trusted = new DnsCidrRegionTable(new[] {
+        new DnsCidrRegionRule("127.0.0.1/32", "trusted")
+    });
+    var group = new SiteGroup([local, remote], 10, true, [],
+        "hostmaster.ecs-health-fallback.unit.test", 1, "CidrRegion",
+        table, true, trusted);
+    var zones = new Dictionary<string, SiteGroup> { [zoneName] = group };
+    var request = new List<byte>(DnsRequest(zoneName, 1));
+    request[11] = 1; // one OPT in the additional section
+    request.AddRange(new byte[] {
+        0, 0, 41, 4, 208, 0, 0, 0, 0, 0, 12,
+        0, 8, 0, 8, 0, 1, 32, 0, 198, 51, 100, 42
+    });
+    var fallback = DnsWireProtocol.Build(request.ToArray(), zones,
+        tcp: true, resolverIp: IPAddress.Loopback)!;
+    if (Dns16(fallback, 6) != 1 ||
+        !fallback.AsSpan(fallback.Length - 15, 4).SequenceEqual(
+            new byte[] { 192, 0, 2, 21 }) ||
+        !fallback.AsSpan(fallback.Length - 11).SequenceEqual(
+            new byte[] { 0, 0, 41, 4, 208, 0, 0, 0, 0, 0, 0 }))
+        throw new Exception("FAIL: ECS regional fallback reflected an unused client prefix");
+
+    remote.Healthy = 1;
+    var matchingRegion = DnsWireProtocol.Build(request.ToArray(), zones,
+        tcp: true, resolverIp: IPAddress.Loopback)!;
+    if (Dns16(matchingRegion, 6) != 1 ||
+        !matchingRegion.AsSpan(matchingRegion.Length - 26, 4).SequenceEqual(
+            new byte[] { 192, 0, 2, 22 }) ||
+        !matchingRegion.AsSpan(matchingRegion.Length - 11, 8).SequenceEqual(
+            new byte[] { 0, 8, 0, 7, 0, 1, 24, 24 }) ||
+        !matchingRegion.AsSpan(matchingRegion.Length - 3).SequenceEqual(
+            new byte[] { 198, 51, 100 }))
+        throw new Exception("FAIL: healthy ECS region lost its /24 routing scope");
+    Console.WriteLine("PASS: ECS health fallback never advertises an unused prefix scope");
+}
 Console.WriteLine("PASS: IPv4/IPv6 resolver CIDR mapping, ECS prefix boundaries and validation");
 // Verify response limiting with deterministic monotonic timestamps: no flaky UDP flood.
 var rate=new DnsResponseRateLimiter(2,2);
