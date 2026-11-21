@@ -89,7 +89,7 @@ class OperatorCorpusTests(unittest.TestCase):
             {"path": "/\r\nx-header:bad"}, {"path": "/where\\isit"},
             {"body": "x" * (waf.MAX_BODY + 1)}, {"method": "DELETE"},
             {"contentType": "text/html"}, {"route": "../path"},
-            {"id": "benign-query"},
+            {"id": "benign-query"}, {"id": "BENIGN-QUERY"},
         ]
         for mutation in changes:
             invalid = corpus()
