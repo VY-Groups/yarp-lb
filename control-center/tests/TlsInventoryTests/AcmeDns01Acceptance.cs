@@ -1,19 +1,5 @@
 internal static class AcmeDns01Acceptance
 {
-    private sealed class Lease(Action onDispose) : IAsyncDisposable
-    {
-        private bool disposed;
-        public ValueTask DisposeAsync()
-        {
-            if (!disposed)
-            {
-                disposed = true;
-                onDispose();
-            }
-            return ValueTask.CompletedTask;
-        }
-    }
-
     private sealed class FakePublisher : IAcmeDns01Publisher
     {
         public int Published;
@@ -21,19 +7,48 @@ internal static class AcmeDns01Acceptance
         public int Cleaned;
         public string? PublishedName;
         public string? PublishedValue;
+        public bool Active;
+        public bool ThrowAfterPublish;
+        public readonly HashSet<string> TxtValues = new(StringComparer.Ordinal)
+            { "unrelated-existing-challenge" };
         public readonly Queue<IReadOnlyList<AcmeDns01AuthorityObservation>> Responses = new();
         public bool ThrowOnProbe;
 
-        public Task<IAsyncDisposable> PublishAsync(string fqdn, string txtValue,
-            TimeSpan lifetime, CancellationToken token)
+        private sealed class Lease(FakePublisher owner, string fqdn, string value)
+            : IAcmeDns01PublicationLease
+        {
+            private bool disposed;
+            public Task PublishAsync(CancellationToken token)
+            {
+                token.ThrowIfCancellationRequested();
+                owner.Published++;
+                owner.PublishedName = fqdn;
+                owner.PublishedValue = value;
+                owner.TxtValues.Add(value);
+                owner.Active = true; // Simulate provider mutation before a timeout/error.
+                if (owner.ThrowAfterPublish)
+                    throw new InvalidOperationException("simulated provider timeout after TXT write");
+                return Task.CompletedTask;
+            }
+            public ValueTask DisposeAsync()
+            {
+                if (!disposed)
+                {
+                    disposed = true;
+                    if (owner.TxtValues.Remove(value)) owner.Cleaned++;
+                    owner.Active = owner.TxtValues.Contains(value);
+                }
+                return ValueTask.CompletedTask;
+            }
+        }
+
+        public Task<IAcmeDns01PublicationLease> AcquirePublicationLeaseAsync(string fqdn,
+            string txtValue, TimeSpan lifetime, CancellationToken token)
         {
             token.ThrowIfCancellationRequested();
-            Published++;
-            PublishedName = fqdn;
-            PublishedValue = txtValue;
             if (lifetime is not { TotalMinutes: >= 1 and <= 10 })
                 throw new Exception("FAIL: DNS-01 publication was not time bounded");
-            return Task.FromResult<IAsyncDisposable>(new Lease(() => Cleaned++));
+            return Task.FromResult<IAcmeDns01PublicationLease>(new Lease(this, fqdn, txtValue));
         }
 
         public Task<IReadOnlyList<AcmeDns01AuthorityObservation>> ProbeAuthoritativeAsync(
@@ -106,11 +121,27 @@ internal static class AcmeDns01Acceptance
             Check(publisher.Published == 1 && publisher.Probed == 1 &&
                 publisher.Cleaned == 0 &&
                 publisher.PublishedName == "_acme-challenge.api.example.com" &&
-                publisher.PublishedValue == txt,
+                publisher.PublishedValue == txt && publisher.TxtValues.Contains(txt),
                 "publication precedes authoritative probe and remains live until release");
         }
-        Check(publisher.Cleaned == 1,
-            "successful DNS-01 authorization cleanup lease removes the TXT");
+        Check(publisher.Cleaned == 1 && !publisher.TxtValues.Contains(txt) &&
+              publisher.TxtValues.Contains("unrelated-existing-challenge"),
+            "successful cleanup removes only its TXT and preserves unrelated concurrent values");
+
+        var partialWrite = new FakePublisher { ThrowAfterPublish = true };
+        var partialWriteFailed = false;
+        try
+        {
+            await using var unused = await AcmeDns01Publication.PublishAndVerifyAsync(
+                name, txt, partialWrite, CancellationToken.None,
+                maximumProbes: 1, probeInterval: TimeSpan.Zero);
+        }
+        catch (InvalidOperationException) { partialWriteFailed = true; }
+        Check(partialWriteFailed && partialWrite.Published == 1 &&
+              partialWrite.Cleaned == 1 && !partialWrite.Active &&
+              partialWrite.TxtValues.Contains("unrelated-existing-challenge") &&
+              !partialWrite.TxtValues.Contains(txt),
+            "partial provider TXT write is compensated when publication throws before returning");
 
         var initiallyStale = new FakePublisher();
         initiallyStale.Responses.Enqueue([Answer("ns1.example.com", txt)]);
