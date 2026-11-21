@@ -147,6 +147,9 @@ try
     File.WriteAllText(key1RotatedPath, signing1Rotated.ExportSubjectPublicKeyInfoPem());
     File.WriteAllText(key2Path, signing2.ExportSubjectPublicKeyInfoPem());
     File.WriteAllText(key3Path, signing3.ExportSubjectPublicKeyInfoPem());
+    if (OperatingSystem.IsLinux())
+        foreach (var trustedPem in new[] { key1Path, key1RotatedPath, key2Path, key3Path })
+            File.SetUnixFileMode(trustedPem, UnixFileMode.UserRead | UnixFileMode.UserWrite);
     var agents = new[] {
         new AgentTrust("agent-1", "vantage-mumbai", [Convert.ToHexString(client1.GetCertHash(HashAlgorithmName.SHA256)),
             Convert.ToHexString(client1Rotated.GetCertHash(HashAlgorithmName.SHA256))], [key1Path, key1RotatedPath]),
