@@ -141,6 +141,18 @@ try
     cli = RunCli("import-gateway-api",bundlePath);
     Check(cli.ExitCode == 1 && cli.StdOut.Length == 0 && !cli.StdErr.Contains("api.apps"),
         "unsafe import exits nonzero without partially translated config");
+    File.WriteAllBytes(bundlePath, [0xC3, 0x28]); // Invalid UTF-8 must fail before JSON parsing.
+    cli = RunCli("import-gateway-api", bundlePath);
+    Check(cli.ExitCode == 1 && cli.StdOut.Length == 0 &&
+          !cli.StdErr.Contains("Unhandled exception", StringComparison.OrdinalIgnoreCase) &&
+          !cli.StdErr.Contains("System.Text.", StringComparison.Ordinal) &&
+          !cli.StdErr.Contains("api.apps", StringComparison.Ordinal),
+          "malformed UTF-8 import fails with a stable, sanitized error");
+    File.WriteAllBytes(bundlePath, new byte[524289]);
+    cli = RunCli("import-gateway-api", bundlePath);
+    Check(cli.ExitCode == 1 && cli.StdOut.Length == 0 &&
+          !cli.StdErr.Contains("Unhandled exception", StringComparison.OrdinalIgnoreCase),
+          "oversized imported bundle is rejected without reading or emitting it");
 }
 finally { File.Delete(bundlePath); }
 

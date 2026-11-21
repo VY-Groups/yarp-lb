@@ -42,3 +42,15 @@ parsing. The CLI bounds both current and desired files to 512 KiB before
 decoding, uses strict UTF-8, checks for concurrent append during read, and
 does not echo rejected JSON values. It remains a **read-only subset planner**,
 not a signed GitOps reconciler or Kubernetes controller.
+
+## Imported bundle byte safety
+
+The CLI's `import-gateway-api` path uses strict UTF-8 decoding, the same
+512 KiB input limit and a post-read length recheck. It explicitly clears the
+raw bounded input byte array whether conversion or supported-schema validation
+succeeds or fails. Invalid UTF-8, oversized bundles and unsupported semantic
+fields return a generic nonzero error with no partial translated output or
+exception trace. The resulting desired document intentionally contains
+service origins; store it only in a protected file for human review and never
+print it in public CI logs. These protections do not implement Git signature
+verification, reconciliation, apply, drift detection or a Kubernetes controller.
