@@ -304,7 +304,7 @@ Must(!EngineConfigContract.Validate("gslb",badDns,false),
 var tcpDns = dns.DeepClone().AsObject();
 tcpDns["ListenHost"] = "::1";
 var tcpSite = tcpDns["Zones"]![0]!["Sites"]![0]!.AsObject();
-tcpSite["Address"] = "2001:db8::17";
+tcpSite["Address"] = "fd00::17";
 tcpSite["HealthCheckType"] = "Tcp";
 tcpSite.Remove("HealthUrl");
 tcpSite["TcpPort"] = 443;
@@ -360,6 +360,41 @@ var privateSite = dns.DeepClone().AsObject();
 privateSite["Zones"]![0]!["Sites"]![0]!["Address"] = "fd00::9";
 Must(EngineConfigContract.Validate("gslb", privateSite, false),
     "signed GSLB staging retains IPv6 unique-local on-premises backend support");
+foreach (var documented in new[] { "192.0.2.80", "198.51.100.53", "203.0.113.17", "2001:db8::17" })
+{
+    var productionCandidate = dns.DeepClone().AsObject();
+    productionCandidate["Zones"]![0]!["Sites"]![0]!["Address"] = documented;
+    Must(!EngineConfigContract.Validate("gslb", productionCandidate, false),
+        "production signed staging refuses RFC documentation backend " + documented);
+    productionCandidate["AllowDocumentationAddressesForTesting"] = true;
+    Must(EngineConfigContract.Validate("gslb", productionCandidate, false),
+        "explicit loopback fixture allows documentation backend " + documented);
+    productionCandidate["AllowNonLoopbackListeners"] = true;
+    Must(!EngineConfigContract.Validate("gslb", productionCandidate, true),
+        "external bind opt-in cannot coexist with documentation fixture permission");
+    productionCandidate["AllowNonLoopbackListeners"] = false;
+    productionCandidate["ListenHost"] = "0.0.0.0";
+    Must(!EngineConfigContract.Validate("gslb", productionCandidate, true),
+        "non-loopback listener cannot enable documentation fixture permission");
+}
+var fixtureNs = authoritativeDns.DeepClone().AsObject();
+fixtureNs["Zones"]![0]!["NameServers"]![0]!["Address"] = "192.0.2.53";
+Must(!EngineConfigContract.Validate("gslb", fixtureNs, false),
+    "signed staging refuses production documentation authoritative NS");
+fixtureNs["AllowDocumentationAddressesForTesting"] = true;
+Must(EngineConfigContract.Validate("gslb", fixtureNs, false),
+    "signed staging accepts explicit isolated lab documentation NS");
+var fixtureChild = delegatedDns.DeepClone().AsObject();
+fixtureChild["Zones"]![0]!["Delegations"]![0]!["NameServers"]![0]!["Address"] = "2001:db8::53";
+Must(!EngineConfigContract.Validate("gslb", fixtureChild, false),
+    "signed staging refuses production documentation delegated NS");
+fixtureChild["AllowDocumentationAddressesForTesting"] = true;
+Must(EngineConfigContract.Validate("gslb", fixtureChild, false),
+    "signed staging accepts explicit isolated lab documentation delegated NS");
+var invalidFlag = dns.DeepClone().AsObject();
+invalidFlag["AllowDocumentationAddressesForTesting"] = "true";
+Must(!EngineConfigContract.Validate("gslb", invalidFlag, false),
+    "signed staging rejects non-boolean fixture opt-in");
 var sameAuthoritativeDns = authoritativeDns.DeepClone().AsObject();
 Must(EngineConfigContract.ValidSoaSerialTransition(authoritativeDns,sameAuthoritativeDns),
     "unchanged authoritative GSLB zone may retain its SOA serial");
