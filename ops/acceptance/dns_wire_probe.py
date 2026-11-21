@@ -113,6 +113,8 @@ def parse(response, txid, expected_name, expected_qtype):
     rid, flags, qd, an, ns, ar = struct.unpack_from("!HHHHHH", response)
     require(rid == txid, "transaction ID mismatch")
     require(flags & 0x8000, "not a response")
+    require(not (flags & 0x7800), "response opcode must be QUERY")
+    require(not (flags & 0x0040), "reserved DNS Z bit set")
     require(not (flags & 0x0080), "recursion unexpectedly available")
     require(qd == 1, "response must echo exactly one question")
     pos = 12
@@ -168,6 +170,14 @@ def validate_parser_guards():
     require(rejected(forward_pointer), "forward compression pointer was accepted")
     require(rejected(mismatched_name), "mismatched response question name was accepted")
     require(rejected(mismatched_type), "mismatched response question type was accepted")
+    malformed_opcode = struct.pack("!HHHHHH", txid, 0x8800, 1, 0, 0, 0)
+    malformed_z = struct.pack("!HHHHHH", txid, 0x8040, 1, 0, 0, 0)
+    for malformed in (malformed_opcode, malformed_z):
+        try:
+            parse(malformed + valid_question, txid, "example.test", 1)
+        except AssertionError:
+            continue
+        raise AssertionError("invalid response header flags were accepted")
     wrong_owner = [("answer", labels_for("other.test"), 2, 1, 60)]
     require(not has_rr(wrong_owner, "answer", "example.test", 2),
             "unrelated answer owner was accepted as the apex RRset")
@@ -178,6 +188,13 @@ def check(host, port, zone, name, qtype, tcp, timeout, *, edns=False, version=0)
     txid, packet = question(name, qtype, edns=edns, version=version)
     response = exchange(host, port, packet, tcp, timeout)
     flags, records = parse(response, txid, name, qtype)
+    if flags & 0x0200:
+        # RFC 1035: truncated UDP replies are not complete evidence. Reissue
+        # the same question over TCP and verify its independently framed reply.
+        require(not tcp, "TCP response unexpectedly truncated")
+        response = exchange(host, port, packet, True, timeout)
+        flags, records = parse(response, txid, name, qtype)
+        require(not (flags & 0x0200), "TCP fallback response remains truncated")
     return flags, records, len(response)
 
 
