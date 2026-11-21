@@ -115,6 +115,32 @@ using (var privacyActivity = new System.Diagnostics.Activity("privacy-contract")
          privacyActivity.GetTagItem("gateway.cluster.id") is null,
         "OTLP span attribute allowlist rejects unknown header arrays, custom data and invalid attribution");
 }
+// Exercise the pooled reject-key buffer beyond its initial 16 entries,
+// across repeated spans, including known-good route/status attributes.
+// Unknown enrichment and raw client fields must still be removed, regardless
+// of the number or ordering of tags.
+var privacyProcessor = new GatewayTelemetryPrivacyProcessor();
+for (var iteration = 0; iteration < 4; iteration++)
+{
+    using var span = new System.Diagnostics.Activity("large-privacy-contract");
+    span.SetTag("http.response.status_code", 503);
+    span.SetTag("gateway.route.id", "public_route");
+    for (var index = 0; index < 96; index++)
+        span.SetTag("untrusted.enrichment." + index,
+            "sensitive-" + iteration + "-" + index);
+    span.SetTag("url.full", "https://example.invalid/private?token=secret");
+    span.Start();
+    privacyProcessor.OnEnd(span);
+    for (var index = 0; index < 96; index++)
+        Must(span.GetTagItem("untrusted.enrichment." + index) is null,
+            "pooled trace tag filter removes every unknown enrichment");
+    Must(span.GetTagItem("url.full") is null &&
+         (string?)span.GetTagItem("gateway.route.id") == "public_route" &&
+         span.GetTagItem("http.response.status_code") is 503,
+        "pooled trace filter preserves permitted attributes and rejects URL secrets");
+}
+Console.WriteLine("PASS: pooled OTLP trace cleanup handles 96 unknown tags without privacy regression");
+
 await GatewayOtlpExporterAcceptance.RunAsync();
 await GatewayOtlpExporterAcceptance.RunWithoutCollectorAsync();
 await GatewayOtlpOverheadAcceptance.RunAsync();
