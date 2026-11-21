@@ -125,6 +125,7 @@ try
     File.CreateSymbolicLink(symlink,protectedFile);
     Assert(Throws(()=>{using var _=Provider(state);}), "symlinked persisted key XML is refused");
     File.Delete(symlink);
+    var protectedKeyBytesBefore=File.ReadAllBytes(protectedFile);
     var forgedRevocation=Path.Combine(Path.GetDirectoryName(protectedFile)!,"revocation-hostile.xml");
     const string forbiddenMasterKey="DISPOSABLE_TEST_PLAINTEXT_KEY_MATERIAL";
     var forgedRevocationBytes=System.Text.Encoding.UTF8.GetBytes(
@@ -135,7 +136,7 @@ try
            File.ReadAllBytes(forgedRevocation).SequenceEqual(forgedRevocationBytes),
         "revocation XML cannot conceal plaintext master key material and is not mutated");
     File.Delete(forgedRevocation);
-    Assert(File.ReadAllBytes(protectedFile).SequenceEqual(File.ReadAllBytes(keyFiles[0])),
+    Assert(File.ReadAllBytes(protectedFile).SequenceEqual(protectedKeyBytesBefore),
         "rejected rogue revocation does not alter the original wrapped key ring");
     var tamperState=Path.Combine(root,"tamper-state");
     Set("YARP_CONTROL_PLANE_DIR",tamperState);
