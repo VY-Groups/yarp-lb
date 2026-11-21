@@ -28,8 +28,8 @@ internal static class DnsWireProtocol
 
     // A/AAAA backend and authoritative/delegated NS addresses become DNS
     // answers visible to resolvers. Reject non-unicast, scoped and link-local
-    // endpoints before the zone can start. Private RFC1918/ULA and loopback
-    // are kept for on-premises and isolated integration fixtures respectively.
+    // endpoints before the zone can start. Private RFC1918/ULA are permitted
+    // on-premises; loopback and documentation ranges are lab-only opt-ins.
     // Whether loopback is suitable for a publicly delegated zone remains a
     // separate deployment-validation requirement.
     internal static bool ValidPublishedUnicastAddress(IPAddress? address,
@@ -41,6 +41,11 @@ internal static class DnsWireProtocol
             address.Equals(IPAddress.Broadcast) || address.IsIPv6Multicast)
             return false;
 
+        // Loopback A/AAAA and NS/glue point every remote resolver or client at
+        // itself, not this authority. Only an explicit loopback-bound fixture
+        // may publish loopback endpoints.
+        if (IPAddress.IsLoopback(address) && !allowDocumentationTestRange)
+            return false;
         var bytes = address.GetAddressBytes();
         if (address.AddressFamily == AddressFamily.InterNetworkV6)
         {
