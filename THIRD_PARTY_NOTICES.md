@@ -13,11 +13,24 @@ hash encoding was adapted; OpenGSLB's synthetic denial-proof generation was
 not used. GatewayCore creates a complete hash ring from its configured
 authoritative names and constructs denial proofs from that ring.
 
-## Project license scope
+## GatewayCore ownership and licensing transition
 
-The root `LICENSE` applies AGPL-3.0-or-later to the GatewayCore repository as a
-whole, including files that previously had no root license declaration. This
-is a project-wide licensing change, not a license limited to the NSEC3 file.
-The upstream OpenGSLB commercial alternative is not included or granted by
-this repository. Review the AGPL obligations before distributing or operating
-a modified network service.
+The owner intends GatewayCore to become a **proprietary commercial product**.
+A customer licensing/activation module and commercial license terms are
+**deferred until the remaining software development issues are closed**.
+There is no root `LICENSE` file in the current main-branch checkout; prior
+repository revisions included an AGPL-3.0-or-later project-wide license.
+The absence of that file now does not revoke any valid licenses previously
+granted for those revisions.
+
+**Do not infer that the current source tree is already free of AGPL duties.**
+The NSEC3 adaptation described above remains attributed to third-party
+AGPL-3.0-or-later material. The OpenGSLB commercial alternative has **not**
+been established in this repository. Before proprietary distribution or
+use of modified network-service code, the owner must obtain appropriate
+rights or arrange a legally reviewed clean replacement. Retain provenance
+records and license notices; do not delete or relabel upstream attribution
+to force a proprietary status.
+
+This file reports the known source provenance; it is not itself a new
+customer license or an assertion that all dependencies are cleared.

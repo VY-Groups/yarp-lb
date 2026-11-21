@@ -1,5 +1,10 @@
 # GatewayCore — Codex handoff, verified repository snapshot
 
+## Ownership/licensing direction (2026-11-21; current owner instruction)
+
+The intended product is proprietary, owner-controlled and commercially licensed in a **later phase after software issues close**. No license activation/billing/tiering module is to be developed now. The root `LICENSE` file is absent at this snapshot, but prior revisions contained project-wide AGPL grants, and `engines/GslbDns/DnssecZoneSigner.cs` contains a separately attributed OpenGSLB **AGPL-derived** NSEC3 implementation. Keep exact upstream attribution and clear its distribution/network-service license compatibility before any commercial/closed-source release. Current source must not be described as fully license-cleared. Update `README.md`, `THIRD_PARTY_NOTICES.md` and `AGENTS.md` accordingly; historical text below remains historical evidence rather than a current licensing declaration.
+
+
 ## Continuation snapshot — security review and release status (2026-11-21)
 
 This is the latest verified continuation state; older same-day snapshots below

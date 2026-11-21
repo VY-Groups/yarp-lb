@@ -2,6 +2,14 @@
 
 **Read [CODEX_HANDOFF.md](CODEX_HANDOFF.md) before changing source.** That document contains the verified 2026-11-16 project snapshot, all then-current branches, PR history, open issues, exact source links, test commands and release blockers. Refresh live GitHub state; it is not a continuously updated status feed.
 
+## Owner direction — licensing phase (2026-11-21)
+
+- GatewayCore is intended as a **proprietary, owner-controlled product**, not an open-source product offering. Do not describe the entire repository as currently AGPL licensed simply because historical revisions were.
+- Do **not** implement a license server, activation gate, tiering, subscription enforcement or commercial pricing now; defer that phase until the remaining software issues are completed.
+- Current `main` has no root `LICENSE` file, but its NSEC3 hash-encoding code in `engines/GslbDns/DnssecZoneSigner.cs` remains a disclosed **AGPL-derived third-party adaptation**. See `THIRD_PARTY_NOTICES.md`. Neither removal of old root license wording nor proprietary intent erases existing grants or upstream obligations.
+- Keep the original copyright/SPDX provenance and security behavior intact until a qualified licensing/provenance review permits alternative commercial rights or a properly reviewed replacement. Do not claim closed-source redistribution is cleared, and never delete third-party copyright notices merely to change branding.
+- Keep code changes and independent reviews moving concurrently. Close individual software issues only with exact-head acceptance evidence; #36 remains the physical/operational release gate.
+
 ## Project and release boundary
 
 - GatewayCore is a **single-organization, on-premises .NET 10 + YARP L7 gateway/control plane** with optional, separate experimental DNS/GSLB, L4 and WAF integrations. Preserve the existing application, UI workflows, authorization and compatibility.
