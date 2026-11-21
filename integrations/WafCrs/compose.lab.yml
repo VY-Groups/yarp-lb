@@ -9,6 +9,10 @@ services:
   waf:
     # Official upstream OCI manifest digest inspected 2026-11-20; update by reviewed PR.
     image: ${WAF_IMAGE:-owasp/modsecurity-crs@sha256:f7b4ec036553aa65e65fe792394099f597d6130465e63ff58d84f087617f5412}
+    volumes:
+      # Loaded before CRS rule 920420. Allows only PKIX DER POST to this
+      # disposable lab endpoint; all other protections remain active.
+      - ./REQUEST-900-LAB-PKIX.conf:/etc/modsecurity.d/owasp-crs/rules/REQUEST-900-GATEWAYCORE-LAB-PKIX.conf:ro
     environment:
       BACKEND: http://protected-app:8000
       SERVER_NAME: localhost
