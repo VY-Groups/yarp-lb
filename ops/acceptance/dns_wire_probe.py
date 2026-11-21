@@ -139,6 +139,21 @@ def run(args):
     assert any(t == 41 and (ttl >> 24) == 16 for _, t, _, ttl in records), (
         "unsupported EDNS version did not report BADVERS extended RCODE")
     print("PASS EDNS BADVERS")
+    # An existing apex with an unsupported RR type is NODATA, not NXDOMAIN.
+    for tcp in (False, True):
+        flags, records, _ = check(args.host, args.port, zone, zone, 15, tcp, args.timeout)
+        assert (flags & 0x0400) and (flags & 0xF) == 0, "apex MX NODATA returned incorrect flags"
+        assert not any(section == "answer" and typ == 15 for section, typ, _, _ in records), (
+            "unexpected apex MX RRset")
+        assert any(section == "authority" and typ == 6 for section, typ, _, _ in records), (
+            "NODATA missing negative-caching SOA")
+        print(f"PASS NODATA {'TCP' if tcp else 'UDP'}")
+    # The listener is authoritative for configured zones only.
+    outside = "not-served.invalid"
+    for tcp in (False, True):
+        flags, _, _ = check(args.host, args.port, zone, outside, 1, tcp, args.timeout)
+        assert (flags & 0xF) == 5 and not (flags & 0x0080), "outside zone did not refuse recursion"
+        print(f"PASS REFUSED {'TCP' if tcp else 'UDP'}")
     print("PASS authoritative UDP/TCP interoperability; no physical/soak certification implied")
 
 

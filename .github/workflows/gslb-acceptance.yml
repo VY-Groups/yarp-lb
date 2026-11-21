@@ -2,9 +2,9 @@ name: GSLB authoritative DNS health/failover acceptance
 on:
   push:
     branches: [main, "feature/**"]
-    paths: ["engines/GslbDns/**", "engines/GslbObserver/**", "tests/GslbAcceptance/**", ".github/workflows/gslb-acceptance.yml"]
+    paths: ["engines/GslbDns/**", "engines/GslbObserver/**", "tests/GslbAcceptance/**", "ops/acceptance/dns_wire_probe.py", ".github/workflows/gslb-acceptance.yml"]
   pull_request:
-    paths: ["engines/GslbDns/**", "engines/GslbObserver/**", "tests/GslbAcceptance/**", ".github/workflows/gslb-acceptance.yml"]
+    paths: ["engines/GslbDns/**", "engines/GslbObserver/**", "tests/GslbAcceptance/**", "ops/acceptance/dns_wire_probe.py", ".github/workflows/gslb-acceptance.yml"]
   workflow_dispatch:
 permissions: {contents: read}
 jobs:
@@ -22,6 +22,8 @@ jobs:
         with: {dotnet-version: "10.0.x"}
       - run: dotnet build engines/GslbDns/GslbDns.csproj -c Release
       - run: dotnet run --project tests/GslbAcceptance/GslbAcceptance.csproj -c Release -- "${{ github.workspace }}"
+      - name: Real authoritative DNS UDP/TCP/EDNS/negative-answer wire acceptance
+        run: python tests/GslbAcceptance/wire_probe_acceptance.py
       - run: dotnet build engines/GslbObserver/GslbObserver.csproj -c Release
       - name: Two DNS nodes and two TLS-authenticated external health validators
         if: runner.os == 'Linux'
