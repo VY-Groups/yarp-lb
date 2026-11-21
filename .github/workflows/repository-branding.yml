@@ -1,0 +1,27 @@
+name: Repository-neutral branding (source and docs)
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  neutral-branding:
+    name: Check neutral branding - ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 8
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2022]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Reject organization-specific names in tracked paths and text
+        run: python -m unittest discover -s tests/CI/branding -p "test_neutral_branding.py" -v
