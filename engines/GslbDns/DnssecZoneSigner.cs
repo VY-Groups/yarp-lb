@@ -47,7 +47,8 @@ internal sealed class DnssecZoneSigner : IDisposable
         IReadOnlyList<DnsDelegation> delegations, bool hasA, bool hasAaaa,
         IReadOnlyList<string>? prepublishPublicKeyPaths = null,
         IReadOnlyList<string>? additionalSigningKeyPaths = null,
-        string denialMode = "Nsec", string? nsec3SaltHex = null, int nsec3Iterations = 0)
+        string denialMode = "Nsec", string? nsec3SaltHex = null, int nsec3Iterations = 0,
+        IReadOnlyList<DnsTxtRecord>? acmeTxtRecords = null)
     {
         this.apex = Canonical(apex);
         this.ttl = ttl;
@@ -126,6 +127,17 @@ internal sealed class DnssecZoneSigner : IDisposable
                 AddType(host, server.RecordType);
                 staticRecords.Add(new DnsResource(host, server.RecordType, ttl, server.Address.GetAddressBytes()));
             }
+        }
+        // The static DNS-01 TXT owners must exist in NSEC/NSEC3 type bitmaps
+        // and their parent empty non-terminals must exist in the denial chain.
+        // Never sign a TXT RRset with the default 'name does not exist' proof.
+        foreach (var txt in acmeTxtRecords ?? [])
+        {
+            var owner = Canonical(txt.Host);
+            for (var current = owner; current != this.apex; current = Parent(current))
+                AddOwner(current);
+            AddType(owner, 16);
+            staticRecords.Add(new DnsResource(owner, 16, ttl, txt.Rdata));
         }
         if (useNsec3)
         {
