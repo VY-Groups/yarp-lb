@@ -1,7 +1,6 @@
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Xml;
-using System.Xml.Linq;
 using Microsoft.AspNetCore.DataProtection;
 using GatewayCore.Gslb.Contracts;
 
@@ -110,7 +109,7 @@ public static class LinuxKeyProtection
     // Inspect existing XML without modifying it or deserializing key types.
     private static void ValidateExistingKeyRing(string directory)
     {
-        XNamespace protection = "http://schemas.asp.net/2015/03/dataProtection";
+        const string protectionNamespace = "http://schemas.asp.net/2015/03/dataProtection";
         foreach (var path in Directory.EnumerateFiles(directory, "*.xml"))
         {
             if ((File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0)
@@ -130,27 +129,39 @@ public static class LinuxKeyProtection
                     XmlResolver = null,
                     MaxCharactersInDocument = 1024 * 1024
                 });
-                var root = XDocument.Load(reader).Root;
-                // Revocation files never contain master key material. A forged
-                // revocation wrapper must not bypass our plaintext-ring guard.
-                if (root?.Name == "revocation")
+                if (reader.MoveToContent() != XmlNodeType.Element)
+                    throw new InvalidOperationException("Existing Linux key-ring XML has no root element");
+                var rootName = reader.LocalName;
+                var rootNamespace = reader.NamespaceURI;
+                var isRevocation = rootName == "revocation" && rootNamespace.Length == 0;
+                var isKey = rootName == "key" && rootNamespace.Length == 0;
+                if (!isRevocation && !isKey)
+                    throw new InvalidOperationException(
+                        "Existing Linux key ring is not certificate-wrapped; isolate and recover an approved protected backup");
+
+                // Walk element names only. Do not materialize the document's
+                // text into an XDocument, where a legacy plaintext master key
+                // would become a long-lived managed string.
+                var encryptedSecretCount = 0;
+                while (reader.Read())
                 {
-                    if (root.Descendants().Any(element =>
-                        element.Name.LocalName is "masterKey" or "encryptedSecret"))
+                    if (reader.NodeType != XmlNodeType.Element) continue;
+                    if (reader.LocalName == "masterKey" ||
+                        (isRevocation && reader.LocalName == "encryptedSecret"))
                         throw new InvalidOperationException(
-                            "Linux key-ring revocation XML contains unexpected key material");
-                    continue;
+                            "Existing Linux key-ring XML contains unexpected key material");
+                    if (isKey && reader.LocalName == "encryptedSecret" &&
+                        reader.NamespaceURI == protectionNamespace)
+                        encryptedSecretCount++;
                 }
-                if (root?.Name != "key" ||
-                    root.Descendants().Any(element => element.Name.LocalName == "masterKey") ||
-                    root.Descendants(protection + "encryptedSecret").Count() != 1)
+                if (isKey && encryptedSecretCount != 1)
                     throw new InvalidOperationException(
                         "Existing Linux key ring is not certificate-wrapped; isolate and recover an approved protected backup");
             }
             finally
             {
-                // Legacy plaintext key XML is deliberately read for rejection;
-                // do not leave those secret bytes in a managed heap after failure.
+                // Clear the bounded source buffer even if XML parsing or a
+                // plaintext-key rejection fails.
                 CryptographicOperations.ZeroMemory(bytes);
             }
         }
