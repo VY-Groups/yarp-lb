@@ -36,7 +36,13 @@ internal static class ExternalAuditIntentTests
             File.WriteAllBytes(senderPath, key);
             File.WriteAllText(verifierPath, signer.ExportSubjectPublicKeyInfoPem());
             if (OperatingSystem.IsLinux())
+            {
                 File.SetUnixFileMode(senderPath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+                // A public trust anchor may be readable but not writable by
+                // unrelated users or through a linked ancestor.
+                File.SetUnixFileMode(verifierPath, UnixFileMode.UserRead |
+                    UnixFileMode.UserWrite | UnixFileMode.GroupRead | UnixFileMode.OtherRead);
+            }
             var endpointUrl = endpoint.AbsoluteUri;
             using (var loaded = ExternalAuditIntent.FromEnvironment(
                 endpointUrl, "node-a", senderPath, verifierPath))
@@ -78,6 +84,34 @@ internal static class ExternalAuditIntentTests
                 }
                 catch (InvalidOperationException) { missingPublicDenied = true; }
                 Check(missingPublicDenied, "missing collector verification key fails startup");
+
+                bool PublicKeyRejected(string candidate)
+                {
+                    try
+                    {
+                        using var loaded = ExternalAuditIntent.FromEnvironment(
+                            endpointUrl, "node-a", senderPath, candidate);
+                        return false;
+                    }
+                    catch (InvalidOperationException) { return true; }
+                }
+                File.SetUnixFileMode(verifierPath, UnixFileMode.UserRead |
+                    UnixFileMode.UserWrite | UnixFileMode.GroupRead | UnixFileMode.GroupWrite);
+                Check(PublicKeyRejected(verifierPath),
+                    "group-writable audit collector trust anchor rejected");
+                File.SetUnixFileMode(verifierPath, UnixFileMode.UserRead |
+                    UnixFileMode.UserWrite | UnixFileMode.GroupRead | UnixFileMode.OtherRead);
+
+                var linkedVerifier = Path.Combine(root, "linked-collector.pem");
+                File.CreateSymbolicLink(linkedVerifier, verifierPath);
+                Check(PublicKeyRejected(linkedVerifier),
+                    "symlinked audit collector trust anchor rejected");
+                Check(PublicKeyRejected(Path.Combine(linkedParent, "collector-public.pem")),
+                    "collector trust anchor through symlinked ancestor rejected");
+                using (var loaded = ExternalAuditIntent.FromEnvironment(
+                    endpointUrl, "node-a", senderPath, verifierPath))
+                    Check(loaded is not null,
+                        "world-readable, non-writable verified collector public key remains supported");
             }
         }
         finally
