@@ -6,6 +6,10 @@
     <Compile Include="../../TlsInventory.cs" Link="TlsInventory.cs" />
     <Compile Include="../../AcmeTargetPolicy.cs" Link="AcmeTargetPolicy.cs" />
     <Compile Include="../../AcmeHttp01ChallengeStore.cs" Link="AcmeHttp01ChallengeStore.cs" />
+    <Compile Include="../../AcmeDns01Publication.cs" Link="AcmeDns01Publication.cs" />
+    <Compile Include="../../AcmeDns01AuthoritativeProbe.cs" Link="AcmeDns01AuthoritativeProbe.cs" />
+    <Compile Include="../../AcmeDns01NsupdateWriter.cs" Link="AcmeDns01NsupdateWriter.cs" />
+    <Compile Include="../../AcmeDns01PublisherSettings.cs" Link="AcmeDns01PublisherSettings.cs" />
     <Compile Include="../../TrafficHttpProtocols.cs" Link="TrafficHttpProtocols.cs" />
     <Compile Include="../../TrafficCertificateRotation.cs" Link="TrafficCertificateRotation.cs" />
     <Compile Include="../../AcmeRenewal.cs" Link="AcmeRenewal.cs" />
