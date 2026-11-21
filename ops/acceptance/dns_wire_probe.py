@@ -54,44 +54,63 @@ def exchange(host, port, payload, tcp, timeout):
         return sock.recv(65535)
 
 
-def skip_name(data, pos):
-    """Bounds-check compressed names without following untrusted pointer chains."""
-    length = 0
+def read_name(data, pos):
+    """Decode one bounded DNS name and reject invalid compression pointers."""
+    labels = []
+    expanded_length = 1
+    cursor = pos
+    resume = None
+    visited_targets = set()
     while True:
-        if pos >= len(data):
+        if cursor >= len(data):
             raise AssertionError("truncated DNS name")
-        size = data[pos]
-        pos += 1
+        size = data[cursor]
         if size & 0xC0 == 0xC0:
-            if pos >= len(data):
+            if cursor + 1 >= len(data):
                 raise AssertionError("truncated compression pointer")
-            return pos + 1
+            target = ((size & 0x3F) << 8) | data[cursor + 1]
+            if target >= len(data):
+                raise AssertionError("compression pointer outside DNS packet")
+            if target in visited_targets:
+                raise AssertionError("compression pointer cycle")
+            visited_targets.add(target)
+            if resume is None:
+                resume = cursor + 2
+            cursor = target
+            continue
         if size & 0xC0:
             raise AssertionError("invalid label encoding")
+        cursor += 1
         if size == 0:
-            return pos
-        length += size + 1
-        if length > 255 or pos + size > len(data):
+            return tuple(labels), resume if resume is not None else cursor
+        expanded_length += size + 1
+        if expanded_length > 255 or cursor + size > len(data):
             raise AssertionError("invalid DNS name length")
-        pos += size
+        labels.append(data[cursor:cursor + size].lower())
+        cursor += size
 
 
-def parse(response, txid):
+def parse(response, txid, expected_name, expected_qtype):
     if len(response) < 12:
         raise AssertionError("short DNS header")
     rid, flags, qd, an, ns, ar = struct.unpack_from("!HHHHHH", response)
     assert rid == txid, "transaction ID mismatch"
     assert flags & 0x8000, "not a response"
     assert not (flags & 0x0080), "recursion unexpectedly available"
+    assert qd == 1, "response must echo exactly one question"
     pos = 12
-    for _ in range(qd):
-        pos = skip_name(response, pos)
-        assert pos + 4 <= len(response), "truncated question"
-        pos += 4
+    question_name, pos = read_name(response, pos)
+    assert question_name == tuple(label.lower() for label in
+                                  expected_name.rstrip(".").encode("ascii").split(b".")), (
+        "question name mismatch")
+    assert pos + 4 <= len(response), "truncated question"
+    question_type, question_class = struct.unpack_from("!HH", response, pos)
+    assert question_type == expected_qtype and question_class == 1, "question type/class mismatch"
+    pos += 4
     rrsets = []
     for section, count in (("answer", an), ("authority", ns), ("additional", ar)):
         for _ in range(count):
-            pos = skip_name(response, pos)
+            _, pos = read_name(response, pos)
             assert pos + 10 <= len(response), "truncated RR header"
             rtype, rclass, ttl, rdlen = struct.unpack_from("!HHIH", response, pos)
             pos += 10
@@ -102,16 +121,41 @@ def parse(response, txid):
     return flags, rrsets
 
 
+def validate_parser_guards():
+    txid = 0x1234
+    header = struct.pack("!HHHHHH", txid, 0x8000, 1, 0, 0, 0)
+    valid_question = name_wire("example.test") + struct.pack("!HH", 1, 1)
+
+    def rejected(question_bytes, expected_name="example.test", expected_qtype=1):
+        try:
+            parse(header + question_bytes, txid, expected_name, expected_qtype)
+        except AssertionError:
+            return True
+        return False
+
+    outside_pointer = b"\xff\xff" + struct.pack("!HH", 1, 1)
+    cyclic_pointer = b"\xc0\x0c" + struct.pack("!HH", 1, 1)
+    mismatched_name = name_wire("other.test") + struct.pack("!HH", 1, 1)
+    mismatched_type = name_wire("example.test") + struct.pack("!HH", 28, 1)
+    assert parse(header + valid_question, txid, "EXAMPLE.TEST.", 1)[0] == 0x8000
+    assert rejected(outside_pointer), "out-of-packet compression pointer was accepted"
+    assert rejected(cyclic_pointer), "cyclic compression pointer was accepted"
+    assert rejected(mismatched_name), "mismatched response question name was accepted"
+    assert rejected(mismatched_type), "mismatched response question type was accepted"
+    print("PASS DNS parser rejects invalid compression and mismatched questions")
+
+
 def check(host, port, zone, name, qtype, tcp, timeout, *, edns=False, version=0):
     txid, packet = question(name, qtype, edns=edns, version=version)
     response = exchange(host, port, packet, tcp, timeout)
-    flags, records = parse(response, txid)
+    flags, records = parse(response, txid, name, qtype)
     return flags, records, len(response)
 
 
 def run(args):
     zone = args.zone.rstrip(".").lower()
     name_wire(zone)
+    validate_parser_guards()
     # NS and SOA at the apex must be authoritative and must not recurse.
     for qtype, label in ((2, "NS"), (6, "SOA")):
         for tcp in (False, True):
@@ -136,9 +180,8 @@ def run(args):
     print(f"PASS EDNS0 UDP {size} bytes")
     flags, records, _ = check(args.host, args.port, zone, zone, 6, False, args.timeout,
                               edns=True, version=1)
-    # RFC 6891: the OPT TTL high byte is the *upper eight bits* of the
-    # twelve-bit RCODE. BADVERS=16 therefore uses extended code 1 and
-    # the ordinary DNS header's low four bits are 0.
+    # RFC 6891: the OPT TTL high byte is the upper eight bits of the
+    # twelve-bit RCODE. BADVERS=16 uses extended code 1 and header RCODE 0.
     assert any(t == 41 and (((ttl >> 24) << 4) | (flags & 0xF)) == 16
                for _, t, _, ttl in records), (
         "unsupported EDNS version did not report BADVERS RCODE 16")
