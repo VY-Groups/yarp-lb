@@ -46,6 +46,28 @@ class DnsWireProbeTests(unittest.TestCase):
                 with self.assertRaisesRegex(AssertionError, message):
                     probe.validate_edns0_response(records)
 
+    def test_badvers_response_envelope_accepts_valid_opt(self):
+        probe.validate_badvers_response(0x8000, [("additional", (), 41, 1232, 0x01000000)])
+
+    def test_badvers_response_envelope_rejects_malformed_opt(self):
+        valid = ("additional", (), 41, 1232, 0x01000000)
+        cases = (
+            (0x8000, [], "exactly one"),
+            (0x8000, [valid, valid], "exactly one"),
+            (0x8000, [("answer", (), 41, 1232, 0x01000000)], "additional section"),
+            (0x8000, [("additional", (b"bad",), 41, 1232, 0x01000000)], "root"),
+            (0x8000, [("additional", (), 41, 511, 0x01000000)], "UDP size"),
+            (0x8000, [("additional", (), 41, 1232, 0x01010000)], "version"),
+            (0x8000, [("additional", (), 41, 1232, 0x01008000)], "flags"),
+            (0x8001, [valid], "RCODE 16"),
+            (0x8000, [("additional", (), 41, 1232, 0)], "RCODE 16"),
+            (0x8000, [("additional", (), 41, 1232, 0x02000000)], "RCODE 16"),
+        )
+        for flags, records, message in cases:
+            with self.subTest(flags=flags, records=records):
+                with self.assertRaisesRegex(AssertionError, message):
+                    probe.validate_badvers_response(flags, records)
+
     def test_truncated_udp_retries_tcp_with_same_query(self):
         seen = []
         def transport(host, port, packet, tcp, timeout):
