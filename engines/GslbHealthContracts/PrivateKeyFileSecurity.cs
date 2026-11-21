@@ -44,11 +44,34 @@ public static class PrivateKeyFileSecurity
     }
 
     /// <summary>
+    /// Reads a trust-anchor public key using the same bounded, non-symlinked
+    /// handle as private files. Group/other read access may be allowed only
+    /// for public trust material; all writes and executes remain forbidden.
+    /// </summary>
+    public static string ReadTrustedPublicKeyPem(string? path, string purpose)
+    {
+        const int MaximumTrustAnchorBytes = 16 * 1024;
+        var bytes = ReadPrivateFileBytes(path, purpose, MaximumTrustAnchorBytes,
+            allowGroupOrOtherRead: true);
+        try
+        {
+            var pem = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false,
+                throwOnInvalidBytes: true).GetString(bytes);
+            if (!pem.Contains("-----BEGIN PUBLIC KEY-----", StringComparison.Ordinal) ||
+                !pem.Contains("-----END PUBLIC KEY-----", StringComparison.Ordinal))
+                throw new InvalidDataException("Trusted signing key must be a SubjectPublicKeyInfo PEM");
+            return pem;
+        }
+        finally { System.Security.Cryptography.CryptographicOperations.ZeroMemory(bytes); }
+    }
+
+    /// <summary>
     /// Read using the same inspected, non-symlinked opened handle.
     /// On Linux validate each parent directory and the final regular file;
     /// Windows callers must separately enforce their required ACL policy.
     /// </summary>
-    public static FileStream OpenPrivateFileRead(string? path, string purpose)
+    public static FileStream OpenPrivateFileRead(string? path, string purpose,
+        bool allowGroupOrOtherRead = false)
     {
         if (string.IsNullOrWhiteSpace(path) || !Path.IsPathFullyQualified(path))
             throw new InvalidDataException($"{purpose} path must be absolute");
@@ -65,7 +88,8 @@ public static class PrivateKeyFileSecurity
             if ((attributes & (FileAttributes.Directory | FileAttributes.ReparsePoint | FileAttributes.Device)) != 0)
                 throw new InvalidDataException($"{purpose} must be a regular file, not a directory, device, or link");
             if (OperatingSystem.IsLinux())
-                ValidateLinuxOpenedObject(handle, purpose, isDirectory: false);
+                ValidateLinuxOpenedObject(handle, purpose, isDirectory: false,
+                    allowGroupOrOtherRead: allowGroupOrOtherRead);
             var stream = new FileStream(handle, FileAccess.Read);
             handle = null;
             return stream;
@@ -74,11 +98,12 @@ public static class PrivateKeyFileSecurity
     }
 
     /// <summary>Read bounded bytes from one validated, no-follow handle.</summary>
-    public static byte[] ReadPrivateFileBytes(string? path, string purpose, int maximumBytes)
+    public static byte[] ReadPrivateFileBytes(string? path, string purpose, int maximumBytes,
+        bool allowGroupOrOtherRead = false)
     {
         if (maximumBytes is < 1 or > 16 * 1024 * 1024)
             throw new ArgumentOutOfRangeException(nameof(maximumBytes));
-        using var stream = OpenPrivateFileRead(path, purpose);
+        using var stream = OpenPrivateFileRead(path, purpose, allowGroupOrOtherRead);
         var length = stream.Length;
         if (!stream.CanSeek || length <= 0 || length > maximumBytes)
             throw new InvalidDataException($"{purpose} must be a regular file no larger than {maximumBytes} bytes");
@@ -281,7 +306,8 @@ public static class PrivateKeyFileSecurity
         }
     }
 
-    private static LinuxStatx ValidateLinuxOpenedObject(SafeFileHandle handle, string purpose, bool isDirectory)
+    private static LinuxStatx ValidateLinuxOpenedObject(SafeFileHandle handle, string purpose,
+        bool isDirectory, bool allowGroupOrOtherRead = false)
     {
         var requiredMask = LinuxStatxMode | LinuxStatxUid;
         if (StatxUnix(handle.DangerousGetHandle().ToInt32(), "", LinuxAtEmptyPath,
@@ -293,12 +319,13 @@ public static class PrivateKeyFileSecurity
         // before constructing a stream (O_NONBLOCK avoids FIFO open hangs).
         if ((metadata.Mode & 0xF000) != (isDirectory ? 0x4000 : 0x8000))
             throw new InvalidDataException($"{purpose} must be a regular file or expected directory");
-        ValidateLinuxPathObject(metadata.OwnerUid, metadata.Mode, GetEffectiveUid(), isDirectory, purpose);
+        ValidateLinuxPathObject(metadata.OwnerUid, metadata.Mode, GetEffectiveUid(), isDirectory,
+            purpose, allowGroupOrOtherRead);
         return metadata;
     }
 
     internal static void ValidateLinuxPathObject(uint ownerUid, uint mode, uint effectiveUid,
-        bool isDirectory, string purpose)
+        bool isDirectory, string purpose, bool allowGroupOrOtherRead = false)
     {
         if (ownerUid != 0 && ownerUid != effectiveUid)
             throw new InvalidDataException($"{purpose} owner must be root or the service identity");
@@ -306,9 +333,14 @@ public static class PrivateKeyFileSecurity
         var unixMode = (UnixFileMode)mode;
         if (!isDirectory)
         {
+            var forbiddenPermissions = ForbiddenUnixPermissions;
+            if (allowGroupOrOtherRead)
+                forbiddenPermissions &= ~(UnixFileMode.GroupRead | UnixFileMode.OtherRead);
             if ((unixMode & UnixFileMode.UserRead) == 0 ||
-                (unixMode & ForbiddenUnixPermissions) != 0)
-                throw new InvalidDataException($"{purpose} permissions must grant owner read and no group/other access (chmod 600 recommended)");
+                (unixMode & forbiddenPermissions) != 0)
+                throw new InvalidDataException(allowGroupOrOtherRead
+                    ? $"{purpose} permissions must grant owner read and forbid group/other write or execute"
+                    : $"{purpose} permissions must grant owner read and no group/other access (chmod 600 recommended)");
             return;
         }
 
