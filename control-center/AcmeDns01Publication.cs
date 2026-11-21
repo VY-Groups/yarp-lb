@@ -11,9 +11,21 @@ public sealed record AcmeDns01AuthorityObservation(string AuthorityId,
 /// No implementation is registered by default; account/zone credentials must
 /// never be accepted through the public Control Center request body.
 /// </summary>
+public interface IAcmeDns01PublicationLease : IAsyncDisposable
+{
+    /// <summary>
+    /// Publish the exact TXT value. The lease already exists so DisposeAsync
+    /// can compensate if this partially fails. Disposal must be idempotent,
+    /// remove only this lease's exact owner/value, and preserve unrelated TXT
+    /// values that another validation may have published concurrently.
+    /// </summary>
+    Task PublishAsync(CancellationToken cancellationToken);
+}
+
 public interface IAcmeDns01Publisher
 {
-    Task<IAsyncDisposable> PublishAsync(string fqdn, string txtValue,
+    /// <summary>Acquire a cleanup handle without publishing. If acquisition fails, no DNS side effect may remain.</summary>
+    Task<IAcmeDns01PublicationLease> AcquirePublicationLeaseAsync(string fqdn, string txtValue,
         TimeSpan lifetime, CancellationToken cancellationToken);
 
     Task<IReadOnlyList<AcmeDns01AuthorityObservation>> ProbeAuthoritativeAsync(
@@ -96,11 +108,13 @@ public static class AcmeDns01Publication
         var owner = ChallengeOwner(dnsName);
         cancellationToken.ThrowIfCancellationRequested();
 
-        var lease = await publisher.PublishAsync(owner, expectedTxt,
+        // Acquire the compensating handle before the provider can mutate DNS.
+        var lease = await publisher.AcquirePublicationLeaseAsync(owner, expectedTxt,
             TimeSpan.FromMinutes(8), cancellationToken)
             ?? throw new InvalidOperationException("DNS-01 publisher did not return a cleanup lease");
         try
         {
+            await lease.PublishAsync(cancellationToken);
             for (var attempt = 0; attempt < maximumProbes; attempt++)
             {
                 cancellationToken.ThrowIfCancellationRequested();
