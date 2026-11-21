@@ -9,16 +9,19 @@ are historical when their branch, issue, or CI state differs.
   #323–#330. PR #327's Windows/Linux account-key, ACME and ten-run HA checks,
   PR #328's CodeQL inventory and actionlint checks, PR #329's documentation
   checks, and PR #330's Windows/Linux DNS, L7, HA and CodeQL checks passed on
-  their exact heads before merge. The combined `main` DNS, L7 and CodeQL push
-  workflows are still running and must be checked before release.
+  their exact heads before merge. The post-merge `main` DNS, L7 and CodeQL
+  workflows for this commit all passed (runs 44852497378, 44852497417, and
+  44852497555).
 - Ten issues remain open: #34, #36, #37, #38, #48, #49, #51, #52, #53, and
-  #109. PR #331 is the only open PR; it validates and bounds audit-receipt
-  response headers. Its updated exact-head checks and CodeQL comparison are
-  pending.
+  #109. PRs #331 and #332 are open. PR #331 validates and bounds audit-receipt
+  response headers; its latest head is awaiting exact-head Actions. PR #332
+  adds Windows console-control graceful-shutdown acceptance; all checks passed
+  on its current head, but this alone does not complete issue #53.
 - PR #327 addresses account-key persistence only; it does not complete ACME
   issuance and zero-downtime renewal. #330 addresses authority publisher
   shutdown only; it does not close the broader #109 health-authority scope.
-  #53 remains open for Windows console/service graceful-stop acceptance.
+  #53 remains open pending review of its complete software acceptance scope;
+  physical host/soak acceptance is tracked in #36.
 - CodeQL alert #7 (response-splitting flow in the disposable audit receipt
   relay) remains open on main; PR #331 applies bounded base64-character
   validation and awaits a fresh scan. Alerts #1–#6 and #14 also require a
