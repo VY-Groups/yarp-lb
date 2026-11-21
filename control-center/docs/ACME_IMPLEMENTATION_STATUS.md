@@ -163,6 +163,20 @@ PFX or password is linked, too large, or has unsafe Linux permissions. The
 Windows/Linux acceptance verifies live-certificate PFX link/mode rejection and
 renewal PFX/password link and password-mode rejection on Linux.
 
+### ACME account-key directory bootstrap without symlink traversal
+
+On Linux, the ACME account-key store now creates its private key directory
+through the shared no-follow, opened-directory-descriptor traversal rather
+than calling path-based `Directory.CreateDirectory` first and checking
+ownership afterwards. The previous order could create a child folder outside
+the trusted state tree through an existing symlink before throwing.
+The issuer now fails closed before such a filesystem write; Windows retains
+its existing directory and ACL boundary. Linux integration tests require
+that existing and dangling linked ancestors are refused without creating an
+external directory. This hardens on-disk account-key lifecycle only;
+DNS-01, public CA staging acceptance and multi-node challenge coordination
+remain unimplemented.
+
 ### Exact JSON schema for destructive revocation requests
 
 `POST /admin/api/tls/acme/revoke` now requires precisely the four declared
