@@ -50,6 +50,7 @@ internal static class ExternalAuditIntentTests
                         endpointUrl, "node-a", candidate, verifierPath);
                     return false;
                 }
+                catch (InvalidDataException) { return true; }
                 catch (IOException) { return true; }
                 catch (UnauthorizedAccessException) { return true; }
             }
