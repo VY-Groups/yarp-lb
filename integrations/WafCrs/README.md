@@ -41,3 +41,16 @@ The disposable CI corpus now sends a real self-signed **public** X.509 DER certi
 ### Enforced disposable exception governance (not production authorization)
 
 The exact `POST /acceptance` `application/pkix-cert` exclusion for CRS rule `920420` is now accompanied by [the lab policy manifest](exception-policy.lab.json). Before starting Docker, `verify.sh` runs stdlib-only tests and a preflight validator that require a single explicit fixture owner, strict method/path/content-type/rule ID, a **45-day maximum** issue-to-expiry window, a currently valid UTC expiration, and an unmodified exact ModSecurity rule mounted once as read-only. Unexpected fields, duplicate keys, broad scopes and expired policies fail closed; the existing WAF attack and outside-route negative requests remain mandatory. The CI fixture owner is **not** an approved production security owner. No runtime rule-approval API, external audit, multi-tenant policy or customer WAF deployment exists here. A real production policy needs independent review, operator ownership, recorded change/ticket, expiry enforcement, rollback and site-specific FP/FN and performance acceptance under #51.
+
+### WAF lab Compose boundary preflight
+
+The disposable exception preflight now validates the complete active `waf` and
+`protected-app` Compose stanzas against reviewed fixture settings, not only
+the exception manifest and read-only rule mount. It fails closed if a lab
+revision changes the engine mode expression, body-limit rejection, inbound
+anomaly threshold, audit engine, additional rule/environment inputs, WAF
+loopback binding or origin isolation. Negative stdlib unit tests exercise
+those mutation paths before Docker starts. This is a strict lab fixture lock,
+**not** a general Compose/YAML policy parser or production WAF governance.
+A legitimate lab Compose update requires a reviewed update to this fixture
+contract and fresh end-to-end allow/block acceptance.
