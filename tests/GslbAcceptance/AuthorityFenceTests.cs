@@ -312,6 +312,56 @@ internal static class AuthorityFenceTests
             File.Delete(deletionConfig.ReplayStatePath + ".lock");
             Check(ThrowsInvalid(() => new AuthorityFenceStore(deletionConfig, fingerprint, [target])),
                 "deleting replay file and lock marker still fails closed after restart");
+            // Equivalent, valid-looking replay JSON containing case aliases
+            // must never be accepted, even if the typed value is unchanged.
+            // This is a local security contract: an attacker should not be
+            // able to induce last-value-wins interpretation of high-water state.
+            var ambiguousConfig = configB with
+            {
+                EpochStatePath = Path.Combine(root, "ambiguous-epoch.json"),
+                ReplayStatePath = Path.Combine(root, "ambiguous-replay.json")
+            };
+            using (var initialStore = new AuthorityFenceStore(ambiguousConfig, fingerprint, [target])) { }
+            var cleanEpoch = File.ReadAllText(ambiguousConfig.EpochStatePath);
+            var cleanReplay = File.ReadAllText(ambiguousConfig.ReplayStatePath);
+            static void WritePrivateTestState(string path, string json)
+            {
+                File.WriteAllText(path, json);
+                if (!OperatingSystem.IsWindows())
+                    File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+            }
+            var ambiguousEpoch = cleanEpoch.Replace("\"Epoch\":", "\"ePoCh\":0,\"Epoch\":", StringComparison.Ordinal);
+            Check(ambiguousEpoch != cleanEpoch, "epoch test fixture contains expected serialized field");
+            WritePrivateTestState(ambiguousConfig.EpochStatePath, ambiguousEpoch);
+            Check(ThrowsInvalid(() => new AuthorityFenceStore(ambiguousConfig, fingerprint, [target])),
+                "restart refuses case-aliased duplicate persisted authority epoch");
+            WritePrivateTestState(ambiguousConfig.EpochStatePath, cleanEpoch);
+            var ambiguousReplay = cleanReplay.Replace("\"Sequence\":", "\"SEQUENCE\":0,\"Sequence\":", StringComparison.Ordinal);
+            Check(ambiguousReplay != cleanReplay, "replay test fixture contains expected serialized field");
+            WritePrivateTestState(ambiguousConfig.ReplayStatePath, ambiguousReplay);
+            Check(ThrowsInvalid(() => new AuthorityFenceStore(ambiguousConfig, fingerprint, [target])),
+                "restart refuses case-aliased duplicate persisted peer sequence");
+            WritePrivateTestState(ambiguousConfig.ReplayStatePath, cleanReplay);
+            using (var liveStore = new AuthorityFenceStore(ambiguousConfig, fingerprint, [target]))
+            using (var source = new AuthorityFenceStore(configA, fingerprint, [target]))
+            {
+                Check(liveStore.TryAccept(source.CreateSnapshot(4000), tlsA, now, 4000),
+                    "authority can accept signed peer decision before state mutation");
+                liveStore.RecordPeerAcknowledgement(4000, 4001);
+                Check(liveStore.IsPeerEligible("fence.example.test", "primary", 4001),
+                    "authority begins with valid protected state");
+                var pristine = File.ReadAllText(ambiguousConfig.ReplayStatePath);
+                var ambiguous = pristine.Replace("\"Sequence\":", "\"seQUENCE\":0,\"Sequence\":", StringComparison.Ordinal);
+                WritePrivateTestState(ambiguousConfig.ReplayStatePath, ambiguous);
+                Check(!liveStore.IsPeerEligible("fence.example.test", "primary", 5100) &&
+                      ThrowsInvalid(() => liveStore.CreateSnapshot(5100)),
+                    "live ambiguous replay state immediately fences DNS eligibility and publication");
+                WritePrivateTestState(ambiguousConfig.ReplayStatePath, pristine);
+                Check(!liveStore.IsPeerEligible("fence.example.test", "primary", 5101) &&
+                      !liveStore.CanPublish(5101),
+                    "restoring unambiguous replay file does not clear sticky runtime fault");
+            }
+            Console.WriteLine("PASS: authority epoch/sequence JSON aliases and live state tampering fail closed");
             // Simulate loss exactly while the snapshot is evaluating local
             // eligibility: the initial durable check has already completed.
             var signingConfig = configB with
