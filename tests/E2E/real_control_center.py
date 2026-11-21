@@ -252,6 +252,22 @@ def openssl_state(root:Path,origin_port:int):
         "-inkey",str(key),"-in",str(cert),"-passout","pass:temporary-e2e-only-password"],
         check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
     for p in (key,cert,secrets/"dp.pfx"): p.chmod(0o600)
+
+    # Kestrel needs a separate TLS identity with signing usage. Never reuse
+    # the encryption-only Data Protection wrapper as a server certificate.
+    tls_key=secrets/"tls.key"
+    tls_cert=secrets/"tls.crt"
+    tls_pfx=secrets/"tls.pfx"
+    subprocess.run(["openssl","req","-x509","-newkey","rsa:3072","-nodes","-days","7",
+        "-subj","/CN=127.0.0.1", "-keyout",str(tls_key),"-out",str(tls_cert),
+        "-addext","subjectAltName=IP:127.0.0.1",
+        "-addext","basicConstraints=critical,CA:FALSE",
+        "-addext","keyUsage=critical,digitalSignature,keyEncipherment"],
+        check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+    subprocess.run(["openssl","pkcs12","-export","-out",str(tls_pfx),
+        "-inkey",str(tls_key),"-in",str(tls_cert),"-passout","pass:temporary-e2e-only-password"],
+        check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+    for p in (tls_key,tls_cert,tls_pfx): p.chmod(0o600)
     appconfig=config/"appsettings.json"
     appconfig.write_text(json.dumps({"Logging":{"LogLevel":{"Default":"Warning"}},
         "AllowedHosts":"localhost;127.0.0.1",
