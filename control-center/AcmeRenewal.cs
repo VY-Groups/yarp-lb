@@ -409,39 +409,63 @@ public sealed record AcmeRenewalSettings(string DirectoryUrl, string DnsName, st
     public static AcmeRenewalSettings Load(string path, string trafficPfxPath,
         string trafficPfxPasswordFile, IReadOnlyList<string>? trafficCertificateDnsNames)
     {
-        if (string.IsNullOrWhiteSpace(path) || !Path.IsPathFullyQualified(path) || !File.Exists(path) ||
-            (File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0)
-            throw new InvalidOperationException("ACME configuration must be an existing absolute non-symlink file.");
-        if (OperatingSystem.IsLinux())
+        // Issue #37: a privileged ACME directory override must not be parsed
+        // from a symlink swap or an unbounded last-property-wins JSON file.
+        // Use the same validated opened handle as other private state keys.
+        var configBytes = GatewayCore.Gslb.Contracts.PrivateKeyFileSecurity.ReadPrivateFileBytes(
+            path, "ACME renewal configuration", 16 * 1024);
+        try
         {
-            var mode = File.GetUnixFileMode(path);
-            if ((mode & (UnixFileMode.GroupRead | UnixFileMode.GroupWrite | UnixFileMode.GroupExecute |
-                         UnixFileMode.OtherRead | UnixFileMode.OtherWrite | UnixFileMode.OtherExecute)) != 0)
-                throw new InvalidOperationException("ACME configuration must have mode 0600 or stricter.");
+            try
+            {
+                // Reject malformed UTF-8 and duplicate/case-aliased JSON names
+                // before Web-default deserialization can choose the last value.
+                _ = new UTF8Encoding(false, true).GetCharCount(configBytes);
+                using var doc = JsonDocument.Parse(configBytes, new JsonDocumentOptions { MaxDepth = 8 });
+                if (doc.RootElement.ValueKind != JsonValueKind.Object)
+                    throw new InvalidOperationException("ACME configuration must be a JSON object");
+                var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var property in doc.RootElement.EnumerateObject())
+                    if (!names.Add(property.Name))
+                        throw new InvalidOperationException("ACME configuration contains duplicate or aliased properties");
+            }
+            catch (DecoderFallbackException)
+            {
+                throw new InvalidOperationException("ACME configuration is not valid UTF-8");
+            }
+            catch (JsonException)
+            {
+                throw new InvalidOperationException("ACME configuration contains invalid JSON");
+            }
+
+            var options = new JsonSerializerOptions(JsonSerializerDefaults.Web)
+            {
+                UnmappedMemberHandling = System.Text.Json.Serialization.JsonUnmappedMemberHandling.Disallow
+            };
+            var value = JsonSerializer.Deserialize<AcmeRenewalSettings>(configBytes, options)
+                ?? throw new InvalidOperationException("ACME configuration is empty.");
+            var target = AcmeTargetPolicy.Validate(value.DirectoryUrl, value.DnsName, http01: true,
+                publicChallengeEntrypointEnabled: true);
+            var productionDirectory = Uri.TryCreate(value.DirectoryUrl, UriKind.Absolute, out var directory) &&
+                string.Equals(directory.IdnHost, "acme-v02.api.letsencrypt.org", StringComparison.OrdinalIgnoreCase);
+            if (!target.Allowed || value.RenewalWindowDays is < 1 or > 60 ||
+                string.IsNullOrWhiteSpace(value.ContactEmail) || value.ContactEmail.Length > 254 ||
+                !value.ContactEmail.Contains('@') || value.ContactEmail.Any(char.IsControl) ||
+                !value.AgreeToTermsOfService || (productionDirectory && !value.AllowProductionCa))
+                throw new InvalidOperationException("ACME configuration has an invalid directory, public DNS name, contact, or renewal window.");
+            var comparer = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+            if (!Path.GetFullPath(value.PfxPath).Equals(Path.GetFullPath(trafficPfxPath), comparer) ||
+                !Path.GetFullPath(value.PfxPasswordFile).Equals(Path.GetFullPath(trafficPfxPasswordFile), comparer) ||
+                trafficCertificateDnsNames is not { Count: > 0 } listenerNames ||
+                !listenerNames.Any(name => string.Equals(AcmeTargetPolicy.ValidateDnsName(name).NormalizedDnsName,
+                    target.NormalizedDnsName, StringComparison.Ordinal)))
+                throw new InvalidOperationException("ACME target and PFX paths must match the isolated traffic listener's rotation configuration.");
+            return value with { DnsName = target.NormalizedDnsName!, RenewalWindowDays = value.RenewalWindowDays };
         }
-        var options = new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web)
+        finally
         {
-            UnmappedMemberHandling = System.Text.Json.Serialization.JsonUnmappedMemberHandling.Disallow
-        };
-        var value = System.Text.Json.JsonSerializer.Deserialize<AcmeRenewalSettings>(File.ReadAllText(path), options)
-            ?? throw new InvalidOperationException("ACME configuration is empty.");
-        var target = AcmeTargetPolicy.Validate(value.DirectoryUrl, value.DnsName, http01: true,
-            publicChallengeEntrypointEnabled: true);
-        var productionDirectory = Uri.TryCreate(value.DirectoryUrl, UriKind.Absolute, out var directory) &&
-            string.Equals(directory.IdnHost, "acme-v02.api.letsencrypt.org", StringComparison.OrdinalIgnoreCase);
-        if (!target.Allowed || value.RenewalWindowDays is < 1 or > 60 ||
-            string.IsNullOrWhiteSpace(value.ContactEmail) || value.ContactEmail.Length > 254 ||
-            !value.ContactEmail.Contains('@') || value.ContactEmail.Any(char.IsControl) ||
-            !value.AgreeToTermsOfService || (productionDirectory && !value.AllowProductionCa))
-            throw new InvalidOperationException("ACME configuration has an invalid directory, public DNS name, contact, or renewal window.");
-        var comparer = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
-        if (!Path.GetFullPath(value.PfxPath).Equals(Path.GetFullPath(trafficPfxPath), comparer) ||
-            !Path.GetFullPath(value.PfxPasswordFile).Equals(Path.GetFullPath(trafficPfxPasswordFile), comparer) ||
-            trafficCertificateDnsNames is not { Count: > 0 } names ||
-            !names.Any(name => string.Equals(AcmeTargetPolicy.ValidateDnsName(name).NormalizedDnsName,
-                target.NormalizedDnsName, StringComparison.Ordinal)))
-            throw new InvalidOperationException("ACME target and PFX paths must match the isolated traffic listener's rotation configuration.");
-        return value with { DnsName = target.NormalizedDnsName!, RenewalWindowDays = value.RenewalWindowDays };
+            CryptographicOperations.ZeroMemory(configBytes);
+        }
     }
 }
 
