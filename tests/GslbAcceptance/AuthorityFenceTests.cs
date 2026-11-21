@@ -221,13 +221,15 @@ internal static class AuthorityFenceTests
                 }
                 finally { File.WriteAllText(publicAPath, originalPem); }
             }
-            var now = DateTimeOffset.UtcNow;
+            // Preserve synthetic monotonic-tick leases, but use a fresh real
+            // wall clock for each signed snapshot admission. A time captured
+            // at fixture startup becomes stale during slow Windows CI runs.
             AuthorityFenceSnapshot initial;
             using (var source = new AuthorityFenceStore(configA, fingerprint, [target]))
             using (var receiver = new AuthorityFenceStore(configB, fingerprint, [target]))
             {
                 initial = source.CreateSnapshot(100);
-                Check(receiver.TryAccept(initial, tlsA, now, 100), "peer accepts authenticated signed decision snapshot");
+                Check(receiver.TryAccept(initial, tlsA, DateTimeOffset.UtcNow, 100), "peer accepts authenticated signed decision snapshot");
                 Check(receiver.IsAllowedPeerAddress(IPAddress.Loopback) &&
                       receiver.IsAllowedPeerAddress(IPAddress.Parse("::ffff:127.0.0.1")),
                     "inbound peer IP allowlist accepts the configured address and mapped IPv4 form");
@@ -268,7 +270,7 @@ internal static class AuthorityFenceTests
                 // before exercising the live HTTP route, which reads that clock.
                 var routeTick = Environment.TickCount64;
                 var routeSnapshot = source.CreateSnapshot(routeTick);
-                Check(receiver.TryAccept(routeSnapshot, tlsA, now, routeTick),
+                Check(receiver.TryAccept(routeSnapshot, tlsA, DateTimeOffset.UtcNow, routeTick),
                     "live status route fixture accepts a currently fresh signed snapshot");
                 receiver.RecordPeerAcknowledgement(routeTick, routeTick);
                 var statusPort = ReserveLoopbackPort();
@@ -306,14 +308,14 @@ internal static class AuthorityFenceTests
                         "authority diagnostic endpoint is absent when the fence is disabled");
                 }
                 finally { noFenceServer.DisposeAsync().AsTask().GetAwaiter().GetResult(); }
-                Check(!receiver.TryAccept(initial, tlsA, now, 102), "duplicate authority snapshot is replay rejected");
+                Check(!receiver.TryAccept(initial, tlsA, DateTimeOffset.UtcNow, 102), "duplicate authority snapshot is replay rejected");
                 Check(receiver.IsPeerEligible("fence.example.test", "primary", 102),
                     "rejected replay does not clear current lease");
-                Check(!receiver.TryAccept(source.CreateSnapshot(103), tlsB, now, 103),
+                Check(!receiver.TryAccept(source.CreateSnapshot(103), tlsB, DateTimeOffset.UtcNow, 103),
                     "mTLS certificate identity must match configured authority peer");
                 localHealthy = false;
                 var negative = source.CreateSnapshot(104);
-                Check(receiver.TryAccept(negative, tlsA, now, 104) &&
+                Check(receiver.TryAccept(negative, tlsA, DateTimeOffset.UtcNow, 104) &&
                       !receiver.IsPeerEligible("fence.example.test", "primary", 105),
                     "authenticated negative peer decision keeps DNS fence closed");
                 var unhealthy = receiver.Inspect(105);
@@ -324,16 +326,16 @@ internal static class AuthorityFenceTests
             using (var restartedReceiver = new AuthorityFenceStore(configB, fingerprint, [target]))
             using (var restartedSource = new AuthorityFenceStore(configA, fingerprint, [target]))
             {
-                Check(!restartedReceiver.TryAccept(initial, tlsA, now, 200),
+                Check(!restartedReceiver.TryAccept(initial, tlsA, DateTimeOffset.UtcNow, 200),
                     "durable receiver high-water rejects a pre-restart snapshot replay");
                 var recovered = restartedSource.CreateSnapshot(201);
                 restartedReceiver.RecordPeerAcknowledgement(201, 202);
                 Check(recovered.Epoch > initial.Epoch &&
-                      restartedReceiver.TryAccept(recovered, tlsA, now, 201) &&
+                      restartedReceiver.TryAccept(recovered, tlsA, DateTimeOffset.UtcNow, 201) &&
                       restartedReceiver.IsPeerEligible("fence.example.test", "primary", 202),
                     "new sender epoch provides fresh recovery after authority restart");
                 var freshInbound = restartedSource.CreateSnapshot(5200);
-                Check(restartedReceiver.TryAccept(freshInbound, tlsA, now, 5200),
+                Check(restartedReceiver.TryAccept(freshInbound, tlsA, DateTimeOffset.UtcNow, 5200),
                     "fresh inbound report during one-way outage accepted as evidence");
                 Check(!restartedReceiver.IsPeerEligible("fence.example.test", "primary", 5202),
                     "fresh inbound evidence cannot extend expired outbound acknowledgement");
@@ -343,12 +345,12 @@ internal static class AuthorityFenceTests
                 restartedReceiver.RecordPeerAcknowledgement(5202, 5203);
                 Check(restartedReceiver.IsPeerEligible("fence.example.test", "primary", 5203),
                     "fresh outbound acknowledgement restores bidirectional eligibility");
-                Check(!restartedReceiver.TryAccept(recovered with { Signature = "A" }, tlsA, now, 5203),
+                Check(!restartedReceiver.TryAccept(recovered with { Signature = "A" }, tlsA, DateTimeOffset.UtcNow, 5203),
                     "tampered authority signature is rejected");
             }
             using (var mismatched = new AuthorityFenceStore(configB, new string('B', 64), [target]))
             using (var source = new AuthorityFenceStore(configA, fingerprint, [target]))
-                Check(!mismatched.TryAccept(source.CreateSnapshot(300), tlsA, now, 300),
+                Check(!mismatched.TryAccept(source.CreateSnapshot(300), tlsA, DateTimeOffset.UtcNow, 300),
                     "different routing configuration fingerprint cannot form agreement");
             var deletionConfig = configB with
             {
@@ -358,7 +360,7 @@ internal static class AuthorityFenceTests
             using (var deletionReceiver = new AuthorityFenceStore(deletionConfig, fingerprint, [target]))
             using (var deletionSource = new AuthorityFenceStore(configA, fingerprint, [target]))
             {
-                Check(deletionReceiver.TryAccept(deletionSource.CreateSnapshot(400), tlsA, now, 400),
+                Check(deletionReceiver.TryAccept(deletionSource.CreateSnapshot(400), tlsA, DateTimeOffset.UtcNow, 400),
                     "replay state initializes once for a new authority pair");
                 deletionReceiver.RecordPeerAcknowledgement(400, 400);
                 Check(deletionReceiver.IsPeerEligible("fence.example.test", "primary", 400),
@@ -379,7 +381,7 @@ internal static class AuthorityFenceTests
                 if (!OperatingSystem.IsWindows())
                     File.SetUnixFileMode(deletionConfig.ReplayStatePath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
                 deletionReceiver.RecordPeerAcknowledgement(1402, 1402);
-                Check(!deletionReceiver.TryAccept(deletionSource.CreateSnapshot(1402), tlsA, now, 1402) &&
+                Check(!deletionReceiver.TryAccept(deletionSource.CreateSnapshot(1402), tlsA, DateTimeOffset.UtcNow, 1402) &&
                       !deletionReceiver.IsPeerEligible("fence.example.test", "primary", 1403) &&
                       ThrowsInvalid(() => deletionReceiver.CreateSnapshot(1403)),
                     "restored state cannot clear a latched runtime authority fault");
@@ -421,7 +423,7 @@ internal static class AuthorityFenceTests
             using (var liveStore = new AuthorityFenceStore(ambiguousConfig, fingerprint, [target]))
             using (var source = new AuthorityFenceStore(configA, fingerprint, [target]))
             {
-                Check(liveStore.TryAccept(source.CreateSnapshot(4000), tlsA, now, 4000),
+                Check(liveStore.TryAccept(source.CreateSnapshot(4000), tlsA, DateTimeOffset.UtcNow, 4000),
                     "authority can accept signed peer decision before state mutation");
                 liveStore.RecordPeerAcknowledgement(4000, 4001);
                 Check(liveStore.IsPeerEligible("fence.example.test", "primary", 4001),
@@ -471,7 +473,7 @@ internal static class AuthorityFenceTests
             using (var sendStore = new AuthorityFenceStore(sendConfig, fingerprint, [target]))
             using (var sendSource = new AuthorityFenceStore(configA, fingerprint, [target]))
             {
-                Check(sendStore.TryAccept(sendSource.CreateSnapshot(1600), tlsA, now, 1600),
+                Check(sendStore.TryAccept(sendSource.CreateSnapshot(1600), tlsA, DateTimeOffset.UtcNow, 1600),
                     "publication fixture receives a valid inbound lease");
                 Check(sendStore.CreateSnapshot(1600).Decisions.Single().Eligible && sendStore.CanPublish(1600),
                     "intact state permits prepared publication");
