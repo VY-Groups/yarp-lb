@@ -1077,23 +1077,45 @@ foreach (var duplicateHost in new[]
 // Even RFC 5737/3849 addresses are denied unless an isolated loopback lab
 // fixture explicitly opts in. The option cannot be enabled for a public or
 // remotely reachable DNS listener, regardless of bind permissions.
-foreach (var (label, mutation) in new (string Label, Action<JsonObject> Mutate)[]
+foreach (var (label, mutation, expectedError) in new
+    (string Label, Action<JsonObject> Mutate, string ExpectedError)[]
 {
-    ("production-documentation-backend", cfg => {
-        cfg["AllowDocumentationAddressesForTesting"] = false;
-        cfg["Zones"]![0]!["Sites"]![0]!["Address"] = "192.0.2.80";
-    }),
-    ("production-documentation-ns", cfg => {
-        cfg["AllowDocumentationAddressesForTesting"] = false;
-        cfg["Zones"]![1]!["NameServers"]![0]!["Address"] = "2001:db8::53";
-    }),
+    ("production-documentation-backend", cfg =>
+        cfg["Zones"]![0]!["Sites"]![0]!["Address"] = "192.0.2.80",
+        "Invalid GSLB site address"),
+    ("production-documentation-ns", cfg =>
+        cfg["Zones"]![0]!["NameServers"]![0]!["Address"] = "2001:db8::53",
+        "Invalid authoritative NS hostname or unicast address"),
+    ("production-documentation-delegation", cfg =>
+        cfg["Zones"]![0]!["Delegations"]![0]!["NameServers"]![0]!["Address"] = "203.0.113.53",
+        "Invalid delegated name-server hostname or unicast address"),
     ("external-documentation-allowance", cfg => {
+        cfg["AllowDocumentationAddressesForTesting"] = true;
         cfg["ListenHost"] = "0.0.0.0";
         cfg["AllowNonLoopbackListeners"] = true;
-    })
+    }, "Invalid DNS listener")
 })
 {
-    var invalidConfig = JsonNode.Parse(File.ReadAllText(configuration))!.AsObject();
+    // A clean private-unicast baseline ensures the failure points at the
+    // targeted site/parent NS/child glue instead of some earlier RFC 5737
+    // address in the long-running DNS integration fixture.
+    var invalidConfig = JsonNode.Parse("""
+        {
+          "ListenHost":"127.0.0.1","ListenPort":15653,
+          "ProbeIntervalSeconds":2,"AllowNonLoopbackListeners":false,
+          "AllowDocumentationAddressesForTesting":false,
+          "Zones":[{
+            "Name":"doc-policy.integration.test","TtlSeconds":10,
+            "Sites":[{"Address":"10.0.0.12","Weight":1,
+              "HealthUrl":"http://127.0.0.1:19711/ready"}],
+            "NameServers":[{"Host":"ns.doc-policy.integration.test","Address":"10.0.0.53"}],
+            "Delegations":[{
+              "Name":"child.doc-policy.integration.test",
+              "NameServers":[{"Host":"ns.child.doc-policy.integration.test","Address":"10.0.0.54"}]
+            }]
+          }]
+        }
+        """)!.AsObject();
     mutation(invalidConfig);
     var invalidPath = Path.Combine(temp, "documentation-policy-" + Guid.NewGuid().ToString("N") + ".json");
     await File.WriteAllTextAsync(invalidPath, invalidConfig.ToJsonString());
@@ -1115,10 +1137,7 @@ foreach (var (label, mutation) in new (string Label, Action<JsonObject> Mutate)[
         await invalidDns.WaitForExitAsync(deadline.Token);
         var output = (await stdout) + (await stderr);
         Must(invalidDns.ExitCode != 0 &&
-             output.Contains(label == "external-documentation-allowance"
-                 ? "Invalid DNS listener" : "unicast address", StringComparison.Ordinal) ||
-             invalidDns.ExitCode != 0 && label == "production-documentation-backend" &&
-             output.Contains("Invalid GSLB site address", StringComparison.Ordinal),
+             output.Contains(expectedError, StringComparison.Ordinal),
             "DNS process fails closed for " + label);
     }
     finally { File.Delete(invalidPath); }
