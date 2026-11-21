@@ -15,28 +15,42 @@ using Microsoft.Extensions.Logging;
 
 internal static class TrafficHttp3Acceptance
 {
-    internal static int SelectDualTransportPort(Func<(int Port, IDisposable Reservation)> reserveUdp, Action<int> bindTcp,
+    internal static int SelectDualTransportPort(
+        Func<(int Port, IDisposable Reservation)> reserveTcp,
+        Func<int, IDisposable> reserveUdp,
         int maxAttempts = 32)
     {
+        ArgumentNullException.ThrowIfNull(reserveTcp);
         ArgumentNullException.ThrowIfNull(reserveUdp);
-        ArgumentNullException.ThrowIfNull(bindTcp);
         if (maxAttempts < 1) throw new ArgumentOutOfRangeException(nameof(maxAttempts));
 
         SocketException? lastFailure = null;
         for (var attempt = 0; attempt < maxAttempts; attempt++)
         {
-            var (port, reservation) = reserveUdp();
-            using (reservation)
+            try
             {
-                try
+                // Ask the TCP ephemeral allocator for a candidate first. On
+                // Windows a UDP-selected dynamic port can belong to an
+                // excluded/reserved TCP range, causing repeated WSAEACCES.
+                var (port, tcpReservation) = reserveTcp();
+                ArgumentNullException.ThrowIfNull(tcpReservation);
+                using (tcpReservation)
                 {
-                    bindTcp(port);
-                    return port;
+                    try
+                    {
+                        using var udpReservation = reserveUdp(port);
+                        ArgumentNullException.ThrowIfNull(udpReservation);
+                        return port;
+                    }
+                    catch (SocketException ex) when (ex.SocketErrorCode is SocketError.AddressAlreadyInUse or SocketError.AccessDenied)
+                    {
+                        lastFailure = ex;
+                    }
                 }
-                catch (SocketException ex) when (ex.SocketErrorCode is SocketError.AddressAlreadyInUse or SocketError.AccessDenied)
-                {
-                    lastFailure = ex;
-                }
+            }
+            catch (SocketException ex) when (ex.SocketErrorCode is SocketError.AddressAlreadyInUse or SocketError.AccessDenied)
+            {
+                lastFailure = ex;
             }
         }
 
@@ -108,13 +122,22 @@ internal static class TrafficHttp3Acceptance
         {
             return SelectDualTransportPort(() =>
             {
-                var udp = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
-                udp.Bind(new IPEndPoint(IPAddress.Loopback, 0));
-                return (((IPEndPoint)udp.LocalEndPoint!).Port, udp);
+                var tcp = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+                try
+                {
+                    tcp.Bind(new IPEndPoint(IPAddress.Loopback, 0));
+                    return (((IPEndPoint)tcp.LocalEndPoint!).Port, tcp);
+                }
+                catch { tcp.Dispose(); throw; }
             }, port =>
             {
-                using var tcp = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
-                tcp.Bind(new IPEndPoint(IPAddress.Loopback, port));
+                var udp = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+                try
+                {
+                    udp.Bind(new IPEndPoint(IPAddress.Loopback, port));
+                    return udp;
+                }
+                catch { udp.Dispose(); throw; }
             });
         }
 

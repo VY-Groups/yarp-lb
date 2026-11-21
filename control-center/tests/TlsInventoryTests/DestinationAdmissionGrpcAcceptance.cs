@@ -651,13 +651,22 @@ internal static class DestinationAdmissionGrpcAcceptance
 
     private static int GetDualTransportPort() => TrafficHttp3Acceptance.SelectDualTransportPort(() =>
     {
-        var udp = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
-        udp.Bind(new IPEndPoint(IPAddress.Loopback, 0));
-        return (((IPEndPoint)udp.LocalEndPoint!).Port, udp);
+        var tcp = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+        try
+        {
+            tcp.Bind(new IPEndPoint(IPAddress.Loopback, 0));
+            return (((IPEndPoint)tcp.LocalEndPoint!).Port, tcp);
+        }
+        catch { tcp.Dispose(); throw; }
     }, port =>
     {
-        using var tcp = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
-        tcp.Bind(new IPEndPoint(IPAddress.Loopback, port));
+        var udp = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+        try
+        {
+            udp.Bind(new IPEndPoint(IPAddress.Loopback, port));
+            return udp;
+        }
+        catch { udp.Dispose(); throw; }
     });
 
     private sealed class OriginTrust : IDisposable
