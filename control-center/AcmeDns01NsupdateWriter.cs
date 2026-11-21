@@ -136,9 +136,11 @@ public sealed class AcmeDns01NsupdateWriter : IAcmeDns01Publisher
         using var process = new Process { StartInfo = psi };
         using var bounded = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         bounded.CancelAfter(TimeSpan.FromSeconds(12));
+        var started = false;
         try
         {
-            if (!process.Start())
+            started = process.Start();
+            if (!started)
                 throw new InvalidOperationException("Could not start approved DNS-01 updater");
             // Drain without buffering; never include tool output in exceptions,
             // HTTP responses, logs or telemetry (it may contain TSIG material).
@@ -155,9 +157,12 @@ public sealed class AcmeDns01NsupdateWriter : IAcmeDns01Publisher
         }
         finally
         {
-            if (process.StartTime != default && !process.HasExited)
+            if (started)
             {
-                try { process.Kill(entireProcessTree: true); }
+                try
+                {
+                    if (!process.HasExited) process.Kill(entireProcessTree: true);
+                }
                 catch (InvalidOperationException) { }
             }
         }
