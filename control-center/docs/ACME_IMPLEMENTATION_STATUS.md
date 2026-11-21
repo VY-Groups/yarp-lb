@@ -79,6 +79,17 @@ reachable through the challenge routing arrangement or a shared HTTP-01 token
 store must be deployed; the current token store is process-local. Keep issue #37
 open until real staging validation and the remaining operational criteria pass.
 
+### Revocation authority trust boundary
+
+The concrete ACME revocation adapter now applies the **same** HTTPS directory,
+approved-host, default-port, exact `/directory` path and no-credential/query/
+fragment policy as issuance. Unknown remote hosts and local loopback authorities
+are rejected for production revocation before the encrypted account key is
+loaded or any outbound request can occur. Loopback remains available only in
+explicitly configured isolated issuer preflight tests, never by default in
+revocation. Windows/Linux unit and adapter-negative tests cover the boundary.
+This does not add live public-domain certificate revocation acceptance.
+
 ## Guarded manual revocation
 
 When ACME is configured, `POST /admin/api/tls/acme/revoke` is available only
