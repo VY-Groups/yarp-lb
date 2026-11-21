@@ -154,8 +154,8 @@ internal sealed class ExternalAuditIntent : IDisposable
         if (intentId is not null && (!CorrelatedMutationAction(action) ||
             !Guid.TryParseExact(intentId, "N", out var intent) || intent.ToString("N") != intentId))
             throw new InvalidDataException("Invalid account audit correlation");
-        if (action is "ACCOUNT_MUTATION_PREPARED" or "RESOURCE_MUTATION_PREPARED" &&
-            intentId is null)
+        if ((action == "ACCOUNT_MUTATION_PREPARED" ||
+             action == "RESOURCE_MUTATION_PREPARED") && intentId is null)
             throw new InvalidDataException("Prepared mutation audit requires confirmed intent");
         var correlation = intentId is null ? new string('0', 64) :
             Convert.ToHexString(SHA256.HashData(Encoding.ASCII.GetBytes(intentId)));
