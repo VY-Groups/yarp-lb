@@ -26,6 +26,26 @@ class DnsWireProbeTests(unittest.TestCase):
     def test_parser_guards(self):
         probe.validate_parser_guards()
 
+    def test_edns0_response_envelope_accepts_valid_opt(self):
+        probe.validate_edns0_response([("additional", (), 41, 1232, 0)])
+
+    def test_edns0_response_envelope_rejects_malformed_opt(self):
+        valid = ("additional", (), 41, 1232, 0)
+        cases = (
+            ([], "exactly one"),
+            ([valid, valid], "exactly one"),
+            ([("answer", (), 41, 1232, 0)], "additional section"),
+            ([("additional", (b"example",), 41, 1232, 0)], "root"),
+            ([("additional", (), 41, 511, 0)], "UDP size"),
+            ([("additional", (), 41, 1232, 0x00010000)], "version"),
+            ([("additional", (), 41, 1232, 0x00008000)], "flags"),
+            ([("additional", (), 41, 1232, 0x01000000)], "extended RCODE"),
+        )
+        for records, message in cases:
+            with self.subTest(records=records):
+                with self.assertRaisesRegex(AssertionError, message):
+                    probe.validate_edns0_response(records)
+
     def test_truncated_udp_retries_tcp_with_same_query(self):
         seen = []
         def transport(host, port, packet, tcp, timeout):
