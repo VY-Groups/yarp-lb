@@ -60,9 +60,10 @@ public sealed class AcmeDns01WireVerifiedPublisher : IAcmeDns01Publisher
         }
     }
 
-    public Task<IAsyncDisposable> PublishAsync(string fqdn, string txtValue,
-        TimeSpan lifetime, CancellationToken cancellationToken) =>
-        writer.PublishAsync(fqdn, txtValue, lifetime, cancellationToken);
+    public Task<IAcmeDns01PublicationLease> AcquirePublicationLeaseAsync(
+        string fqdn, string txtValue, TimeSpan lifetime,
+        CancellationToken cancellationToken) =>
+        writer.AcquirePublicationLeaseAsync(fqdn, txtValue, lifetime, cancellationToken);
 
     public async Task<IReadOnlyList<AcmeDns01AuthorityObservation>> ProbeAuthoritativeAsync(
         string fqdn, string txtValue, CancellationToken cancellationToken)
