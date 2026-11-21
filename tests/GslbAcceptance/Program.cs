@@ -256,6 +256,8 @@ try
     // shared signing key count as independent cryptographic identities.
     var duplicateKeyPath = Path.Combine(reportRoot, "duplicate-signing-key.pem");
     File.WriteAllText(duplicateKeyPath, signing1Rotated.ExportSubjectPublicKeyInfoPem());
+    if (OperatingSystem.IsLinux())
+        File.SetUnixFileMode(duplicateKeyPath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
     var sharedSigningKeyRejected = false;
     try
     {
