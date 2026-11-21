@@ -1,0 +1,25 @@
+name: WAF corpus matrix acceptance
+on:
+  pull_request:
+    paths:
+      - 'ops/waf/validate_corpus_matrix.py'
+      - 'ops/waf/test_validate_corpus_matrix.py'
+      - '.github/workflows/waf-corpus-matrix.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  corpus-matrix:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Run redacted WAF corpus matrix regression tests
+        run: python -m unittest discover -s ops/waf -p test_validate_corpus_matrix.py -v
