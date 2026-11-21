@@ -84,6 +84,7 @@ if (!AcmeTargetPolicy.IsApprovedDirectoryUrl(
     throw new Exception("explicit isolated loopback test policy should remain supported");
 Console.WriteLine("PASS: ACME target preflight rejects unsafe authority, hostname and HTTP-01 inputs");
 await AcmeHttp01Acceptance.RunAsync();
+await AcmeDns01Acceptance.RunAsync();
 await TrafficHttp3Acceptance.RunAsync();
 await DestinationAdmissionHttp3Acceptance.RunAsync();
 await DestinationAdmissionGrpcAcceptance.RunAsync();
