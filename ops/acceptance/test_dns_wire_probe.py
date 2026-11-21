@@ -23,6 +23,19 @@ def reply(packet, flags):
 
 
 class DnsWireProbeTests(unittest.TestCase):
+    def test_unframeable_queries_rejected_before_network(self):
+        # A TCP length prefix cannot represent 65536 bytes. Keep this
+        # deterministic: neither UDP nor TCP should open a socket for an
+        # empty or oversized query, including the IPv6 transport path.
+        with patch.object(probe.socket, "socket") as socket_factory:
+            for host in ("127.0.0.1", "::1"):
+                for tcp in (False, True):
+                    for payload in (b"", b"x" * 65536):
+                        with self.subTest(host=host, tcp=tcp, size=len(payload)):
+                            with self.assertRaisesRegex(AssertionError, "wire message limit"):
+                                probe.exchange(host, 5353, payload, tcp, 1)
+            socket_factory.assert_not_called()
+
     def test_parser_guards(self):
         probe.validate_parser_guards()
 
