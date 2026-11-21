@@ -144,3 +144,23 @@ The final directories still require service-owner-only mode `0700`.
 This closes one local bootstrap race class, but **does not** prove fleet
 anti-rollback, shared key-ring disaster recovery, Windows Server/RHEL
 operational acceptance or production readiness.
+
+### Linux encrypted-key-ring restore identity checks (#48)
+
+Linux Data Protection startup now requires each encrypted `<key id=GUID>` XML
+file to use its matching `key-GUID.xml` filename and to have a unique
+in-ring GUID. At most **512 XML entries** (keys and revocations combined) may
+be present. Rewritten key IDs, renamed/copied XML and oversized inventories
+fail before the ASP.NET Data Protection provider can import ambiguous state.
+The checker does not modify or decrypt a rejected file; tests confirm an
+existing encrypted session remains decryptable after the rejected tampering
+is reversed. These limits apply to the existing at-rest certificate wrapping
+and independent per-process startup path.
+
+**Important:** filename/GUID consistency is local integrity validation, not
+a cryptographically anchored anti-rollback guarantee. A privileged attacker
+could restore an older internally consistent key set. A fleet recovery plan
+still needs separately verified immutable backup checkpoints, shared wrapping
+key custody, version attestation, secure cross-host synchronization and a DR
+rotation exercise. Do not claim full #48 or production acceptance from this
+increment alone.
