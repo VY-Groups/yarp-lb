@@ -19,6 +19,12 @@ public interface IAcmeCertificateIssuer
     Task<AcmeIssuedCertificate> IssueHttp01Async(string directoryUrl, string dnsName,
         string contactEmail, string pfxPassword, AcmeHttp01ChallengeStore challenges,
         CancellationToken cancellationToken);
+    // Default refusal keeps existing HTTP-01-only fake/test issuers safe:
+    // a DNS-01 renewal must never silently downgrade to HTTP-01.
+    Task<AcmeIssuedCertificate> IssueDns01Async(string directoryUrl, string dnsName,
+        string contactEmail, string pfxPassword, IAcmeDns01Publisher publisher,
+        CancellationToken cancellationToken) =>
+        throw new NotSupportedException("DNS-01 issuance is unavailable for this issuer");
     Task RevokeCertificateAsync(string directoryUrl, string contactEmail, byte[] certificateDer,
         RevocationReason reason, CancellationToken cancellationToken);
 }
@@ -309,11 +315,13 @@ public sealed class AcmeRenewalCoordinator(IAcmeCertificateIssuer issuer,
 
     public async Task<AcmeRenewalResult> RenewIfDueAsync(string directoryUrl, string dnsName,
         string contactEmail, bool publicHttp01Enabled, string activePfxPath,
-        string passwordFilePath, TimeSpan renewBeforeExpiry, CancellationToken cancellationToken)
+        string passwordFilePath, TimeSpan renewBeforeExpiry, CancellationToken cancellationToken,
+        IAcmeDns01Publisher? dns01Publisher = null)
     {
         if (renewBeforeExpiry <= TimeSpan.Zero || renewBeforeExpiry > TimeSpan.FromDays(60))
             throw new ArgumentOutOfRangeException(nameof(renewBeforeExpiry), "Renewal window must be in (0, 60 days].");
-        var target = AcmeTargetPolicy.Validate(directoryUrl, dnsName, http01: true,
+        var useDns01 = dns01Publisher is not null;
+        var target = AcmeTargetPolicy.Validate(directoryUrl, dnsName, http01: !useDns01,
             publicChallengeEntrypointEnabled: publicHttp01Enabled);
         if (!target.Allowed) throw new InvalidOperationException("ACME target rejected: " + target.Reason);
         if (!Path.IsPathFullyQualified(activePfxPath) || !Path.IsPathFullyQualified(passwordFilePath) ||
@@ -344,8 +352,13 @@ public sealed class AcmeRenewalCoordinator(IAcmeCertificateIssuer issuer,
                     return new AcmeRenewalResult(false, notAfter, "certificate-is-outside-renewal-window");
             }
 
-            var issued = await issuer.IssueHttp01Async(directoryUrl, target.NormalizedDnsName!,
-                contactEmail, originalPassword, challenges, operationToken).WaitAsync(operationToken);
+            var issued = useDns01
+                ? await issuer.IssueDns01Async(directoryUrl, target.NormalizedDnsName!,
+                    contactEmail, originalPassword, dns01Publisher!, operationToken)
+                    .WaitAsync(operationToken)
+                : await issuer.IssueHttp01Async(directoryUrl, target.NormalizedDnsName!,
+                    contactEmail, originalPassword, challenges, operationToken)
+                    .WaitAsync(operationToken);
             if (!string.Equals(issued.DnsName, target.NormalizedDnsName, StringComparison.Ordinal) ||
                 issued.Pfx.Length is < 512 or > 1_048_576)
                 throw new CryptographicException("ACME issuer returned an invalid identity or bounded PFX payload.");
@@ -480,7 +493,8 @@ public sealed class AcmeRenewalCoordinator(IAcmeCertificateIssuer issuer,
 
 public sealed record AcmeRenewalSettings(string DirectoryUrl, string DnsName, string ContactEmail,
     string PfxPath, string PfxPasswordFile, int RenewalWindowDays = 30,
-    bool AllowProductionCa = false, bool AgreeToTermsOfService = false)
+    bool AllowProductionCa = false, bool AgreeToTermsOfService = false,
+    bool EnableDns01Renewal = false, AcmeDns01PublisherSettings? Dns01Publisher = null)
 {
     public static AcmeRenewalSettings Load(string path, string trafficPfxPath,
         string trafficPfxPasswordFile, IReadOnlyList<string>? trafficCertificateDnsNames)
@@ -520,8 +534,15 @@ public sealed record AcmeRenewalSettings(string DirectoryUrl, string DnsName, st
             };
             var value = JsonSerializer.Deserialize<AcmeRenewalSettings>(configBytes, options)
                 ?? throw new InvalidOperationException("ACME configuration is empty.");
-            var target = AcmeTargetPolicy.Validate(value.DirectoryUrl, value.DnsName, http01: true,
-                publicChallengeEntrypointEnabled: true);
+            // DNS-01 has no public HTTP challenge dependency. It MUST use an
+            // explicit operator-provisioned, pinned provider and cannot
+            // enable itself merely because credentials exist on disk.
+            if (value.EnableDns01Renewal != (value.Dns01Publisher is not null))
+                throw new InvalidOperationException(
+                    "DNS-01 scheduler enablement and publisher configuration must be specified together");
+            var target = AcmeTargetPolicy.Validate(value.DirectoryUrl, value.DnsName,
+                http01: !value.EnableDns01Renewal,
+                publicChallengeEntrypointEnabled: !value.EnableDns01Renewal);
             var productionDirectory = Uri.TryCreate(value.DirectoryUrl, UriKind.Absolute, out var directory) &&
                 string.Equals(directory.IdnHost, "acme-v02.api.letsencrypt.org", StringComparison.OrdinalIgnoreCase);
             if (!target.Allowed || value.RenewalWindowDays is < 1 or > 60 ||
@@ -548,7 +569,8 @@ public sealed record AcmeRenewalSettings(string DirectoryUrl, string DnsName, st
 /// <summary>Opt-in renewal scheduler. It is never registered unless an ACME config path is set.</summary>
 public sealed class AcmeRenewalBackgroundService(AcmeRenewalSettings settings,
     AcmeRenewalCoordinator coordinator, TimeProvider? timeProvider,
-    ILogger<AcmeRenewalBackgroundService> logger) : BackgroundService
+    ILogger<AcmeRenewalBackgroundService> logger,
+    IAcmeDns01Publisher? dns01Publisher = null) : BackgroundService
 {
     private readonly TimeProvider clock = timeProvider ?? TimeProvider.System;
 
@@ -563,8 +585,9 @@ public sealed class AcmeRenewalBackgroundService(AcmeRenewalSettings settings,
             try
             {
                 await coordinator.RenewIfDueAsync(settings.DirectoryUrl, settings.DnsName, settings.ContactEmail,
-                    publicHttp01Enabled: true, settings.PfxPath, settings.PfxPasswordFile,
-                    TimeSpan.FromDays(settings.RenewalWindowDays), stoppingToken);
+                    publicHttp01Enabled: !settings.EnableDns01Renewal, settings.PfxPath,
+                    settings.PfxPasswordFile, TimeSpan.FromDays(settings.RenewalWindowDays),
+                    stoppingToken, dns01Publisher);
                 backoff = TimeSpan.FromMinutes(1);
                 nextDelay = TimeSpan.FromHours(6);
             }
