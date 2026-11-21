@@ -87,6 +87,30 @@ class WafLabPolicyTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.check()
 
+    def test_rejects_added_service_that_exposes_the_private_origin(self):
+        compose = self.compose.read_text(encoding="utf-8")
+        compose = compose.replace(
+            "  waf:\n",
+            '  unreviewed-origin-proxy:\n'
+            '    image: nginx:latest\n'
+            '    ports: ["0.0.0.0:9443:80"]\n'
+            '    networks: ["waf-private"]\n'
+            "  waf:\n")
+        self.compose.write_text(compose, encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "service set changed"):
+            self.check()
+
+    def test_rejects_compose_include_and_network_reconfiguration(self):
+        original = self.compose.read_text(encoding="utf-8")
+        self.compose.write_text("include:\n  - unreviewed.yml\n" + original,
+                                encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "top-level"):
+            self.check()
+        self.compose.write_text(original.replace(
+            "    driver: bridge", "    driver: host"), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "network isolation"):
+            self.check()
+
     def test_rejects_missing_or_unknown_fields(self):
         data = json.loads(self.policy.read_text(encoding="utf-8"))
         data.pop("owner")

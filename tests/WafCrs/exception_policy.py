@@ -69,6 +69,28 @@ _EXPECTED_WAF = (
     '- protected-app',
     'networks: ["waf-private"]',
 )
+_EXPECTED_BENCHMARK = (
+    'image: python:3.12-alpine',
+    'profiles: ["benchmark"]',
+    'entrypoint: ["python", "/app/benchmark.py"]',
+    'volumes:',
+    '- ../../tests/WafCrs/benchmark.py:/app/benchmark.py:ro',
+    'networks: ["waf-private"]',
+)
+
+
+def _active_compose_lines(compose_text):
+    active = []
+    for line in compose_text.splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if "\t" in line[:len(line) - len(line.lstrip())]:
+            raise ValueError("WAF lab Compose may not use tab indentation")
+        # Inline comments are irrelevant to Compose semantics. All other
+        # active lines remain strict so flow mappings, aliases and includes
+        # cannot bypass the checked fixture shape.
+        active.append(line.split("#", 1)[0].rstrip())
+    return tuple(active)
 
 
 def _compose_service_active_lines(compose_text, service):
@@ -94,10 +116,25 @@ def _compose_service_active_lines(compose_text, service):
 
 
 def _validate_compose_lab_boundary(compose_text):
+    lines = _active_compose_lines(compose_text)
+    top_level = tuple(line for line in lines if not line.startswith(" "))
+    if top_level != ("services:", "networks:"):
+        raise ValueError("WAF lab Compose may not add top-level services, includes or extensions")
+    services_start = lines.index("services:")
+    networks_start = lines.index("networks:")
+    service_lines = lines[services_start + 1:networks_start]
+    service_keys = tuple(line for line in service_lines
+                         if len(line) - len(line.lstrip(" ")) == 2)
+    if service_keys != ("  protected-app:", "  waf:", "  benchmark:"):
+        raise ValueError("WAF lab Compose service set changed")
     if _compose_service_active_lines(compose_text, "protected-app") != _EXPECTED_BACKEND:
         raise ValueError("WAF lab backend isolation or config changed")
     if _compose_service_active_lines(compose_text, "waf") != _EXPECTED_WAF:
         raise ValueError("WAF lab engine, rule mounts, threshold or binding changed")
+    if _compose_service_active_lines(compose_text, "benchmark") != _EXPECTED_BENCHMARK:
+        raise ValueError("WAF lab benchmark service changed")
+    if lines[networks_start:] != ("networks:", "  waf-private:", "    driver: bridge"):
+        raise ValueError("WAF lab network isolation changed")
 
 
 def _no_duplicate_properties(pairs):
