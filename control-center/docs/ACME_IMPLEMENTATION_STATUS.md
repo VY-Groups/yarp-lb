@@ -269,3 +269,60 @@ RFC 2136 server or public DNS operation. No automatic scheduler/provider
 configuration or CA staging validation is enabled by this PR; external DNS
 network credentials, signed response trust, live DNSSEC/TSIG interoperability,
 fleet coordination and physical #36 remain pending.
+
+### Explicit DNS-01 renewal scheduler wiring (operator-only opt-in)
+
+The same 10-minute-bounded `AcmeRenewalCoordinator`, X.509 SAN/EKU/
+chain validation, staging PFX, atomic active-certificate replacement,
+last-good rollback and listener activation checks now support **either**
+HTTP-01 (default) **or** DNS-01. DNS-01 must be selected explicitly by
+`enableDns01Renewal: true` and a complete `dns01Publisher` object in
+the existing owner-only `YARP_ACME_CONFIG_FILE`. Supplying one without
+the other fails startup/configuration. There is no automatic downgrade
+to HTTP-01. A DNS-01-only renewal does not require an externally reachable
+TCP/80 challenge listener, although the isolated traffic TLS listener
+and active certificate/password paths remain mandatory.
+
+Example **private renewal config fields** to add to the existing JSON
+(shown with placeholder digest/IPs, not ready-to-deploy credentials):
+
+```json
+{
+  "enableDns01Renewal": true,
+  "dns01Publisher": {
+    "zoneName": "example.com",
+    "updateServerAddress": "192.0.2.53",
+    "nsupdateExecutablePath": "/usr/bin/nsupdate",
+    "nsupdateExecutableSha256": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    "tsigKeyFilePath": "/var/lib/gatewaycore/private/dns-01.key",
+    "authorities": [
+      { "authorityId": "ns1.example.com", "address": "192.0.2.53" },
+      { "authorityId": "ns2.example.com", "address": "192.0.2.54" }
+    ]
+  }
+}
+```
+
+This snippet is **not** a complete ACME config. It must be combined with
+the `directoryUrl` (staging initially), `dnsName`, contact email, correct
+active traffic PFX/password paths, renewal window and CA terms consent in
+the previous section. The addresses shown are RFC 5737 documentation IPs;
+the digest is a **dummy**, and the paths are deployment-specific.
+
+The service constructs a private TSIG RFC2136 writer, wraps it with a
+separate pinned direct-authority TCP verifier, and **preflights** the
+installed updater binary and TSIG key *at startup* before registering the
+renewal background worker. No raw signing secret or trust override is
+read from an HTTP request. DNS-01 selection shares the same jitter,
+backoff and atomic PFX rollback as HTTP-01. Deterministic fake CA tests
+exercise the real renewal coordinator with DNS-01 selected, TCP/80 disabled,
+multiple simulated authoritative TXT answers, exact TXT lease cleanup,
+certificate installation and refusal to downgrade to HTTP-01.
+
+**Open acceptance:** no real public staging CA order has completed; no
+real RFC2136/TSIG name-server interoperability, signer custody, crash
+recovery of orphan TXT, multi-node issuance fencing or external
+certificate-chain delivery is proven. Do not deploy a shared TSIG identity
+with unrestricted zone-update permission. Preserve #37 and physical #36 as
+open gates until independent Windows/Linux integration and operator-controlled
+staging/DR exercises are completed.
