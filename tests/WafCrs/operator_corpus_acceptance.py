@@ -70,10 +70,12 @@ def load_corpus(filename):
         require_object(case, CASE_FIELDS)
         if any(not isinstance(case[key], str) for key in CASE_FIELDS):
             raise ValueError("corpus case fields must be bounded text")
-        if not SAFE_ID.fullmatch(case["id"]) or case["id"] in seen or \
+        case_id = case["id"]
+        canonical_case_id = case_id.casefold()
+        if not SAFE_ID.fullmatch(case_id) or canonical_case_id in seen or \
                 not SAFE_ID.fullmatch(case["route"]):
             raise ValueError("duplicate or unsafe case/route identifier")
-        seen.add(case["id"])
+        seen.add(canonical_case_id)
         if case["expected"] not in ("benign", "malicious") or \
                 case["severity"] not in ("none", "low", "medium", "high", "critical") or \
                 (case["expected"] == "benign") != (case["severity"] == "none"):
