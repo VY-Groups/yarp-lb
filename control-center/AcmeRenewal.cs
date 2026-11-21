@@ -91,10 +91,12 @@ public sealed class CertesAcmeCertificateIssuer(AcmeAccountKeyStore accountKeys,
     public async Task RevokeCertificateAsync(string directoryUrl, string contactEmail,
         byte[] certificateDer, RevocationReason reason, CancellationToken cancellationToken)
     {
-        if (!Uri.TryCreate(directoryUrl, UriKind.Absolute, out var directory) ||
-            directory.Scheme != Uri.UriSchemeHttps || directory.UserInfo.Length != 0 ||
-            directory.Fragment.Length != 0)
-            throw new InvalidOperationException("ACME revocation requires an absolute HTTPS directory URL.");
+        // A revocation is an authenticated ACME account operation. Never
+        // expose the account key or signed request to an unapproved authority,
+        // alternate path, port or URL carrying a query/fragment.
+        if (!AcmeTargetPolicy.IsApprovedDirectoryUrl(directoryUrl))
+            throw new InvalidOperationException("ACME revocation authority is not approved.");
+        var directory = new Uri(directoryUrl!, UriKind.Absolute);
         if (string.IsNullOrWhiteSpace(contactEmail) || contactEmail.Length > 254 ||
             !contactEmail.Contains('@') || contactEmail.Any(char.IsControl) ||
             certificateDer is not { Length: >= 128 and <= 1_048_576 })
