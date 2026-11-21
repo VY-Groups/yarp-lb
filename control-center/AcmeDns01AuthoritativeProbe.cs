@@ -24,6 +24,37 @@ public sealed class AcmeDns01WireVerifiedPublisher : IAcmeDns01Publisher
     private readonly AcmeDns01AuthorityServer[] authorities;
     private const int MaximumDnsPacketBytes = 8192;
 
+    // Do not count scoped/link-local aliases or multicast destinations as
+    // independent authoritative DNS servers. RFC1918 and IPv6 ULA unicast
+    // addresses remain supported for operator-managed on-premises DNS.
+    private static bool IsPinnedUnicastAddress(IPAddress? address, bool allowLocalTestEndpoints)
+    {
+        if (address is null || address.IsIPv4MappedToIPv6 ||
+            address.AddressFamily is not (AddressFamily.InterNetwork or AddressFamily.InterNetworkV6) ||
+            address.Equals(IPAddress.Any) || address.Equals(IPAddress.IPv6Any) ||
+            address.Equals(IPAddress.Broadcast) || address.IsIPv6Multicast)
+            return false;
+
+        if (address.AddressFamily == AddressFamily.InterNetworkV6)
+        {
+            // An IPv6 zone/scope identifier changes the interface, not the
+            // authority's identity. Distinct %scope values cannot satisfy quorum.
+            if (address.ScopeId != 0 || address.IsIPv6LinkLocal || address.IsIPv6SiteLocal)
+                return false;
+        }
+        else
+        {
+            var octets = address.GetAddressBytes();
+            // 0/8 is not a destination, 169.254/16 is link-local, and
+            // 224/4 plus 240/4 are not ordinary unicast DNS endpoints.
+            if (octets[0] == 0 || octets[0] >= 224 ||
+                (octets[0] == 169 && octets[1] == 254))
+                return false;
+        }
+
+        return allowLocalTestEndpoints || !IPAddress.IsLoopback(address);
+    }
+
     public AcmeDns01WireVerifiedPublisher(IAcmeDns01Publisher writer,
         IEnumerable<AcmeDns01AuthorityServer> authorities)
         : this(writer, authorities, allowLocalTestEndpoints: false) { }
@@ -48,14 +79,11 @@ public sealed class AcmeDns01WireVerifiedPublisher : IAcmeDns01Publisher
                 server.AuthorityId.Length > 128 ||
                 server.AuthorityId.Any(c => !(char.IsAsciiLetterOrDigit(c) ||
                     c is '.' or '-' or '_' or ':')) ||
-                address is null || address.IsIPv4MappedToIPv6 ||
-                address.AddressFamily is not (AddressFamily.InterNetwork or AddressFamily.InterNetworkV6) ||
-                address.Equals(IPAddress.Any) || address.Equals(IPAddress.IPv6Any) ||
-                address.Equals(IPAddress.Broadcast) || address.IsIPv6Multicast ||
-                !names.Add(server.AuthorityId) || !addresses.Add(address) ||
+                !IsPinnedUnicastAddress(address, allowLocalTestEndpoints) ||
+                !names.Add(server.AuthorityId) || !addresses.Add(address!) ||
                 (allowLocalTestEndpoints
                     ? server.Port is < 1 or > 65535
-                    : server.Port != 53 || IPAddress.IsLoopback(address)))
+                    : server.Port != 53))
                 throw new InvalidOperationException("Invalid or duplicate pinned DNS-01 authority endpoint");
         }
     }
