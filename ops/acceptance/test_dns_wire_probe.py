@@ -42,7 +42,7 @@ class DnsWireProbeTests(unittest.TestCase):
         txid = 0x1234
         question = probe.name_wire("example.test") + struct.pack("!HH", 1, 1)
         cases = (
-            (b"\\x00\\x0f\\x00", "truncated EDNS option header"),
+            (b"\x00\x0f\x00", "truncated EDNS option header"),
             (struct.pack("!HH", 15, 4) + b"ab", "EDNS option overruns OPT RDATA"),
             (struct.pack("!HH", 15, 0) + b"\x00", "truncated EDNS option header"),
         )
