@@ -163,6 +163,181 @@ PFX or password is linked, too large, or has unsafe Linux permissions. The
 Windows/Linux acceptance verifies live-certificate PFX link/mode rejection and
 renewal PFX/password link and password-mode rejection on Linux.
 
+### DNS-01 publisher and Certes issuer path — opt-in, not yet deployed
+
+A new `CertesAcmeCertificateIssuer.IssueDns01Async` uses the existing
+Data Protection-encrypted account identity, obtains a real Certes DNS-01
+challenge, computes the SHA-256-derived RFC 8555 DNS TXT value, and invokes
+an **explicit, trusted** `IAcmeDns01Publisher` before asking the CA to validate.
+The publisher is required to publish `_acme-challenge.<target>` for a bounded
+8-minute lifetime and probe the configured authoritative nameservers.
+Validation is gated until the exact TXT appears at **two or more distinct
+authorities** (at most 16 observed), with bounded polling and mandatory
+async lease cleanup on success, timeout, network error and cancellation.
+The publisher must enumerate all configured authoritative hosts; recursive
+resolver cache responses are not evidence of authoritative propagation.
+Other simultaneous TXT values are permitted to avoid clobbering unrelated
+validations.
+
+The test suite validates base64url SHA-256 TXT format, safe canonical owner
+names, independent-authority evidence, replay/stale/missing values, bounded
+retry and cleanup through deterministic synthetic publishers. The actual
+Certes API method follows the same PFX output bounds and authorization
+timeout as HTTP-01. **No DNS provider is registered by default**, the
+background scheduler still uses HTTP-01, and no operator-managed DNS mutation,
+live staging CA order, multi-node TXT propagation or DNS-01 certificate
+activation has yet been proven. The DNS-01 API cannot activate accidentally
+without an authenticated operator-supplied publisher. Do not mark #37
+complete or claim production DNS-01 until provider credentials, publication/
+revoke fencing, fleet coordination and staging CA acceptance are added.
+
+### Independent authoritative DNS-01 wire evidence
+
+The optional `AcmeDns01WireVerifiedPublisher` wraps a separately authenticated
+`IAcmeDns01Publisher` and **ignores** that writer's own reported
+`ProbeAuthoritativeAsync` results. Instead it queries two to sixteen
+explicitly pinned, distinct authoritative IP addresses directly using DNS over
+TCP/53; no DNS resolver discovery, recursion or public caller-supplied
+endpoints are used. It checks transaction IDs, exact QNAME/TXT/IN echo,
+`QR` and `AA` bits, NOERROR, non-truncated DNS frames, bounded resource
+records, backward-only DNS name pointers, and the complete 43-byte TXT
+character-string. A malformed, non-authoritative, unreachable or incorrect
+server contributes **no** healthy vote. The issuer's existing cleanup lease
+is still released when any required authority fails. Strict production
+construction rejects duplicate server IDs, reused IP addresses, loopback
+endpoints and non-53 ports. Loopback/ephemeral ports are enabled exclusively
+by an internal socket-test constructor.
+
+The Windows/Linux TLS acceptance now exercises two real independent TCP
+socket listeners, a non-AA second server, wrong digests, truncated/corrupt
+wire data, pointer errors and a malicious writer that fabricates reports.
+
+**Trust limitation:** The AA bit is a protocol assertion by the contacted
+server, not cryptographic proof of DNSSEC or operator independence. The
+pinned addresses and their network paths must be trusted and configured by
+an operator. A production-approved DNS publication implementation, bounded
+credential rotation, DNSSEC validation where required, live external
+propagation and CA staging order remain outstanding. This code is a
+verification layer, **not** a complete DNS provider or release acceptance.
+
+### Bounded RFC 2136/TSIG DNS-01 publication option
+
+`AcmeDns01NsupdateWriter` adds an operator-provisioned DNS-01 publication
+backend for externally managed RFC 2136 authoritative zones. It invokes a
+locally installed and **SHA-256-pinned** `nsupdate` binary with `-v`
+(TCP) and `-k <private-key-file>` through an argument list, not through a
+shell. The binary is checked again before each add/delete. A single
+owner-only (0600), bounded TSIG file containing exactly one
+`algorithm hmac-sha256` key is validated before use; the shared secret is
+never included in argv, command input, log output or error messages.
+The process has a 12-second hard timeout and all output is drained without
+retaining or logging the text.
+
+The writer accepts only canonical public hostnames strictly beneath one
+configured public DNS zone, the exact `_acme-challenge` owner and a
+canonical 43-character SHA-256 base64url digest. It sends only:
+
+```text
+server <pinned-update-server-IP> 53
+zone <configured-public-zone>.
+update add _acme-challenge.api.example.com. 30 TXT "<43-character-digest>"
+send
+```
+
+Cleanup is `update delete <same-owner>. TXT "<same-digest>"`, not a
+whole-owner or whole-TXT-RRset removal. Disposing a successful publication
+lease performs that exact-value delete independently of the ACME
+cancellation token. An ambiguous failed add triggers bounded best-effort
+compensating deletion. **DNS TTL is not a lease:** a crashed process can
+leave an authoritative record behind; durable clean-up recovery and update
+idempotency across multiple gateway nodes are still required.
+
+The writer deliberately refuses to self-attest TXT propagation.
+Operators must wrap it in `AcmeDns01WireVerifiedPublisher` using separately
+pinned authoritative endpoints; only those direct TCP DNS answers can
+satisfy the issuer's two-or-more-authority readiness gate. Grant its TSIG
+identity update permission **only** for the approved `_acme-challenge`
+TXT names, never unrestricted zone write authority. Keep the executable,
+TSIG file and their parent paths root-/service-controlled and out of
+source control; do not configure DNS update credentials in public API or UI.
+
+The Windows/Linux test harness checks the strict script and configuration;
+Linux additionally runs a disposable fake `nsupdate` process to verify
+stdin/argv separation, exact cleanup, nonzero-exit compensation and
+executable tampering rejection. A fake executable is not proof of a live
+RFC 2136 server or public DNS operation. No automatic scheduler/provider
+configuration or CA staging validation is enabled by this PR; external DNS
+network credentials, signed response trust, live DNSSEC/TSIG interoperability,
+fleet coordination and physical #36 remain pending.
+
+### Explicit DNS-01 renewal scheduler wiring (operator-only opt-in)
+
+The same 10-minute-bounded `AcmeRenewalCoordinator`, X.509 SAN/EKU/
+chain validation, staging PFX, atomic active-certificate replacement,
+last-good rollback and listener activation checks now support **either**
+HTTP-01 (default) **or** DNS-01. DNS-01 must be selected explicitly by
+`enableDns01Renewal: true` and a complete `dns01Publisher` object in
+the existing owner-only `YARP_ACME_CONFIG_FILE`. Supplying one without
+the other fails startup/configuration. There is no automatic downgrade
+to HTTP-01. A DNS-01-only renewal does not require an externally reachable
+TCP/80 challenge listener, although the isolated traffic TLS listener
+and active certificate/password paths remain mandatory.
+
+Example **private renewal config fields** to add to the existing JSON
+(shown with placeholder digest/IPs, not ready-to-deploy credentials):
+
+```json
+{
+  "enableDns01Renewal": true,
+  "dns01Publisher": {
+    "zoneName": "example.com",
+    "updateServerAddress": "192.0.2.53",
+    "nsupdateExecutablePath": "/usr/bin/nsupdate",
+    "nsupdateExecutableSha256": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    "tsigKeyFilePath": "/var/lib/gatewaycore/private/dns-01.key",
+    "authorities": [
+      { "authorityId": "ns1.example.com", "address": "192.0.2.53" },
+      { "authorityId": "ns2.example.com", "address": "192.0.2.54" }
+    ]
+  }
+}
+```
+
+This snippet is **not** a complete ACME config. It must be combined with
+the `directoryUrl` (staging initially), `dnsName`, contact email, correct
+active traffic PFX/password paths, renewal window and CA terms consent in
+the previous section. The addresses shown are RFC 5737 documentation IPs;
+the digest is a **dummy**, and the paths are deployment-specific.
+
+The service constructs a private TSIG RFC2136 writer, wraps it with a
+separate pinned direct-authority TCP verifier, and **preflights** the
+installed updater binary and TSIG key *at startup* before registering the
+renewal background worker. No raw signing secret or trust override is
+read from an HTTP request. DNS-01 selection shares the same jitter,
+backoff and atomic PFX rollback as HTTP-01. Deterministic fake CA tests
+exercise the real renewal coordinator with DNS-01 selected, TCP/80 disabled,
+multiple simulated authoritative TXT answers, exact TXT lease cleanup,
+certificate installation and refusal to downgrade to HTTP-01.
+
+**Open acceptance:** no real public staging CA order has completed; no
+real RFC2136/TSIG name-server interoperability, signer custody, crash
+recovery of orphan TXT, multi-node issuance fencing or external
+certificate-chain delivery is proven. Do not deploy a shared TSIG identity
+with unrestricted zone-update permission. Preserve #37 and physical #36 as
+open gates until independent Windows/Linux integration and operator-controlled
+staging/DR exercises are completed.
+
+For the updater executable, the Linux integrity preflight follows every
+parent directory with no symlink traversal and rejects the **immediate**
+executable directory when group/other identities can write it. Trusted
+root-managed public executable directories such as `/usr/bin` (mode 0755)
+are supported; the private 0700 directory requirement applies to the TSIG
+secret/state paths, not normal installed system binaries. Explicit symlinked
+binaries/ancestors and group-writable executable directories remain denied.
+An approved, independently pinned SHA-256 hash is checked before every
+operation, and deployments must update that pin only after reviewing a
+verified executable replacement.
+
 ### ACME account-key directory bootstrap without symlink traversal
 
 On Linux, the ACME account-key store now creates its private key directory

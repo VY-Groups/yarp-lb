@@ -70,11 +70,17 @@ var acmeConfigurationPath = Environment.GetEnvironmentVariable("YARP_ACME_CONFIG
 AcmeRenewalSettings? acmeRenewalSettings = null;
 if (!string.IsNullOrWhiteSpace(acmeConfigurationPath))
 {
-    if (ec2Lab || !acmeHttp01PublicEntrypointEnabled || isolatedListeners is null)
-        throw new InvalidOperationException("ACME renewal requires production data protection and an explicitly enabled isolated public HTTP-01 listener.");
+    if (ec2Lab || isolatedListeners is null)
+        throw new InvalidOperationException(
+            "ACME renewal requires production Data Protection and isolated traffic TLS listeners");
     acmeRenewalSettings = AcmeRenewalSettings.Load(acmeConfigurationPath,
         isolatedListeners.Config.TrafficPfxPath, isolatedListeners.Config.TrafficPfxPasswordFile,
         isolatedListeners.Config.TrafficCertificateDnsNames);
+    if (!acmeRenewalSettings.EnableDns01Renewal && !acmeHttp01PublicEntrypointEnabled)
+        throw new InvalidOperationException(
+            "HTTP-01 renewal requires an explicitly enabled public challenge listener");
+    // DNS-01 startup does not require TCP/80. It requires a separately
+    // pinned TSIG update authority plus independent authoritative probes.
 }
 builder.Services.AddSingleton<AcmeHttp01ChallengeStore>();
 isolatedListeners?.Configure(builder.WebHost);
@@ -99,6 +105,12 @@ if (acmeRenewalSettings is { } renewalSettings)
 {
     var activeListeners = isolatedListeners ?? throw new InvalidOperationException(
         "ACME requires the isolated traffic listener certificate rotator.");
+    // Fail startup *before* creating a renewal worker if the DNS-01
+    // update executable, private TSIG, zone or pinned authorities are
+    // unavailable. Never send DNS credentials through a management API.
+    IAcmeDns01Publisher? dns01Publisher = renewalSettings.EnableDns01Renewal
+        ? renewalSettings.Dns01Publisher!.CreateVerifiedPublisher()
+        : null;
     builder.Services.AddSingleton<AcmeCertificateLifecycleGate>();
     var accountKeyPath = Path.Combine(privateDir, "acme-account.encrypted");
     builder.Services.AddSingleton<IAcmeCertificateIssuer>(services => new CertesAcmeCertificateIssuer(
@@ -116,7 +128,8 @@ if (acmeRenewalSettings is { } renewalSettings)
         services.GetRequiredService<AcmeCertificateLifecycleGate>()));
     builder.Services.AddHostedService(services => new AcmeRenewalBackgroundService(renewalSettings,
         services.GetRequiredService<AcmeRenewalCoordinator>(), null,
-        services.GetRequiredService<ILogger<AcmeRenewalBackgroundService>>()));
+        services.GetRequiredService<ILogger<AcmeRenewalBackgroundService>>(),
+        dns01Publisher));
 }
 // Keep executable/static assets read-only under /opt on hardened Linux.
 // Management may atomically update ONLY a private state-directory config.
