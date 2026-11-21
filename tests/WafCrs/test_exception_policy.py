@@ -87,6 +87,30 @@ class WafLabPolicyTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.check()
 
+    def test_rejects_added_service_that_exposes_the_private_origin(self):
+        compose = self.compose.read_text(encoding="utf-8")
+        compose = compose.replace(
+            "  waf:\n",
+            '  unreviewed-origin-proxy:\n'
+            '    image: nginx:latest\n'
+            '    ports: ["0.0.0.0:9443:80"]\n'
+            '    networks: ["waf-private"]\n'
+            "  waf:\n")
+        self.compose.write_text(compose, encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "service set changed"):
+            self.check()
+
+    def test_rejects_compose_include_and_network_reconfiguration(self):
+        original = self.compose.read_text(encoding="utf-8")
+        self.compose.write_text("include:\n  - unreviewed.yml\n" + original,
+                                encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "top-level"):
+            self.check()
+        self.compose.write_text(original.replace(
+            "    driver: bridge", "    driver: host"), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "network isolation"):
+            self.check()
+
     def test_rejects_missing_or_unknown_fields(self):
         data = json.loads(self.policy.read_text(encoding="utf-8"))
         data.pop("owner")
@@ -98,6 +122,60 @@ class WafLabPolicyTests(unittest.TestCase):
         self.policy.write_text(json.dumps(data), encoding="utf-8")
         with self.assertRaises(ValueError):
             self.check()
+
+    def test_rejects_waf_engine_policy_and_anomaly_changes(self):
+        original = self.compose.read_text(encoding="utf-8")
+        changes = (
+            ('MODSEC_RULE_ENGINE: "${WAF_MODE:-On}"',
+             'MODSEC_RULE_ENGINE: "Off"'),
+            ('ANOMALY_INBOUND: "5"', 'ANOMALY_INBOUND: "100"'),
+            ('MODSEC_REQ_BODY_LIMIT_ACTION: "Reject"',
+             'MODSEC_REQ_BODY_LIMIT_ACTION: "ProcessPartial"'),
+            ('MODSEC_AUDIT_ENGINE: "On"', 'MODSEC_AUDIT_ENGINE: "Off"'),
+        )
+        for current, replacement in changes:
+            with self.subTest(current=current):
+                self.assertIn(current, original)
+                self.compose.write_text(original.replace(current, replacement),
+                                        encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, "WAF lab engine"):
+                    self.check()
+
+    def test_rejects_extra_rule_mount_or_environment_override(self):
+        original = self.compose.read_text(encoding="utf-8")
+        changes = (
+            ('    environment:\n',
+             '    environment:\n      MODSEC_RULE_ENGINE: "Off"\n'),
+            ('    volumes:\n      # Loaded before CRS rule 920420.',
+             '    volumes:\n      - ./override.conf:/etc/modsecurity.d/override.conf:ro\n'
+             '      # Loaded before CRS rule 920420.'),
+            ('    depends_on:\n      - protected-app',
+             '    env_file: ./untrusted.env\n    depends_on:\n      - protected-app'),
+        )
+        for current, replacement in changes:
+            with self.subTest(replacement=replacement):
+                self.assertIn(current, original)
+                self.compose.write_text(original.replace(current, replacement),
+                                        encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, "WAF lab engine"):
+                    self.check()
+
+    def test_rejects_public_waf_listener_or_published_backend(self):
+        original = self.compose.read_text(encoding="utf-8")
+        changes = (
+            ('127.0.0.1:18888:8080', '0.0.0.0:18888:8080',
+             "WAF lab engine"),
+            ('    expose: ["8000"]',
+             '    expose: ["8000"]\n    ports: ["8000:8000"]',
+             "backend isolation"),
+        )
+        for current, replacement, error in changes:
+            with self.subTest(replacement=replacement):
+                self.assertIn(current, original)
+                self.compose.write_text(original.replace(current, replacement),
+                                        encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, error):
+                    self.check()
 
 
 if __name__ == "__main__":

@@ -33,6 +33,109 @@ EXPECTED_RULE = r"""SecRule REQUEST_METHOD "@streq POST" \
 """
 REQUIRED = set(EXPECTED) | {"approvedForProduction", "issuedAtUtc", "expiresAtUtc"}
 
+# Lock the disposable lab's effective WAF and backend Compose stanzas. The
+# policy manifest alone does not protect an exception when another mount,
+# runtime override or published origin silently bypasses the intended engine.
+# Treat any Compose change as a separately reviewed fixture revision.
+_EXPECTED_BACKEND = (
+    'image: python:3.12-alpine',
+    'command: ["python", "/app/backend.py"]',
+    'volumes:',
+    '- ../../tests/WafCrs/backend.py:/app/backend.py:ro',
+    'expose: ["8000"]',
+    'networks: ["waf-private"]',
+)
+_EXPECTED_WAF = (
+    'image: ${WAF_IMAGE:-owasp/modsecurity-crs@sha256:f7b4ec036553aa65e65fe792394099f597d6130465e63ff58d84f087617f5412}',
+    'volumes:',
+    '- ./REQUEST-900-LAB-PKIX.conf:/etc/modsecurity.d/owasp-crs/rules/REQUEST-900-GATEWAYCORE-LAB-PKIX.conf:ro',
+    'environment:',
+    'BACKEND: http://protected-app:8000',
+    'SERVER_NAME: localhost',
+    'PORT: "8080"',
+    'MODSEC_RULE_ENGINE: "${WAF_MODE:-On}"',
+    'MODSEC_REQ_BODY_ACCESS: "On"',
+    'MODSEC_REQ_BODY_LIMIT: "131072"',
+    'MODSEC_REQ_BODY_NOFILES_LIMIT: "65536"',
+    'MODSEC_REQ_BODY_LIMIT_ACTION: "Reject"',
+    'BLOCKING_PARANOIA: "1"',
+    'DETECTION_PARANOIA: "1"',
+    'ANOMALY_INBOUND: "5"',
+    'MODSEC_AUDIT_ENGINE: "On"',
+    'MODSEC_AUDIT_LOG_FORMAT: "Native"',
+    'ports:',
+    '- "127.0.0.1:18888:8080"',
+    'depends_on:',
+    '- protected-app',
+    'networks: ["waf-private"]',
+)
+_EXPECTED_BENCHMARK = (
+    'image: python:3.12-alpine',
+    'profiles: ["benchmark"]',
+    'entrypoint: ["python", "/app/benchmark.py"]',
+    'volumes:',
+    '- ../../tests/WafCrs/benchmark.py:/app/benchmark.py:ro',
+    'networks: ["waf-private"]',
+)
+
+
+def _active_compose_lines(compose_text):
+    active = []
+    for line in compose_text.splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if "\t" in line[:len(line) - len(line.lstrip())]:
+            raise ValueError("WAF lab Compose may not use tab indentation")
+        # Inline comments are irrelevant to Compose semantics. All other
+        # active lines remain strict so flow mappings, aliases and includes
+        # cannot bypass the checked fixture shape.
+        active.append(line.split("#", 1)[0].rstrip())
+    return tuple(active)
+
+
+def _compose_service_active_lines(compose_text, service):
+    """Read only the exact two-space-indented lab Compose service block.
+
+    No YAML aliases, Compose extensions, additional mounts or environment
+    fields are permitted by this fixture contract. This is NOT a general YAML
+    parser; docker compose config --quiet still validates the actual document.
+    """
+    lines = compose_text.splitlines()
+    starts = [index for index, line in enumerate(lines)
+              if line == f"  {service}:"]
+    if len(starts) != 1:
+        raise ValueError(f"Expected exactly one {service} service block")
+    selected = []
+    for line in lines[starts[0] + 1:]:
+        if line.strip() and not line.startswith("    "):
+            break
+        value = line.strip()
+        if value and not value.startswith("#"):
+            selected.append(value)
+    return tuple(selected)
+
+
+def _validate_compose_lab_boundary(compose_text):
+    lines = _active_compose_lines(compose_text)
+    top_level = tuple(line for line in lines if not line.startswith(" "))
+    if top_level != ("services:", "networks:"):
+        raise ValueError("WAF lab Compose may not add top-level services, includes or extensions")
+    services_start = lines.index("services:")
+    networks_start = lines.index("networks:")
+    service_lines = lines[services_start + 1:networks_start]
+    service_keys = tuple(line for line in service_lines
+                         if len(line) - len(line.lstrip(" ")) == 2)
+    if service_keys != ("  protected-app:", "  waf:", "  benchmark:"):
+        raise ValueError("WAF lab Compose service set changed")
+    if _compose_service_active_lines(compose_text, "protected-app") != _EXPECTED_BACKEND:
+        raise ValueError("WAF lab backend isolation or config changed")
+    if _compose_service_active_lines(compose_text, "waf") != _EXPECTED_WAF:
+        raise ValueError("WAF lab engine, rule mounts, threshold or binding changed")
+    if _compose_service_active_lines(compose_text, "benchmark") != _EXPECTED_BENCHMARK:
+        raise ValueError("WAF lab benchmark service changed")
+    if lines[networks_start:] != ("networks:", "  waf-private:", "    driver: bridge"):
+        raise ValueError("WAF lab network isolation changed")
+
 
 def _no_duplicate_properties(pairs):
     output = {}
@@ -94,6 +197,7 @@ def validate(policy=POLICY, rule=RULE, compose=COMPOSE, now=None):
             "/etc/modsecurity.d/owasp-crs/rules/"
             "REQUEST-900-GATEWAYCORE-LAB-PKIX.conf:ro") not in compose_text:
         raise ValueError("Lab rule not mounted once, read-only, at the expected path")
+    _validate_compose_lab_boundary(compose_text)
     return {"exceptionId": data["exceptionId"],
             "scope": data["environment"],
             "expiresAtUtc": data["expiresAtUtc"],
