@@ -526,6 +526,7 @@ def main():
             }
             config_document = {
                 "ListenHost": "127.0.0.1", "ListenPort": dns_port,
+                "AllowDocumentationAddressesForTesting": True,
                 "MetricsListenHost": "127.0.0.1", "MetricsListenPort": metrics_port,
                 "ProbeIntervalSeconds": 1, "AgentReports": report_config,
                 "AuthorityFence": fence_config,
