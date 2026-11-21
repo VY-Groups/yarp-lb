@@ -149,6 +149,18 @@ in `gateway-alerts.yml`; their syntax and synthetic behavior are checked by
 Alertmanager receiver. See `control-center/docs/AVAILABILITY_SLO.md` for the
 assumption model and incident evidence format.
 
+### Error-fraction alert for quiet services
+
+`YarpHigh5xxFraction` uses the ratio of per-instance 5xx responses to the
+**actual** per-instance total HTTP request rate in the same five-minute window.
+The denominator has a numerical zero guard (`1e-9` requests/s), not a traffic
+floor of 1 request/s. A quiet gateway's error fraction therefore remains
+mathematically accurate; an idle gateway with no 5xx stays unalerted.
+The existing **0.1% error fraction**, two-minute pending interval and severity
+remain unchanged. Synthetic promtool cases exercise a one-request-per-minute
+failing gateway, a quiet healthy gateway and an idle gateway. These synthetic
+rules do not prove real remote alert delivery; #50 requires that separately.
+
 ### Alert/template routing
 - `/gateway/metrics` is restricted to the management metrics listener in split mode.
 - A management IP allowlist and pinned trusted client certificate are required.
