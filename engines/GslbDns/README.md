@@ -71,6 +71,10 @@ rollover and multi-authority acceptance remain open.
   serial must be deliberately bumped in config when site authority changes.
   In-bailiwick name server IPv4 or IPv6 address answers and additional glue are available;
   out-of-bailiwick NS targets are listed without forging glue.
+  Apex NS inventory accepts up to four distinct hostnames and up to eight address
+  entries (at most one A and one AAAA per hostname). A dual-stack name server is
+  emitted once in the apex NS RRset, with its A and AAAA glue emitted separately.
+  Duplicate address families for the same normalized hostname fail startup.
   Opt-in signed GatewayAgent staging rejects changed existing authoritative
   zones unless the proposed `SoaSerial` advances under RFC 1982; it does not
   generate serials and does not guard direct file edits.
