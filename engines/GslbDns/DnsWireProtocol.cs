@@ -66,6 +66,10 @@ internal static class DnsWireProtocol
         if (pos + 4 > query.Length) return null;
         var qtype = BinaryPrimitives.ReadUInt16BigEndian(query.Slice(pos, 2));
         var qclass = BinaryPrimitives.ReadUInt16BigEndian(query.Slice(pos + 2, 2));
+        // RFC 6895 reserves QTYPE 0 and QCLASS 0. A zero question
+        // is not an unsupported ordinary RR type: reject the malformed
+        // frame before zone lookup, signing, or backend-health evaluation.
+        if (qtype == 0 || qclass == 0) return null;
         pos += 4;
         var questionEnd = pos;
         var domain = string.Join('.', labels).ToLowerInvariant();
