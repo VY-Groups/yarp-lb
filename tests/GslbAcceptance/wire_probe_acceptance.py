@@ -97,6 +97,14 @@ def run():
                                 "127.0.0.1", port, bytes(frame), tcp, 0.4)
                         except (OSError, TimeoutError):
                             response = b""
+                        except AssertionError as error:
+                            # The TCP DNS server deliberately closes the
+                            # connection for malformed reserved questions;
+                            # the shared framed reader reports that EOF as an
+                            # assertion. Treat only this exact EOF as a drop.
+                            if str(error) != "TCP DNS response ended early":
+                                raise
+                            response = b""
                         if response:
                             # FORMERR need not echo a malformed question, so
                             # inspect only the DNS header, not the normal
