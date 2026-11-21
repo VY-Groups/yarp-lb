@@ -9,6 +9,8 @@ internal static class AcmeDns01Acceptance
         public string? PublishedValue;
         public bool Active;
         public bool ThrowAfterPublish;
+        public readonly HashSet<string> TxtValues = new(StringComparer.Ordinal)
+            { "unrelated-existing-challenge" };
         public readonly Queue<IReadOnlyList<AcmeDns01AuthorityObservation>> Responses = new();
         public bool ThrowOnProbe;
 
@@ -22,6 +24,7 @@ internal static class AcmeDns01Acceptance
                 owner.Published++;
                 owner.PublishedName = fqdn;
                 owner.PublishedValue = value;
+                owner.TxtValues.Add(value);
                 owner.Active = true; // Simulate provider mutation before a timeout/error.
                 if (owner.ThrowAfterPublish)
                     throw new InvalidOperationException("simulated provider timeout after TXT write");
@@ -32,8 +35,8 @@ internal static class AcmeDns01Acceptance
                 if (!disposed)
                 {
                     disposed = true;
-                    if (owner.Active) owner.Cleaned++;
-                    owner.Active = false;
+                    if (owner.TxtValues.Remove(value)) owner.Cleaned++;
+                    owner.Active = owner.TxtValues.Contains(value);
                 }
                 return ValueTask.CompletedTask;
             }
@@ -118,11 +121,12 @@ internal static class AcmeDns01Acceptance
             Check(publisher.Published == 1 && publisher.Probed == 1 &&
                 publisher.Cleaned == 0 &&
                 publisher.PublishedName == "_acme-challenge.api.example.com" &&
-                publisher.PublishedValue == txt,
+                publisher.PublishedValue == txt && publisher.TxtValues.Contains(txt),
                 "publication precedes authoritative probe and remains live until release");
         }
-        Check(publisher.Cleaned == 1,
-            "successful DNS-01 authorization cleanup lease removes the TXT");
+        Check(publisher.Cleaned == 1 && !publisher.TxtValues.Contains(txt) &&
+              publisher.TxtValues.Contains("unrelated-existing-challenge"),
+            "successful cleanup removes only its TXT and preserves unrelated concurrent values");
 
         var partialWrite = new FakePublisher { ThrowAfterPublish = true };
         var partialWriteFailed = false;
@@ -134,7 +138,9 @@ internal static class AcmeDns01Acceptance
         }
         catch (InvalidOperationException) { partialWriteFailed = true; }
         Check(partialWriteFailed && partialWrite.Published == 1 &&
-              partialWrite.Cleaned == 1 && !partialWrite.Active,
+              partialWrite.Cleaned == 1 && !partialWrite.Active &&
+              partialWrite.TxtValues.Contains("unrelated-existing-challenge") &&
+              !partialWrite.TxtValues.Contains(txt),
             "partial provider TXT write is compensated when publication throws before returning");
 
         var initiallyStale = new FakePublisher();
