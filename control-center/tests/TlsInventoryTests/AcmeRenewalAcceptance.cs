@@ -147,6 +147,7 @@ internal static class AcmeRenewalAcceptance
             var linkedSettingsPath = Path.Combine(alias, "acme.json");
             var ancestorDenied = false;
             try { _ = AcmeRenewalSettings.Load(linkedSettingsPath, activePfxPath, passwordPath, [DnsName]); }
+            catch (InvalidDataException) { ancestorDenied = true; }
             catch (IOException) { ancestorDenied = true; }
             Check(ancestorDenied, "ACME config through symlinked parent fails closed");
         }
