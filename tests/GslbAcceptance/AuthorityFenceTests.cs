@@ -236,9 +236,76 @@ internal static class AuthorityFenceTests
                     "inbound peer IP allowlist rejects wrong or missing source addresses");
                 Check(!receiver.IsPeerEligible("fence.example.test", "primary", 101),
                     "inbound lease alone cannot authorize a one-way partition");
+                var oneWay = receiver.Inspect(101);
+                Check(oneWay.DurableStateTrusted && oneWay.PeerSnapshotFresh &&
+                      !oneWay.PeerAcknowledgementFresh && !oneWay.PeerFenceReady &&
+                      oneWay.EligiblePeerTargets == 0 && oneWay.ConfiguredTargets == 1,
+                    "operator diagnostics cannot present a one-way partition as ready");
                 receiver.RecordPeerAcknowledgement(100, 101);
                 Check(receiver.IsPeerEligible("fence.example.test.", "primary", 101),
                     "fresh matching eligible peer lease opens the fence");
+                var readyStatus = receiver.Inspect(101);
+                Check(readyStatus.PeerFenceReady && readyStatus.EligiblePeerTargets == 1 &&
+                      readyStatus.PeerSnapshotRemainingMilliseconds > 0 &&
+                      readyStatus.PeerAcknowledgementRemainingMilliseconds > 0 &&
+                      readyStatus.LastAcceptedPeerEpoch == initial.Epoch &&
+                      readyStatus.LastAcceptedPeerSequence == initial.Sequence,
+                    "operator status reports actual signed epoch, replay high-water and two-way lease readiness");
+                var observedMetrics = new DnsRuntimeMetrics().Render(
+                    Array.Empty<SiteGroup>(), null, Array.Empty<AgentReportTarget>(),
+                    101, receiver);
+                Check(observedMetrics.Contains("gatewaycore_gslb_authority_fence_ready 1", StringComparison.Ordinal) &&
+                      observedMetrics.Contains("gatewaycore_gslb_authority_peer_eligible_targets 1", StringComparison.Ordinal),
+                    "private Prometheus gauges agree with the exact active authority fence");
+                static int ReserveLoopbackPort()
+                {
+                    using var probe = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
+                    probe.Start();
+                    return ((IPEndPoint)probe.LocalEndpoint).Port;
+                }
+                // The earlier in-process state assertions use synthetic monotonic
+                // ticks. Refresh both signed leases using the real process clock
+                // before exercising the live HTTP route, which reads that clock.
+                var routeTick = Environment.TickCount64;
+                var routeSnapshot = source.CreateSnapshot(routeTick);
+                Check(receiver.TryAccept(routeSnapshot, tlsA, now, routeTick),
+                    "live status route fixture accepts a currently fresh signed snapshot");
+                receiver.RecordPeerAcknowledgement(routeTick, routeTick);
+                var statusPort = ReserveLoopbackPort();
+                var statusServer = new DnsMetricsServer("127.0.0.1", statusPort,
+                    new DnsRuntimeMetrics(), Array.Empty<SiteGroup>(), null,
+                    Array.Empty<AgentReportTarget>(), receiver);
+                statusServer.StartAsync(CancellationToken.None).GetAwaiter().GetResult();
+                try
+                {
+                    using var statusClient = new HttpClient();
+                    var statusResponse = statusClient.GetAsync(
+                        $"http://127.0.0.1:{statusPort}/authority-fence-status")
+                        .GetAwaiter().GetResult();
+                    var statusJson = statusResponse.Content.ReadAsStringAsync().GetAwaiter().GetResult();
+                    using var statusDocument = JsonDocument.Parse(statusJson);
+                    Check(statusResponse.StatusCode == HttpStatusCode.OK &&
+                          statusResponse.Headers.CacheControl?.NoStore == true &&
+                          statusDocument.RootElement.GetProperty("status")
+                              .GetProperty("peerFenceReady").GetBoolean(),
+                        "loopback authority status route exposes no-store current lease evidence");
+                }
+                finally { statusServer.DisposeAsync().AsTask().GetAwaiter().GetResult(); }
+                var noFencePort = ReserveLoopbackPort();
+                var noFenceServer = new DnsMetricsServer("127.0.0.1", noFencePort,
+                    new DnsRuntimeMetrics(), Array.Empty<SiteGroup>(), null,
+                    Array.Empty<AgentReportTarget>());
+                noFenceServer.StartAsync(CancellationToken.None).GetAwaiter().GetResult();
+                try
+                {
+                    using var statusClient = new HttpClient();
+                    var notFound = statusClient.GetAsync(
+                        $"http://127.0.0.1:{noFencePort}/authority-fence-status")
+                        .GetAwaiter().GetResult();
+                    Check(notFound.StatusCode == HttpStatusCode.NotFound,
+                        "authority diagnostic endpoint is absent when the fence is disabled");
+                }
+                finally { noFenceServer.DisposeAsync().AsTask().GetAwaiter().GetResult(); }
                 Check(!receiver.TryAccept(initial, tlsA, now, 102), "duplicate authority snapshot is replay rejected");
                 Check(receiver.IsPeerEligible("fence.example.test", "primary", 102),
                     "rejected replay does not clear current lease");
@@ -249,6 +316,9 @@ internal static class AuthorityFenceTests
                 Check(receiver.TryAccept(negative, tlsA, now, 104) &&
                       !receiver.IsPeerEligible("fence.example.test", "primary", 105),
                     "authenticated negative peer decision keeps DNS fence closed");
+                var unhealthy = receiver.Inspect(105);
+                Check(unhealthy.PeerFenceReady && unhealthy.EligiblePeerTargets == 0,
+                    "operator status never counts authenticated negative decisions as eligible");
                 localHealthy = true;
             }
             using (var restartedReceiver = new AuthorityFenceStore(configB, fingerprint, [target]))
@@ -297,6 +367,12 @@ internal static class AuthorityFenceTests
                 File.Delete(deletionConfig.ReplayStatePath);
                 Check(!deletionReceiver.IsPeerEligible("fence.example.test", "primary", 1400),
                     "DNS read detects durable state loss without another incoming snapshot, before lease expiry");
+                var faultedStatus = deletionReceiver.Inspect(1400);
+                Check(!faultedStatus.DurableStateTrusted && !faultedStatus.PeerFenceReady &&
+                      faultedStatus.EligiblePeerTargets == 0 &&
+                      faultedStatus.PeerSnapshotRemainingMilliseconds == 0 &&
+                      faultedStatus.PeerAcknowledgementRemainingMilliseconds == 0,
+                    "operator diagnostics latch a durable replay fault and zero both lease budgets");
                 Check(ThrowsInvalid(() => deletionReceiver.CreateSnapshot(1401)),
                     "faulted authority cannot publish a new positive decision");
                 File.WriteAllBytes(deletionConfig.ReplayStatePath, savedReplay);

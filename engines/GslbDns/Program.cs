@@ -367,7 +367,7 @@ await using var reportServer = config.AgentReports is null || reportStore is nul
     ? null : new AgentHealthReportServer(config.AgentReports, reportStore, runtimeMetrics);
 await using var metricsServer = config.MetricsListenPort == 0 ? null : new DnsMetricsServer(
     config.MetricsListenHost, config.MetricsListenPort, runtimeMetrics,
-    groups.Values.ToArray(), reportStore, reportTargets);
+    groups.Values.ToArray(), reportStore, reportTargets, authorityFenceStore);
 using var validation = groups.Values.SelectMany(group => group.Sites).Any(site => site.Validators.Length > 0)
     ? new ExternalValidation(groups.Values.SelectMany(group => group.Sites).SelectMany(site => site.Validators)) : null;
 using var stop=new CancellationTokenSource();
