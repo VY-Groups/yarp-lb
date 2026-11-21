@@ -710,3 +710,12 @@ Observer report admission charges the authenticated certificate identity's `MaxR
 ### Chunked report body rejection
 
 The agent report ingress continues to enforce the same 8192-byte JSON limit through Kestrel and the application reader. When a real authenticated chunked transfer trips Kestrel's size bound while reading, the endpoint translates only the HTTP 413 transport exception into a controlled 413 response and increments per-agent rejection metrics. Other transport errors are not silently converted to successful reports. The disposable mTLS authority test sends three 4096-byte chunks to verify the 413 status, continued server availability and per-observer quota isolation. This is independent of the separate peer authority-fencing protocol; it does not establish full #109 completion.
+
+### Strict DNS query-header validation
+
+Both UDP and TCP listeners drop malformed query headers before DNS record or
+health evaluation. Requests with QR=1, a non-QUERY opcode, response-only AA/TC/RA,
+reserved Z or nonzero query RCODE are rejected. Valid resolver query flags RD,
+AD and CD remain accepted. Windows/Linux GSLB acceptance exercises malformed
+header drops alongside the existing packet-shape, EDNS and amplification tests.
+A successful lab result is not independent public recursive-resolver qualification.

@@ -1281,6 +1281,20 @@ try
     }
     var oversizedName = DnsRequest(maxWireName + "d", 1);
     var malformedBase = DnsRequest("app.integration.test",1);
+    byte[] WithHeaderFlags(ushort flags)
+    {
+        var packet = (byte[])malformedBase.Clone();
+        BinaryPrimitives.WriteUInt16BigEndian(packet.AsSpan(2, 2), flags);
+        return packet;
+    }
+    // RD is optional; test every AD/CD combination with RD both clear and set.
+    // Reject only response/invalid header flags, not valid resolver intent.
+    foreach (var validFlags in new ushort[] { 0x0000, 0x0010, 0x0020, 0x0030, 0x0100, 0x0110, 0x0120, 0x0130 })
+    {
+        var request = WithHeaderFlags(validFlags);
+        Must(DnsWireProtocol.Build(request, new Dictionary<string, SiteGroup>(), tcp: false) is { Length: > 12 },
+            $"valid RD/AD/CD query header 0x{validFlags:X4} is accepted");
+    }
     var nonAsciiName = (byte[])malformedBase.Clone();
     nonAsciiName[13] = 0xFF;
     var noQuestions = (byte[])malformedBase.Clone();
@@ -1305,7 +1319,14 @@ try
         (compressedQuestion,"compressed question name"),
         (trailingData,"unaccounted trailing byte"),
         (multipleAdditionals,"multiple additional records"),
-        (truncatedOpt,"truncated EDNS OPT")
+        (truncatedOpt,"truncated EDNS OPT"),
+        (WithHeaderFlags(0x8100),"response QR flag in a query"),
+        (WithHeaderFlags(0x0900),"nonstandard DNS opcode"),
+        (WithHeaderFlags(0x0500),"response-only authoritative-answer flag"),
+        (WithHeaderFlags(0x0300),"response-only truncation flag"),
+        (WithHeaderFlags(0x0180),"response-only recursion-available flag"),
+        (WithHeaderFlags(0x0140),"reserved DNS header bit"),
+        (WithHeaderFlags(0x0101),"nonzero query RCODE")
     };
     foreach (var malformed in malformedPackets)
         await ExpectUdpDrop(malformed.Packet,malformed.Case);
