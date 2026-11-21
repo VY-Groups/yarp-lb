@@ -49,7 +49,7 @@ class DnsWireProbeTests(unittest.TestCase):
                 # truncation, but not a parseable complete RR section.
                 partial = bytearray(reply(packet, 0x8200))
                 struct.pack_into("!H", partial, 6, 1)
-                return bytes(partial) + b"\\xc0\\x0c\\x00"
+                return bytes(partial) + b"\xc0\x0c\x00"
             return reply(packet, 0x8000)
         with patch.object(probe, "exchange", side_effect=transport):
             flags, records, _ = probe.check("127.0.0.1", 5353, "example.test",
@@ -62,7 +62,7 @@ class DnsWireProbeTests(unittest.TestCase):
         calls = []
         def transport(host, port, packet, tcp, timeout):
             calls.append(tcp)
-            return reply(packet, 0x8200) + b"\\0" * 512
+            return reply(packet, 0x8200) + b"\0" * 512
         with patch.object(probe, "exchange", side_effect=transport):
             with self.assertRaisesRegex(AssertionError, "advertised payload limit"):
                 probe.check("127.0.0.1", 5353, "example.test",
