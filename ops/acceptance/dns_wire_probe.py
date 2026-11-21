@@ -13,6 +13,8 @@ import sys
 
 
 def name_wire(name):
+    if name == ".":
+        return b"\0"
     parts = name.rstrip(".").encode("ascii").split(b".")
     if not parts or any(not part or len(part) > 63 for part in parts):
         raise ValueError("invalid DNS name")
@@ -71,6 +73,8 @@ def read_name(data, pos):
             target = ((size & 0x3F) << 8) | data[cursor + 1]
             if target >= len(data):
                 raise AssertionError("compression pointer outside DNS packet")
+            if target >= cursor:
+                raise AssertionError("compression pointer does not reference prior data")
             if target in visited_targets:
                 raise AssertionError("compression pointer cycle")
             visited_targets.add(target)
@@ -97,6 +101,8 @@ def require(condition, message):
 
 
 def labels_for(name):
+    if name == ".":
+        return ()
     name_wire(name)  # Validate the input before canonicalizing it.
     return tuple(label.lower() for label in name.rstrip(".").encode("ascii").split(b"."))
 
@@ -152,12 +158,14 @@ def validate_parser_guards():
 
     outside_pointer = b"\xff\xff" + struct.pack("!HH", 1, 1)
     cyclic_pointer = b"\xc0\x0c" + struct.pack("!HH", 1, 1)
+    forward_pointer = b"\xc0\x0e" + struct.pack("!HH", 1, 1) + b"\0"
     mismatched_name = name_wire("other.test") + struct.pack("!HH", 1, 1)
     mismatched_type = name_wire("example.test") + struct.pack("!HH", 28, 1)
     require(parse(header + valid_question, txid, "EXAMPLE.TEST.", 1)[0] == 0x8000,
             "valid response question was rejected")
     require(rejected(outside_pointer), "out-of-packet compression pointer was accepted")
     require(rejected(cyclic_pointer), "cyclic compression pointer was accepted")
+    require(rejected(forward_pointer), "forward compression pointer was accepted")
     require(rejected(mismatched_name), "mismatched response question name was accepted")
     require(rejected(mismatched_type), "mismatched response question type was accepted")
     wrong_owner = [("answer", labels_for("other.test"), 2, 1, 60)]
@@ -195,18 +203,20 @@ def run(args):
                 "NXDOMAIN missing negative-caching SOA")
         print(f"PASS NXDOMAIN {'TCP' if tcp else 'UDP'} {size} bytes")
     flags, records, size = check(args.host, args.port, zone, zone, 1, False, args.timeout, edns=True)
-    require((flags & 0xF) == 0 and any(section == "additional" and rtype == 41
-                                      for section, _, rtype, _, _ in records),
-            "EDNS0 response missing OPT or returned error")
+    opts = [(owner, rclass, ttl) for section, owner, rtype, rclass, ttl in records
+            if section == "additional" and rtype == 41]
+    require((flags & 0xF) == 0 and len(opts) == 1 and opts[0][0] == (),
+            "EDNS0 response must contain exactly one root-owned additional OPT RR")
     require(size <= 1232, "EDNS0 UDP response exceeded advertised 1232-byte limit")
     print(f"PASS EDNS0 UDP {size} bytes")
     flags, records, _ = check(args.host, args.port, zone, zone, 6, False, args.timeout,
                               edns=True, version=1)
     # RFC 6891: the OPT TTL high byte is the upper eight bits of the
     # twelve-bit RCODE. BADVERS=16 uses extended code 1 and header RCODE 0.
-    require(any(section == "additional" and rtype == 41 and
-                (((ttl >> 24) << 4) | (flags & 0xF)) == 16
-                for section, _, rtype, _, ttl in records),
+    badvers_opts = [(owner, ttl) for section, owner, rtype, _, ttl in records
+                    if section == "additional" and rtype == 41]
+    require(len(badvers_opts) == 1 and badvers_opts[0][0] == () and
+            (((badvers_opts[0][1] >> 24) << 4) | (flags & 0xF)) == 16,
             "unsupported EDNS version did not report BADVERS RCODE 16")
     print("PASS EDNS BADVERS")
     # An existing apex with an unsupported RR type is NODATA, not NXDOMAIN.
