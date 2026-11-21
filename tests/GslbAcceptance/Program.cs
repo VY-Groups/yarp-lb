@@ -1287,9 +1287,9 @@ try
         BinaryPrimitives.WriteUInt16BigEndian(packet.AsSpan(2, 2), flags);
         return packet;
     }
-    // DNSSEC-aware recursive resolvers may signal AD/CD on the query.
+    // RD is optional; test every AD/CD combination with RD both clear and set.
     // Reject only response/invalid header flags, not valid resolver intent.
-    foreach (var validFlags in new ushort[] { 0x0100, 0x0110, 0x0120, 0x0130 })
+    foreach (var validFlags in new ushort[] { 0x0000, 0x0010, 0x0020, 0x0030, 0x0100, 0x0110, 0x0120, 0x0130 })
     {
         var request = WithHeaderFlags(validFlags);
         Must(DnsWireProtocol.Build(request, new Dictionary<string, SiteGroup>(), tcp: false) is { Length: > 12 },
