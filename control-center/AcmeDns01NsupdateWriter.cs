@@ -49,26 +49,34 @@ public sealed class AcmeDns01NsupdateWriter : IAcmeDns01Publisher
             throw new InvalidOperationException("DNS-01 RFC2136 writer requires pinned executable, private TSIG and canonical public zone");
     }
 
-    public async Task<IAsyncDisposable> PublishAsync(string fqdn, string txtValue,
-        TimeSpan lifetime, CancellationToken cancellationToken)
+    public Task<IAcmeDns01PublicationLease> AcquirePublicationLeaseAsync(
+        string fqdn, string txtValue, TimeSpan lifetime, CancellationToken cancellationToken)
     {
         ValidateOwnerAndValue(fqdn, txtValue);
         if (lifetime < TimeSpan.FromSeconds(10) || lifetime > TimeSpan.FromMinutes(10))
             throw new InvalidOperationException("DNS-01 publication lifetime outside allowed bound");
         cancellationToken.ThrowIfCancellationRequested();
+        // This cleanup handle exists before nsupdate can perform any side effect.
+        return Task.FromResult<IAcmeDns01PublicationLease>(
+            new TxtLease(this, fqdn, txtValue));
+    }
 
+    // Concrete compatibility helper used by the local writer acceptance only.
+    // Production issuance uses the pre-acquired IAcmeDns01PublicationLease.
+    public async Task<IAsyncDisposable> PublishAsync(string fqdn, string txtValue,
+        TimeSpan lifetime, CancellationToken cancellationToken)
+    {
+        var lease = await AcquirePublicationLeaseAsync(
+            fqdn, txtValue, lifetime, cancellationToken);
         try
         {
-            await ApplyAsync(fqdn, txtValue, delete: false, cancellationToken);
-            return new TxtLease(this, fqdn, txtValue);
+            await lease.PublishAsync(cancellationToken);
+            return lease;
         }
         catch
         {
-            // The update may have reached the server before a timeout or
-            // broken response. Compensate by deleting only this exact TXT.
-            // Never run a broad owner/whole-RRset delete.
-            try { await ApplyAsync(fqdn, txtValue, delete: true, CancellationToken.None); }
-            catch { /* original failure is preserved; operator alerts required */ }
+            try { await lease.DisposeAsync(); }
+            catch { /* preserve the original update failure */ }
             throw;
         }
     }
@@ -79,15 +87,42 @@ public sealed class AcmeDns01NsupdateWriter : IAcmeDns01Publisher
             "The DNS update writer cannot attest its own propagation; wrap with pinned DNS TCP authority verification");
 
     private sealed class TxtLease(AcmeDns01NsupdateWriter writer, string owner,
-        string value) : IAsyncDisposable
+        string value) : IAcmeDns01PublicationLease
     {
-        private int released;
+        private readonly SemaphoreSlim gate = new(1, 1);
+        private bool publishAttempted;
+        private bool released;
+
+        public async Task PublishAsync(CancellationToken cancellationToken)
+        {
+            await gate.WaitAsync(cancellationToken);
+            try
+            {
+                if (released)
+                    throw new InvalidOperationException("DNS-01 publication lease was already released");
+                if (publishAttempted)
+                    throw new InvalidOperationException("DNS-01 publication lease may publish only once");
+                // Mark before I/O: a timeout can occur after the authoritative
+                // server applied the update, so disposal must compensate.
+                publishAttempted = true;
+                await writer.ApplyAsync(owner, value, delete: false, cancellationToken);
+            }
+            finally { gate.Release(); }
+        }
+
         public async ValueTask DisposeAsync()
         {
-            if (Interlocked.Exchange(ref released, 1) != 0) return;
-            // An ACME caller cancellation must not skip cleanup. The
-            // subprocess always has its own independent 12-second timeout.
-            await writer.ApplyAsync(owner, value, delete: true, CancellationToken.None);
+            await gate.WaitAsync();
+            try
+            {
+                if (released) return;
+                // An ACME caller cancellation must not skip cleanup. The
+                // subprocess always has its own independent 12-second timeout.
+                if (publishAttempted)
+                    await writer.ApplyAsync(owner, value, delete: true, CancellationToken.None);
+                released = true;
+            }
+            finally { gate.Release(); }
         }
     }
 
