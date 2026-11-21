@@ -169,6 +169,25 @@ def validate_edns0_response(records):
     require((ttl >> 24) == 0, "EDNS0 response has unexpected extended RCODE")
 
 
+def validate_badvers_response(flags, records):
+    """Validate the full EDNS BADVERS response, including its OPT envelope.
+
+    BADVERS is the extended RCODE 16, encoded as OPT extended RCODE 1
+    and legacy header RCODE 0. Version and reserved flags must be zero.
+    """
+    opts = [(section, owner, rclass, ttl) for section, owner, rtype, rclass, ttl in records
+            if rtype == 41]
+    require(len(opts) == 1, "BADVERS response must contain exactly one OPT RR")
+    section, owner, payload_size, ttl = opts[0]
+    require(section == "additional", "BADVERS OPT must be in additional section")
+    require(owner == (), "BADVERS OPT owner must be root")
+    require(payload_size >= 512, "BADVERS advertised invalid UDP size")
+    require(((ttl >> 16) & 0xFF) == 0, "BADVERS response EDNS version must be zero")
+    require((ttl & 0xFFFF) == 0, "BADVERS response contains unexpected flags")
+    require((flags & 0xF) == 0 and (ttl >> 24) == 1,
+            "unsupported EDNS version did not report BADVERS RCODE 16")
+
+
 def validate_parser_guards():
     txid = 0x1234
     header = struct.pack("!HHHHHH", txid, 0x8000, 1, 0, 0, 0)
@@ -254,11 +273,7 @@ def run(args):
                               edns=True, version=1)
     # RFC 6891: the OPT TTL high byte is the upper eight bits of the
     # twelve-bit RCODE. BADVERS=16 uses extended code 1 and header RCODE 0.
-    badvers_opts = [(owner, ttl) for section, owner, rtype, _, ttl in records
-                    if section == "additional" and rtype == 41]
-    require(len(badvers_opts) == 1 and badvers_opts[0][0] == () and
-            (((badvers_opts[0][1] >> 24) << 4) | (flags & 0xF)) == 16,
-            "unsupported EDNS version did not report BADVERS RCODE 16")
+    validate_badvers_response(flags, records)
     print("PASS EDNS BADVERS")
     # An existing apex with an unsupported RR type is NODATA, not NXDOMAIN.
     for tcp in (False, True):
