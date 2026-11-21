@@ -162,3 +162,31 @@ operator responsibility. Renewal fails before contacting the issuer when the
 PFX or password is linked, too large, or has unsafe Linux permissions. The
 Windows/Linux acceptance verifies live-certificate PFX link/mode rejection and
 renewal PFX/password link and password-mode rejection on Linux.
+
+### DNS-01 publisher and Certes issuer path — opt-in, not yet deployed
+
+A new `CertesAcmeCertificateIssuer.IssueDns01Async` uses the existing
+Data Protection-encrypted account identity, obtains a real Certes DNS-01
+challenge, computes the SHA-256-derived RFC 8555 DNS TXT value, and invokes
+an **explicit, trusted** `IAcmeDns01Publisher` before asking the CA to validate.
+The publisher is required to publish `_acme-challenge.<target>` for a bounded
+8-minute lifetime and probe the configured authoritative nameservers.
+Validation is gated until the exact TXT appears at **two or more distinct
+authorities** (at most 16 observed), with bounded polling and mandatory
+async lease cleanup on success, timeout, network error and cancellation.
+The publisher must enumerate all configured authoritative hosts; recursive
+resolver cache responses are not evidence of authoritative propagation.
+Other simultaneous TXT values are permitted to avoid clobbering unrelated
+validations.
+
+The test suite validates base64url SHA-256 TXT format, safe canonical owner
+names, independent-authority evidence, replay/stale/missing values, bounded
+retry and cleanup through deterministic synthetic publishers. The actual
+Certes API method follows the same PFX output bounds and authorization
+timeout as HTTP-01. **No DNS provider is registered by default**, the
+background scheduler still uses HTTP-01, and no operator-managed DNS mutation,
+live staging CA order, multi-node TXT propagation or DNS-01 certificate
+activation has yet been proven. The DNS-01 API cannot activate accidentally
+without an authenticated operator-supplied publisher. Do not mark #37
+complete or claim production DNS-01 until provider credentials, publication/
+revoke fencing, fleet coordination and staging CA acceptance are added.
