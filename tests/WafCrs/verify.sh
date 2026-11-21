@@ -196,6 +196,16 @@ openssl req -new -x509 -newkey rsa:2048 -nodes -days 1 \
   -keyout "$WAF_CERT_TMP/private.key" -out "$WAF_CERT_TMP/public.pem" >/dev/null 2>&1
 openssl x509 -in "$WAF_CERT_TMP/public.pem" -outform DER -out "$DIR/benign-cert.der"
 assert_benign_post pkix-der application/pkix-cert "$DIR/benign-cert.der" "$DIR/pkix-der-response.json"
+# A certificate upload outside the exact, approved lab endpoint must still
+# hit the original CRS content-type policy. Fail if our exclusion is broad.
+outside_pkix_code="$(curl --silent --show-error --max-time 8 -X POST \
+  -H 'Content-Type: application/pkix-cert' \
+  --data-binary "@$DIR/benign-cert.der" \
+  -o "$DIR/outside-pkix-response.txt" -w '%{http_code}' "http://127.0.0.1:18888/not-allowed")"
+printf '%s\n' "$outside_pkix_code" > "$DIR/outside-pkix-http-status.txt"
+[[ "$outside_pkix_code" == "403" ]] ||
+  { echo "FAIL: PKIX content-type exception unexpectedly escaped its exact route" >&2; exit 1; }
+echo "PASS: PKIX exception applies only to the exact POST /acceptance route"
 xss_code="$(curl --silent --show-error --max-time 8 -o "$DIR/xss-response.txt" \
   -w '%{http_code}' --get --data-urlencode \
   'q=<script>alert(1)</script>' "http://127.0.0.1:18888/")"
