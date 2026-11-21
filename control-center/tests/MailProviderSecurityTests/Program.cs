@@ -165,6 +165,7 @@ finally { outboxRoot.Delete(recursive: true); }
 // disposable local test validates the spool's exact correlation and its
 // fail-closed behavior after partial/corrupt journal state.
 var resourceRoot = Directory.CreateTempSubdirectory("gateway-resource-audit-");
+var resourceLogRoot = Directory.CreateTempSubdirectory("gateway-resource-local-log-");
 try
 {
     using var signer = System.Security.Cryptography.RSA.Create(2048);
@@ -175,7 +176,9 @@ try
     var resourceOutbox = Path.Combine(resourceRoot.FullName, "outbox");
     Directory.CreateDirectory(resourceOutbox);
     using var queue = new DurableAuditOutbox(resourceOutbox, transport);
-    var local = new LocalAdminAudit(Path.Combine(resourceRoot.FullName, "resource-audit.jsonl"), queue);
+    // The shipping local JSONL file is separate from the strict outbox
+    // spool; the latter contains ONLY owner.lock and authenticated .event files.
+    var local = new LocalAdminAudit(Path.Combine(resourceLogRoot.FullName, "resource-audit.jsonl"), queue);
     var confirmed = Guid.NewGuid().ToString("N");
     await local.AppendAsync("operator", "RESOURCE_MUTATION_PREPARED",
         new { operation = "INVENTORY_ADD_INTENT", revision = new string('A', 64) },
@@ -209,7 +212,11 @@ try
     Check(refused && queue.Status().StorageFault,
         "corrupt resource audit queue latches failure and denies further prepared events");
 }
-finally { resourceRoot.Delete(recursive: true); }
+finally
+{
+    resourceRoot.Delete(recursive: true);
+    resourceLogRoot.Delete(recursive: true);
+}
 
 // A symlink in a *parent* component must not let a previously enrolled
 // audit queue be reopened through a different directory identity.
