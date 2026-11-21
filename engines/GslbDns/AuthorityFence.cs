@@ -102,7 +102,8 @@ internal sealed class AuthorityFenceStore : IDisposable
             if (localSigner.ExportParameters(false).Curve.Oid.Value != "1.2.840.10045.3.1.7")
                 throw new InvalidDataException("Authority decision signing key must use P-256");
             peerVerifier = ECDsa.Create();
-            peerVerifier.ImportFromPem(File.ReadAllText(config.Peer.SigningPublicKeyPem));
+            peerVerifier.ImportFromPem(PrivateKeyFileSecurity.ReadTrustedPublicKeyPem(
+                config.Peer.SigningPublicKeyPem, "Peer authority snapshot signing trust anchor"));
             if (peerVerifier.ExportParameters(false).Curve.Oid.Value != "1.2.840.10045.3.1.7")
                 throw new InvalidDataException("Trusted authority decision key must use P-256");
         }
