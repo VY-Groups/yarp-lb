@@ -119,6 +119,7 @@ def main():
                 port = reservation.getsockname()[1]
             config = root / f"{port}.json"
             config.write_text(json.dumps({"ListenHost": "127.0.0.1", "ListenPort": port,
+                "AllowDocumentationAddressesForTesting": True,
                 "ProbeIntervalSeconds": interval, "Zones": [{"Name": "lab.example", "TtlSeconds": 5,
                 "SuccessThreshold": rise, "FailureThreshold": fall, "FailClosedWhenAllSitesDown": True, "Sites": [{"Address": "192.0.2.17", "Weight": 1,
                 "HealthUrl": f"http://127.0.0.1:{local.server_port}/ready",

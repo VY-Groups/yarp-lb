@@ -109,6 +109,7 @@ def main():
         child_ds = dns.dnssec.make_ds(child_zone, child_dnskey, "SHA256")
         port = start_port()
         config = {"AllowNonLoopbackListeners": False, "ListenHost": "127.0.0.1",
+            "AllowDocumentationAddressesForTesting": True,
             "ListenPort": port, "ProbeIntervalSeconds": 2, "Zones": [{
                 "Name": str(ZONE).rstrip("."), "TtlSeconds": 30, "SoaSerial": 2026111901,
                 "SoaContact": "hostmaster.nsec3.integration.test",

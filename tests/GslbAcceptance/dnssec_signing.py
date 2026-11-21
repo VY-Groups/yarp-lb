@@ -168,6 +168,7 @@ def main():
         config = {
             "AllowNonLoopbackListeners": False,
             "ListenHost": "127.0.0.1",
+            "AllowDocumentationAddressesForTesting": True,
             "ListenPort": port,
             "ProbeIntervalSeconds": 2,
             "Zones": [{

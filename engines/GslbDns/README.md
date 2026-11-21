@@ -49,6 +49,32 @@ the separate opt-in `GeoIpEcs` policy below.
 
 Each site `Address` may now be an IPv4 or IPv6 literal. A queries select only
 configured IPv4 site addresses, and AAAA queries only configured IPv6 sites.
+A backend `Address`, authoritative `NameServers[].Address` or delegated
+`NameServers[].Address` must be a usable unicast destination: signed
+GatewayAgent staging and standalone DNS engine startup both reject
+IPv4 0/8, link-local 169.254/16, multicast/reserved 224/4 and 240/4,
+IPv4-mapped IPv6, IPv6 unspecified/multicast/link-local/site-local and scoped
+zone-ID addresses. **RFC 5737 TEST-NET-1/2/3** (`192.0.2.0/24`,
+`198.51.100.0/24`, `203.0.113.0/24`) and **RFC 3849**
+(`2001:db8::/32`) are also denied by default; these are non-routable
+documentation ranges, not valid production DNS endpoints or NS glue.
+**IPv4 loopback 127.0.0.0/8 and IPv6 ::1 are also denied by default
+as published A/AAAA, authoritative NS and delegated NS/glue targets**: clients
+would otherwise resolve their own loopback interface rather than the backend.
+RFC1918 private IPv4 and IPv6 unique-local unicast remain valid for on-premises
+routing.
+
+Existing disposable DNS tests that intentionally publish documentation or
+loopback addresses must set `"AllowDocumentationAddressesForTesting": true`
+in their JSON config. The setting is **false by default** and is accepted
+**only when the DNS listener binds IPv4/IPv6 loopback** and
+`AllowNonLoopbackListeners` is false. The signed GatewayAgent staging contract
+enforces the same restriction; a remote listener or external-bind opt-in cannot
+use this lab allowance. It must never be enabled for production deployments.
+Loopback addresses remain valid as private **health-probe URLs** or DNS
+listener bindings; only publishing them as answer/NS destinations is restricted.
+A loopback-bound test is not proof of valid public DNS delegation.
+Review all published addresses and glue against the intended real network before release.
 Health, optional priority and existing weights are applied within that family.
 When no site is configured for the requested family, the authoritative result
 is **NODATA with negative SOA**, not SERVFAIL or an incorrectly typed answer.

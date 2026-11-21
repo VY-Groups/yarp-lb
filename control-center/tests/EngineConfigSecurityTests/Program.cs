@@ -185,7 +185,7 @@ var dns=JsonNode.Parse("""
 {"ListenHost":"127.0.0.1","ListenPort":15353,"ProbeIntervalSeconds":2,
  "MaxResponsesPerSecondPerClient":500,"AllowNonLoopbackListeners":false,
  "Zones":[{"Name":"test.example","TtlSeconds":30,
- "Sites":[{"Address":"127.0.0.20","HealthUrl":"http://127.0.0.1:8888/ready","Weight":1}]}]}
+ "Sites":[{"Address":"10.0.0.20","HealthUrl":"http://127.0.0.1:8888/ready","Weight":1}]}]}
 """)!.AsObject();
 Must(EngineConfigContract.Validate("l4",l4,false), "loopback L4 candidate is valid");
 Must(EngineConfigContract.Validate("gslb",dns,false), "loopback GSLB candidate is valid");
@@ -304,7 +304,7 @@ Must(!EngineConfigContract.Validate("gslb",badDns,false),
 var tcpDns = dns.DeepClone().AsObject();
 tcpDns["ListenHost"] = "::1";
 var tcpSite = tcpDns["Zones"]![0]!["Sites"]![0]!.AsObject();
-tcpSite["Address"] = "2001:db8::17";
+tcpSite["Address"] = "fd00::17";
 tcpSite["HealthCheckType"] = "Tcp";
 tcpSite.Remove("HealthUrl");
 tcpSite["TcpPort"] = 443;
@@ -322,7 +322,108 @@ var authoritativeDns = dns.DeepClone().AsObject();
 authoritativeDns["Zones"]![0]!["SoaSerial"] = 2026111601u;
 authoritativeDns["Zones"]![0]!["SoaContact"] = "hostmaster.test.example";
 authoritativeDns["Zones"]![0]!["NameServers"] = new JsonArray(
-    new JsonObject { ["Host"] = "ns1.test.example", ["Address"] = "127.0.0.53" });
+    new JsonObject { ["Host"] = "ns1.test.example", ["Address"] = "10.0.0.53" });
+// Signed gateway staging must reject the same non-unicast published
+// destination addresses as the running GSLB engine, rather than accepting
+// a signed revision that inevitably fails DNS startup.
+foreach (var badAddress in new[] {
+    "0.0.0.0", "169.254.1.2", "224.0.0.1", "240.0.0.1",
+    "::", "ff02::1", "fe80::12%2", "::ffff:192.0.2.1"
+})
+{
+    var invalidSite = dns.DeepClone().AsObject();
+    invalidSite["Zones"]![0]!["Sites"]![0]!["Address"] = badAddress;
+    Must(!EngineConfigContract.Validate("gslb", invalidSite, false),
+        "signed GSLB staging rejects published backend " + badAddress);
+    var invalidNs = authoritativeDns.DeepClone().AsObject();
+    invalidNs["Zones"]![0]!["NameServers"]![0]!["Address"] = badAddress;
+    Must(!EngineConfigContract.Validate("gslb", invalidNs, false),
+        "signed GSLB staging rejects authoritative NS " + badAddress);
+}
+var delegatedDns = authoritativeDns.DeepClone().AsObject();
+delegatedDns["Zones"]![0]!["Delegations"] = new JsonArray(
+    new JsonObject {
+        ["Name"] = "child.test.example",
+        ["NameServers"] = new JsonArray(
+            new JsonObject { ["Host"] = "ns.child.test.example", ["Address"] = "10.1.2.3" })
+    });
+Must(EngineConfigContract.Validate("gslb", delegatedDns, false),
+    "signed GSLB staging accepts private unicast delegated NS");
+foreach (var badAddress in new[] { "0.0.0.0", "224.0.0.1", "fe80::53%3", "ff02::1" })
+{
+    var invalidDelegation = delegatedDns.DeepClone().AsObject();
+    invalidDelegation["Zones"]![0]!["Delegations"]![0]!["NameServers"]![0]!["Address"] = badAddress;
+    Must(!EngineConfigContract.Validate("gslb", invalidDelegation, false),
+        "signed GSLB staging rejects delegated NS " + badAddress);
+}
+var privateSite = dns.DeepClone().AsObject();
+privateSite["Zones"]![0]!["Sites"]![0]!["Address"] = "fd00::9";
+Must(EngineConfigContract.Validate("gslb", privateSite, false),
+    "signed GSLB staging retains IPv6 unique-local on-premises backend support");
+foreach (var documented in new[] { "192.0.2.80", "198.51.100.53", "203.0.113.17", "2001:db8::17" })
+{
+    var productionCandidate = dns.DeepClone().AsObject();
+    productionCandidate["Zones"]![0]!["Sites"]![0]!["Address"] = documented;
+    Must(!EngineConfigContract.Validate("gslb", productionCandidate, false),
+        "production signed staging refuses RFC documentation backend " + documented);
+    productionCandidate["AllowDocumentationAddressesForTesting"] = true;
+    Must(EngineConfigContract.Validate("gslb", productionCandidate, false),
+        "explicit loopback fixture allows documentation backend " + documented);
+    productionCandidate["AllowNonLoopbackListeners"] = true;
+    Must(!EngineConfigContract.Validate("gslb", productionCandidate, true),
+        "external bind opt-in cannot coexist with documentation fixture permission");
+    productionCandidate["AllowNonLoopbackListeners"] = false;
+    productionCandidate["ListenHost"] = "0.0.0.0";
+    Must(!EngineConfigContract.Validate("gslb", productionCandidate, true),
+        "non-loopback listener cannot enable documentation fixture permission");
+}
+var fixtureNs = authoritativeDns.DeepClone().AsObject();
+fixtureNs["Zones"]![0]!["NameServers"]![0]!["Address"] = "192.0.2.53";
+Must(!EngineConfigContract.Validate("gslb", fixtureNs, false),
+    "signed staging refuses production documentation authoritative NS");
+fixtureNs["AllowDocumentationAddressesForTesting"] = true;
+Must(EngineConfigContract.Validate("gslb", fixtureNs, false),
+    "signed staging accepts explicit isolated lab documentation NS");
+var fixtureChild = delegatedDns.DeepClone().AsObject();
+fixtureChild["Zones"]![0]!["Delegations"]![0]!["NameServers"]![0]!["Address"] = "2001:db8::53";
+Must(!EngineConfigContract.Validate("gslb", fixtureChild, false),
+    "signed staging refuses production documentation delegated NS");
+fixtureChild["AllowDocumentationAddressesForTesting"] = true;
+Must(EngineConfigContract.Validate("gslb", fixtureChild, false),
+    "signed staging accepts explicit isolated lab documentation delegated NS");
+var invalidFlag = dns.DeepClone().AsObject();
+invalidFlag["AllowDocumentationAddressesForTesting"] = "true";
+Must(!EngineConfigContract.Validate("gslb", invalidFlag, false),
+    "signed staging rejects non-boolean fixture opt-in");
+foreach (var loopback in new[] { "127.0.0.1", "127.7.8.9", "::1" })
+{
+    var siteLoopback = dns.DeepClone().AsObject();
+    siteLoopback["Zones"]![0]!["Sites"]![0]!["Address"] = loopback;
+    Must(!EngineConfigContract.Validate("gslb", siteLoopback, false),
+        "production signed staging rejects advertised loopback site " + loopback);
+    siteLoopback["AllowDocumentationAddressesForTesting"] = true;
+    Must(EngineConfigContract.Validate("gslb", siteLoopback, false),
+        "isolated lab signed staging explicitly permits loopback site " + loopback);
+    siteLoopback["AllowNonLoopbackListeners"] = true;
+    Must(!EngineConfigContract.Validate("gslb", siteLoopback, true),
+        "external listener opt-in rejects loopback fixture permission " + loopback);
+
+    var parentLoopback = authoritativeDns.DeepClone().AsObject();
+    parentLoopback["Zones"]![0]!["NameServers"]![0]!["Address"] = loopback;
+    Must(!EngineConfigContract.Validate("gslb", parentLoopback, false),
+        "production signed staging rejects parent NS loopback " + loopback);
+    parentLoopback["AllowDocumentationAddressesForTesting"] = true;
+    Must(EngineConfigContract.Validate("gslb", parentLoopback, false),
+        "isolated lab signed staging explicitly permits parent NS loopback " + loopback);
+
+    var childLoopback = delegatedDns.DeepClone().AsObject();
+    childLoopback["Zones"]![0]!["Delegations"]![0]!["NameServers"]![0]!["Address"] = loopback;
+    Must(!EngineConfigContract.Validate("gslb", childLoopback, false),
+        "production signed staging rejects delegated NS loopback " + loopback);
+    childLoopback["AllowDocumentationAddressesForTesting"] = true;
+    Must(EngineConfigContract.Validate("gslb", childLoopback, false),
+        "isolated lab signed staging explicitly permits delegated NS loopback " + loopback);
+}
 var sameAuthoritativeDns = authoritativeDns.DeepClone().AsObject();
 Must(EngineConfigContract.ValidSoaSerialTransition(authoritativeDns,sameAuthoritativeDns),
     "unchanged authoritative GSLB zone may retain its SOA serial");

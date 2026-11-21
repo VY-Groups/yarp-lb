@@ -26,6 +26,48 @@ internal static class DnsWireProtocol
             label[0] != '-' && label[^1] != '-');
     }
 
+    // A/AAAA backend and authoritative/delegated NS addresses become DNS
+    // answers visible to resolvers. Reject non-unicast, scoped and link-local
+    // endpoints before the zone can start. Private RFC1918/ULA are permitted
+    // on-premises; loopback and documentation ranges are lab-only opt-ins.
+    // Whether loopback is suitable for a publicly delegated zone remains a
+    // separate deployment-validation requirement.
+    internal static bool ValidPublishedUnicastAddress(IPAddress? address,
+        bool allowDocumentationTestRange = false)
+    {
+        if (address is null || address.IsIPv4MappedToIPv6 ||
+            address.AddressFamily is not (AddressFamily.InterNetwork or AddressFamily.InterNetworkV6) ||
+            address.Equals(IPAddress.Any) || address.Equals(IPAddress.IPv6Any) ||
+            address.Equals(IPAddress.Broadcast) || address.IsIPv6Multicast)
+            return false;
+
+        // Loopback A/AAAA and NS/glue point every remote resolver or client at
+        // itself, not this authority. Only an explicit loopback-bound fixture
+        // may publish loopback endpoints.
+        if (IPAddress.IsLoopback(address) && !allowDocumentationTestRange)
+            return false;
+        var bytes = address.GetAddressBytes();
+        if (address.AddressFamily == AddressFamily.InterNetworkV6)
+        {
+            // RFC 3849 2001:db8::/32 is documentation-only, never a public
+            // authoritative target. An isolated loopback DNS fixture may opt in.
+            var documentation = bytes[0] == 0x20 && bytes[1] == 0x01 &&
+                bytes[2] == 0x0d && bytes[3] == 0xb8;
+            return address.ScopeId == 0 && !address.IsIPv6LinkLocal &&
+                   !address.IsIPv6SiteLocal && (allowDocumentationTestRange || !documentation);
+        }
+
+        // RFC 5737 TEST-NET-1/2/3 are not real routable backend or NS
+        // addresses. Fail closed by default and allow only explicitly
+        // selected loopback-bound lab fixtures.
+        var reservedDocumentation = bytes[0] == 192 && bytes[1] == 0 && bytes[2] == 2 ||
+            bytes[0] == 198 && bytes[1] == 51 && bytes[2] == 100 ||
+            bytes[0] == 203 && bytes[1] == 0 && bytes[2] == 113;
+        return bytes[0] != 0 && bytes[0] < 224 &&
+               !(bytes[0] == 169 && bytes[1] == 254) &&
+               (allowDocumentationTestRange || !reservedDocumentation);
+    }
+
     public static byte[]? Build(ReadOnlySpan<byte> query, IReadOnlyDictionary<string, SiteGroup> zones,
         bool tcp, IPAddress? resolverIp = null, AgentHealthReportStore? agentReports = null,
         AuthorityFenceStore? authorityFence = null)

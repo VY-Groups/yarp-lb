@@ -53,6 +53,35 @@ public static class EngineConfigContract
         return true;
     }
 
+    // Keep signed staging consistent with the DNS process' published-address
+    // safety contract: an address used in an A/AAAA backend or NS/glue record
+    // is not equivalent to a valid listener/bind address. Private RFC1918/ULA
+    // and isolated test loopback remain supported.
+    private static bool PublishedUnicast(JsonNode? node, bool allowDocumentationTestRange)
+    {
+        if (!Ip(node, out var address, allowIpv6: true) ||
+            address.IsIPv4MappedToIPv6 ||
+            address.Equals(IPAddress.Any) || address.Equals(IPAddress.IPv6Any) ||
+            address.Equals(IPAddress.Broadcast) || address.IsIPv6Multicast)
+            return false;
+        if (IPAddress.IsLoopback(address) && !allowDocumentationTestRange)
+            return false; // Publishing a loopback target is only safe in isolated lab mode.
+        var bytes = address.GetAddressBytes();
+        if (address.AddressFamily == AddressFamily.InterNetworkV6)
+        {
+            var documentation = bytes[0] == 0x20 && bytes[1] == 0x01 &&
+                bytes[2] == 0x0d && bytes[3] == 0xb8;
+            return address.ScopeId == 0 && !address.IsIPv6LinkLocal &&
+                   !address.IsIPv6SiteLocal && (allowDocumentationTestRange || !documentation);
+        }
+        var documentationIpv4 = bytes[0] == 192 && bytes[1] == 0 && bytes[2] == 2 ||
+            bytes[0] == 198 && bytes[1] == 51 && bytes[2] == 100 ||
+            bytes[0] == 203 && bytes[1] == 0 && bytes[2] == 113;
+        return bytes[0] != 0 && bytes[0] < 224 &&
+               !(bytes[0] == 169 && bytes[1] == 254) &&
+               (allowDocumentationTestRange || !documentationIpv4);
+    }
+
     public static bool Validate(string engineId, JsonObject config, bool allowPublicBind)
     {
         if (!ValidEngineId(engineId) || config.ToJsonString().Length > 524288) return false;
@@ -63,6 +92,12 @@ public static class EngineConfigContract
                           v.TryGetValue<bool>(out var opted) && opted;
         if (engineId == "gslb")
         {
+            if (config["AllowDocumentationAddressesForTesting"] is not null &&
+                !Bool(config["AllowDocumentationAddressesForTesting"])) return false;
+            var allowDocumentationTestRange = config["AllowDocumentationAddressesForTesting"]
+                is JsonValue docValue && docValue.TryGetValue<bool>(out var allowDoc) && allowDoc;
+            if (allowDocumentationTestRange && (!IPAddress.IsLoopback(bind) || publicOptIn))
+                return false; // Never stage fixture addresses for an externally bindable DNS node.
             var listenPortAllowed = Num(config["ListenPort"],1025,65535) ||
                 Num(config["ListenPort"],53,53) && allowPublicBind && publicOptIn && !IPAddress.IsLoopback(bind);
             if (!listenPortAllowed ||
@@ -85,7 +120,7 @@ public static class EngineConfigContract
                     return false;
                 foreach (var s in sites)
                 {
-                    if (s is not JsonObject site || !Ip(site["Address"],out _, allowIpv6: true) ||
+                    if (s is not JsonObject site || !PublishedUnicast(site["Address"], allowDocumentationTestRange) ||
                         !Num(site["Weight"],1,100)) return false;
                     var probeType = "Http";
                     if (site["HealthCheckType"] is not null &&
@@ -103,6 +138,25 @@ public static class EngineConfigContract
                              !Uri.TryCreate(url,UriKind.Absolute,out var uri) ||
                              (uri.Scheme!="http" && uri.Scheme!="https") ||
                              !string.IsNullOrEmpty(uri.UserInfo)) return false;
+                }
+                if (zone["NameServers"] is not null)
+                {
+                    if (zone["NameServers"] is not JsonArray nameServers) return false;
+                    foreach (var server in nameServers)
+                        if (server is not JsonObject row || !Str(row["Host"], out _) ||
+                            !PublishedUnicast(row["Address"], allowDocumentationTestRange)) return false;
+                }
+                if (zone["Delegations"] is not null)
+                {
+                    if (zone["Delegations"] is not JsonArray delegations) return false;
+                    foreach (var cut in delegations)
+                    {
+                        if (cut is not JsonObject delegation || !Str(delegation["Name"], out _) ||
+                            delegation["NameServers"] is not JsonArray childServers) return false;
+                        foreach (var server in childServers)
+                            if (server is not JsonObject row || !Str(row["Host"], out _) ||
+                                !PublishedUnicast(row["Address"], allowDocumentationTestRange)) return false;
+                    }
                 }
             }
             return true;
