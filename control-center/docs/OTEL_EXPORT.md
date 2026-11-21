@@ -55,3 +55,27 @@ than matching the old regular-expression `$` anchor. Regression tests verify
 actual rejection and preservation in the privacy processor. This is a
 trace-instrumentation candidate, not a demonstrated 8.6 KiB/request reduction;
 new exact-head paired profiling and independent review are required.
+
+### No-listener proxy metrics fast path (#34)
+
+When no `MeterListener` observes the proxy request count or duration
+instruments, request telemetry no longer resolves the reverse-proxy feature,
+registers route/cluster/destination dimension tuples, derives status classes,
+or creates metric tags solely for export. The hot path checks each instrument's
+runtime `Enabled` state; a listener registering later immediately receives
+measurements without requiring a gateway restart.
+
+The private local-rejection marker is still removed from `HttpContext.Items`
+on every request, even when telemetry is disabled. A listener subscribing
+**only** to `gateway.proxy.local_rejections` receives the original allowlisted
+reason, and a counter-only subscriber receives counter updates without
+requiring a duration histogram subscriber. Isolated acceptance tests cover
+these cases and bound warmed unobserved-call allocations to <=2 bytes/call.
+
+This may reduce overhead in no-OTLP or selectively collected configurations;
+it does **not** bypass YARP, privacy filtering, access logging, forwarding or
+the configured OTel exporter when its instruments have active subscribers.
+The per-helper allocation bound is not whole-proxy throughput or memory
+evidence. Issue #34 remains subject to three paired pinned before/after
+whole-gateway tests, allocation stack attribution, correctness/TLS/POST/streaming
+matrix and independent reviewer approval.
