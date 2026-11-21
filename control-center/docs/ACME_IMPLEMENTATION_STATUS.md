@@ -198,7 +198,9 @@ The opt-in Certes DNS-01 path requires an explicitly supplied trusted publisher.
 The provider first acquires a cleanup lease without changing DNS; publication
 then occurs through that lease. If an update partially reaches a provider and
 then times out or throws, the already-held lease is disposed on the failure
-path so it can remove or reconcile the exact challenge. A provider that fails
+path so it can remove or reconcile only that lease's exact owner/value. Lease
+cleanup must be idempotent and preserve unrelated TXT values for concurrent
+validations. A provider that fails
 while acquiring the lease must leave DNS unchanged. Readiness still requires
 the exact TXT value at at least two distinct configured authoritative servers.
 
