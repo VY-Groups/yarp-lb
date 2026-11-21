@@ -323,6 +323,43 @@ authoritativeDns["Zones"]![0]!["SoaSerial"] = 2026111601u;
 authoritativeDns["Zones"]![0]!["SoaContact"] = "hostmaster.test.example";
 authoritativeDns["Zones"]![0]!["NameServers"] = new JsonArray(
     new JsonObject { ["Host"] = "ns1.test.example", ["Address"] = "127.0.0.53" });
+// Signed gateway staging must reject the same non-unicast published
+// destination addresses as the running GSLB engine, rather than accepting
+// a signed revision that inevitably fails DNS startup.
+foreach (var badAddress in new[] {
+    "0.0.0.0", "169.254.1.2", "224.0.0.1", "240.0.0.1",
+    "::", "ff02::1", "fe80::12%2", "::ffff:192.0.2.1"
+})
+{
+    var invalidSite = dns.DeepClone().AsObject();
+    invalidSite["Zones"]![0]!["Sites"]![0]!["Address"] = badAddress;
+    Must(!EngineConfigContract.Validate("gslb", invalidSite, false),
+        "signed GSLB staging rejects published backend " + badAddress);
+    var invalidNs = authoritativeDns.DeepClone().AsObject();
+    invalidNs["Zones"]![0]!["NameServers"]![0]!["Address"] = badAddress;
+    Must(!EngineConfigContract.Validate("gslb", invalidNs, false),
+        "signed GSLB staging rejects authoritative NS " + badAddress);
+}
+var delegatedDns = authoritativeDns.DeepClone().AsObject();
+delegatedDns["Zones"]![0]!["Delegations"] = new JsonArray(
+    new JsonObject {
+        ["Name"] = "child.test.example",
+        ["NameServers"] = new JsonArray(
+            new JsonObject { ["Host"] = "ns.child.test.example", ["Address"] = "10.1.2.3" })
+    });
+Must(EngineConfigContract.Validate("gslb", delegatedDns, false),
+    "signed GSLB staging accepts private unicast delegated NS");
+foreach (var badAddress in new[] { "0.0.0.0", "224.0.0.1", "fe80::53%3", "ff02::1" })
+{
+    var invalidDelegation = delegatedDns.DeepClone().AsObject();
+    invalidDelegation["Zones"]![0]!["Delegations"]![0]!["NameServers"]![0]!["Address"] = badAddress;
+    Must(!EngineConfigContract.Validate("gslb", invalidDelegation, false),
+        "signed GSLB staging rejects delegated NS " + badAddress);
+}
+var privateSite = dns.DeepClone().AsObject();
+privateSite["Zones"]![0]!["Sites"]![0]!["Address"] = "fd00::9";
+Must(EngineConfigContract.Validate("gslb", privateSite, false),
+    "signed GSLB staging retains IPv6 unique-local on-premises backend support");
 var sameAuthoritativeDns = authoritativeDns.DeepClone().AsObject();
 Must(EngineConfigContract.ValidSoaSerialTransition(authoritativeDns,sameAuthoritativeDns),
     "unchanged authoritative GSLB zone may retain its SOA serial");
