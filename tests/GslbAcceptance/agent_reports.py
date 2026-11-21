@@ -291,6 +291,8 @@ def main():
             subprocess.run(["openssl", *args], cwd=root, check=True, capture_output=True)
 
         openssl("req", "-new", "-x509", "-nodes", "-newkey", "rsa:2048", "-days", "1",
+                "-addext", "basicConstraints=critical,CA:TRUE",
+                "-addext", "keyUsage=critical,keyCertSign,cRLSign",
                 "-subj", "/CN=Disposable report CA", "-keyout", "ca.key", "-out", "ca.pem")
 
         def issue(role, usage, san="IP:127.0.0.1"):
