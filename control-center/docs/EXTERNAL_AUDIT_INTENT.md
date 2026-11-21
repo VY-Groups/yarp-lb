@@ -75,3 +75,19 @@ Routing freeze enable/disable and organization profile changes use the same `Loc
 ## Account intent/outcome correlation (initial scope)
 
 For the four signed administrator account operations, retain the verified intent ID in the local success row. With the opt-in outbox enabled, persist an ACCOUNT_MUTATION_PREPARED event before writing the account state; if preparation fails (including full or faulty queue), return 503 with unchanged account bytes. The recorded-event schema retains the same eight fields and separate historical-event MAC/receipt purpose. For these five explicitly named account events only, a nonzero revision is SHA-256 of the lowercase intent GUID ASCII; join to the original schema-1 intent on the same node. targetDigest remains the SHA-256 of the exact local JSON line, now containing intentId. Uncorrelated historical events still use zero revision. Upgrade the collector before enabling this increment; new collectors accept old events. The prepared row is NOT success, and a missing success row is unresolved, never evidence that the account mutation did not occur. The external intent's before/after hashes and the local prepared row support operator reconciliation. The write and post-write enqueue are separate filesystem operations; this is not a crash-atomic transaction, reserved outcome slot, guaranteed automatic recovery, or cross-replica correlation. Do not replay a mutation on a missing outcome. Further journal/reconciliation and other administrative mutations remain #38 work. Tests exercise the four real account mutations with signed receipts and outbox delivery plus a simulated precommit storage fault.
+
+## Audit sender key: no-follow opened-handle validation
+
+The external-audit **32-byte sender HMAC key** is now opened through the shared
+Windows/Linux private-key loader, rather than checking a path and then
+reopening it. On Linux, the loader walks each ancestor with no-follow,
+validates actual opened-object owner and permissions, rejects linked ancestors,
+devices and non-regular inputs, and reads the exact validated file handle.
+Windows uses a reparse-point-aware handle and requires deployment-managed
+service-account ACLs. The public collector verification-key PEM keeps its
+separate size and endpoint validation contract. Sender bytes are cleared on
+all startup paths, including public-key loading failures. No collector signing
+key is added to the gateway. Disposable Windows/Linux tests cover a valid
+key, missing key, Linux owner-only mode and linked key/parent rejection.
+This tightens local key loading but does not provide tamper-proof WORM storage,
+a distributed gateway audit authority or production TLS trust acceptance.

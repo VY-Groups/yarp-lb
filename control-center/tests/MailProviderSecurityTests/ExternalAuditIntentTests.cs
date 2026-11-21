@@ -22,6 +22,67 @@ internal static class ExternalAuditIntentTests
             new HttpClient(handler, disposeHandler: false));
         Check(ExternalAuditIntent.FromEnvironment(null, null, null, null) is null,
             "external intent gate disabled when unconfigured");
+        // The audit sender key uses the same no-follow, opened-object reader
+        // as sensitive service keys. Run on Windows and Linux; Linux additionally
+        // exercises linked parent directories and world-readable key files.
+        var root = Path.Combine(Path.GetTempPath(), "gateway-audit-key-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        if (OperatingSystem.IsLinux())
+            File.SetUnixFileMode(root, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        try
+        {
+            var senderPath = Path.Combine(root, "audit-sender.bin");
+            var verifierPath = Path.Combine(root, "collector-public.pem");
+            File.WriteAllBytes(senderPath, key);
+            File.WriteAllText(verifierPath, signer.ExportSubjectPublicKeyInfoPem());
+            if (OperatingSystem.IsLinux())
+                File.SetUnixFileMode(senderPath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+            var endpointUrl = endpoint.AbsoluteUri;
+            using (var loaded = ExternalAuditIntent.FromEnvironment(
+                endpointUrl, "node-a", senderPath, verifierPath))
+                Check(loaded is not null, "validated no-follow sender key opens on current platform");
+
+            bool Rejected(string candidate)
+            {
+                try
+                {
+                    using var loaded = ExternalAuditIntent.FromEnvironment(
+                        endpointUrl, "node-a", candidate, verifierPath);
+                    return false;
+                }
+                catch (IOException) { return true; }
+                catch (UnauthorizedAccessException) { return true; }
+            }
+            Check(Rejected(Path.Combine(root, "missing-key.bin")),
+                "missing audit sender key fails closed");
+            if (OperatingSystem.IsLinux())
+            {
+                File.SetUnixFileMode(senderPath, UnixFileMode.UserRead | UnixFileMode.UserWrite |
+                    UnixFileMode.GroupRead | UnixFileMode.OtherRead);
+                Check(Rejected(senderPath), "group/world-readable audit sender key rejected");
+                File.SetUnixFileMode(senderPath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+                var linkedKey = Path.Combine(root, "linked-sender.bin");
+                File.CreateSymbolicLink(linkedKey, senderPath);
+                Check(Rejected(linkedKey), "sender key symlink rejected without following it");
+                var linkedParent = Path.Combine(root, "linked-parent");
+                Directory.CreateSymbolicLink(linkedParent, root);
+                Check(Rejected(Path.Combine(linkedParent, "audit-sender.bin")),
+                    "sender key through a symlinked ancestor rejected");
+                // Public key failures must not leave an activated audit transport.
+                var missingPublicDenied = false;
+                try
+                {
+                    using var missing = ExternalAuditIntent.FromEnvironment(
+                        endpointUrl, "node-a", senderPath, Path.Combine(root, "missing-collector.pem"));
+                }
+                catch (InvalidOperationException) { missingPublicDenied = true; }
+                Check(missingPublicDenied, "missing collector verification key fails startup");
+            }
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
         Check(await gate.ConfirmAsync("reviewer", "CONFIG_APPLY_INTENT", digest, target, CancellationToken.None) &&
               handler.Calls == 1 && handler.Authenticated && handler.BoundIntent,
             "collector receipt bound to authenticated actor, operation, revision and exact target digest");
