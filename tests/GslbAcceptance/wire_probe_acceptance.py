@@ -84,6 +84,33 @@ def run():
                     time.sleep(0.1)
                 args = argparse.Namespace(host="127.0.0.1", port=port, zone=ZONE, timeout=3.0)
                 dns_wire_probe.run(args)
+                # Reserved zero QTYPE/QCLASS must never be normalized into
+                # authoritative NODATA. Exercise both transports and ensure
+                # a subsequent valid SOA query still works after rejection.
+                for qtype, qclass in ((0, 1), (6, 0), (0, 0)):
+                    for tcp in (False, True):
+                        txid, packet = dns_wire_probe.question(ZONE, qtype)
+                        frame = bytearray(packet)
+                        frame[-2:] = qclass.to_bytes(2, "big")
+                        try:
+                            response = dns_wire_probe.exchange(
+                                "127.0.0.1", port, bytes(frame), tcp, 0.4)
+                        except (OSError, TimeoutError):
+                            response = b""
+                        if response:
+                            flags, _ = dns_wire_probe.parse(
+                                response, txid, ZONE, qtype)
+                            dns_wire_probe.require((flags & 0xF) == 1,
+                                "reserved zero question received a non-FORMERR response")
+                        valid_id, valid_packet = dns_wire_probe.question(ZONE, 6)
+                        valid_reply = dns_wire_probe.exchange(
+                            "127.0.0.1", port, valid_packet, tcp, 2)
+                        valid_flags, valid_records = dns_wire_probe.parse(
+                            valid_reply, valid_id, ZONE, 6)
+                        dns_wire_probe.require((valid_flags & 0xF) == 0 and
+                            dns_wire_probe.has_rr(valid_records, "answer", ZONE, 6),
+                            "valid SOA recovery failed after malformed question")
+                print("PASS: reserved-zero question rejection and valid recovery")
                 print("PASS: disposable Windows/Linux real-process DNS wire qualification")
             except BaseException:
                 output.flush()
