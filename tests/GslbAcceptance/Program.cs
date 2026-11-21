@@ -1404,6 +1404,29 @@ try
     var (_, badVers) = await QueryWire("app.integration.test",1,ednsVersion:1);
     Must(Dns16(badVers,6)==0 && Dns16(badVers,10)==1 &&
          badVers[^6]==1,"EDNS version mismatch signals BADVERS, without A answer");
+    // OPT TTL's high byte is an *extended response* code, never a
+    // client-supplied request code (RFC 6891). Reject it over both
+    // transports instead of returning a normal answer or BADVERS.
+    foreach (var version in new byte[] { 0, 1 })
+    {
+        var malformedExtendedRcode = DnsRequest("app.integration.test", 1, ednsVersion: version);
+        const int optFixedBytes = 11;
+        const int unknownOptionBytes = 7;
+        var optStart = malformedExtendedRcode.Length - optFixedBytes - unknownOptionBytes;
+        Must(malformedExtendedRcode[optStart + 1] == 0 &&
+             malformedExtendedRcode[optStart + 2] == 41,
+             "malformed EDNS request test targets the actual OPT header");
+        malformedExtendedRcode[optStart + 5] = 1; // illegal high RCODE byte
+        await ExpectUdpDrop(malformedExtendedRcode,
+            "EDNS query with nonzero extended response code, version " + version);
+        await ExpectTcpDrop(malformedExtendedRcode,
+            "EDNS query with nonzero extended response code, version " + version);
+    }
+    var validEdnsAfterMalformed = await TcpQuery(DnsRequest("app.integration.test", 1, ednsVersion: 0));
+    Must((Dns16(validEdnsAfterMalformed, 2) & 0x0F) == 0 &&
+         Dns16(validEdnsAfterMalformed, 10) == 1,
+         "valid EDNS requests remain serviceable after malformed extended RCODE probes");
+    Console.WriteLine("PASS: EDNS extended request RCODE validation on UDP/TCP, normal EDNS0 preserved");
     // RFC 1035: a legal 255-octet QNAME includes the label length octets
     // and the root terminator. More than 32 short labels are also legal.
     var maxWireName = string.Join(".", new[] { new string('a', 63), new string('b', 63),
