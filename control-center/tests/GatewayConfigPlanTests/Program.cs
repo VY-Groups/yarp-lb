@@ -17,6 +17,26 @@ Check(!validationJson.Contains("127.0.0.1") && !validationJson.Contains("catch-a
 try { PlanEngine.Validate(baseline.Replace("\"schemaVersion\":1", "\"schemaVersion\":9")); throw new InvalidOperationException("unsupported schema unexpectedly validated"); }
 catch (ArgumentException) { }
 
+// Duplicate names are ambiguous in reviewed JSON even when their values agree.
+// Reject case aliases and Unicode escape aliases before JsonNode last-key-wins
+// materialization, both for validation and plan current/desired inputs.
+foreach (var ambiguous in new[]
+{
+    baseline.Replace("\"schemaVersion\":1", "\"schemaVersion\":1,\"schemaVersion\":1"),
+    baseline.Replace("\"schemaVersion\":1", "\"schemaVersion\":1,\"schema\\u0056ersion\":1"),
+    baseline.Replace("\"Path\":\"/{**catch-all}\"", "\"Path\":\"/admin\",\"Path\":\"/{**catch-all}\""),
+    baseline.Replace("\"Address\":\"http://127.0.0.1:8080\"",
+                     "\"Address\":\"http://evil.invalid/\",\"Address\":\"http://127.0.0.1:8080\"")
+})
+{
+    Check(ThrowsAmbiguous(() => PlanEngine.Validate(ambiguous)),
+          "ambiguous desired JSON must be refused");
+    Check(ThrowsAmbiguous(() => PlanEngine.Build(baseline, ambiguous)),
+          "ambiguous desired JSON must never produce a plan");
+    Check(ThrowsAmbiguous(() => PlanEngine.Build(ambiguous, baseline)),
+          "ambiguous current JSON must never produce a plan");
+}
+
 var desiredPath = Path.Combine(Path.GetTempPath(), $"gateway-config-plan-{Guid.NewGuid():N}.json");
 try
 {
@@ -29,6 +49,16 @@ try
     cli = RunCli("validate", desiredPath);
     Check(cli.ExitCode == 1 && cli.StdErr.Contains("schemaVersion must be 1"),
           "validate CLI exits nonzero for unsupported schema versions");
+    File.WriteAllText(desiredPath, baseline.Replace("\"schemaVersion\":1",
+        "\"schemaVersion\":1,\"schemaVersion\":9"));
+    cli = RunCli("validate", desiredPath);
+    Check(cli.ExitCode == 1 && cli.StdOut.Length == 0 &&
+          !cli.StdErr.Contains("127.0.0.1"),
+          "validate CLI rejects duplicate JSON without exposing gateway values");
+    File.WriteAllText(desiredPath, new string(' ', 524289) + baseline);
+    cli = RunCli("validate", desiredPath);
+    Check(cli.ExitCode == 1 && cli.StdOut.Length == 0,
+          "oversized planner file is rejected before unbounded read");
 }
 finally { File.Delete(desiredPath); }
 
@@ -110,6 +140,12 @@ try
 finally { File.Delete(bundlePath); }
 
 Console.WriteLine("PASS: standalone declarative validation, redacted deterministic planning and strict Gateway API import");
+
+static bool ThrowsAmbiguous(Action action)
+{
+    try { action(); return false; }
+    catch (ArgumentException) { return true; }
+}
 
 static (int ExitCode, string StdOut, string StdErr) RunCli(params string[] args)
 {

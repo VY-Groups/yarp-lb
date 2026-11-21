@@ -31,3 +31,14 @@ Example bundle:
   "services": [{"apiVersion":"v1","kind":"Service","metadata":{"name":"api","namespace":"apps"},"spec":{"type":"ClusterIP","ports":[{"port":8080,"protocol":"TCP","appProtocol":"http"}]}}]
 }
 ```
+
+## Ambiguous-input and memory limits
+
+The offline schema-1 validator and plan parser reject duplicate properties
+(including case variants and equivalent Unicode-escaped names) at **all JSON
+nesting levels** before materializing values. A Git review and an operator
+must not interpret the same document differently due to last-value-wins
+parsing. The CLI bounds both current and desired files to 512 KiB before
+decoding, uses strict UTF-8, checks for concurrent append during read, and
+does not echo rejected JSON values. It remains a **read-only subset planner**,
+not a signed GitOps reconciler or Kubernetes controller.

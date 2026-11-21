@@ -14,6 +14,7 @@ public static class PlanEngine
 {
     private static readonly Regex IdPattern = new("^[A-Za-z0-9_-]{1,80}$", RegexOptions.CultureInvariant);
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = false };
+    private const int MaxDocumentBytes = 512 * 1024;
 
     public static ConfigPlan Build(string currentJson, string desiredJson)
     {
@@ -39,9 +40,22 @@ public static class PlanEngine
     private static DesiredConfig Parse(string json, string label)
     {
         JsonObject root;
-        try { root = JsonNode.Parse(json)?.AsObject() ?? throw new FormatException("document must be an object"); }
-        catch (Exception e) when (e is JsonException or InvalidOperationException or FormatException)
-        { throw new ArgumentException($"{label} config: invalid JSON ({e.Message})", nameof(json)); }
+        if (System.Text.Encoding.UTF8.GetByteCount(json) > MaxDocumentBytes)
+            throw new ArgumentException($"{label} config: input exceeds 512 KiB bound", nameof(json));
+        try
+        {
+            using var document = JsonDocument.Parse(json, new JsonDocumentOptions { MaxDepth = 24 });
+            RejectDuplicateProperties(document.RootElement);
+            root = JsonNode.Parse(json)?.AsObject() ??
+                throw new FormatException("document must be an object");
+        }
+        catch (Exception e) when (e is JsonException or InvalidOperationException or
+                                    FormatException or ArgumentException)
+        {
+            // Do not include untrusted backend addresses or secret-bearing JSON
+            // fragments in CLI logs and CI check output.
+            throw new ArgumentException($"{label} config: invalid or ambiguous JSON", nameof(json));
+        }
         var allowed = new HashSet<string>(["schemaVersion", "routes", "clusters"], StringComparer.Ordinal);
         var unknown = root.Select(x => x.Key).Where(k => !allowed.Contains(k)).ToArray();
         if (unknown.Length != 0) throw new ArgumentException($"{label} config: unsupported field(s): {string.Join(", ", unknown)}", nameof(json));
@@ -85,6 +99,25 @@ public static class PlanEngine
             }
         }
         return new(routes, clusters);
+    }
+
+    private static void RejectDuplicateProperties(JsonElement element)
+    {
+        if (element.ValueKind == JsonValueKind.Object)
+        {
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var property in element.EnumerateObject())
+            {
+                if (!seen.Add(property.Name))
+                    throw new ArgumentException("Duplicate or case-aliased JSON property");
+                RejectDuplicateProperties(property.Value);
+            }
+        }
+        else if (element.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var value in element.EnumerateArray())
+                RejectDuplicateProperties(value);
+        }
     }
 
     private static void RequireId(string id, string label, string kind)
