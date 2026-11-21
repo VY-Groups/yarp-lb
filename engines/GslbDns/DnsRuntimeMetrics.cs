@@ -29,7 +29,8 @@ internal sealed class DnsRuntimeMetrics
     public void AgentReportStorageError() => Interlocked.Increment(ref reports[2]);
 
     public string Render(IReadOnlyCollection<SiteGroup> groups, AgentHealthReportStore? reportStore,
-        IReadOnlyCollection<AgentReportTarget> reportTargets, long nowTick)
+        IReadOnlyCollection<AgentReportTarget> reportTargets, long nowTick,
+        AuthorityFenceStore? authorityFence = null)
     {
         var output = new StringBuilder(2048);
         WriteCounter(output, "gatewaycore_gslb_dns_queries_total",
@@ -84,6 +85,30 @@ internal sealed class DnsRuntimeMetrics
             AppendEvidence(output, "unknown", evidence.Unknown);
             AppendEvidence(output, "stale_or_missing", evidence.StaleOrMissing);
         }
+        if (authorityFence is not null)
+        {
+            var state = authorityFence.Inspect(nowTick);
+            output.AppendLine("# HELP gatewaycore_gslb_authority_fence_ready Peer snapshot and acknowledgement both fresh with durable state trusted");
+            output.AppendLine("# TYPE gatewaycore_gslb_authority_fence_ready gauge");
+            output.Append("gatewaycore_gslb_authority_fence_ready ")
+                .Append(state.PeerFenceReady ? 1 : 0).Append('\n');
+            output.AppendLine("# HELP gatewaycore_gslb_authority_durable_state_trusted Local epoch and replay state integrity");
+            output.AppendLine("# TYPE gatewaycore_gslb_authority_durable_state_trusted gauge");
+            output.Append("gatewaycore_gslb_authority_durable_state_trusted ")
+                .Append(state.DurableStateTrusted ? 1 : 0).Append('\n');
+            output.AppendLine("# HELP gatewaycore_gslb_authority_peer_eligible_targets Peer-eligible targets after two-way lease fencing (local readiness still required)");
+            output.AppendLine("# TYPE gatewaycore_gslb_authority_peer_eligible_targets gauge");
+            output.Append("gatewaycore_gslb_authority_peer_eligible_targets ")
+                .Append(state.EligiblePeerTargets).Append('\n');
+            output.AppendLine("# HELP gatewaycore_gslb_authority_snapshot_remaining_ms Monotonic peer evidence lease budget");
+            output.AppendLine("# TYPE gatewaycore_gslb_authority_snapshot_remaining_ms gauge");
+            output.Append("gatewaycore_gslb_authority_snapshot_remaining_ms ")
+                .Append(state.PeerSnapshotRemainingMilliseconds).Append('\n');
+            output.AppendLine("# HELP gatewaycore_gslb_authority_ack_remaining_ms Monotonic outbound acknowledgement lease budget");
+            output.AppendLine("# TYPE gatewaycore_gslb_authority_ack_remaining_ms gauge");
+            output.Append("gatewaycore_gslb_authority_ack_remaining_ms ")
+                .Append(state.PeerAcknowledgementRemainingMilliseconds).Append('\n');
+        }
         return output.ToString();
     }
 
@@ -113,11 +138,13 @@ internal sealed class DnsMetricsServer : IAsyncDisposable
     private readonly IReadOnlyCollection<SiteGroup> groups;
     private readonly AgentHealthReportStore? reportStore;
     private readonly IReadOnlyCollection<AgentReportTarget> reportTargets;
+    private readonly AuthorityFenceStore? authorityFence;
     private WebApplication? app;
 
     public DnsMetricsServer(string listenAddress, int listenPort, DnsRuntimeMetrics metrics,
         IReadOnlyCollection<SiteGroup> groups, AgentHealthReportStore? reportStore,
-        IReadOnlyCollection<AgentReportTarget> reportTargets)
+        IReadOnlyCollection<AgentReportTarget> reportTargets,
+        AuthorityFenceStore? authorityFence = null)
     {
         if (!IPAddress.TryParse(listenAddress, out var address) || !IPAddress.IsLoopback(address) ||
             address.IsIPv4MappedToIPv6 || listenPort is < 1025 or > 65535)
@@ -128,6 +155,7 @@ internal sealed class DnsMetricsServer : IAsyncDisposable
         this.groups = groups;
         this.reportStore = reportStore;
         this.reportTargets = reportTargets;
+        this.authorityFence = authorityFence;
     }
 
     public async Task StartAsync(CancellationToken token)
@@ -144,8 +172,22 @@ internal sealed class DnsMetricsServer : IAsyncDisposable
         web.MapGet("/metrics", (HttpContext context) =>
         {
             context.Response.Headers.CacheControl = "no-store";
-            return Results.Text(metrics.Render(groups, reportStore, reportTargets, Environment.TickCount64),
+            return Results.Text(metrics.Render(groups, reportStore, reportTargets,
+                Environment.TickCount64, authorityFence),
                 "text/plain; version=0.0.4; charset=utf-8");
+        });
+        // The listener itself can only bind to loopback. Operators may use
+        // an authenticated tunnel; never publish peer state on the DNS socket.
+        web.MapGet("/authority-fence-status", (HttpContext context) =>
+        {
+            context.Response.Headers.CacheControl = "no-store";
+            if (authorityFence is null) return Results.NotFound();
+            return Results.Json(new
+            {
+                type = "loopback-gslb-authority-fence-status",
+                checkedUtc = DateTimeOffset.UtcNow,
+                status = authorityFence.Inspect(Environment.TickCount64)
+            });
         });
         web.MapGet("/agent-report-status", (HttpContext context) =>
         {
