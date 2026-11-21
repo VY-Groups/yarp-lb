@@ -284,6 +284,36 @@ internal static class AcmeRenewalAcceptance
             catch (InvalidOperationException) { ancestorRejected = true; }
             Check(ancestorRejected && !File.Exists(Path.Combine(realLeaf, "unapproved-new-key.bin")),
                 "ACME account key linked ancestor rejected before creation");
+
+            // The destination *directory* must also remain absent when a
+            // previously existing symlink leads to another private tree.
+            // Ordinary CreateDirectory would create realParent/new-directory
+            // before discovering the linked parent and refusing startup.
+            var uncreatedDirectory = Path.Combine(realParent, "unapproved-new-directory");
+            var redirectedNewDirectory = Path.Combine(linkedAncestor, "unapproved-new-directory");
+            var linkedCreateRejected = false;
+            try
+            {
+                _ = new AcmeAccountKeyStore(Path.Combine(redirectedNewDirectory, "new-account.bin"),
+                    restartedDataProtection.CreateProtector("acceptance")).LoadOrCreate();
+            }
+            catch (InvalidOperationException) { linkedCreateRejected = true; }
+            Check(linkedCreateRejected && !Directory.Exists(uncreatedDirectory),
+                "ACME account bootstrap refuses linked ancestor without creating external directories");
+
+            var danglingTarget = Path.Combine(rootDir, "missing-trust-state");
+            var danglingParent = Path.Combine(rootDir, "linked-dangling-trust-state");
+            Directory.CreateSymbolicLink(danglingParent, danglingTarget);
+            var danglingRejected = false;
+            try
+            {
+                _ = new AcmeAccountKeyStore(Path.Combine(danglingParent, "child", "new-account.bin"),
+                    restartedDataProtection.CreateProtector("acceptance")).LoadOrCreate();
+            }
+            catch (InvalidOperationException) { danglingRejected = true; }
+            finally { File.Delete(danglingParent); }
+            Check(danglingRejected && !Directory.Exists(danglingTarget),
+                "ACME account bootstrap rejects dangling symlink without materializing its target");
         }
 
         // A corrupted or oversized existing file must not trigger silent key
