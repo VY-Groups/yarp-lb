@@ -32,7 +32,8 @@ internal static class DnsWireProtocol
     // are kept for on-premises and isolated integration fixtures respectively.
     // Whether loopback is suitable for a publicly delegated zone remains a
     // separate deployment-validation requirement.
-    internal static bool ValidPublishedUnicastAddress(IPAddress? address)
+    internal static bool ValidPublishedUnicastAddress(IPAddress? address,
+        bool allowDocumentationTestRange = false)
     {
         if (address is null || address.IsIPv4MappedToIPv6 ||
             address.AddressFamily is not (AddressFamily.InterNetwork or AddressFamily.InterNetworkV6) ||
@@ -40,12 +41,26 @@ internal static class DnsWireProtocol
             address.Equals(IPAddress.Broadcast) || address.IsIPv6Multicast)
             return false;
 
-        if (address.AddressFamily == AddressFamily.InterNetworkV6)
-            return address.ScopeId == 0 && !address.IsIPv6LinkLocal && !address.IsIPv6SiteLocal;
-
         var bytes = address.GetAddressBytes();
+        if (address.AddressFamily == AddressFamily.InterNetworkV6)
+        {
+            // RFC 3849 2001:db8::/32 is documentation-only, never a public
+            // authoritative target. An isolated loopback DNS fixture may opt in.
+            var documentation = bytes[0] == 0x20 && bytes[1] == 0x01 &&
+                bytes[2] == 0x0d && bytes[3] == 0xb8;
+            return address.ScopeId == 0 && !address.IsIPv6LinkLocal &&
+                   !address.IsIPv6SiteLocal && (allowDocumentationTestRange || !documentation);
+        }
+
+        // RFC 5737 TEST-NET-1/2/3 are not real routable backend or NS
+        // addresses. Fail closed by default and allow only explicitly
+        // selected loopback-bound lab fixtures.
+        var reservedDocumentation = bytes[0] == 192 && bytes[1] == 0 && bytes[2] == 2 ||
+            bytes[0] == 198 && bytes[1] == 51 && bytes[2] == 100 ||
+            bytes[0] == 203 && bytes[1] == 0 && bytes[2] == 113;
         return bytes[0] != 0 && bytes[0] < 224 &&
-               !(bytes[0] == 169 && bytes[1] == 254);
+               !(bytes[0] == 169 && bytes[1] == 254) &&
+               (allowDocumentationTestRange || !reservedDocumentation);
     }
 
     public static byte[]? Build(ReadOnlySpan<byte> query, IReadOnlyDictionary<string, SiteGroup> zones,
