@@ -22,6 +22,8 @@ jobs:
         with: {dotnet-version: "10.0.x"}
       - uses: actions/setup-python@v5
         with: {python-version: "3.x"}
+      - name: DNS wire probe unit regressions (UDP truncation fallback and header validation)
+        run: python ops/acceptance/test_dns_wire_probe.py
       - run: dotnet build engines/GslbDns/GslbDns.csproj -c Release
       - run: dotnet run --project tests/GslbAcceptance/GslbAcceptance.csproj -c Release -- "${{ github.workspace }}"
       - name: Real authoritative DNS UDP/TCP/EDNS/negative-answer wire acceptance
