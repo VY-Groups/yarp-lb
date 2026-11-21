@@ -755,3 +755,16 @@ deployments should provision a conforming certificate, overlap old/new pins
 during rotation, and rerun the real multi-authority mTLS acceptance before
 installing this stricter policy. This does not certify production transport,
 distributed health quorum or live geographic authority failover.
+
+### Private, no-follow trust-anchor PEMs for observer and authority signatures
+
+Pinned observer report-signing public-key PEMs and the two-authority snapshot
+peer signing trust anchor now load from a single validated, no-follow opened
+file handle. Their SubjectPublicKeyInfo PEM content is bounded to 16 KiB;
+Linux trust-anchor files must be owned by root or the service identity and
+private to that owner (0600), with non-symlinked safe ancestors. This avoids
+trust-anchor substitution through link traversal and unbounded trust input.
+The file contains a **public key**, but is treated as security-sensitive
+configuration; existing deployments with 0644 public PEMs must provision
+private 0600 copies before enabling this version. Signature/epoch/observer
+quorum semantics are unchanged.
