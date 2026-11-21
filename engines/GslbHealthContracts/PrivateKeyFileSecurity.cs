@@ -173,6 +173,56 @@ public static class PrivateKeyFileSecurity
     }
 
     /// <summary>
+    /// Trust the entire no-follow directory chain for an installed executable.
+    /// Unlike private key/state directories, standard root-owned executable
+    /// directories (e.g. /usr/bin, mode 0755) may be group/other-readable
+    /// and traversable. The *final* directory must never be writable by
+    /// other identities, including in a sticky directory.
+    /// </summary>
+    public static void ValidateLinuxTrustedExecutableDirectory(string? path, string purpose)
+    {
+        if (!OperatingSystem.IsLinux()) return;
+        if (string.IsNullOrWhiteSpace(path) || !Path.IsPathFullyQualified(path))
+            throw new InvalidDataException($"{purpose} directory path must be absolute");
+
+        var components = Path.GetFullPath(path).Split(Path.DirectorySeparatorChar,
+            StringSplitOptions.RemoveEmptyEntries);
+        if (components.Length == 0)
+            throw new InvalidDataException($"{purpose} directory must not be the filesystem root");
+
+        SafeFileHandle? directory = OpenLinux("/", LinuxReadOnly | LinuxDirectory | LinuxCloseOnExec,
+            purpose, "parent directory");
+        try
+        {
+            ValidateLinuxOpenedObject(directory, purpose, isDirectory: true);
+            for (var i = 0; i < components.Length; i++)
+            {
+                var next = OpenLinuxAt(directory, components[i],
+                    LinuxReadOnly | LinuxDirectory | LinuxNoFollow | LinuxCloseOnExec,
+                    purpose, "executable parent directory");
+                LinuxStatx metadata;
+                try { metadata = ValidateLinuxOpenedObject(next, purpose, isDirectory: true); }
+                catch { next.Dispose(); throw; }
+
+                // Sticky /tmp may be a trusted ancestor, but never the
+                // immediate directory containing an executable we launch.
+                if (i == components.Length - 1 &&
+                    (((UnixFileMode)metadata.Mode &
+                      (UnixFileMode.GroupWrite | UnixFileMode.OtherWrite)) != 0))
+                {
+                    next.Dispose();
+                    throw new InvalidDataException(
+                        $"{purpose} executable directory must not be writable by other identities");
+                }
+
+                directory.Dispose();
+                directory = next;
+            }
+        }
+        finally { directory?.Dispose(); }
+    }
+
+    /// <summary>
     /// Creates a private Linux state directory by walking each path component
     /// relative to an already validated directory handle. Existing symlinks
     /// are rejected before any child directory can be created through them.
