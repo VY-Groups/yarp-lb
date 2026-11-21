@@ -342,37 +342,34 @@ public sealed class AcmeRenewalCoordinator(IAcmeCertificateIssuer issuer,
         }
     }
 
-    private static async Task<byte[]> ReadBoundedPfxAsync(string path, CancellationToken token)
+    private static Task<byte[]> ReadBoundedPfxAsync(string path, CancellationToken token)
     {
-        await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read,
-            FileShare.Read, 16_384, FileOptions.Asynchronous);
-        if (stream.Length is < 512 or > 1_048_576)
-            throw new CryptographicException("Active traffic PFX is outside the configured size bound.");
-        var bytes = new byte[checked((int)stream.Length)];
+        token.ThrowIfCancellationRequested();
+        var bytes = GatewayCore.Gslb.Contracts.PrivateKeyFileSecurity.ReadPrivateFileBytes(
+            path, "Active traffic PFX", 1_048_576);
         try
         {
-            await stream.ReadExactlyAsync(bytes, token);
-            if (stream.ReadByte() != -1) throw new InvalidDataException("PFX changed during read.");
-            return bytes;
+            token.ThrowIfCancellationRequested();
+            if (bytes.Length < 512)
+                throw new CryptographicException("Active traffic PFX is outside the configured size bound.");
+            return Task.FromResult(bytes);
         }
         catch { CryptographicOperations.ZeroMemory(bytes); throw; }
     }
 
-    private static async Task<string> ReadBoundedPasswordAsync(string path, CancellationToken token)
+    private static Task<string> ReadBoundedPasswordAsync(string path, CancellationToken token)
     {
-        await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read,
-            FileShare.Read, 4096, FileOptions.Asynchronous);
-        if (stream.Length is < 1 or > 16_384) throw new InvalidDataException("PFX password file exceeds bound.");
-        var bytes = new byte[checked((int)stream.Length)];
+        token.ThrowIfCancellationRequested();
+        var bytes = GatewayCore.Gslb.Contracts.PrivateKeyFileSecurity.ReadPrivateFileBytes(
+            path, "Traffic PFX password", 16_384);
         try
         {
-            await stream.ReadExactlyAsync(bytes, token);
-            if (stream.ReadByte() != -1) throw new InvalidDataException("PFX password changed during read.");
+            token.ThrowIfCancellationRequested();
             // Preserve UTF-8 BOM compatibility with File.ReadAllText.
             var offset = bytes.AsSpan().StartsWith(new byte[] { 0xef, 0xbb, 0xbf }) ? 3 : 0;
             var password = new UTF8Encoding(false, true).GetString(bytes, offset, bytes.Length - offset).TrimEnd('\r','\n');
             if (password.Length == 0) throw new InvalidDataException("Traffic PFX password cannot be empty.");
-            return password;
+            return Task.FromResult(password);
         }
         finally { CryptographicOperations.ZeroMemory(bytes); }
     }

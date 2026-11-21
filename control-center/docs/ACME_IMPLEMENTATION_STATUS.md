@@ -134,3 +134,16 @@ Disposable Windows/Linux TLS inventory tests validate legitimate settings,
 duplicate aliases, oversize and invalid UTF-8; Linux tests a linked ancestor.
 This is startup-input hardening only: it does not add DNS-01, staging CA
 validation, external renewal notifications or cross-node issuance coordination.
+
+### Private traffic certificate and password reads
+
+The ACME renewal coordinator and live TLS certificate rotator read the active
+PFX and password through the same bounded, no-follow opened-handle validator.
+PFX input is limited to 1 MiB (minimum 512 bytes), and password input to 16 KiB;
+temporary PFX/password byte arrays are cleared after use. Linux checks service
+or root ownership, private file modes and every parent component on the opened
+path. Windows rejects reparse-point files; service-identity ACLs remain an
+operator responsibility. Renewal fails before contacting the issuer when the
+PFX or password is linked, too large, or has unsafe Linux permissions. The
+Windows/Linux acceptance verifies live-certificate PFX link/mode rejection and
+renewal PFX/password link and password-mode rejection on Linux.
