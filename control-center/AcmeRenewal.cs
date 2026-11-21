@@ -126,29 +126,31 @@ public sealed class AcmeAccountKeyStore
     {
         lock (gate)
         {
-            if (File.Exists(keyPath)) return LoadExisting();
             var directory = Path.GetDirectoryName(keyPath)!;
-            var createPrivateDirectory = !System.IO.Directory.Exists(directory);
-            System.IO.Directory.CreateDirectory(directory);
             if (OperatingSystem.IsLinux())
-            {
-                if (createPrivateDirectory)
-                    File.SetUnixFileMode(directory, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
-                var mode = File.GetUnixFileMode(directory);
-                if ((mode & (UnixFileMode.GroupRead | UnixFileMode.GroupWrite | UnixFileMode.GroupExecute |
-                             UnixFileMode.OtherRead | UnixFileMode.OtherWrite | UnixFileMode.OtherExecute)) != 0)
-                    throw new InvalidOperationException("ACME account key directory must be private (mode 0700 or stricter).");
-            }
+                System.IO.Directory.CreateDirectory(directory,
+                    UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+            else
+                System.IO.Directory.CreateDirectory(directory);
+            ValidateAccountKeyDirectory(directory);
+            if (File.Exists(keyPath)) return LoadExisting();
             var key = KeyFactory.NewKey(KeyAlgorithm.ES256);
-            var ciphertext = protector.Protect(Encoding.UTF8.GetBytes(key.ToPem()));
+            var plaintext = Encoding.UTF8.GetBytes(key.ToPem());
+            byte[] ciphertext;
+            try { ciphertext = protector.Protect(plaintext); }
+            finally { CryptographicOperations.ZeroMemory(plaintext); }
             var temporary = Path.Combine(directory, ".acme-key-" + Guid.NewGuid().ToString("N") + ".tmp");
             try
             {
-                using (var file = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write,
-                           FileShare.None, 4096, FileOptions.WriteThrough))
+                var options = new FileStreamOptions
                 {
-                    if (OperatingSystem.IsLinux())
-                        File.SetUnixFileMode(temporary, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+                    Mode = FileMode.CreateNew, Access = FileAccess.Write,
+                    Share = FileShare.None, BufferSize = 4096, Options = FileOptions.WriteThrough
+                };
+                if (OperatingSystem.IsLinux())
+                    options.UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
+                using (var file = new FileStream(temporary, options))
+                {
                     file.Write(ciphertext);
                     file.Flush(flushToDisk: true);
                 }
@@ -164,8 +166,22 @@ public sealed class AcmeAccountKeyStore
         }
     }
 
+    private static void ValidateAccountKeyDirectory(string directory)
+    {
+        if ((File.GetAttributes(directory) & FileAttributes.ReparsePoint) != 0)
+            throw new InvalidOperationException("ACME account key directory may not be a symbolic link.");
+        if (OperatingSystem.IsLinux())
+        {
+            var mode = File.GetUnixFileMode(directory);
+            if ((mode & (UnixFileMode.GroupRead | UnixFileMode.GroupWrite | UnixFileMode.GroupExecute |
+                         UnixFileMode.OtherRead | UnixFileMode.OtherWrite | UnixFileMode.OtherExecute)) != 0)
+                throw new InvalidOperationException("ACME account key directory must be private (mode 0700 or stricter).");
+        }
+    }
+
     private IKey LoadExisting()
     {
+        ValidateAccountKeyDirectory(Path.GetDirectoryName(keyPath)!);
         if ((File.GetAttributes(keyPath) & FileAttributes.ReparsePoint) != 0)
             throw new InvalidOperationException("ACME account key store may not be a symbolic link.");
         if (OperatingSystem.IsLinux())
@@ -177,11 +193,16 @@ public sealed class AcmeAccountKeyStore
                 (UnixFileMode.UserRead | UnixFileMode.UserWrite))
                 throw new InvalidOperationException("ACME account key ciphertext must have mode 0600.");
         }
-        var ciphertext = File.ReadAllBytes(keyPath);
-        if (ciphertext.Length is < 64 or > 16_384)
+        using var file = new FileStream(keyPath, FileMode.Open, FileAccess.Read, FileShare.Read);
+        var length = file.Length;
+        if (length is < 64 or > 16_384)
             throw new CryptographicException("ACME account key ciphertext length is outside its accepted bound.");
+        var ciphertext = new byte[(int)length];
         try
         {
+            file.ReadExactly(ciphertext);
+            if (file.ReadByte() != -1)
+                throw new CryptographicException("ACME account key ciphertext changed during read.");
             var pem = protector.Unprotect(ciphertext);
             try { return KeyFactory.FromPem(Encoding.UTF8.GetString(pem)); }
             finally { CryptographicOperations.ZeroMemory(pem); }

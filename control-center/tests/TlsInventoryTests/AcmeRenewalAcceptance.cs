@@ -128,6 +128,57 @@ internal static class AcmeRenewalAcceptance
         var secondKey = new AcmeAccountKeyStore(keyPath, restartedDataProtection.CreateProtector("acceptance")).LoadOrCreate();
         Check(secondKey.ToPem() == accountPem, "persisted ACME account key survives a store restart");
 
+        var accountStore = new AcmeAccountKeyStore(keyPath, restartedDataProtection.CreateProtector("acceptance"));
+        if (OperatingSystem.IsLinux())
+        {
+            var privateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute;
+            File.SetUnixFileMode(rootDir, privateMode | UnixFileMode.GroupRead);
+            try
+            {
+                var unsafeDirectoryRejected = false;
+                try { _ = accountStore.LoadOrCreate(); }
+                catch (InvalidOperationException) { unsafeDirectoryRejected = true; }
+                Check(unsafeDirectoryRejected, "existing account key below a nonprivate directory is rejected");
+            }
+            finally { File.SetUnixFileMode(rootDir, privateMode); }
+
+            var linkedDirectory = Path.Combine(rootDir, "linked-account-directory");
+            Directory.CreateSymbolicLink(linkedDirectory, rootDir);
+            try
+            {
+                var linkRejected = false;
+                try
+                {
+                    _ = new AcmeAccountKeyStore(Path.Combine(linkedDirectory, "acme-account.bin"),
+                        restartedDataProtection.CreateProtector("acceptance")).LoadOrCreate();
+                }
+                catch (InvalidOperationException) { linkRejected = true; }
+                Check(linkRejected, "existing account key through a linked directory is rejected");
+            }
+            finally { Directory.Delete(linkedDirectory); }
+        }
+
+        // A corrupted or oversized existing file must not trigger silent key
+        // regeneration, which would lose the ACME account identity.
+        var invalidKey = Path.Combine(rootDir, "invalid-account.bin");
+        foreach (var invalidBytes in new[] { new byte[32], new byte[16_385], new byte[256] })
+        {
+            await File.WriteAllBytesAsync(invalidKey, invalidBytes);
+            SetPrivate(invalidKey);
+            var rejected = false;
+            try
+            {
+                _ = new AcmeAccountKeyStore(invalidKey,
+                    restartedDataProtection.CreateProtector("acceptance")).LoadOrCreate();
+            }
+            catch (CryptographicException) { rejected = true; }
+            Check(rejected && (await File.ReadAllBytesAsync(invalidKey)).SequenceEqual(invalidBytes),
+                "invalid account ciphertext rejected without changing the existing file");
+        }
+        File.Delete(invalidKey);
+        Check(accountStore.LoadOrCreate().ToPem() == accountPem,
+            "original ACME account remains readable after rejected unsafe state");
+
         var challengeStore = new AcmeHttp01ChallengeStore();
         var lifecycleGate = new AcmeCertificateLifecycleGate();
         var httpPort = -1;
