@@ -349,6 +349,47 @@ try
     }
     using (var reports = new AgentHealthReportStore(agents, targets, statePath, 10, 5, 2))
     {
+        // Constructor-only mTLS ingress regression: a literal external IP
+        // must require the same explicit opt-in as the wildcard listener.
+        // No sockets, DNS ports, service certificates or private hosts touched.
+        var listenerOptions = new AgentReportServerConfig(
+            "127.0.0.1", 15443, false,
+            Path.Combine(reportRoot, "unused-report-server.pem"),
+            Path.Combine(reportRoot, "unused-report-server.key"),
+            statePath, 10, 5, 2, 100, [], agents);
+        var listenerMetrics = new DnsRuntimeMetrics();
+        foreach (var listenAddress in new[] {
+            "192.0.2.10", "10.0.0.10", "2001:db8::10",
+            "0.0.0.0", "::"
+        })
+        {
+            var rejected = false;
+            try
+            {
+                await using var invalid = new AgentHealthReportServer(
+                    listenerOptions with { ListenAddress = listenAddress },
+                    reports, listenerMetrics);
+            }
+            catch (InvalidDataException) { rejected = true; }
+            if (!rejected)
+                throw new Exception("FAIL: signed agent report listener accepted external bind without opt-in: " + listenAddress);
+        }
+        await using (var local = new AgentHealthReportServer(
+            listenerOptions, reports, listenerMetrics)) { }
+        await using (var external = new AgentHealthReportServer(
+            listenerOptions with { ListenAddress = "10.0.0.10", AllowNonLoopbackListener = true },
+            reports, listenerMetrics)) { }
+        var loopbackWithExternalOptInRejected = false;
+        try
+        {
+            await using var invalid = new AgentHealthReportServer(
+                listenerOptions with { AllowNonLoopbackListener = true },
+                reports, listenerMetrics);
+        }
+        catch (InvalidDataException) { loopbackWithExternalOptInRejected = true; }
+        if (!loopbackWithExternalOptInRejected)
+            throw new Exception("FAIL: external-listener opt-in incorrectly accepted loopback");
+        Console.WriteLine("PASS: signed health report mTLS listener binds require explicit external opt-in");
         if (!reports.IsAuthorizedCertificate(client1, "agent-1") ||
             !reports.IsAuthorizedCertificate(client1Rotated, "agent-1") ||
             reports.IsAuthorizedCertificate(client1, "agent-2"))
