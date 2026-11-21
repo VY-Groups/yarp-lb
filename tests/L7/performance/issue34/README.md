@@ -9,3 +9,15 @@ After the measured rounds, the workflow collects one 25-second `dotnet-trace` `g
 The Actions summary labels a report **interim** if any required profile step fails. It calls the evidence complete only when the paired report, trace index and both non-empty trace files exist.
 
 Artifacts include raw per-run summaries and gateway counters, paired JSON report, trace files, and trace metadata. Keep them as isolated CI evidence. A single hosted runner is not production-scale evidence, and a measured improvement is not inferred if the paired interval includes zero. This workflow alone does not close issue #34: Windows parity, streaming and CA-signing POST/no-replay characterization, a defensible allocation-stack attribution, and an independently validated optimization without safety regressions remain acceptance work.
+
+## Report-evidence validation (strict, no threshold relaxation)
+
+The paired report validator now rejects non-integer request/error counts,
+out-of-range check rates, nonpositive RPS, negative or reversed p95/p99
+measurements, and missing or malformed VU/duration/payload/connection-reuse
+metadata. It continues enforcing the existing 30–115 second, minimum-request,
+failed-request, check and latency gates. Beyond the tabulated Student-t degrees
+of freedom, the CI uses a conservative critical value rather than a narrower
+normal approximation. Negative unit fixtures ensure corrupt summaries cannot
+be mistaken for a measured optimization. This protects benchmark evidence but
+**does not itself reduce the gateway's bytes allocated per request**.
