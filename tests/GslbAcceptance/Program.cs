@@ -28,14 +28,15 @@ foreach (var invalidAddress in new[]
 foreach (var validAddress in new[]
 {
     "8.8.8.8", "1.1.1.1", "10.1.2.3", "172.16.1.5",
-    "192.168.1.10", "127.0.0.1", "2606:4700::1111", "fd00::2", "::1"
+    "192.168.1.10", "10.10.5.4", "2606:4700::1111", "fd00::2", "fc00::1"
 })
     if (!DnsWireProtocol.ValidPublishedUnicastAddress(IPAddress.Parse(validAddress)))
         throw new Exception("FAIL: valid DNS published unicast endpoint rejected " + validAddress);
 if (DnsWireProtocol.ValidPublishedUnicastAddress(null))
     throw new Exception("FAIL: null published endpoint accepted");
 foreach (var documented in new[] {
-    "192.0.2.80", "198.51.100.53", "203.0.113.53", "2001:db8::1"
+    "192.0.2.80", "198.51.100.53", "203.0.113.53", "2001:db8::1",
+    "127.0.0.1", "127.7.8.9", "::1"
 })
 {
     var address = IPAddress.Parse(documented);
@@ -43,7 +44,7 @@ foreach (var documented in new[] {
         !DnsWireProtocol.ValidPublishedUnicastAddress(address, allowDocumentationTestRange: true))
         throw new Exception("FAIL: RFC documentation range not restricted to explicit lab policy " + documented);
 }
-Console.WriteLine("PASS: published DNS addresses reject RFC 5737/3849 outside opt-in isolated lab fixture");
+Console.WriteLine("PASS: published DNS targets reject RFC 5737/3849 and loopback outside opt-in lab fixture");
 
 // A locally configured ACME TXT owner must exist for both TXT queries and
 // NODATA on other types; DNSSEC signing/denial-chain owners must agree.
@@ -1088,6 +1089,15 @@ foreach (var (label, mutation, expectedError) in new
         "Invalid authoritative NS hostname or unicast address"),
     ("production-documentation-delegation", cfg =>
         cfg["Zones"]![0]!["Delegations"]![0]!["NameServers"]![0]!["Address"] = "203.0.113.53",
+        "Invalid delegated name-server hostname or unicast address"),
+    ("production-loopback-backend", cfg =>
+        cfg["Zones"]![0]!["Sites"]![0]!["Address"] = "127.0.0.12",
+        "Invalid GSLB site address"),
+    ("production-loopback-parent-ns", cfg =>
+        cfg["Zones"]![0]!["NameServers"]![0]!["Address"] = "::1",
+        "Invalid authoritative NS hostname or unicast address"),
+    ("production-loopback-delegated-ns", cfg =>
+        cfg["Zones"]![0]!["Delegations"]![0]!["NameServers"]![0]!["Address"] = "127.0.0.54",
         "Invalid delegated name-server hostname or unicast address"),
     ("external-documentation-allowance", cfg => {
         cfg["AllowDocumentationAddressesForTesting"] = true;
