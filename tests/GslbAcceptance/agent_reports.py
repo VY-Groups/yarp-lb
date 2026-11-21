@@ -925,12 +925,21 @@ def main():
         assert post_agent_report_status(authority_b, signer_agent, root / "ca.pem",
                                         duplicate_after.encode()) == 400, \
             "valid signed report with duplicate after signed value was not rejected"
+        extra_unsigned = valid.replace(marker, '"UnsignedOverride":true,' + marker, 1)
+        omitted_nullable = valid.replace('"LatencyMilliseconds":23,', '', 1)
+        assert extra_unsigned != valid and omitted_nullable != valid
+        assert post_agent_report_status(authority_b, signer_agent, root / "ca.pem",
+                                        extra_unsigned.encode()) == 400, \
+            "cryptographically signed report with an unsigned extra field was accepted"
+        assert post_agent_report_status(authority_b, signer_agent, root / "ca.pem",
+                                        omitted_nullable.encode()) == 400, \
+            "signed report missing optional-valued wire field was accepted"
         clean_status = post_agent_report_status(authority_b, signer_agent, root / "ca.pem", valid.encode())
         assert clean_status == 202, f"clean signed report returned HTTP {clean_status}, expected 202"
         assert post_agent_report_status(authority_b, signer_agent, root / "ca.pem",
                                         valid.encode()) == 400, \
             "replayed signed report was not rejected at the real mTLS HTTP boundary"
-        print("PASS: mTLS report ingress rejects valid signed duplicate-field frames in both orders, accepts clean frame, rejects replay")
+        print("PASS: mTLS report ingress rejects duplicate/extra/missing signed fields, accepts clean frame, rejects replay")
 
         # Last phase: eliminate background observer traffic and restart B with
         # a deliberately small quota so every request in the window is known.
