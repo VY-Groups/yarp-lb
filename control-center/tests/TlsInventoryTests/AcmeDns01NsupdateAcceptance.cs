@@ -131,6 +131,58 @@ internal static class AcmeDns01NsupdateAcceptance
                 await using var lease=await staleBinary.PublishAsync(
                     Owner,Txt,TimeSpan.FromMinutes(8),CancellationToken.None);
             }, "changed executable after it was approved");
+            var installedTools = Path.Combine(root,"installed-tools");
+            Directory.CreateDirectory(installedTools,privateDir);
+            File.SetUnixFileMode(installedTools,
+                UnixFileMode.UserRead|UnixFileMode.UserWrite|UnixFileMode.UserExecute|
+                UnixFileMode.GroupRead|UnixFileMode.GroupExecute|
+                UnixFileMode.OtherRead|UnixFileMode.OtherExecute);
+            GatewayCore.Gslb.Contracts.PrivateKeyFileSecurity
+                .ValidateLinuxTrustedExecutableDirectory(installedTools,"approved updater");
+            var installedExe=Path.Combine(installedTools,"nsupdate");
+            File.Copy(binary,installedExe);
+            File.SetUnixFileMode(installedExe,
+                UnixFileMode.UserRead|UnixFileMode.UserExecute|
+                UnixFileMode.GroupRead|UnixFileMode.GroupExecute|
+                UnixFileMode.OtherRead|UnixFileMode.OtherExecute);
+            var trustedInstalled=new AcmeDns01NsupdateWriter(example with
+            {
+                ExecutablePath=installedExe,
+                ExecutableSha256=Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(installedExe))),
+                TsigKeyFilePath=key
+            });
+            trustedInstalled.VerifyPreflight();
+            await using(var lease=await trustedInstalled.PublishAsync(
+                Owner,Txt,TimeSpan.FromMinutes(8),CancellationToken.None))
+                Must(File.ReadAllText(trace).Contains("update add "+Owner, StringComparison.Ordinal),
+                    "system-style executable directory with 0755 permissions supports TSIG publishing");
+
+            var groupWritableTools=Path.Combine(root,"writable-tools");
+            Directory.CreateDirectory(groupWritableTools,privateDir);
+            File.SetUnixFileMode(groupWritableTools,
+                UnixFileMode.UserRead|UnixFileMode.UserWrite|UnixFileMode.UserExecute|
+                UnixFileMode.GroupRead|UnixFileMode.GroupWrite|UnixFileMode.GroupExecute);
+            var untrustedExecutableDirectoryRejected=false;
+            try
+            {
+                GatewayCore.Gslb.Contracts.PrivateKeyFileSecurity
+                    .ValidateLinuxTrustedExecutableDirectory(groupWritableTools,"untrusted updater");
+            }
+            catch(InvalidDataException) {untrustedExecutableDirectoryRejected=true;}
+            Must(untrustedExecutableDirectoryRejected,
+                "group-writable installed executable directory fails before process launch");
+
+            var link=Path.Combine(root,"linked-tools");
+            Directory.CreateSymbolicLink(link,installedTools);
+            var linkRejected=false;
+            try
+            {
+                GatewayCore.Gslb.Contracts.PrivateKeyFileSecurity
+                    .ValidateLinuxTrustedExecutableDirectory(link,"linked updater");
+            }
+            catch(InvalidDataException) {linkRejected=true;}
+            finally { Directory.Delete(link); }
+            Must(linkRejected,"symlinked executable directory is rejected even when target is trusted");
             Console.WriteLine("PASS: real Linux nsupdate subprocess, binary pin, TSIG privacy and exact-value cleanup");
         }
         finally { Directory.Delete(root,recursive:true); }
