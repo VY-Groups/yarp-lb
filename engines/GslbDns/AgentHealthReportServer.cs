@@ -126,7 +126,8 @@ internal sealed class AgentHealthReportServer : IAsyncDisposable
                     {
                         int read;
                         try { read = await context.Request.Body.ReadAsync(buffer, context.RequestAborted); }
-                        catch (BadHttpRequestException ex) when (ex.StatusCode == StatusCodes.Status413PayloadTooLarge)
+                        catch (Microsoft.AspNetCore.Server.Kestrel.Core.BadHttpRequestException ex)
+                            when (ex.StatusCode == StatusCodes.Status413PayloadTooLarge)
                         {
                             // Chunked requests can trip Kestrel's transport
                             // bound before our explicit accumulated-byte check.
