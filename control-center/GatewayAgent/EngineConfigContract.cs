@@ -53,6 +53,24 @@ public static class EngineConfigContract
         return true;
     }
 
+    // Keep signed staging consistent with the DNS process' published-address
+    // safety contract: an address used in an A/AAAA backend or NS/glue record
+    // is not equivalent to a valid listener/bind address. Private RFC1918/ULA
+    // and isolated test loopback remain supported.
+    private static bool PublishedUnicast(JsonNode? node)
+    {
+        if (!Ip(node, out var address, allowIpv6: true) ||
+            address.IsIPv4MappedToIPv6 ||
+            address.Equals(IPAddress.Any) || address.Equals(IPAddress.IPv6Any) ||
+            address.Equals(IPAddress.Broadcast) || address.IsIPv6Multicast)
+            return false;
+        if (address.AddressFamily == AddressFamily.InterNetworkV6)
+            return address.ScopeId == 0 && !address.IsIPv6LinkLocal && !address.IsIPv6SiteLocal;
+        var bytes = address.GetAddressBytes();
+        return bytes[0] != 0 && bytes[0] < 224 &&
+               !(bytes[0] == 169 && bytes[1] == 254);
+    }
+
     public static bool Validate(string engineId, JsonObject config, bool allowPublicBind)
     {
         if (!ValidEngineId(engineId) || config.ToJsonString().Length > 524288) return false;
@@ -85,7 +103,7 @@ public static class EngineConfigContract
                     return false;
                 foreach (var s in sites)
                 {
-                    if (s is not JsonObject site || !Ip(site["Address"],out _, allowIpv6: true) ||
+                    if (s is not JsonObject site || !PublishedUnicast(site["Address"]) ||
                         !Num(site["Weight"],1,100)) return false;
                     var probeType = "Http";
                     if (site["HealthCheckType"] is not null &&
@@ -103,6 +121,25 @@ public static class EngineConfigContract
                              !Uri.TryCreate(url,UriKind.Absolute,out var uri) ||
                              (uri.Scheme!="http" && uri.Scheme!="https") ||
                              !string.IsNullOrEmpty(uri.UserInfo)) return false;
+                }
+                if (zone["NameServers"] is not null)
+                {
+                    if (zone["NameServers"] is not JsonArray nameServers) return false;
+                    foreach (var server in nameServers)
+                        if (server is not JsonObject row || !Str(row["Host"], out _) ||
+                            !PublishedUnicast(row["Address"])) return false;
+                }
+                if (zone["Delegations"] is not null)
+                {
+                    if (zone["Delegations"] is not JsonArray delegations) return false;
+                    foreach (var cut in delegations)
+                    {
+                        if (cut is not JsonObject delegation || !Str(delegation["Name"], out _) ||
+                            delegation["NameServers"] is not JsonArray childServers) return false;
+                        foreach (var server in childServers)
+                            if (server is not JsonObject row || !Str(row["Host"], out _) ||
+                                !PublishedUnicast(row["Address"])) return false;
+                    }
                 }
             }
             return true;
