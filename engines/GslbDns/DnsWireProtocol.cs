@@ -8,7 +8,7 @@ using System.Text;
 // or EDNS Client Subnet routing by default.
 internal static class DnsWireProtocol
 {
-    private const ushort A = 1, Ns = 2, Soa = 6, Aaaa = 28, Ds = 43, Opt = 41, EcsOption = 8;
+    private const ushort A = 1, Ns = 2, Soa = 6, Txt = 16, Aaaa = 28, Ds = 43, Opt = 41, EcsOption = 8;
     private const ushort Rrsig = 46, Nsec = 47, Dnskey = 48, Nsec3 = 50, Nsec3Param = 51;
     private const ushort ClassIn = 1;
     // RFC 6891 response OPT CLASS reports this server's receive capability,
@@ -165,14 +165,19 @@ internal static class DnsWireProtocol
                 n.Host.Equals(domain, StringComparison.OrdinalIgnoreCase));
             var ns = zone.NameServers.FirstOrDefault(n =>
                 n.Host.Equals(domain, StringComparison.OrdinalIgnoreCase) && n.RecordType == qtype);
+            var txt = zone.AcmeTxtRecords.Where(record =>
+                record.Host.Equals(domain, StringComparison.OrdinalIgnoreCase)).ToArray();
+            var txtOwnerExists = txt.Length != 0;
             // A configured address below this name makes it an existing empty
             // non-terminal. NXDOMAIN would incorrectly deny its entire subtree
             // to caching resolvers (RFC 8020 section 3.1).
-            var emptyNonTerminal = !atApex && !nsHostExists &&
+            var emptyNonTerminal = !atApex && !nsHostExists && !txtOwnerExists &&
                 (zone.NameServers.Any(n =>
                     n.Host.EndsWith("." + domain, StringComparison.OrdinalIgnoreCase)) ||
                  zone.Delegations.Any(cut =>
-                    cut.Name.EndsWith("." + domain, StringComparison.OrdinalIgnoreCase)));
+                    cut.Name.EndsWith("." + domain, StringComparison.OrdinalIgnoreCase)) ||
+                 zone.AcmeTxtRecords.Any(record =>
+                    record.Host.EndsWith("." + domain, StringComparison.OrdinalIgnoreCase)));
             if (delegation is not null && domain.Equals(delegation.Name, StringComparison.OrdinalIgnoreCase) && qtype == Ds)
             {
                 if (delegation.DsRecords.Length > 0)
@@ -218,7 +223,7 @@ internal static class DnsWireProtocol
                     else authority.AddRange(parentSigner.DenialProof(delegation.Name, nxDomain: false));
                 }
             }
-            else if (!atApex && !nsHostExists)
+            else if (!atApex && !nsHostExists && !txtOwnerExists)
             {
                 rcode = emptyNonTerminal ? 0 : 3; // NODATA vs true NXDOMAIN
                 AddNegativeSoa();
@@ -405,6 +410,9 @@ internal static class DnsWireProtocol
                     }
                 }
             }
+            else if (qtype == Txt && txtOwnerExists)
+                answers.AddRange(txt.Select(record =>
+                    new DnsResource(domain, Txt, (uint)zone.Ttl, record.Rdata)));
             else if (ns is not null && qtype == ns.RecordType)
                 answers.Add(new DnsResource(domain, ns.RecordType, (uint)zone.Ttl, ns.Address.GetAddressBytes()));
             else if (qtype == Soa && atApex && zone.NameServers.Length != 0)
