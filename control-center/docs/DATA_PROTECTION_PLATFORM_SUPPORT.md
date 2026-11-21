@@ -60,9 +60,15 @@ keys merely to make the service start:
 - `YARP_CONTROL_PLANE_DIR`: absolute private root owned by the service identity.
 - `YARP_RUNTIME_CONFIG_PATH`: exactly `config/appsettings.json` beneath that root.
 - `YARP_LINUX_DP_CERT_PFX_PATH` and `YARP_LINUX_DP_CERT_PASSWORD_FILE`: RSA private
-  certificate and its password file. Both files must be regular, non-symlinked,
-  owner-readable/writable only (`0600`); the root and key directory must be
-  non-symlinked and owner-only (`0700`).
+  certificate and its password file. The RSA private-key certificate must
+  be a valid, non-CA leaf with explicit X.509 `keyEncipherment` key usage
+  and a BasicConstraints extension declaring CA=false. Signing-only and CA
+  certificates, or certificates missing these declarations, fail startup;
+  provision a dedicated replacement certificate before upgrading if your
+  current wrapping PFX is not compliant. Do not remove an old protector while
+  existing key-ring entries still depend on it. Both files must be regular,
+  non-symlinked, owner-readable/writable only (`0600`); the root and key
+  directory must be non-symlinked and owner-only (`0700`).
 - For certificate rotation, set the current certificate to the replacement and
   configure both `YARP_LINUX_DP_OLD_CERT_PFX_PATH` and
   `YARP_LINUX_DP_OLD_CERT_PASSWORD_FILE` with the previous certificate during

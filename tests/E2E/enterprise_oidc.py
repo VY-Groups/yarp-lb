@@ -275,7 +275,10 @@ def distributed_revocation(cwd,dll):
         hp1,tls1,hp2,tls2,redis_port=ports
         origin1,origin2=f"https://127.0.0.1:{tls1}",f"https://127.0.0.1:{tls2}"
         for node,hp,tlsport in ((first,hp1,tls1),(second,hp2,tls2)):
-            pfx=node/"secrets"/"dp.pfx"
+            # Keep the shared TLS identity trusted by the real OIDC/Redis
+            # client; never overwrite the dedicated, keyEncipherment-only
+            # private Data Protection leaf created by openssl_state().
+            pfx=node/"secrets"/"tls.pfx"
             cmd("openssl","pkcs12","-export","-out",str(pfx),"-inkey",str(key),"-in",str(cert),
                 "-passout","pass:temporary-e2e-only-password")
             pfx.chmod(0o600)

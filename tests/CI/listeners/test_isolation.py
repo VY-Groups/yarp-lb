@@ -96,7 +96,10 @@ with tempfile.TemporaryDirectory(prefix='gateway-sockets-') as td:
         mgmt_pfx,mgmt_password=pfx(root,'mgmt',mgmt_key,mgmt_crt,ca_crt)
         dp_key=root/'dp.key';dp_crt=root/'dp.crt'
         run('openssl','req','-new','-x509','-nodes','-newkey','rsa:3072','-sha256',
-            '-days','7','-subj','/CN=CI-DP','-keyout',str(dp_key),'-out',str(dp_crt))
+            '-days','7','-subj','/CN=CI-DP',
+            '-addext','basicConstraints=critical,CA:FALSE',
+            '-addext','keyUsage=critical,keyEncipherment',
+            '-keyout',str(dp_key),'-out',str(dp_crt))
         dp_pfx,dp_password=pfx(root,'dp',dp_key,dp_crt,ca_crt)
         thumb=run('openssl','x509','-in',str(client_crt),'-fingerprint','-sha1','-noout').stdout.split('=',1)[1].strip().replace(':','')
         ports=[available('127.0.0.2') for _ in range(2)]+[available('127.0.0.1') for _ in range(2)]

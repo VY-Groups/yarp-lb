@@ -27,14 +27,17 @@ var previousEnv=new[] {
     "YARP_LINUX_DP_OLD_CERT_PFX_PATH","YARP_LINUX_DP_OLD_CERT_PASSWORD_FILE"
 }.ToDictionary(k=>k,k=>Environment.GetEnvironmentVariable(k));
 void Set(string key,string? value) => Environment.SetEnvironmentVariable(key,value);
-(string Pfx,string PasswordFile) CreateCertificate(string prefix)
+(string Pfx,string PasswordFile) CreateCertificate(string prefix,
+    X509KeyUsageFlags? keyUsage=X509KeyUsageFlags.KeyEncipherment|X509KeyUsageFlags.DataEncipherment,
+    bool isCa=false, bool includeBasicConstraints=true)
 {
     using var rsa=RSA.Create(3072);
     var request=new CertificateRequest("CN=DP "+prefix,rsa,
         HashAlgorithmName.SHA256,RSASignaturePadding.Pkcs1);
-    request.CertificateExtensions.Add(new X509BasicConstraintsExtension(false,false,0,true));
-    request.CertificateExtensions.Add(new X509KeyUsageExtension(
-        X509KeyUsageFlags.KeyEncipherment|X509KeyUsageFlags.DataEncipherment,true));
+    if(includeBasicConstraints)
+        request.CertificateExtensions.Add(new X509BasicConstraintsExtension(isCa,false,0,true));
+    if(keyUsage is { } flags)
+        request.CertificateExtensions.Add(new X509KeyUsageExtension(flags,true));
     using var cert=request.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1),
         DateTimeOffset.UtcNow.AddDays(30));
     var pass=Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
@@ -185,6 +188,27 @@ try
     File.SetUnixFileMode(secrets,PrivateDir|UnixFileMode.OtherWrite);
     Assert(Throws(()=>{using var _=Provider(state);}), "world-writable secret ancestor refused");
     File.SetUnixFileMode(secrets,PrivateDir);
+    // Wrapping certificates are dedicated RSA encryption *leaf* identities.
+    // Bad certificates must fail at configuration time, not at the first
+    // user sign-in or when a new Data Protection key is generated.
+    var signingOnly=CreateCertificate("sign-only", X509KeyUsageFlags.DigitalSignature);
+    var issuer=CreateCertificate("issuer-only", X509KeyUsageFlags.KeyCertSign, isCa:true);
+    var missingUsage=CreateCertificate("without-usage", keyUsage:null);
+    var missingConstraints=CreateCertificate("without-basic-constraints", includeBasicConstraints:false);
+    foreach(var invalid in new[] {
+        (Identity:signingOnly,Label:"signing-only RSA identity"),
+        (Identity:issuer,Label:"CA signing identity"),
+        (Identity:missingUsage,Label:"certificate without key usage"),
+        (Identity:missingConstraints,Label:"certificate without leaf basic constraints")
+    })
+    {
+        Set("YARP_LINUX_DP_CERT_PFX_PATH",invalid.Identity.Pfx);
+        Set("YARP_LINUX_DP_CERT_PASSWORD_FILE",invalid.Identity.PasswordFile);
+        Assert(Throws(()=>{using var _=Provider(state);}),
+            "Linux DP refuses " + invalid.Label);
+    }
+    Set("YARP_LINUX_DP_CERT_PFX_PATH",first.Pfx);
+    Set("YARP_LINUX_DP_CERT_PASSWORD_FILE",first.PasswordFile);
     var originalPassword=File.ReadAllBytes(first.PasswordFile);
     File.WriteAllText(first.PasswordFile,new string('x',4097));
     Assert(Throws(()=>{using var _=Provider(state);}), "oversized wrapping password refused");

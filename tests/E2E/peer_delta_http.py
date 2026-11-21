@@ -46,8 +46,10 @@ def certificate(root, name):
 
 def state_with_tls(root, origin):
     openssl_state(root,origin)
+    # Keep the CA TLS identity separate from the compliant key-encipherment
+    # leaf that openssl_state created for Linux Data Protection.
     key,cert=certificate(root/"secrets","peer-tls")
-    pfx=root/"secrets"/"dp.pfx"
+    pfx=root/"secrets"/"tls.pfx"
     subprocess.run(["openssl","pkcs12","-export","-out",str(pfx),"-inkey",str(key),
         "-in",str(cert),"-passout","pass:temporary-e2e-only-password"],check=True,
         stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
