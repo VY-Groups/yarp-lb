@@ -941,25 +941,36 @@ internal static class AcmeRenewalAcceptance
         public int Cleanup;
         public int Probes;
 
-        private sealed class Lease(Action cleanup) : IAsyncDisposable
+        private sealed class Lease(FakeDnsPublisher publisher) : IAcmeDns01PublicationLease
         {
+            private bool disposed;
+            public Task PublishAsync(CancellationToken token)
+            {
+                token.ThrowIfCancellationRequested();
+                if (disposed) throw new InvalidOperationException("Fake DNS-01 lease is disposed");
+                publisher.Publications++;
+                return Task.CompletedTask;
+            }
             public ValueTask DisposeAsync()
             {
-                cleanup();
+                if (!disposed)
+                {
+                    disposed = true;
+                    publisher.Cleanup++;
+                }
                 return ValueTask.CompletedTask;
             }
         }
 
-        public Task<IAsyncDisposable> PublishAsync(string owner, string txtValue,
-            TimeSpan lifetime, CancellationToken token)
+        public Task<IAcmeDns01PublicationLease> AcquirePublicationLeaseAsync(
+            string owner, string txtValue, TimeSpan lifetime, CancellationToken token)
         {
             token.ThrowIfCancellationRequested();
             if (owner != "_acme-challenge.api.example.com" ||
                 txtValue != new string('A', 43) ||
                 lifetime > TimeSpan.FromMinutes(10))
                 throw new InvalidOperationException("Unexpected fake DNS-01 publication");
-            Publications++;
-            return Task.FromResult<IAsyncDisposable>(new Lease(() => Cleanup++));
+            return Task.FromResult<IAcmeDns01PublicationLease>(new Lease(this));
         }
 
         public Task<IReadOnlyList<AcmeDns01AuthorityObservation>> ProbeAuthoritativeAsync(
