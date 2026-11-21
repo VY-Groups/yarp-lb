@@ -263,6 +263,14 @@ internal static class AuthorityFenceTests
                     probe.Start();
                     return ((IPEndPoint)probe.LocalEndpoint).Port;
                 }
+                // The earlier in-process state assertions use synthetic monotonic
+                // ticks. Refresh both signed leases using the real process clock
+                // before exercising the live HTTP route, which reads that clock.
+                var routeTick = Environment.TickCount64;
+                var routeSnapshot = source.CreateSnapshot(routeTick);
+                Check(receiver.TryAccept(routeSnapshot, tlsA, now, routeTick),
+                    "live status route fixture accepts a currently fresh signed snapshot");
+                receiver.RecordPeerAcknowledgement(routeTick, routeTick);
                 var statusPort = ReserveLoopbackPort();
                 var statusServer = new DnsMetricsServer("127.0.0.1", statusPort,
                     new DnsRuntimeMetrics(), Array.Empty<SiteGroup>(), null,
