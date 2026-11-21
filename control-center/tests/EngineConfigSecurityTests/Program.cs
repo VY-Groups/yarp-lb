@@ -119,7 +119,26 @@ using (var privacyActivity = new System.Diagnostics.Activity("privacy-contract")
 // across repeated spans, including known-good route/status attributes.
 // Unknown enrichment and raw client fields must still be removed, regardless
 // of the number or ordering of tags.
+foreach (var validId in new[] { "route_1", "ROUTE-ABC", new string('A', 80) })
+    Must(GatewayOpenTelemetry.IsSafeTelemetryId(validId),
+        "safe trace and metric ID preserved by allocation-free ASCII validator");
+foreach (var unsafeId in new[] { "", "route/name", "route\n", "route\r",
+    "route\nforged", "nonascii_é", "route id", new string('A', 81) })
+    Must(!GatewayOpenTelemetry.IsSafeTelemetryId(unsafeId),
+        "invalid, trailing-newline and oversized trace/metric IDs rejected");
+
 var privacyProcessor = new GatewayTelemetryPrivacyProcessor();
+using (var unsafeSpan = new System.Diagnostics.Activity("bad-id-privacy-contract"))
+{
+    unsafeSpan.SetTag("gateway.route.id", "route\n");
+    unsafeSpan.SetTag("gateway.cluster.id", "safe_cluster");
+    unsafeSpan.Start();
+    privacyProcessor.OnEnd(unsafeSpan);
+    Must(unsafeSpan.GetTagItem("gateway.route.id") is null &&
+        (string?)unsafeSpan.GetTagItem("gateway.cluster.id") == "safe_cluster",
+        "OTLP privacy scrub rejects newline-bearing route IDs without dropping valid clusters");
+}
+
 for (var iteration = 0; iteration < 4; iteration++)
 {
     using var span = new System.Diagnostics.Activity("large-privacy-contract");
