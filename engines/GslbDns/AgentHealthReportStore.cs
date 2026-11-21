@@ -33,6 +33,10 @@ internal sealed class AgentHealthReportStore : IDisposable
     private readonly Dictionary<string, ReplayPoint> highWater;
     private FileStream? stateLock;
     private bool stateFaulted;
+    // Digest of the last successfully loaded or atomically persisted replay
+    // state. Detect an unexpected replacement, including valid old JSON.
+    // Not a cryptographic attestation against a privileged host compromise.
+    private byte[]? persistedStateHash;
     private long? lastStateCheckTick;
     private const long StateCheckIntervalMs = 1000;
     private readonly Dictionary<string, LiveReport> live = new(StringComparer.Ordinal);
@@ -235,10 +239,30 @@ internal sealed class AgentHealthReportStore : IDisposable
             (ulong)nowTick - (ulong)last < StateCheckIntervalMs)
             return true;
         lastStateCheckTick = nowTick;
-        if (File.Exists(statePath)) return true;
-        stateFaulted = true;
-        live.Clear();
-        return false;
+        try
+        {
+            EnsurePrivateFile(statePath);
+            var length = new FileInfo(statePath).Length;
+            if (length is < 1 || length > MaximumReplayStateBytes())
+                throw new InvalidDataException("Replay state size is invalid");
+            // Use streaming SHA-256 to bound allocation on the DNS answer
+            // path. Authenticated report writes always recheck before update.
+            using var stream = File.OpenRead(statePath);
+            var actualHash = SHA256.HashData(stream);
+            if (persistedStateHash is null ||
+                !CryptographicOperations.FixedTimeEquals(actualHash, persistedStateHash))
+                throw new InvalidDataException("Replay state changed outside accepted report persistence");
+            return true;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or
+                                          InvalidDataException or CryptographicException)
+        {
+            // Never let a valid-looking rollback preserve previously admitted
+            // healthy votes. Restoration is deliberately not self-healing.
+            stateFaulted = true;
+            live.Clear();
+            return false;
+        }
     }
 
     public void RecordRejectedReport(string agentId)
@@ -370,18 +394,25 @@ internal sealed class AgentHealthReportStore : IDisposable
         }
     }
 
+    private int MaximumReplayStateBytes() =>
+        Math.Max(4096, targets.Values.Sum(policy => policy.AgentIds.Length) * 512);
+
     private Dictionary<string, ReplayPoint> LoadReplayState(string path)
     {
         if (!File.Exists(path)) return new Dictionary<string, ReplayPoint>(StringComparer.Ordinal);
         EnsurePrivateFile(path);
-        var maximumBytes = Math.Max(4096, targets.Values.Sum(policy => policy.AgentIds.Length) * 512);
-        if (new FileInfo(path).Length > maximumBytes)
+        if (new FileInfo(path).Length is < 1 || new FileInfo(path).Length > MaximumReplayStateBytes())
             throw new InvalidDataException("Replay state exceeds configured storage bound");
-        var file = JsonSerializer.Deserialize<ReplayFile>(File.ReadAllBytes(path))
+        var bytes = File.ReadAllBytes(path);
+        if (bytes.Length > MaximumReplayStateBytes() ||
+            !StrictJsonPropertyNames.HasNoDuplicates(bytes))
+            throw new InvalidDataException("Replay state contains invalid or ambiguous JSON");
+        var file = JsonSerializer.Deserialize<ReplayFile>(bytes)
             ?? throw new InvalidDataException("Malformed agent replay state");
         if (file.Version != 1 || file.Points is null || file.Points.Any(p =>
             string.IsNullOrWhiteSpace(p.Key) || p.Value is null || p.Value.Epoch <= 0 || p.Value.Sequence <= 0))
             throw new InvalidDataException("Invalid agent replay state");
+        persistedStateHash = SHA256.HashData(bytes);
         return new Dictionary<string, ReplayPoint>(file.Points, StringComparer.Ordinal);
     }
 
@@ -403,6 +434,7 @@ internal sealed class AgentHealthReportStore : IDisposable
                 stream.Flush(flushToDisk: true);
             }
             File.Move(temporary, statePath, overwrite: true);
+            persistedStateHash = SHA256.HashData(bytes);
         }
         finally
         {
