@@ -235,6 +235,28 @@ internal static class AcmeRenewalAcceptance
                 Check(linkRejected, "existing account key through a linked directory is rejected");
             }
             finally { Directory.Delete(linkedDirectory); }
+
+            // A symlink at a GRANDPARENT must be denied before creating
+            // another account identity; checking only the final directory
+            // is insufficient when a nested parent points elsewhere.
+            var realParent = Path.Combine(rootDir, "account-real-parent");
+            var realLeaf = Path.Combine(realParent, "private-child");
+            Directory.CreateDirectory(realParent);
+            Directory.CreateDirectory(realLeaf);
+            File.SetUnixFileMode(realParent, privateMode);
+            File.SetUnixFileMode(realLeaf, privateMode);
+            var linkedAncestor = Path.Combine(rootDir, "account-linked-ancestor");
+            Directory.CreateSymbolicLink(linkedAncestor, realParent);
+            var redirectedAccount = Path.Combine(linkedAncestor, "private-child", "unapproved-new-key.bin");
+            var ancestorRejected = false;
+            try
+            {
+                _ = new AcmeAccountKeyStore(redirectedAccount,
+                    restartedDataProtection.CreateProtector("acceptance")).LoadOrCreate();
+            }
+            catch (InvalidOperationException) { ancestorRejected = true; }
+            Check(ancestorRejected && !File.Exists(Path.Combine(realLeaf, "unapproved-new-key.bin")),
+                "ACME account key linked ancestor rejected before creation");
         }
 
         // A corrupted or oversized existing file must not trigger silent key
