@@ -31,3 +31,17 @@ Export uses the SDK's bounded batch queue and background worker; request handlin
 The Windows/Linux control-center CI test now emits a paired loopback middleware comparison with telemetry disabled and enabled (default 5% trace sampling). Each mode receives three alternating-order samples of 10,000 HTTP requests at concurrency 16 after 500 warmups; each sample reuses one HTTP/1.1 client and drains every response body before stopping the latency timer. The JSON output includes per-pair and per-mode RPS and p50/p95/p99, median percentage deltas, and min/max sample ranges. Export is drained to a disposable local HTTP receiver outside the timed request windows; background exports may still run during the request interval. The complete JSON is appended to the GitHub Actions job summary when available and printed in the test log. This isolates the shipping telemetry middleware and SDK on GitHub runner hosts; it is not a full YARP-to-backend throughput comparison and must not be reported as customer or production overhead. A measurable regression is a prompt to measure the actual site path, not a result to dismiss or generalize.
 
 This integration does not provide a production Collector deployment, durable central storage, production Grafana hosting, audit-log replication, or a fleet-wide report store. The loopback-only Docker fixture in `ops/observability` verifies real Collector ingestion, Prometheus translation, Grafana dashboard provisioning and test Alertmanager delivery; it is disposable evidence with no persistent volumes. Local per-destination health/ejection/queue metrics remain on the separate loopback Prometheus endpoint unless explicitly added to the OTLP meter. Before production use, deploy a secured Collector and metrics backend, configure authentication and retention, validate redaction and queue-loss behavior end to end, verify alert delivery to approved operators, measure the actual gateway plus backend path on Windows and Linux with the site's traffic mix, and test collector outage/recovery. These steps remain open under issue #50; exporter source and CI do not establish production monitoring or availability.
+
+### Trace attribute filtering allocation guard (#34)
+
+The sampled-span privacy processor now collects only disallowed attribute
+**keys** using a cleared, reusable array-pool buffer, removes them after
+tag enumeration, and returns the buffer in a `finally` block. It no longer
+materializes the entire `Activity.TagObjects` collection into a new heap
+array for each processed span. Bounded allowed operational attributes and
+deny-by-default rejection of URLs, client addresses, headers and unknown
+enrichment are unchanged. A regression test exercises 96 private tags over
+repeated spans to force buffer growth and reuse. This targets **trace-export
+instrumentation** only; it does not prove any overall gateway
+allocated-bytes/request reduction. Issue #34 still requires three-or-more
+paired, pinned whole-proxy profiles and Windows/Ubuntu runtime evidence.
