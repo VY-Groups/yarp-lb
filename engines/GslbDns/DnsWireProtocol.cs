@@ -33,7 +33,11 @@ internal static class DnsWireProtocol
         if (query.Length is < 17 or > 4096) return null;
         var id = BinaryPrimitives.ReadUInt16BigEndian(query);
         var flags = BinaryPrimitives.ReadUInt16BigEndian(query[2..]);
-        if ((flags & 0xF800) != 0 || (flags & 0x7800) != 0) return null; // QR or opcode
+        // DNS queries may set RD, AD or CD, but response-only QR/AA/TC/RA,
+        // reserved Z, a nonzero question RCODE and non-QUERY opcodes are not
+        // valid requests for this strict authoritative UDP/TCP listener.
+        // Drop them before name parsing, health lookups or allocations.
+        if ((flags & 0xFECF) != 0) return null;
         if (BinaryPrimitives.ReadUInt16BigEndian(query[4..]) != 1 ||
             BinaryPrimitives.ReadUInt16BigEndian(query[6..]) != 0 ||
             BinaryPrimitives.ReadUInt16BigEndian(query[8..]) != 0) return null;
