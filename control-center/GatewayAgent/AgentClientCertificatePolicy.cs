@@ -68,6 +68,13 @@ public static class AgentClientCertificatePolicy
         X509Certificate2? cert = context.Connection.ClientCertificate;
         if (cert is null || !ValidTime(cert, DateTimeOffset.UtcNow)) return false;
 
+        return MatchesPins(cert, pins);
+    }
+
+    // A pin match is an identity comparison, not independent authorization.
+    // The request policy checks TLS, time, trust and revocation separately.
+    private static bool MatchesPins(X509Certificate2 cert, IReadOnlySet<string> pins)
+    {
         var sha1 = Convert.FromHexString(cert.Thumbprint);
         var sha256 = SHA256.HashData(cert.RawData);
         var matched = false;
@@ -99,7 +106,9 @@ public static class AgentClientCertificatePolicy
     public static bool IsAuthorizedLive(HttpContext context, IConfiguration config,
         Action<string>? pinSetRevisionObserved = null)
     {
-        if (!context.Request.IsHttps || context.Connection.ClientCertificate is null) return false;
+        if (!context.Request.IsHttps) return false;
+        var cert = context.Connection.ClientCertificate;
+        if (cert is null || !ValidTime(cert, DateTimeOffset.UtcNow)) return false;
         try
         {
             var pins = ParsePinnedThumbprints(
@@ -110,7 +119,11 @@ public static class AgentClientCertificatePolicy
             var revoked = deny.Length == 0
                 ? new HashSet<string>(StringComparer.Ordinal)
                 : ParsePins(deny, 1, 128, "revoked client certificate pin");
-            return !IsAuthorized(context, revoked) && IsAuthorized(context, pins);
+            // Evaluate both sets against the same TLS certificate. A denylist
+            // match can only reject, and an empty denylist never grants trust.
+            var trusted = MatchesPins(cert, pins);
+            var denied = MatchesPins(cert, revoked);
+            return trusted && !denied;
         }
         catch (Exception ex) when (ex is InvalidOperationException or ArgumentException)
         {

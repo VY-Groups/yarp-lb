@@ -23,6 +23,22 @@ from urllib.request import build_opener, ProxyHandler, HTTPSHandler, HTTPCookieP
 from unittest.mock import patch
 from real_control_center import backend, gateway, openssl_state, port, Client, check
 
+# These Linux-only CI fixtures must exercise the shipping file-based secret
+# readers. Use an owner-only RAM-backed directory, never ordinary disk or
+# uploaded artifacts, and create each secret file with permissions atomically.
+def fixture_secret_directory():
+    with open("/proc/mounts", encoding="utf-8") as mounts:
+        if not any(line.split()[1:3] == ["/dev/shm", "tmpfs"] for line in mounts):
+            raise RuntimeError("CI requires /dev/shm tmpfs for disposable credentials")
+    return tempfile.TemporaryDirectory(prefix="gatewaycore-ci-secrets-", dir="/dev/shm")
+
+def write_private_fixture_file(path, data):
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "wb") as stream:
+        stream.write(data if isinstance(data, bytes) else data.encode("utf-8"))
+    if path.stat().st_mode & 0o777 != 0o600:
+        raise RuntimeError("Fixture secret file permissions are not owner-only")
+
 def b64url(data):
     return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
 
@@ -150,6 +166,7 @@ class Idp:
         self.insecure_server=ThreadingHTTPServer(("127.0.0.2",0),InsecureLogoutHandler)
         self.insecure_logout_endpoint=f"http://127.0.0.2:{self.insecure_server.server_address[1]}/logout"
         tls=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        tls.minimum_version = ssl.TLSVersion.TLSv1_2
         tls.load_cert_chain(str(cert),str(tlskey))
         self.server.socket=tls.wrap_socket(self.server.socket,server_side=True)
         self.thread=threading.Thread(target=self.server.serve_forever,daemon=True)
@@ -240,7 +257,7 @@ def insecure_logout_endpoint_is_rejected(client,idp):
         "HTTP end-session metadata fails closed without contacting its endpoint")
 
 def distributed_revocation(cwd,dll):
-    with tempfile.TemporaryDirectory(prefix="gatewaycore-oidc-shared-") as td, backend() as upstream:
+    with tempfile.TemporaryDirectory(prefix="gatewaycore-oidc-shared-") as td, fixture_secret_directory() as sd, backend() as upstream:
         root=Path(td)
         first,second=root/"first",root/"second"
         for node in (first,second):
@@ -250,6 +267,7 @@ def distributed_revocation(cwd,dll):
         trust=root/"trust.pem"
         trust.write_bytes(cert.read_bytes()+idp_cert.read_bytes())
         ctx=ssl.create_default_context(cafile=str(trust))
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
         ports=[]
         while len(ports)<5:
             candidate=port()
@@ -267,9 +285,8 @@ def distributed_revocation(cwd,dll):
                 recovery.request("POST","/admin/api/users",{"username":"operator",
                     "password":"Operator-fixture-password!","email":"operator@example.invalid","role":"Operator"})
         password=secrets.token_hex(32)
-        redis_file=root/"redis-connection"
-        redis_file.write_text(f"127.0.0.1:{redis_port},ssl=true,sslHost=127.0.0.1,password={password}")
-        redis_file.chmod(0o600)
+        redis_file=Path(sd)/"redis-connection"
+        write_private_fixture_file(redis_file, f"127.0.0.1:{redis_port},ssl=true,sslHost=127.0.0.1,password={password}")
         redis_args=["redis-server","--bind","127.0.0.1","--port","0","--tls-port",str(redis_port),
             "--tls-cert-file",str(cert),"--tls-key-file",str(key),"--tls-ca-cert-file",str(cert),
             "--tls-auth-clients","no","--requirepass",password,"--dir",str(root),
@@ -298,12 +315,12 @@ def distributed_revocation(cwd,dll):
                 except subprocess.TimeoutExpired: proc.kill();proc.wait(timeout=5)
         with Idp(root,origin1,idp_key,idp_cert) as idp:
             configs=[]
-            secret=root/"shared-secret"
-            secret.write_text(idp.secret);secret.chmod(0o600)
+            secret=Path(sd)/"shared-secret"
+            write_private_fixture_file(secret, idp.secret)
             for node,origin in ((first,origin1),(second,origin2)):
                 config=node/"oidc.json"
                 config.write_text(json.dumps({"Issuer":idp.issuer,"ClientId":idp.client,
-                    "ClientSecretFile":str(secret),"ManagementOrigin":origin,"RequiredAcr":"urn:fixture:fido",
+                    "ManagementOrigin":origin,"RequiredAcr":"urn:fixture:fido",
                     "RequiredAmr":"fido2","BreakGlassUsername":"recovery","Accounts":[{"Subject":"operator-subject",
                     "Username":"operator","Group":"gateway-operators","Role":"Operator"}]}))
                 config.chmod(0o600);configs.append(config)
@@ -312,7 +329,8 @@ def distributed_revocation(cwd,dll):
             redis_proc=start_redis()
             try:
                 check(cli("SET",cutoff_key,"0","NX")=="OK","explicit shared cutoff initialization")
-                shared={"SSL_CERT_FILE":str(trust),"GATEWAY_OIDC_REVOCATION_REDIS_FILE":str(redis_file)}
+                shared={"SSL_CERT_FILE":str(trust),"GATEWAY_OIDC_REVOCATION_REDIS_FILE":str(redis_file),
+                "GATEWAY_OIDC_CLIENT_SECRET_FILE":str(secret)}
                 with patch.dict(os.environ,dict(shared,GATEWAY_OIDC_CONFIG_FILE=str(configs[0]))), gateway(cwd,dll,first,hp1,tls1):
                     with patch.dict(os.environ,dict(shared,GATEWAY_OIDC_CONFIG_FILE=str(configs[1]))), gateway(cwd,dll,second,hp2,tls2):
                         idp.gateway_origin=origin1
@@ -389,7 +407,7 @@ def main():
         raise SystemExit("Disposable GitHub Actions CI only")
     cwd=args.root.resolve()
     dll=cwd/"bin/Release/net10.0/GatewayCoreYarp.dll"
-    with tempfile.TemporaryDirectory(prefix="gatewaycore-oidc-") as td, backend() as upstream:
+    with tempfile.TemporaryDirectory(prefix="gatewaycore-oidc-") as td, fixture_secret_directory() as sd, backend() as upstream:
         root=Path(td)
         openssl_state(root,upstream)
         admin_key,admin_cert=make_tls(root,"admin","127.0.0.1")
@@ -401,6 +419,7 @@ def main():
         trust=root/"trusted.pem"
         trust.write_bytes(admin_cert.read_bytes()+idp_cert.read_bytes())
         ctx=ssl.create_default_context(cafile=str(trust))
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
         hp,tlsport=port(),port()
         while hp==tlsport: tlsport=port()
         origin=f"https://127.0.0.1:{tlsport}"
@@ -411,14 +430,17 @@ def main():
                 "email":"operator@example.invalid","role":"Operator"})
         with Idp(root,origin,idp_key,idp_cert) as idp:
             config=root/"oidc.json"
-            secret=root/"client-secret"
-            secret.write_text(idp.secret)
-            config.write_text(json.dumps({"Issuer":idp.issuer,"ClientId":idp.client,"ClientSecretFile":str(secret),
+            client_secret_path=Path(sd)/"client-secret"
+            write_private_fixture_file(client_secret_path, idp.secret)
+            # Keep secret-file locations out of the serialized configuration;
+            # the dedicated environment override supplies the runtime path.
+            config.write_text(json.dumps({"Issuer":idp.issuer,"ClientId":idp.client,
                 "ManagementOrigin":origin,"RequiredAcr":"urn:fixture:fido","RequiredAmr":"fido2",
                 "BreakGlassUsername":"recovery","Accounts":[{"Subject":"operator-subject",
                    "Username":"operator","Group":"gateway-operators","Role":"Operator"}]}))
-            for path in (config,secret): path.chmod(0o600)
-            with patch.dict(os.environ,{"GATEWAY_OIDC_CONFIG_FILE":str(config),"SSL_CERT_FILE":str(trust)}):
+            config.chmod(0o600)
+            with patch.dict(os.environ,{"GATEWAY_OIDC_CONFIG_FILE":str(config),"SSL_CERT_FILE":str(trust),
+                                       "GATEWAY_OIDC_CLIENT_SECRET_FILE":str(client_secret_path)}):
                 with gateway(cwd,dll,root,hp,tlsport) as base:
                     a,_=browser(origin,ctx)
                     check(a.request("GET","/admin/api/auth-methods")["enterpriseOidc"],"enterprise SSO announced on management origin")
