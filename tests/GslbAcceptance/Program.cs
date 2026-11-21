@@ -226,6 +226,63 @@ try
     var targets = new[] { new AgentReportTarget("lab.example.test", "mumbai",
         ["agent-1", "agent-2", "agent-3"], MinimumHealthyVantageGroups: 2) };
     var statePath = Path.Combine(reportRoot, "replay-state.json");
+    // Signed reports are advisory evidence only within bounded time windows.
+    // Unsafe operator timing must fail at both the store and HTTPS ingress
+    // before any replay-state file, key read, socket or DNS action occurs.
+    var reportTimeCases = new[]
+    {
+        (Ttl: 0, Age: 5, Skew: 2),
+        (Ttl: 301, Age: 5, Skew: 2),
+        (Ttl: int.MaxValue, Age: 5, Skew: 2),
+        (Ttl: 10, Age: 0, Skew: 2),
+        (Ttl: 10, Age: 301, Skew: 2),
+        (Ttl: 10, Age: int.MaxValue, Skew: 2),
+        (Ttl: 10, Age: 5, Skew: -1),
+        (Ttl: 10, Age: 5, Skew: 31),
+        (Ttl: 10, Age: 5, Skew: int.MaxValue)
+    };
+    for (var index = 0; index < reportTimeCases.Length; index++)
+    {
+        var (ttl, age, skew) = reportTimeCases[index];
+        var invalidStatePath = Path.Combine(reportRoot, $"invalid-report-bounds-{index}.json");
+        var rejected = false;
+        try
+        {
+            using var invalid = new AgentHealthReportStore(
+                agents, targets, invalidStatePath, ttl, age, skew);
+        }
+        catch (InvalidDataException) { rejected = true; }
+        if (!rejected || File.Exists(invalidStatePath) || File.Exists(invalidStatePath + ".lock"))
+            throw new Exception("FAIL: unbounded report freshness created persistent replay state");
+    }
+    // Valid upper bounds preserve explicitly short-term operator policy.
+    using (var bounded = new AgentHealthReportStore(agents, targets,
+        Path.Combine(reportRoot, "bounded-report-policy.json"), 300, 300, 30))
+    {
+        var options = new AgentReportServerConfig(
+            "127.0.0.1", 15443, false,
+            Path.Combine(reportRoot, "unused-tls-cert.pem"),
+            Path.Combine(reportRoot, "unused-tls-key.pem"), statePath,
+            300, 300, 30, 120, [], agents);
+        var metrics = new DnsRuntimeMetrics();
+        await using (var valid = new AgentHealthReportServer(options, bounded, metrics)) { }
+        foreach (var (ttl, age, skew) in reportTimeCases)
+        {
+            var rejected = false;
+            try
+            {
+                await using var invalid = new AgentHealthReportServer(
+                    options with {
+                        MaxTtlSeconds = ttl, MaxAgeSeconds = age,
+                        MaxClockSkewSeconds = skew
+                    }, bounded, metrics);
+            }
+            catch (InvalidDataException) { rejected = true; }
+            if (!rejected)
+                throw new Exception("FAIL: observer report HTTPS ingress accepted unbounded freshness");
+        }
+    }
+    Console.WriteLine("PASS: bounded observer TTL, age and clock skew reject unsafe startup without state mutation");
     if (OperatingSystem.IsWindows())
     {
         var broadAclDirectory = Path.Combine(reportRoot, "broad-replay-acl");
