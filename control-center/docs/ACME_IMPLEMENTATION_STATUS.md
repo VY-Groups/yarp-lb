@@ -326,3 +326,14 @@ certificate-chain delivery is proven. Do not deploy a shared TSIG identity
 with unrestricted zone-update permission. Preserve #37 and physical #36 as
 open gates until independent Windows/Linux integration and operator-controlled
 staging/DR exercises are completed.
+
+For the updater executable, the Linux integrity preflight follows every
+parent directory with no symlink traversal and rejects the **immediate**
+executable directory when group/other identities can write it. Trusted
+root-managed public executable directories such as `/usr/bin` (mode 0755)
+are supported; the private 0700 directory requirement applies to the TSIG
+secret/state paths, not normal installed system binaries. Explicit symlinked
+binaries/ancestors and group-writable executable directories remain denied.
+An approved, independently pinned SHA-256 hash is checked before every
+operation, and deployments must update that pin only after reviewing a
+verified executable replacement.
