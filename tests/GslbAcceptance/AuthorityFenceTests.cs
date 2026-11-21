@@ -219,7 +219,17 @@ internal static class AuthorityFenceTests
                     Check(trustedDigest == TrustDigest(trust, loaded),
                         "loaded fingerprint does not depend on a second file read");
                 }
-                finally { File.WriteAllText(publicAPath, originalPem); }
+                finally
+                {
+                    File.WriteAllText(publicAPath, originalPem);
+                    // The fixture intentionally deletes the trust PEM above.
+                    // Recreating it on Linux starts with the process umask,
+                    // not the original owner-only mode. Restore the trust
+                    // anchor's 0600 policy before the next authority load.
+                    if (OperatingSystem.IsLinux())
+                        File.SetUnixFileMode(publicAPath,
+                            UnixFileMode.UserRead | UnixFileMode.UserWrite);
+                }
             }
             var now = DateTimeOffset.UtcNow;
             AuthorityFenceSnapshot initial;
