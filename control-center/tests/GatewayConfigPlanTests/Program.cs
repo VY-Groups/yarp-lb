@@ -108,6 +108,76 @@ Check(imported["routes"]!["web"]!["Match"]!["Path"]!.ToString() == "/{**catch-al
 Check(PlanEngine.Validate(imported.ToJsonString()).RouteCount == 1 &&
       PlanEngine.Build(imported.ToJsonString(), GatewayApiImport.Translate(bundle).ToJsonString()).Changes.Count == 0,
       "Gateway API import is deterministic and passes supported declarative planner");
+
+ // A target namespace owner may permit exactly one foreign HTTPRoute to a
+ // named Service. This offline import never grants access on its own.
+ var crossBundle = System.Text.Json.Nodes.JsonNode.Parse(bundle)!.AsObject();
+ crossBundle["services"]![0]!["metadata"]!["namespace"] = "shared";
+ crossBundle["httpRoutes"]![0]!["spec"]!["rules"]![0]!["backendRefs"]![0]!.AsObject()["namespace"] = "shared";
+ crossBundle["referenceGrants"] = System.Text.Json.Nodes.JsonNode.Parse("""
+ [
+   {
+     "apiVersion":"gateway.networking.k8s.io/v1",
+     "kind":"ReferenceGrant",
+     "metadata":{"name":"allow-apps-api","namespace":"shared"},
+     "spec":{
+       "from":[{"group":"gateway.networking.k8s.io","kind":"HTTPRoute","namespace":"apps"}],
+       "to":[{"group":"","kind":"Service","name":"api"}]
+     }
+   }
+ ]
+ """);
+ var authorizedCross = crossBundle.ToJsonString();
+ var importedCross = GatewayApiImport.Translate(authorizedCross);
+ Check(importedCross["clusters"]!["svc-api-8080"]!["Destinations"]!["service"]!["Address"]!.ToString() ==
+       "http://api.shared.svc.cluster.local:8080/",
+       "explicit target-owned ReferenceGrant permits a named cross-namespace Service only");
+ Check(PlanEngine.Validate(importedCross.ToJsonString()).Status == "valid" &&
+       PlanEngine.Build(importedCross.ToJsonString(),
+           GatewayApiImport.Translate(authorizedCross).ToJsonString()).Changes.Count == 0,
+       "cross-namespace grant import yields deterministic, valid offline desired configuration");
+
+ // Mutations must fail rather than falling back to a same-namespace address,
+ // silently skipping a grant, or interpreting grant from/to rules broadly.
+ var invalidGrantCases = new (string Name, Action<System.Text.Json.Nodes.JsonObject> Mutate)[]
+ {
+     ("missing grant", doc => doc.Remove("referenceGrants")),
+     ("wrong grant namespace", doc => doc["referenceGrants"]![0]!["metadata"]!["namespace"] = "apps"),
+     ("wrong source namespace", doc => doc["referenceGrants"]![0]!["spec"]!["from"]![0]!["namespace"] = "other"),
+     ("wrong source kind", doc => doc["referenceGrants"]![0]!["spec"]!["from"]![0]!["kind"] = "Gateway"),
+     ("wrong source group", doc => doc["referenceGrants"]![0]!["spec"]!["from"]![0]!["group"] = "evil.example"),
+     ("wrong target kind", doc => doc["referenceGrants"]![0]!["spec"]!["to"]![0]!["kind"] = "Secret"),
+     ("wrong target group", doc => doc["referenceGrants"]![0]!["spec"]!["to"]![0]!["group"] = "gateway.networking.k8s.io"),
+     ("wrong Service name", doc => doc["referenceGrants"]![0]!["spec"]!["to"]![0]!["name"] = "other"),
+     ("broad grant without named Service", doc => doc["referenceGrants"]![0]!["spec"]!["to"]![0]!.AsObject().Remove("name")),
+     ("unsupported grant version", doc => doc["referenceGrants"]![0]!["apiVersion"] = "gateway.networking.k8s.io/v1beta1"),
+     ("unlisted backend namespace", doc => doc["httpRoutes"]![0]!["spec"]!["rules"]![0]!["backendRefs"]![0]!["namespace"] = "unlisted"),
+     ("unlisted Service namespace", doc => doc["services"]![0]!["metadata"]!["namespace"] = "unlisted"),
+     ("backend missing namespace", doc => doc["httpRoutes"]![0]!["spec"]!["rules"]![0]!["backendRefs"]![0]!.AsObject().Remove("namespace")),
+     ("duplicate grant", doc => doc["referenceGrants"]!.AsArray().Add(
+          doc["referenceGrants"]![0]!.DeepClone())),
+     ("extra broad grant member", doc => doc["referenceGrants"]![0]!["spec"]!["to"]!.AsArray().Add(
+          new System.Text.Json.Nodes.JsonObject {
+              ["group"] = "", ["kind"] = "Service", ["name"] = "other"
+          })),
+     ("unexpected grant metadata", doc => doc["referenceGrants"]![0]!["metadata"]!.AsObject()["labels"] =
+          new System.Text.Json.Nodes.JsonObject { ["ignored"] = "unsafe" }),
+ };
+ foreach (var (name, mutate) in invalidGrantCases)
+ {
+     var candidate = System.Text.Json.Nodes.JsonNode.Parse(authorizedCross)!.AsObject();
+     mutate(candidate);
+     Check(ThrowsAmbiguous(() => GatewayApiImport.Translate(candidate.ToJsonString())),
+           "cross-namespace grant must reject " + name);
+ }
+ // A same-namespace backend does not require a grant; extra unused grants
+ // are rejected so intent cannot be silently dropped.
+ var redundantGrant = System.Text.Json.Nodes.JsonNode.Parse(authorizedCross)!.AsObject();
+ redundantGrant["services"]![0]!["metadata"]!["namespace"] = "apps";
+ redundantGrant["httpRoutes"]![0]!["spec"]!["rules"]![0]!["backendRefs"]![0]!["namespace"] = "apps";
+ Check(ThrowsAmbiguous(() => GatewayApiImport.Translate(redundantGrant.ToJsonString())),
+       "unused cross-namespace grants cannot be silently ignored");
+
 foreach (var bad in new[] {
     bundle.Replace("\"from\":\"Same\"", "\"from\":\"All\""),
     bundle.Replace("\"sectionName\":\"http\"", "\"sectionName\":\"other\""),
