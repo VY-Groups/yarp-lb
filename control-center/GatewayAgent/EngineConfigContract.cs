@@ -64,6 +64,8 @@ public static class EngineConfigContract
             address.Equals(IPAddress.Any) || address.Equals(IPAddress.IPv6Any) ||
             address.Equals(IPAddress.Broadcast) || address.IsIPv6Multicast)
             return false;
+        if (IPAddress.IsLoopback(address) && !allowDocumentationTestRange)
+            return false; // Publishing a loopback target is only safe in isolated lab mode.
         var bytes = address.GetAddressBytes();
         if (address.AddressFamily == AddressFamily.InterNetworkV6)
         {
