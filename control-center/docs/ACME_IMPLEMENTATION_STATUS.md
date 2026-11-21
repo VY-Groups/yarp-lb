@@ -190,3 +190,32 @@ activation has yet been proven. The DNS-01 API cannot activate accidentally
 without an authenticated operator-supplied publisher. Do not mark #37
 complete or claim production DNS-01 until provider credentials, publication/
 revoke fencing, fleet coordination and staging CA acceptance are added.
+
+### Independent authoritative DNS-01 wire evidence
+
+The optional `AcmeDns01WireVerifiedPublisher` wraps a separately authenticated
+`IAcmeDns01Publisher` and **ignores** that writer's own reported
+`ProbeAuthoritativeAsync` results. Instead it queries two to sixteen
+explicitly pinned, distinct authoritative IP addresses directly using DNS over
+TCP/53; no DNS resolver discovery, recursion or public caller-supplied
+endpoints are used. It checks transaction IDs, exact QNAME/TXT/IN echo,
+`QR` and `AA` bits, NOERROR, non-truncated DNS frames, bounded resource
+records, backward-only DNS name pointers, and the complete 43-byte TXT
+character-string. A malformed, non-authoritative, unreachable or incorrect
+server contributes **no** healthy vote. The issuer's existing cleanup lease
+is still released when any required authority fails. Strict production
+construction rejects duplicate server IDs, reused IP addresses, loopback
+endpoints and non-53 ports. Loopback/ephemeral ports are enabled exclusively
+by an internal socket-test constructor.
+
+The Windows/Linux TLS acceptance now exercises two real independent TCP
+socket listeners, a non-AA second server, wrong digests, truncated/corrupt
+wire data, pointer errors and a malicious writer that fabricates reports.
+
+**Trust limitation:** The AA bit is a protocol assertion by the contacted
+server, not cryptographic proof of DNSSEC or operator independence. The
+pinned addresses and their network paths must be trusted and configured by
+an operator. A production-approved DNS publication implementation, bounded
+credential rotation, DNSSEC validation where required, live external
+propagation and CA staging order remain outstanding. This code is a
+verification layer, **not** a complete DNS provider or release acceptance.
