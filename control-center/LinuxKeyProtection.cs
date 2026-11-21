@@ -90,11 +90,19 @@ public static class LinuxKeyProtection
         try
         {
             using var privateKey = cert.GetRSAPrivateKey();
+            // Do not use a CA signing key or signing-only TLS identity as
+            // an ASP.NET Data Protection XML envelope key. The dedicated
+            // RSA leaf must explicitly authorize key encipherment.
+            var usage = cert.Extensions.OfType<X509KeyUsageExtension>().ToArray();
+            var constraints = cert.Extensions.OfType<X509BasicConstraintsExtension>().ToArray();
             if (privateKey is null || privateKey.KeySize < 2048 ||
+                usage.Length != 1 ||
+                (usage[0].KeyUsages & X509KeyUsageFlags.KeyEncipherment) == 0 ||
+                constraints.Length != 1 || constraints[0].CertificateAuthority ||
                 cert.NotBefore.ToUniversalTime() > DateTime.UtcNow ||
                 cert.NotAfter.ToUniversalTime() <= DateTime.UtcNow.AddDays(1))
                 throw new InvalidOperationException(
-                    "Linux Data Protection requires a currently valid RSA >=2048 certificate with a private key");
+                    "Linux Data Protection requires a valid RSA >=2048 leaf wrapping certificate with explicit keyEncipherment usage and a private key");
             return cert;
         }
         catch
