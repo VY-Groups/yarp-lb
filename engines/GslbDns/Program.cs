@@ -93,7 +93,7 @@ foreach(var zone in config.Zones)
             (health.Scheme == Uri.UriSchemeHttp || health.Scheme == Uri.UriSchemeHttps) &&
             string.IsNullOrWhiteSpace(health.UserInfo);
         if(!IPAddress.TryParse(site.Address,out var address) ||
-            address.AddressFamily is not (AddressFamily.InterNetwork or AddressFamily.InterNetworkV6) ||
+            !DnsWireProtocol.ValidPublishedUnicastAddress(address) ||
             site.Weight is < 1 or > 100 ||
             site.Priority is < 0 or > 1000 ||
             (site.Region is not null && !DnsCidrRegionTable.ValidRegion(site.Region)) ||
@@ -181,8 +181,8 @@ foreach(var zone in config.Zones)
         if (source is null || string.IsNullOrWhiteSpace(source.Host) ||
             !DnsWireProtocol.ValidName(source.Host.TrimEnd('.')) ||
             !IPAddress.TryParse(source.Address, out var nsAddress) ||
-            nsAddress.IsIPv4MappedToIPv6 || nsAddress.AddressFamily is not (AddressFamily.InterNetwork or AddressFamily.InterNetworkV6))
-            throw new InvalidDataException("Invalid authoritative NS hostname or address");
+            !DnsWireProtocol.ValidPublishedUnicastAddress(nsAddress))
+            throw new InvalidDataException("Invalid authoritative NS hostname or unicast address");
         var host = source.Host.TrimEnd('.').ToLowerInvariant();
         serverNames.Add(host);
         if (!serverAddressFamilies.Add((host, nsAddress.AddressFamily)))
@@ -239,9 +239,8 @@ foreach(var zone in config.Zones)
             if (child is null || string.IsNullOrWhiteSpace(child.Host) ||
                 !DnsWireProtocol.ValidName(child.Host.TrimEnd('.')) ||
                 !IPAddress.TryParse(child.Address, out var childAddress) ||
-                childAddress.IsIPv4MappedToIPv6 ||
-                childAddress.AddressFamily is not (AddressFamily.InterNetwork or AddressFamily.InterNetworkV6))
-                throw new InvalidDataException("Invalid delegated name-server hostname or address");
+                !DnsWireProtocol.ValidPublishedUnicastAddress(childAddress))
+                throw new InvalidDataException("Invalid delegated name-server hostname or unicast address");
             var host = child.Host.TrimEnd('.').ToLowerInvariant();
             childServerNames.Add(host);
             if (!childServerAddressFamilies.Add((host, childAddress.AddressFamily)))
