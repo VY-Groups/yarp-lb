@@ -54,10 +54,22 @@ A backend `Address`, authoritative `NameServers[].Address` or delegated
 GatewayAgent staging and standalone DNS engine startup both reject
 IPv4 0/8, link-local 169.254/16, multicast/reserved 224/4 and 240/4,
 IPv4-mapped IPv6, IPv6 unspecified/multicast/link-local/site-local and scoped
-zone-ID addresses. RFC1918 private IPv4 and IPv6 unique-local unicast are valid
-for on-premises routing. Loopback addresses remain available for isolated
-test fixtures but are not proof of valid public DNS delegation; review all
-published addresses and glue against the intended real network before release.
+zone-ID addresses. **RFC 5737 TEST-NET-1/2/3** (`192.0.2.0/24`,
+`198.51.100.0/24`, `203.0.113.0/24`) and **RFC 3849**
+(`2001:db8::/32`) are also denied by default; these are non-routable
+documentation ranges, not valid production DNS endpoints or NS glue.
+RFC1918 private IPv4 and IPv6 unique-local unicast remain valid for on-premises
+routing.
+
+Existing disposable DNS tests that intentionally use documentation addresses
+must set `"AllowDocumentationAddressesForTesting": true` in their JSON config.
+This setting is **false by default** and is accepted **only when the DNS
+listener is explicitly bound to IPv4/IPv6 loopback** and
+`AllowNonLoopbackListeners` is false. The signed GatewayAgent staging contract
+enforces the same restriction; a remote listener or external-bind opt-in cannot
+use this lab allowance. It must never be enabled for production deployments.
+Loopback endpoints are test fixtures, not proof of valid public DNS delegation.
+Review all published addresses and glue against the intended real network before release.
 Health, optional priority and existing weights are applied within that family.
 When no site is configured for the requested family, the authoritative result
 is **NODATA with negative SOA**, not SERVFAIL or an incorrectly typed answer.
