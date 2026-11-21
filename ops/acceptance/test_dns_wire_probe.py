@@ -26,6 +26,76 @@ class DnsWireProbeTests(unittest.TestCase):
     def test_parser_guards(self):
         probe.validate_parser_guards()
 
+    def test_edns_opt_rdata_accepts_bounded_unknown_options(self):
+        # Unknown EDNS options may be ignored, but their TLV wire format
+        # must still be checked before the response is accepted.
+        txid = 0x1234
+        question = probe.name_wire("example.test") + struct.pack("!HH", 1, 1)
+        options = struct.pack("!HH", 65000, 3) + b"abc" + struct.pack("!HH", 15, 0)
+        packet = (struct.pack("!HHHHHH", txid, 0x8000, 1, 0, 0, 1) +
+                  question + b"\0" + struct.pack("!HHIH", 41, 1232, 0, len(options)) + options)
+        flags, records = probe.parse(packet, txid, "example.test", 1)
+        self.assertEqual(flags, 0x8000)
+        probe.validate_edns0_response(records)
+
+    def test_edns_opt_rdata_rejects_truncated_tlv(self):
+        txid = 0x1234
+        question = probe.name_wire("example.test") + struct.pack("!HH", 1, 1)
+        cases = (
+            (b"\x00\x0f\x00", "truncated EDNS option header"),
+            (struct.pack("!HH", 15, 4) + b"ab", "EDNS option overruns OPT RDATA"),
+            (struct.pack("!HH", 15, 0) + b"\x00", "truncated EDNS option header"),
+        )
+        for options, message in cases:
+            with self.subTest(options=options):
+                packet = (struct.pack("!HHHHHH", txid, 0x8000, 1, 0, 0, 1) +
+                          question + b"\0" +
+                          struct.pack("!HHIH", 41, 1232, 0, len(options)) + options)
+                with self.assertRaisesRegex(AssertionError, message):
+                    probe.parse(packet, txid, "example.test", 1)
+
+    def test_edns0_response_envelope_accepts_valid_opt(self):
+        probe.validate_edns0_response([("additional", (), 41, 1232, 0)])
+
+    def test_edns0_response_envelope_rejects_malformed_opt(self):
+        valid = ("additional", (), 41, 1232, 0)
+        cases = (
+            ([], "exactly one"),
+            ([valid, valid], "exactly one"),
+            ([("answer", (), 41, 1232, 0)], "additional section"),
+            ([("additional", (b"example",), 41, 1232, 0)], "root"),
+            ([("additional", (), 41, 511, 0)], "UDP size"),
+            ([("additional", (), 41, 1232, 0x00010000)], "version"),
+            ([("additional", (), 41, 1232, 0x00008000)], "flags"),
+            ([("additional", (), 41, 1232, 0x01000000)], "extended RCODE"),
+        )
+        for records, message in cases:
+            with self.subTest(records=records):
+                with self.assertRaisesRegex(AssertionError, message):
+                    probe.validate_edns0_response(records)
+
+    def test_badvers_response_envelope_accepts_valid_opt(self):
+        probe.validate_badvers_response(0x8000, [("additional", (), 41, 1232, 0x01000000)])
+
+    def test_badvers_response_envelope_rejects_malformed_opt(self):
+        valid = ("additional", (), 41, 1232, 0x01000000)
+        cases = (
+            (0x8000, [], "exactly one"),
+            (0x8000, [valid, valid], "exactly one"),
+            (0x8000, [("answer", (), 41, 1232, 0x01000000)], "additional section"),
+            (0x8000, [("additional", (b"bad",), 41, 1232, 0x01000000)], "root"),
+            (0x8000, [("additional", (), 41, 511, 0x01000000)], "UDP size"),
+            (0x8000, [("additional", (), 41, 1232, 0x01010000)], "version"),
+            (0x8000, [("additional", (), 41, 1232, 0x01008000)], "flags"),
+            (0x8001, [valid], "RCODE 16"),
+            (0x8000, [("additional", (), 41, 1232, 0)], "RCODE 16"),
+            (0x8000, [("additional", (), 41, 1232, 0x02000000)], "RCODE 16"),
+        )
+        for flags, records, message in cases:
+            with self.subTest(flags=flags, records=records):
+                with self.assertRaisesRegex(AssertionError, message):
+                    probe.validate_badvers_response(flags, records)
+
     def test_truncated_udp_retries_tcp_with_same_query(self):
         seen = []
         def transport(host, port, packet, tcp, timeout):
