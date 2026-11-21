@@ -8,6 +8,7 @@ import http.client
 import json
 import os
 from pathlib import Path
+import re
 import secrets
 import socket
 import ssl
@@ -44,7 +45,12 @@ def check(condition, message):
 
 def safe_receipt_response(status, response_body, receipt):
     """Reject malformed signed receipts instead of forwarding a modified value."""
-    if receipt and ("\r" in receipt or "\n" in receipt):
+    # Collector signatures use standard base64. Restrict the value to a small,
+    # bounded ASCII alphabet before placing it in an HTTP response header.
+    # Keep the value unchanged: the gateway verifies the exact signed bytes.
+    if receipt is not None and (
+        len(receipt) > 1024 or re.fullmatch(r"[A-Za-z0-9+/]+={0,2}", receipt) is None
+    ):
         return 503, b"", None
     return status, response_body, receipt
 
@@ -152,7 +158,7 @@ def main():
         raise SystemExit("Disposable CI only")
     check(safe_receipt_response(201, b"ok", "signed") ==
           (201, b"ok", "signed"), "valid signed receipt is forwarded unchanged")
-    for malformed in ("signed\rInjected: true", "signed\nInjected: true"):
+    for malformed in ("signed\rInjected: true", "signed\nInjected: true", "signed\x00", "x" * 1025):
         check(safe_receipt_response(201, b"ok", malformed) ==
               (503, b"", None), "CR/LF in signed receipt fails closed")
     dll = Path(sys.argv[1]).resolve()
