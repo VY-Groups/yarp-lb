@@ -45,3 +45,13 @@ repeated spans to force buffer growth and reuse. This targets **trace-export
 instrumentation** only; it does not prove any overall gateway
 allocated-bytes/request reduction. Issue #34 still requires three-or-more
 paired, pinned whole-proxy profiles and Windows/Ubuntu runtime evidence.
+
+### Strict trace ID validation (#34)
+
+Sampled trace route/cluster/destination IDs now use a bounded ASCII scan
+rather than regular expressions or LINQ. Only 1–80 ASCII letters, numbers,
+underscores and hyphens are accepted; trailing newlines are rejected rather
+than matching the old regular-expression `$` anchor. Regression tests verify
+actual rejection and preservation in the privacy processor. This is a
+trace-instrumentation candidate, not a demonstrated 8.6 KiB/request reduction;
+new exact-head paired profiling and independent review are required.
