@@ -58,6 +58,34 @@ internal static class PrivateKeyFileSecurityTests
                 throw new Exception("FAIL: opened-handle digest differs from SHA-256 payload");
             MustReject(() => PrivateKeyFileSecurity.HashPrivateFileSha256(file, "observer replay", 4),
                 "oversized replay file in bounded hash");
+            var trustedPem = Path.Combine(root, "trusted-signing.pem");
+            const string publicPem = "-----BEGIN PUBLIC KEY-----\nQUJD\n-----END PUBLIC KEY-----\n";
+            File.WriteAllText(trustedPem, publicPem);
+            if (OperatingSystem.IsLinux())
+                File.SetUnixFileMode(trustedPem, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+            if (PrivateKeyFileSecurity.ReadTrustedPublicKeyPem(trustedPem, "trusted signing key") != publicPem)
+                throw new Exception("FAIL: trusted signing PEM changed on bounded read");
+            File.WriteAllText(trustedPem, new string('A', 16 * 1024 + 1));
+            MustReject(() => PrivateKeyFileSecurity.ReadTrustedPublicKeyPem(
+                trustedPem, "trusted signing key"), "oversized trusted PEM");
+            File.WriteAllText(trustedPem, "unrelated JSON");
+            MustReject(() => PrivateKeyFileSecurity.ReadTrustedPublicKeyPem(
+                trustedPem, "trusted signing key"), "non-SPKI trusted PEM");
+            File.WriteAllText(trustedPem, publicPem);
+            if (OperatingSystem.IsLinux())
+            {
+                File.SetUnixFileMode(trustedPem,
+                    UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.OtherRead);
+                MustReject(() => PrivateKeyFileSecurity.ReadTrustedPublicKeyPem(
+                    trustedPem, "trusted signing key"), "world-readable trust anchor");
+                File.SetUnixFileMode(trustedPem, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+                var trustedLink = Path.Combine(root, "trusted-signing-link.pem");
+                File.CreateSymbolicLink(trustedLink, trustedPem);
+                MustReject(() => PrivateKeyFileSecurity.ReadTrustedPublicKeyPem(
+                    trustedLink, "trusted signing key"), "symlinked trust anchor");
+                File.Delete(trustedLink);
+            }
+
             if (OperatingSystem.IsLinux())
             {
                 var linkedParent = Path.Combine(root, "linked-parent");
