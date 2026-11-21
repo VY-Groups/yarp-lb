@@ -21,19 +21,8 @@ public static class AcmeTargetPolicy
     public static Validation Validate(string? directoryUrl, string? dnsName, bool http01,
         bool publicChallengeEntrypointEnabled, bool allowLoopbackTestAuthority = false)
     {
-        if (!Uri.TryCreate(directoryUrl, UriKind.Absolute, out var directory) ||
-            directory.Scheme != Uri.UriSchemeHttps || !string.IsNullOrEmpty(directory.UserInfo) ||
-            !string.IsNullOrEmpty(directory.Query) || !string.IsNullOrEmpty(directory.Fragment) ||
-            directory.AbsolutePath != "/directory")
-            return Reject("directory-must-be-an-https-url-without-credentials-query-or-fragment");
-
-        var officialDirectory = OfficialDirectories.Contains(directory.IdnHost);
-        var loopbackTestDirectory = allowLoopbackTestAuthority &&
-            IPAddress.TryParse(directory.Host.Trim('[', ']'), out var directoryIp) &&
-            IPAddress.IsLoopback(directoryIp);
-        if ((!officialDirectory && !loopbackTestDirectory) ||
-            (officialDirectory && !directory.IsDefaultPort))
-            return Reject("directory-host-is-not-an-approved-acme-authority");
+        var directoryError = DirectoryRejectionReason(directoryUrl, allowLoopbackTestAuthority);
+        if (directoryError is not null) return Reject(directoryError);
 
         var target = ValidateDnsName(dnsName);
         if (!target.Allowed) return target;
@@ -42,6 +31,33 @@ public static class AcmeTargetPolicy
             return Reject("http-01-requires-an-explicit-public-challenge-entrypoint");
 
         return target;
+    }
+
+    /// <summary>
+    /// Issuance and revocation must use the identical ACME directory trust
+    /// boundary. Production callers never opt into a local test authority.
+    /// </summary>
+    public static bool IsApprovedDirectoryUrl(string? directoryUrl,
+        bool allowLoopbackTestAuthority = false) =>
+        DirectoryRejectionReason(directoryUrl, allowLoopbackTestAuthority) is null;
+
+    private static string? DirectoryRejectionReason(string? directoryUrl,
+        bool allowLoopbackTestAuthority)
+    {
+        if (!Uri.TryCreate(directoryUrl, UriKind.Absolute, out var directory) ||
+            directory.Scheme != Uri.UriSchemeHttps || !string.IsNullOrEmpty(directory.UserInfo) ||
+            !string.IsNullOrEmpty(directory.Query) || !string.IsNullOrEmpty(directory.Fragment) ||
+            directory.AbsolutePath != "/directory")
+            return "directory-must-be-an-https-url-without-credentials-query-or-fragment";
+
+        var officialDirectory = OfficialDirectories.Contains(directory.IdnHost);
+        var loopbackTestDirectory = allowLoopbackTestAuthority &&
+            IPAddress.TryParse(directory.Host.Trim('[', ']'), out var directoryIp) &&
+            IPAddress.IsLoopback(directoryIp);
+        if ((!officialDirectory && !loopbackTestDirectory) ||
+            (officialDirectory && !directory.IsDefaultPort))
+            return "directory-host-is-not-an-approved-acme-authority";
+        return null;
     }
 
     // Shared by the issuer preflight and request-host challenge binding.
