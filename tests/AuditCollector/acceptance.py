@@ -721,6 +721,42 @@ def main():
                                    if json.loads(line).get("intentId")==intent["eventId"]}
                             check(len(exact)==2 and all(v["targetDigest"] in exact for v in linked),
                                   "correlated envelopes bind both exact local rows")
+                        # A resource mutation must now have a PREPARED
+                        # event correlated to its independently signed
+                        # collector intent BEFORE inventory bytes change.
+                        inventory=queued_root/"state"/"inventory.json"
+                        previous=inventory.read_bytes() if inventory.exists() else b""
+                        admin.request("POST","/admin/api/inventory",{
+                            "id":"durable-resource","name":"Durable resource","type":"Service",
+                            "address":"fixture.example.invalid","notes":"private-audit-fixture"})
+                        committed=inventory.read_bytes()
+                        check(committed!=previous,"resource mutation committed only after durable preparation")
+                        deadline=time.monotonic()+30
+                        while time.monotonic()<deadline and list(spool.glob("*.event")):
+                            time.sleep(.1)
+                        check(not list(spool.glob("*.event")),
+                              "resource PREPARED and outcome delivered through external collector")
+                        ledger_rows=[json.loads(base64.b64decode(json.loads(line)["Body"]))
+                                     for line in ledger.read_text().splitlines()]
+                        intents=[v for v in ledger_rows if v["schema"]==1 and
+                                 v["operation"]=="INVENTORY_ADD_INTENT"]
+                        check(bool(intents),"resource has a signed collector intent")
+                        signed_intent=intents[-1]
+                        correlation=hashlib.sha256(signed_intent["eventId"].encode("ascii")).hexdigest().upper()
+                        prepared=[v for v in ledger_rows if v["schema"]==2 and
+                                  v["operation"]=="RESOURCE_MUTATION_PREPARED" and
+                                  v["revision"]==correlation]
+                        check(len(prepared)==1 and
+                              signed_intent["revision"]==hashlib.sha256(previous).hexdigest().upper() and
+                              signed_intent["targetDigest"]==hashlib.sha256(committed).hexdigest().upper(),
+                              "resource PREPARED is bound to exact collector revision/target and signed intent")
+                        local_rows=(queued_root/"state"/"admin-audit.jsonl").read_bytes().splitlines()
+                        exact={hashlib.sha256(line).hexdigest().upper() for line in local_rows
+                               if json.loads(line).get("intentId")==signed_intent["eventId"] and
+                               json.loads(line).get("action")=="RESOURCE_MUTATION_PREPARED"}
+                        check(len(exact)==1 and prepared[0]["targetDigest"] in exact and
+                              "private-audit-fixture" not in json.dumps(prepared),
+                              "collector PREPARED binds exact local row without exporting private inventory fields")
                         # Inject a queue storage fault after startup. The collector
                         # still authorizes the intent, but precommit storage must deny.
                         before=state.read_bytes()
@@ -729,6 +765,12 @@ def main():
                             "username":"must-not-exist","password":"Blocked-fixture-password-123!",
                             "email":"blocked@example.invalid","role":"Viewer"},expect=503)
                         check(state.read_bytes()==before,"preparation storage fault denies account mutation")
+                        before_inventory=inventory.read_bytes()
+                        admin.request("POST","/admin/api/inventory",{
+                            "id":"must-not-write","name":"Blocked resource","type":"Service",
+                            "address":"fixture.example.invalid","notes":"fault fixture"},expect=503)
+                        check(inventory.read_bytes()==before_inventory,
+                              "corrupted durable outbox denies resource mutation before its file write")
                         check(admin.request("GET","/admin/api/audit/delivery")["storageFault"],
                               "outbox storage fault remains visible")
                     finally: stop(proc)
