@@ -80,6 +80,42 @@ tests:
         alertname: YarpHigh5xxFraction
         exp_alerts:
           - exp_labels: {instance: gateway-01, severity: critical}
+  # A low-traffic gateway serves one request/minute; every response is 5xx.
+  # Division must use the real 1/60 RPS, not a hard-coded 1 RPS denominator.
+  - interval: 1m
+    input_series:
+      - series: 'yarp_control_http_requests_total{job="gatewaycore-gateway",instance="quiet-gateway"}'
+        values: '0+1x14'
+      - series: 'yarp_control_http_responses_total{job="gatewaycore-gateway",instance="quiet-gateway",status_class="5xx"}'
+        values: '0+1x14'
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: YarpHigh5xxFraction
+        exp_alerts:
+          - exp_labels: {instance: quiet-gateway, severity: critical}
+  # A quiet but healthy gateway must not page: both total and 5xx counters
+  # are present, but no 5xx response has occurred.
+  - interval: 1m
+    input_series:
+      - series: 'yarp_control_http_requests_total{job="gatewaycore-gateway",instance="quiet-healthy"}'
+        values: '0+1x14'
+      - series: 'yarp_control_http_responses_total{job="gatewaycore-gateway",instance="quiet-healthy",status_class="5xx"}'
+        values: '0+0x14'
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: YarpHigh5xxFraction
+        exp_alerts: []
+  # No traffic must not trigger a NaN / infinity-based false-positive.
+  - interval: 1m
+    input_series:
+      - series: 'yarp_control_http_requests_total{job="gatewaycore-gateway",instance="idle-gateway"}'
+        values: '0+0x14'
+      - series: 'yarp_control_http_responses_total{job="gatewaycore-gateway",instance="idle-gateway",status_class="5xx"}'
+        values: '0+0x14'
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: YarpHigh5xxFraction
+        exp_alerts: []
   - interval: 1m
     input_series:
       - series: 'yarp_control_http_duration_seconds_bucket{job="gatewaycore-gateway",instance="gateway-01",le="0.005"}'

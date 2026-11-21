@@ -26,7 +26,10 @@ groups:
         for: 2m
         labels: {severity: critical}
       - alert: YarpHigh5xxFraction
-        expr: (sum by (instance) (rate(yarp_control_http_responses_total{job="gatewaycore-gateway",status_class="5xx"}[5m])) / clamp_min(sum by (instance) (rate(yarp_control_http_requests_total{job="gatewaycore-gateway"}[5m])), 1)) > 0.001
+        # A request rate below 1/s must not be treated as 1/s: it hides the
+        # actual 5xx fraction on quiet on-prem gateways. The tiny floor only
+        # protects zero-traffic division; no traffic yields zero numerator.
+        expr: (sum by (instance) (rate(yarp_control_http_responses_total{job="gatewaycore-gateway",status_class="5xx"}[5m])) / clamp_min(sum by (instance) (rate(yarp_control_http_requests_total{job="gatewaycore-gateway"}[5m])), 1e-9)) > 0.001
         for: 2m
         labels: {severity: critical}
       - alert: YarpHighP99
