@@ -68,3 +68,67 @@ HTTP 403. The image digest and policy remain pinned as in the existing lab.
 These three disposable probes do not establish real-customer false-positive
 rates, comprehensive OWASP coverage, per-customer WAF tuning or production
 capacity. Issue #51 remains open for that broader acceptance.
+
+### Private operator-supplied WAF corpus replay (#51)
+
+The disposable WAF lab now supports an **optional real local replay** of a
+security-reviewed, privately stored customer/route corpus. The runner is
+`tests/WafCrs/operator_corpus_acceptance.py`, triggered only when the caller
+supplies `WAF_OPERATOR_CORPUS=/private/path/corpus.json` to the existing
+`bash tests/WafCrs/verify.sh` command. It runs **after** restoring the
+same pinned CRS image to blocking mode; it never changes anomaly thresholds,
+sends requests to public networks or repeats a potentially non-idempotent POST.
+The HTTP target is hard-coded to `127.0.0.1:18888` with redirects disabled.
+The fixture stays in its private original path and is not added to this
+repository, written into the artifacts directory or echoed in log output.
+
+Required strict JSON schema:
+```json
+{
+  "schemaVersion": 1,
+  "maxFalsePositives": 0,
+  "maxFalseNegatives": 0,
+  "cases": [
+    {"id":"benign-json","route":"app","method":"POST",
+     "path":"/acceptance","expected":"benign","severity":"none",
+     "contentType":"application/json","body":"{}"},
+    {"id":"benign-query","route":"app","method":"GET",
+     "path":"/?q=normal","expected":"benign","severity":"none",
+     "contentType":"text/plain","body":""},
+    {"id":"xss","route":"app","method":"GET",
+     "path":"/?q=<script>alert(1)</script>","expected":"malicious",
+     "severity":"high","contentType":"text/plain","body":""},
+    {"id":"traversal","route":"app","method":"GET",
+     "path":"/?file=../../etc/passwd","expected":"malicious",
+     "severity":"high","contentType":"text/plain","body":""}
+  ]
+}
+```
+This is an **example schema**, not a verified representative dataset; review
+actual customer fixtures and tenant consent before use. The runner requires
+4–256 uniquely named cases, at least two of each ground-truth class, strictly
+bounded URI/body, GET or POST only, and a fixed allowlist of request media
+types. Missing, duplicate or extra JSON fields, invalid encodings, unsafe
+request targets, non-zero FP/FN allowances and oversized inputs fail before
+network activity. Any benign HTTP 403 is FP; any malicious HTTP 200 reaching
+the exact synthetic origin marker is FN; unexpected status/timeout/connection
+errors fail separately. No retries, redirects, external targets or automatic
+relaxation of CRS rules are permitted.
+
+The output `artifacts/waf-crs/operator-corpus-report.json` contains only
+case **identifiers**, pseudonymous route IDs, test-specified severity,
+ground-truth class, HTTP status and TP/TN/FP/FN/ERROR counts. It omits
+request paths, queries, bodies, headers, origin contents and customer
+identifiers. A per-route/severity confusion matrix is included. All test
+cases must match their ground truth; one false positive/negative or transport
+error fails the run. The CI unit test uses its own loopback HTTP server
+to verify this contract and the ability to catch missed attacks, blocked
+benign requests, unexpected redirects and malicious JSON mutations.
+
+**Not a production certification:** no private customer corpus is committed
+or run by GitHub Actions, and the lab is nginx/CRS rather than a real
+Windows/Linux GatewayCore/YARP production deployment. This is an acceptance
+mechanism for evidence that operators must still provide and review. Real
+multi-tenant rule lifecycle/approval, sustainable p95/p99/CPU/allocations,
+independent Windows/Linux deployment and signed policy rollback remain open
+in #51. No issue closure or production WAF GO is implied.
