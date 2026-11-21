@@ -172,7 +172,9 @@ try
         new Uri("https://collector.example.invalid/audit/v1/intents"),
         "node-test", new byte[32], signer.ExportSubjectPublicKeyInfoPem(),
         new HttpClient(new CapturingHandler(HttpStatusCode.ServiceUnavailable, "")));
-    using var queue = new DurableAuditOutbox(resourceRoot.FullName, transport);
+    var resourceOutbox = Path.Combine(resourceRoot.FullName, "outbox");
+    Directory.CreateDirectory(resourceOutbox);
+    using var queue = new DurableAuditOutbox(resourceOutbox, transport);
     var local = new LocalAdminAudit(Path.Combine(resourceRoot.FullName, "resource-audit.jsonl"), queue);
     var confirmed = Guid.NewGuid().ToString("N");
     await local.AppendAsync("operator", "RESOURCE_MUTATION_PREPARED",
@@ -180,7 +182,7 @@ try
         confirmed);
     Check(queue.Status() is { Pending: 1, StorageFault: false },
         "verified resource PREPARED event persists before inventory/fleet mutation");
-    var eventFile = Directory.GetFiles(resourceRoot.FullName, "*.event").Single();
+    var eventFile = Directory.GetFiles(resourceOutbox, "*.event").Single();
     var recorded = System.Text.Json.JsonSerializer.Deserialize<ExternalAuditIntent.QueuedEvent>(
         File.ReadAllBytes(eventFile))!;
     using (var json = System.Text.Json.JsonDocument.Parse(recorded.Payload))
@@ -198,7 +200,7 @@ try
     catch (InvalidDataException) { refused = true; }
     Check(refused && queue.Status().Pending == 1,
         "unsigned/uncorrelated resource PREPARED cannot enter durable event spool");
-    var invalidEvent = Path.Combine(resourceRoot.FullName, "incomplete.tmp");
+    var invalidEvent = Path.Combine(resourceOutbox, "incomplete.tmp");
     File.WriteAllText(invalidEvent, "partial-append");
     refused = false;
     try { await local.AppendAsync("operator", "RESOURCE_MUTATION_PREPARED",
