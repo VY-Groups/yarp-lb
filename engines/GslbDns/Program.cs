@@ -54,7 +54,7 @@ foreach(var zone in config.Zones)
         !names.Add(zone.Name.TrimEnd('.')) || zone.TtlSeconds is < 5 or > 300 ||
         !DnsWireProtocol.ValidName(zone.Name.TrimEnd('.')) ||
         zone.Sites is not {Length: >=1 and <=16} ||
-        zone.NameServers is {Length: >4} || zone.SoaSerial == 0 ||
+        zone.NameServers is {Length: >8} || zone.SoaSerial == 0 ||
         zone.FailureThreshold is < 1 or > 10 ||
         zone.SuccessThreshold is < 1 or > 10 ||
         zone.RoutingPolicy is not ("Weighted" or "Failover" or "CidrRegion" or "GeoIpEcs" or "ObservedLatency" or "WeightedFailover") ||
@@ -175,6 +175,7 @@ foreach(var zone in config.Zones)
     var origin = zone.Name.TrimEnd('.').ToLowerInvariant();
     var servers = new List<DnsNameServer>();
     var serverNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    var serverAddressFamilies = new HashSet<(string Host, AddressFamily Family)>();
     foreach (var source in zone.NameServers ?? Array.Empty<DnsNameServerConfig>())
     {
         if (source is null || string.IsNullOrWhiteSpace(source.Host) ||
@@ -183,8 +184,12 @@ foreach(var zone in config.Zones)
             nsAddress.IsIPv4MappedToIPv6 || nsAddress.AddressFamily is not (AddressFamily.InterNetwork or AddressFamily.InterNetworkV6))
             throw new InvalidDataException("Invalid authoritative NS hostname or address");
         var host = source.Host.TrimEnd('.').ToLowerInvariant();
-        if (!serverNames.Add(host))
-            throw new InvalidDataException("Duplicate authoritative NS hostname");
+        serverNames.Add(host);
+        if (!serverAddressFamilies.Add((host, nsAddress.AddressFamily)))
+            throw new InvalidDataException("Duplicate authoritative name-server address family");
+        if (serverNames.Count > 4)
+            throw new InvalidDataException("A zone may configure at most four unique authoritative name servers");
+        // A dual-stack NS host contributes one NS RR but distinct A/AAAA glue.
         // Explicit out-of-bailiwick servers may be NS targets; their A data is not advertised.
         servers.Add(new DnsNameServer(host, nsAddress));
     }
