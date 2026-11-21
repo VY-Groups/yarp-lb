@@ -5,18 +5,16 @@
 This is the latest verified continuation state; older same-day snapshots below
 are historical when their branch, issue, or CI state differs.
 
-- `main` is `1501769680440c5ba6b7d9c187a3695f8ef04652`, including PRs #321,
-  #323–#330. PR #327's Windows/Linux account-key, ACME and ten-run HA checks,
+- `main` is `309d77ae6ca7caeb654cf92b809e670223561927`, including PRs #321,
+  #323–#330 and #332. PR #327's Windows/Linux account-key, ACME and ten-run HA checks,
   PR #328's CodeQL inventory and actionlint checks, PR #329's documentation
   checks, and PR #330's Windows/Linux DNS, L7, HA and CodeQL checks passed on
-  their exact heads before merge. The post-merge `main` DNS, L7 and CodeQL
-  workflows for this commit all passed (runs 44852497378, 44852497417, and
-  44852497555).
+  their exact heads before merge. PR #332's Windows/Linux L4 socket acceptance,
+  CodeQL, L7, HA, and load checks passed before merge. The post-merge workflows
+  for this `main` commit must be checked before release.
 - Ten issues remain open: #34, #36, #37, #38, #48, #49, #51, #52, #53, and
-  #109. PRs #331 and #332 are open. PR #331 validates and bounds audit-receipt
-  response headers; its latest head is awaiting exact-head Actions. PR #332
-  adds Windows console-control graceful-shutdown acceptance; all checks passed
-  on its current head, but this alone does not complete issue #53.
+  #109. PR #331 is the only open PR. It validates and bounds audit-receipt
+  response headers; its current head is awaiting exact-head Actions.
 - PR #327 addresses account-key persistence only; it does not complete ACME
   issuance and zero-downtime renewal. #330 addresses authority publisher
   shutdown only; it does not close the broader #109 health-authority scope.
