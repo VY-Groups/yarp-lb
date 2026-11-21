@@ -139,6 +139,22 @@ internal static class AcmeDns01WireAcceptance
             new("ns2.example.com", IPAddress.Parse("192.0.2.2"))
         ], "reserved 0/8 authority");
         MustRejectConfiguration([
+            new("ns1.example.com", IPAddress.Parse("240.0.0.1")),
+            new("ns2.example.com", IPAddress.Parse("192.0.2.2"))
+        ], "reserved IPv4 240/4 authority");
+        MustRejectConfiguration([
+            new("ns1.example.com", IPAddress.Parse("ff02::1")),
+            new("ns2.example.com", IPAddress.Parse("2001:db8::2"))
+        ], "IPv6 multicast authority");
+        MustRejectConfiguration([
+            new("ns1.example.com", IPAddress.Parse("fec0::1")),
+            new("ns2.example.com", IPAddress.Parse("2001:db8::2"))
+        ], "deprecated IPv6 site-local authority");
+        MustRejectConfiguration([
+            new("ns1.example.com", IPAddress.Parse("::ffff:192.0.2.1")),
+            new("ns2.example.com", IPAddress.Parse("192.0.2.2"))
+        ], "IPv4-mapped IPv6 authority alias");
+        MustRejectConfiguration([
             new("ns1.example.com", IPAddress.Parse("192.0.2.1"), 5053),
             new("ns2.example.com", IPAddress.Parse("192.0.2.2"))
         ], "non-port-53 production authority");
