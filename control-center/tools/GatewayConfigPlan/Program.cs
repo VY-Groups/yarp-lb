@@ -10,13 +10,26 @@ if (args.Length == 2 && args[0] == "import-gateway-api")
         // unlike plan/validate, redirect it only to a protected file.
         using var stream = new FileStream(args[1], FileMode.Open, FileAccess.Read, FileShare.Read);
         if (stream.Length is < 1 or > 524288) throw new ArgumentException("Import exceeds input bound");
-        var bytes = new byte[(int)stream.Length];
-        stream.ReadExactly(bytes);
-        if (stream.ReadByte() != -1) throw new ArgumentException("Import changed during read");
-        var json = new System.Text.UTF8Encoding(false, true).GetString(bytes);
-        var result = GatewayApiImport.Translate(json);
-        Console.WriteLine(result.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
-        return 0;
+        var bytes = new byte[checked((int)stream.Length)];
+        try
+        {
+            stream.ReadExactly(bytes);
+            if (stream.ReadByte() != -1)
+                throw new ArgumentException("Import changed during read");
+            string json;
+            try { json = new System.Text.UTF8Encoding(false, true).GetString(bytes); }
+            catch (System.Text.DecoderFallbackException)
+            { throw new ArgumentException("Import is not valid UTF-8"); }
+            var result = GatewayApiImport.Translate(json);
+            Console.WriteLine(result.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+            return 0;
+        }
+        finally
+        {
+            // Import documents contain internal service origins; bound and
+            // clear raw request buffers after successful or failed parsing.
+            System.Security.Cryptography.CryptographicOperations.ZeroMemory(bytes);
+        }
     }
     catch (Exception ex) when (ex is ArgumentException or IOException or UnauthorizedAccessException)
     {
