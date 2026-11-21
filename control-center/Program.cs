@@ -2414,7 +2414,10 @@ HttpClient CreateFleetClient(FleetGateway row)
 // Version 0.1 setup APIs and independently verified YARP runtime state.
 app.MapSetupCenter(privateDir, Audit);
 app.MapCapabilityRegistry();
-app.MapOnboardingApi(privateDir, ConfirmStateMutation, WriteAuditedState, Audit);
+app.MapOnboardingApi(privateDir,
+    (ctx, path, before, proposed, operation, administratorOnly) =>
+        ConfirmStateMutation(ctx, path, before, proposed, operation, administratorOnly),
+    WriteAuditedState, Audit);
 // Enforce onboarding state server-side; hiding navigation is never a security boundary.
 app.Use(async (ctx, next) =>
 {
