@@ -79,6 +79,40 @@ try
     Assert(File.GetUnixFileMode(state)==PrivateDir &&
         File.GetUnixFileMode(Path.Combine(state,"data-protection-keys"))==PrivateDir,
         "persisted key directories are owner-only 0700");
+
+    // Validate bootstrap safety, not just a later secret-file read. A plain
+    // Directory.CreateDirectory() through a parent symlink would create a
+    // new directory outside the intended state tree *before* rejecting it.
+    var missingSymlinkTarget=Path.Combine(root,"must-not-be-created");
+    var linkedAncestor=Path.Combine(root,"linked-uncreated-state");
+    Directory.CreateSymbolicLink(linkedAncestor,missingSymlinkTarget);
+    Set("YARP_CONTROL_PLANE_DIR",Path.Combine(linkedAncestor,"state"));
+    Assert(Throws(()=>LinuxKeyProtection.InitializeStateDirectory()) &&
+           !Directory.Exists(missingSymlinkTarget),
+        "startup rejects dangling parent link without creating its missing target");
+    File.Delete(linkedAncestor);
+
+    var existingLinkedTarget=Path.Combine(root,"existing-link-target");
+    Directory.CreateDirectory(existingLinkedTarget,PrivateDir);
+    var existingAncestor=Path.Combine(root,"linked-existing-state");
+    Directory.CreateSymbolicLink(existingAncestor,existingLinkedTarget);
+    Set("YARP_CONTROL_PLANE_DIR",Path.Combine(existingAncestor,"new-subtree"));
+    Assert(Throws(()=>LinuxKeyProtection.InitializeStateDirectory()) &&
+           !Directory.Exists(Path.Combine(existingLinkedTarget,"new-subtree")),
+        "startup refuses existing symlinked ancestor before creating a state subtree");
+    File.Delete(existingAncestor);
+
+    var alternateState=Path.Combine(root,"linked-keyring-parent");
+    Directory.CreateDirectory(alternateState,PrivateDir);
+    var redirectedKeys=Path.Combine(root,"never-create-external-keyring");
+    var linkedKeyDir=Path.Combine(alternateState,"data-protection-keys");
+    Directory.CreateSymbolicLink(linkedKeyDir,redirectedKeys);
+    Set("YARP_CONTROL_PLANE_DIR",alternateState);
+    Assert(Throws(()=>LinuxKeyProtection.InitializeStateDirectory()) &&
+           !Directory.Exists(redirectedKeys),
+        "startup refuses dangling key-ring link before creating any external key directory");
+    File.Delete(linkedKeyDir);
+    Set("YARP_CONTROL_PLANE_DIR",state);
     string encrypted;
     using(var service=Provider(state))
     {
