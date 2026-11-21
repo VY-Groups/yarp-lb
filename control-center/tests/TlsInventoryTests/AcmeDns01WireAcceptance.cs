@@ -8,8 +8,14 @@ internal static class AcmeDns01WireAcceptance
     private const string Owner = "_acme-challenge.api.example.com";
     private const string Txt = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 
-    private sealed class Lease(Action disposed) : IAsyncDisposable
+    private sealed class Lease(Action published, Action disposed) : IAcmeDns01PublicationLease
     {
+        public Task PublishAsync(CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            published();
+            return Task.CompletedTask;
+        }
         public ValueTask DisposeAsync() { disposed(); return ValueTask.CompletedTask; }
     }
 
@@ -17,13 +23,13 @@ internal static class AcmeDns01WireAcceptance
     {
         public int Published;
         public int Disposed;
-        public Task<IAsyncDisposable> PublishAsync(string fqdn, string value,
-            TimeSpan lifetime, CancellationToken cancellationToken)
+        public Task<IAcmeDns01PublicationLease> AcquirePublicationLeaseAsync(
+            string fqdn, string value, TimeSpan lifetime, CancellationToken cancellationToken)
         {
             if (fqdn != Owner || value != Txt)
                 throw new InvalidOperationException("Wrong DNS-01 owner/value");
-            Published++;
-            return Task.FromResult<IAsyncDisposable>(new Lease(() => Disposed++));
+            return Task.FromResult<IAcmeDns01PublicationLease>(
+                new Lease(() => Published++, () => Disposed++));
         }
 
         public Task<IReadOnlyList<AcmeDns01AuthorityObservation>> ProbeAuthoritativeAsync(
