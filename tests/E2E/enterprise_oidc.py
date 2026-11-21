@@ -415,7 +415,11 @@ def main():
         openssl_state(root,upstream)
         admin_key,admin_cert=make_tls(root,"admin","127.0.0.1")
         idp_key,idp_cert=make_tls(root,"idp","127.0.0.2")
-        pfx=root/"secrets"/"dp.pfx"
+        # Preserve the dedicated RSA Data Protection wrapping identity that
+        # openssl_state() created. The independently trusted admin TLS
+        # certificate is allowed to serve HTTPS but must never be used for
+        # Data Protection key encryption (its CA usage is intentional here).
+        pfx=root/"secrets"/"tls.pfx"
         cmd("openssl","pkcs12","-export","-out",str(pfx),"-inkey",str(admin_key),"-in",str(admin_cert),
             "-passout","pass:temporary-e2e-only-password")
         pfx.chmod(0o600)
