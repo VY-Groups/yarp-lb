@@ -25,13 +25,12 @@ EXPECTED = {
     "contentType": "application/pkix-cert",
     "removedRuleId": 920420,
 }
-EXPECTED_RULE = (
-    'SecRule REQUEST_METHOD "@streq POST" \\\n'
-    '    "id:1000420,phase:1,pass,nolog,t:none,chain"\n'
-    '    SecRule REQUEST_URI "@streq /acceptance" "t:none,chain"\n'
-    '        SecRule REQUEST_HEADERS:Content-Type "@streq application/pkix-cert" \\\n'
-    '            "t:lowercase,ctl:ruleRemoveById=920420"\n'
-)
+EXPECTED_RULE = r"""SecRule REQUEST_METHOD "@streq POST" \
+    "id:1000420,phase:1,pass,nolog,t:none,chain"
+    SecRule REQUEST_URI "@streq /acceptance" "t:none,chain"
+        SecRule REQUEST_HEADERS:Content-Type "@streq application/pkix-cert" \
+            "t:lowercase,ctl:ruleRemoveById=920420"
+"""
 REQUIRED = set(EXPECTED) | {"approvedForProduction", "issuedAtUtc", "expiresAtUtc"}
 
 
