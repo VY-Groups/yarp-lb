@@ -130,3 +130,17 @@ customer-host acceptance is completed.
 ## Linux secret path hardening
 
 Wrapping PFX files (up to 1 MiB), password files (up to 4 KiB) and startup key-ring XML inspection now use the shared no-follow file reader. It validates ownership, declared object type and permissions on opened handles, traverses each ancestor without following symlinks, rejects unsafe writable ancestors, bounds input, detects size changes and clears temporary PFX/password byte arrays. Linux state/key directories also validate their ancestor chain. Protected parents and service ownership remain required throughout operation; framework-managed key-ring reads/writes are not replaced by this startup inspection, and this is not a complete defense against a compromised service identity. Existing tests are extended for secret ancestor links, writable parents and oversized password files. No key-ring migration, cross-host key sharing or anti-rollback is implied.
+
+### Linux state bootstrap no-follow boundary (#48)
+
+State-directory and `data-protection-keys` directory creation now walks each
+Linux path component through an already-opened directory descriptor and
+rejects symlinks before creating children beneath them. Previously ordinary
+path-based `Directory.CreateDirectory` could follow a linked parent and create
+an unwanted subtree before the later ancestry check refused startup.
+Regression tests cover existing and dangling linked ancestors and a linked
+key-ring directory; all must fail without touching the external target.
+The final directories still require service-owner-only mode `0700`.
+This closes one local bootstrap race class, but **does not** prove fleet
+anti-rollback, shared key-ring disaster recovery, Windows Server/RHEL
+operational acceptance or production readiness.
