@@ -54,3 +54,17 @@ those mutation paths before Docker starts. This is a strict lab fixture lock,
 **not** a general Compose/YAML policy parser or production WAF governance.
 A legitimate lab Compose update requires a reviewed update to this fixture
 contract and fresh end-to-end allow/block acceptance.
+
+### Detection-mode attack categories and restored blocking
+
+The disposable WAF acceptance now sends the same labeled XSS, SQL injection,
+and path-traversal payloads to the `DetectionOnly` instance and proves both
+that the origin received each request (HTTP 200 with the exact origin marker)
+and that CRS logged the relevant 941xxx, 942xxx, and 930xxx rule families.
+It writes `artifacts/waf-crs/detection-corpus-report.json` containing only the
+category, status and audit-family observation, without any raw payload.
+After the engine is restored to blocking mode, all three classes must return
+HTTP 403. The image digest and policy remain pinned as in the existing lab.
+These three disposable probes do not establish real-customer false-positive
+rates, comprehensive OWASP coverage, per-customer WAF tuning or production
+capacity. Issue #51 remains open for that broader acceptance.
