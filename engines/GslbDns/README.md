@@ -429,19 +429,16 @@ interoperability, DNS stress/fuzz, dual-authoritative-node evidence, site-specif
 health checks, delegation review, and independent network/security approval.
 GitHub Actions exercise a disposable Windows/Linux lab; they do not certify GSLB.
 
-## Open-source architecture references and licensing
+## GatewayCore GSLB implementation
 
-At the time of PR #98, `gslb` held BSD-3-Clause licensed Polaris
-(historical comparison retained in `POLARIS_ARCHITECTURE_REVIEW.md`).
-The user replaced that branch with **OpenGSLB v1.1.10**, Go source at
-`gslb:48f020c3f0d7d3d353485c9a0d701061a3014c08`. Its
-`LICENSE` is **AGPL-3.0-or-later OR a separate commercial license**.
-No Go source, third-party DNS library, OpenGSLB dependency or product
-branding is incorporated into GatewayCore. This independent C# adaptation
-targets observable features only, not OpenGSLB protocol compatibility or
-vendor certification. See `OPENGSLB_REFERENCE_REVIEW.md` for mapping,
-risk and test boundaries. Consult legal counsel before any future direct
-code reuse or software distribution.
+GatewayCore's GSLB engine is implemented in .NET/C# and follows the
+applicable DNS and DNSSEC RFCs. Its supported routing policies, endpoint
+health validation, security controls, limits and operational acceptance are
+documented here and in [GatewayCore GSLB feature status](GSLB_FEATURE_STATUS.md).
+
+This is GatewayCore functionality. A successful isolated integration test does
+not certify public authoritative DNS delegation, multi-node convergence or
+production availability. Track outstanding work in issues #52 and #109.
 
 ## Opt-in external HTTPS health validation
 
