@@ -27,14 +27,23 @@ foreach (var invalidAddress in new[]
         throw new Exception("FAIL: DNS published non-unicast or scoped backend/NS address " + invalidAddress);
 foreach (var validAddress in new[]
 {
-    "192.0.2.80", "198.51.100.53", "10.1.2.3", "172.16.1.5",
-    "192.168.1.10", "127.0.0.1", "2001:db8::1", "fd00::2", "::1"
+    "8.8.8.8", "1.1.1.1", "10.1.2.3", "172.16.1.5",
+    "192.168.1.10", "127.0.0.1", "2606:4700::1111", "fd00::2", "::1"
 })
     if (!DnsWireProtocol.ValidPublishedUnicastAddress(IPAddress.Parse(validAddress)))
         throw new Exception("FAIL: valid DNS published unicast endpoint rejected " + validAddress);
 if (DnsWireProtocol.ValidPublishedUnicastAddress(null))
     throw new Exception("FAIL: null published endpoint accepted");
-Console.WriteLine("PASS: authoritative backend and name-server address publication requires unicast");
+foreach (var documented in new[] {
+    "192.0.2.80", "198.51.100.53", "203.0.113.53", "2001:db8::1"
+})
+{
+    var address = IPAddress.Parse(documented);
+    if (DnsWireProtocol.ValidPublishedUnicastAddress(address) ||
+        !DnsWireProtocol.ValidPublishedUnicastAddress(address, allowDocumentationTestRange: true))
+        throw new Exception("FAIL: RFC documentation range not restricted to explicit lab policy " + documented);
+}
+Console.WriteLine("PASS: published DNS addresses reject RFC 5737/3849 outside opt-in isolated lab fixture");
 
 // A locally configured ACME TXT owner must exist for both TXT queries and
 // NODATA on other types; DNSSEC signing/denial-chain owners must agree.
@@ -863,7 +872,7 @@ var chainSites=new[]{
     new {Address="2001:db8::41",HealthUrl="http://127.0.0.1:19712/ready",Weight=1,Priority=10,HealthCheckType="Http",TcpPort=0}
 };
 File.WriteAllText(configuration,JsonSerializer.Serialize(new {
- AllowNonLoopbackListeners=false,
+ AllowNonLoopbackListeners=false,AllowDocumentationAddressesForTesting=true,
  ListenHost="127.0.0.1",ListenPort=15353,ProbeIntervalSeconds=1,
  MetricsListenHost="127.0.0.1",MetricsListenPort=metricsPort,
  GeoIpCountryDatabasePath=countryFixture,GeoIpAsnDatabasePath=asnFixture,
@@ -1065,6 +1074,57 @@ foreach (var duplicateHost in new[]
     }
     finally { File.Delete(invalidPath); }
 }
+// Even RFC 5737/3849 addresses are denied unless an isolated loopback lab
+// fixture explicitly opts in. The option cannot be enabled for a public or
+// remotely reachable DNS listener, regardless of bind permissions.
+foreach (var (label, mutation) in new (string Label, Action<JsonObject> Mutate)[]
+{
+    ("production-documentation-backend", cfg => {
+        cfg["AllowDocumentationAddressesForTesting"] = false;
+        cfg["Zones"]![0]!["Sites"]![0]!["Address"] = "192.0.2.80";
+    }),
+    ("production-documentation-ns", cfg => {
+        cfg["AllowDocumentationAddressesForTesting"] = false;
+        cfg["Zones"]![1]!["NameServers"]![0]!["Address"] = "2001:db8::53";
+    }),
+    ("external-documentation-allowance", cfg => {
+        cfg["ListenHost"] = "0.0.0.0";
+        cfg["AllowNonLoopbackListeners"] = true;
+    })
+})
+{
+    var invalidConfig = JsonNode.Parse(File.ReadAllText(configuration))!.AsObject();
+    mutation(invalidConfig);
+    var invalidPath = Path.Combine(temp, "documentation-policy-" + Guid.NewGuid().ToString("N") + ".json");
+    await File.WriteAllTextAsync(invalidPath, invalidConfig.ToJsonString());
+    try
+    {
+        var invalidInfo = new ProcessStartInfo("dotnet")
+        {
+            UseShellExecute = false, CreateNoWindow = true,
+            WorkingDirectory = Path.GetDirectoryName(dll)!,
+            RedirectStandardOutput = true, RedirectStandardError = true
+        };
+        invalidInfo.ArgumentList.Add(dll);
+        invalidInfo.ArgumentList.Add(invalidPath);
+        using var invalidDns = Process.Start(invalidInfo) ??
+            throw new Exception("Documentation policy DNS test did not start");
+        var stdout = invalidDns.StandardOutput.ReadToEndAsync();
+        var stderr = invalidDns.StandardError.ReadToEndAsync();
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await invalidDns.WaitForExitAsync(deadline.Token);
+        var output = (await stdout) + (await stderr);
+        Must(invalidDns.ExitCode != 0 &&
+             output.Contains(label == "external-documentation-allowance"
+                 ? "Invalid DNS listener" : "unicast address", StringComparison.Ordinal) ||
+             invalidDns.ExitCode != 0 && label == "production-documentation-backend" &&
+             output.Contains("Invalid GSLB site address", StringComparison.Ordinal),
+            "DNS process fails closed for " + label);
+    }
+    finally { File.Delete(invalidPath); }
+}
+Console.WriteLine("PASS: documentation targets require explicit loopback-only lab setting");
+
 // Exercise the production configuration parser, not only the shared unicast
 // helper. Invalid backend, parent NS and delegated NS addresses must prevent
 // the standalone authority from starting any DNS listener.
