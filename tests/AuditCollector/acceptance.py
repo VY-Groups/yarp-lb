@@ -105,7 +105,11 @@ class ReceiptProxy:
                     status, response_body, receipt)
                 self.send_response(status)
                 if receipt:
-                    self.send_header("X-GC-Audit-Receipt", receipt)
+                    # Belt-and-suspenders CR/LF encoding at the actual header
+                    # sink for static analysis. The strict base64 guard above
+                    # rejects these bytes first, so valid signatures are unchanged.
+                    self.send_header("X-GC-Audit-Receipt",
+                                     receipt.replace("\r", "").replace("\n", ""))
                 self.send_header("Content-Length", str(len(response_body)))
                 self.send_header("Connection", "close")
                 self.end_headers()
@@ -158,9 +162,9 @@ def main():
         raise SystemExit("Disposable CI only")
     check(safe_receipt_response(201, b"ok", "signed") ==
           (201, b"ok", "signed"), "valid signed receipt is forwarded unchanged")
-    for malformed in ("signed\rInjected: true", "signed\nInjected: true", "signed\x00", "x" * 1025):
+    for malformed in ("signed\rInjected: true", "signed\nInjected: true", "signed\x00", "signed\x09", "signed\u2028", "x" * 1025):
         check(safe_receipt_response(201, b"ok", malformed) ==
-              (503, b"", None), "CR/LF in signed receipt fails closed")
+              (503, b"", None), "invalid or oversized signed receipt fails closed")
     dll = Path(sys.argv[1]).resolve()
     with tempfile.TemporaryDirectory(prefix="audit-fixture-") as tmp, fixture_secret_directory() as sd:
         root = Path(tmp)
