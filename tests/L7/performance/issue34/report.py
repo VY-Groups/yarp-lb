@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import statistics
 from pathlib import Path
 from typing import Any
@@ -40,17 +41,25 @@ def _validate_measurement(measurement: dict[str, Any], path: str) -> None:
         raise ValueError(f"{path}: duration outside existing 30..115 second acceptance")
     if requests < 1000:
         raise ValueError(f"{path}: fewer than 1000 requests")
+    if not requests.is_integer() or not errors.is_integer():
+        raise ValueError(f"{path}: request and error counters must be whole numbers")
     if errors < 0 or errors > requests or abs(failed_rate - errors / requests) > 1 / requests + 1e-9:
         raise ValueError(f"{path}: error count and failed rate do not match")
     if not 0 <= failed_rate < 0.01:
         raise ValueError(f"{path}: failed rate does not meet existing <1% acceptance")
+    if not 0 <= failed_rate <= 1 or not 0 <= checks_rate <= 1:
+        raise ValueError(f"{path}: request/check rates must be between 0 and 1")
     if checks_rate <= 0.995:
         raise ValueError(f"{path}: checks rate does not meet existing >99.5% acceptance")
+    if p95 < 0 or p99 < p95:
+        raise ValueError(f"{path}: p95/p99 latency ordering is invalid")
     if p95 >= 2500 or p99 >= 5000:
         raise ValueError(f"{path}: latency exceeds existing p95/p99 acceptance")
     for key in ("rps", "allocated_bytes", "working_set_delta_bytes", "gc0_delta",
                 "gc1_delta", "gc2_delta", "gc_pause_ms_delta", "managed_heap_delta_bytes"):
         _number(measurement.get(key), path + "." + key)
+    if measurement["rps"] <= 0:
+        raise ValueError(f"{path}: request rate must be positive")
     if measurement["allocated_bytes"] < 0:
         raise ValueError(f"{path}: allocated bytes decreased/reset")
     for key in ("gc0_delta", "gc1_delta", "gc2_delta", "gc_pause_ms_delta"):
@@ -58,12 +67,32 @@ def _validate_measurement(measurement: dict[str, Any], path: str) -> None:
             raise ValueError(f"{path}: {key} decreased/reset")
 
 
+
+def _validate_workload(workload: dict[str, Any], path: str) -> None:
+    """Refuse incomplete/malformed load metadata before claiming matched runs."""
+    required = ("vus", "duration", "payload_bytes", "connection_reuse")
+    if any(field not in workload for field in required):
+        raise ValueError(f"{path}: missing required workload parameters")
+    if type(workload["vus"]) is not int or not 1 <= workload["vus"] <= 10_000:
+        raise ValueError(f"{path}: invalid virtual-user count")
+    duration = workload["duration"]
+    if not isinstance(duration, str) or not re.fullmatch(r"[0-9]{1,3}s", duration) or (
+            not 30 <= int(duration[:-1]) <= 115):
+        raise ValueError(f"{path}: workload duration outside 30..115 seconds")
+    if type(workload["payload_bytes"]) is not int or not 0 <= workload["payload_bytes"] <= 1_048_576:
+        raise ValueError(f"{path}: invalid payload byte count")
+    if type(workload["connection_reuse"]) is not bool:
+        raise ValueError(f"{path}: connection-reuse setting must be boolean")
+
+
 def _mean_ci(values: list[float]) -> dict[str, float | int]:
     if len(values) < 3:
         raise ValueError("at least three paired rounds are required")
     mean = statistics.fmean(values)
     stddev = statistics.stdev(values)
-    critical = T95.get(len(values) - 1, 1.96)
+    # Beyond the 29-DF table, retain the last (slightly conservative)
+    # Student-t value rather than silently using a narrower normal interval.
+    critical = T95.get(len(values) - 1, T95[29])
     margin = critical * stddev / math.sqrt(len(values))
     return {
         "count": len(values),
@@ -93,6 +122,7 @@ def build_report(records: list[dict[str, Any]], baseline_commit: str,
         workload = record.get("workload")
         if not isinstance(workload, dict):
             raise ValueError(f"records[{index}] is missing matched workload metadata")
+        _validate_workload(workload, f"records[{index}].workload")
         workloads.append(workload)
         group = by_round.setdefault(round_number, {})
         observed_order.setdefault(round_number, []).append(record["revision"])
