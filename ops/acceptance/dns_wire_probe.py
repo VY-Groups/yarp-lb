@@ -137,6 +137,20 @@ def parse(response, txid, expected_name, expected_qtype, *, allow_truncated=Fals
             rtype, rclass, ttl, rdlen = struct.unpack_from("!HHIH", response, pos)
             pos += 10
             require(pos + rdlen <= len(response), "truncated RDATA")
+            if rtype == 41:
+                # EDNS option RDATA is a sequence of bounded CODE/LENGTH/DATA
+                # tuples. An RR-level RDLENGTH check alone cannot detect a
+                # truncated option header or an overclaimed option payload.
+                option_pos = pos
+                option_end = pos + rdlen
+                while option_pos < option_end:
+                    require(option_pos + 4 <= option_end,
+                            "truncated EDNS option header")
+                    _, option_length = struct.unpack_from("!HH", response, option_pos)
+                    option_pos += 4
+                    require(option_pos + option_length <= option_end,
+                            "EDNS option overruns OPT RDATA")
+                    option_pos += option_length
             rrsets.append((section, owner, rtype, rclass, ttl))
             pos += rdlen
     require(pos == len(response), "trailing DNS response bytes")
