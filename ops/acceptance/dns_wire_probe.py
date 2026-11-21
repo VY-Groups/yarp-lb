@@ -90,35 +90,52 @@ def read_name(data, pos):
         cursor += size
 
 
+def require(condition, message):
+    """Keep acceptance checks active even when Python optimization is enabled."""
+    if not condition:
+        raise AssertionError(message)
+
+
+def labels_for(name):
+    name_wire(name)  # Validate the input before canonicalizing it.
+    return tuple(label.lower() for label in name.rstrip(".").encode("ascii").split(b"."))
+
+
 def parse(response, txid, expected_name, expected_qtype):
     if len(response) < 12:
         raise AssertionError("short DNS header")
     rid, flags, qd, an, ns, ar = struct.unpack_from("!HHHHHH", response)
-    assert rid == txid, "transaction ID mismatch"
-    assert flags & 0x8000, "not a response"
-    assert not (flags & 0x0080), "recursion unexpectedly available"
-    assert qd == 1, "response must echo exactly one question"
+    require(rid == txid, "transaction ID mismatch")
+    require(flags & 0x8000, "not a response")
+    require(not (flags & 0x0080), "recursion unexpectedly available")
+    require(qd == 1, "response must echo exactly one question")
     pos = 12
     question_name, pos = read_name(response, pos)
-    assert question_name == tuple(label.lower() for label in
-                                  expected_name.rstrip(".").encode("ascii").split(b".")), (
-        "question name mismatch")
-    assert pos + 4 <= len(response), "truncated question"
+    require(question_name == labels_for(expected_name), "question name mismatch")
+    require(pos + 4 <= len(response), "truncated question")
     question_type, question_class = struct.unpack_from("!HH", response, pos)
-    assert question_type == expected_qtype and question_class == 1, "question type/class mismatch"
+    require(question_type == expected_qtype and question_class == 1,
+            "question type/class mismatch")
     pos += 4
     rrsets = []
     for section, count in (("answer", an), ("authority", ns), ("additional", ar)):
         for _ in range(count):
-            _, pos = read_name(response, pos)
-            assert pos + 10 <= len(response), "truncated RR header"
+            owner, pos = read_name(response, pos)
+            require(pos + 10 <= len(response), "truncated RR header")
             rtype, rclass, ttl, rdlen = struct.unpack_from("!HHIH", response, pos)
             pos += 10
-            assert pos + rdlen <= len(response), "truncated RDATA"
-            rrsets.append((section, rtype, rclass, ttl))
+            require(pos + rdlen <= len(response), "truncated RDATA")
+            rrsets.append((section, owner, rtype, rclass, ttl))
             pos += rdlen
-    assert pos == len(response), "trailing DNS response bytes"
+    require(pos == len(response), "trailing DNS response bytes")
     return flags, rrsets
+
+
+def has_rr(records, section, owner, rtype):
+    expected_owner = labels_for(owner)
+    return any(record_section == section and record_owner == expected_owner and
+               record_type == rtype and record_class == 1
+               for record_section, record_owner, record_type, record_class, _ in records)
 
 
 def validate_parser_guards():
@@ -137,11 +154,15 @@ def validate_parser_guards():
     cyclic_pointer = b"\xc0\x0c" + struct.pack("!HH", 1, 1)
     mismatched_name = name_wire("other.test") + struct.pack("!HH", 1, 1)
     mismatched_type = name_wire("example.test") + struct.pack("!HH", 28, 1)
-    assert parse(header + valid_question, txid, "EXAMPLE.TEST.", 1)[0] == 0x8000
-    assert rejected(outside_pointer), "out-of-packet compression pointer was accepted"
-    assert rejected(cyclic_pointer), "cyclic compression pointer was accepted"
-    assert rejected(mismatched_name), "mismatched response question name was accepted"
-    assert rejected(mismatched_type), "mismatched response question type was accepted"
+    require(parse(header + valid_question, txid, "EXAMPLE.TEST.", 1)[0] == 0x8000,
+            "valid response question was rejected")
+    require(rejected(outside_pointer), "out-of-packet compression pointer was accepted")
+    require(rejected(cyclic_pointer), "cyclic compression pointer was accepted")
+    require(rejected(mismatched_name), "mismatched response question name was accepted")
+    require(rejected(mismatched_type), "mismatched response question type was accepted")
+    wrong_owner = [("answer", labels_for("other.test"), 2, 1, 60)]
+    require(not has_rr(wrong_owner, "answer", "example.test", 2),
+            "unrelated answer owner was accepted as the apex RRset")
     print("PASS DNS parser rejects invalid compression and mismatched questions")
 
 
@@ -160,46 +181,50 @@ def run(args):
     for qtype, label in ((2, "NS"), (6, "SOA")):
         for tcp in (False, True):
             flags, records, size = check(args.host, args.port, zone, zone, qtype, tcp, args.timeout)
-            assert flags & 0x0400, f"{label}: AA missing"
-            assert (flags & 0xF) == 0, f"{label}: RCODE not NOERROR"
-            assert any(section == "answer" and typ == qtype for section, typ, _, _ in records), (
-                f"{label}: missing apex RRset")
+            require(flags & 0x0400, f"{label}: AA missing")
+            require((flags & 0xF) == 0, f"{label}: RCODE not NOERROR")
+            require(has_rr(records, "answer", zone, qtype),
+                    f"{label}: missing apex RRset")
             print(f"PASS {label} {'TCP' if tcp else 'UDP'} {size} bytes")
     unknown = "unconfigured-" + secrets.token_hex(6) + "." + zone
     for tcp in (False, True):
         flags, records, size = check(args.host, args.port, zone, unknown, 1, tcp, args.timeout)
-        assert flags & 0x0400, "NXDOMAIN: AA missing"
-        assert (flags & 0xF) == 3, "unknown owner must be NXDOMAIN"
-        assert any(section == "authority" and typ == 6 for section, typ, _, _ in records), (
-            "NXDOMAIN missing negative-caching SOA")
+        require(flags & 0x0400, "NXDOMAIN: AA missing")
+        require((flags & 0xF) == 3, "unknown owner must be NXDOMAIN")
+        require(has_rr(records, "authority", zone, 6),
+                "NXDOMAIN missing negative-caching SOA")
         print(f"PASS NXDOMAIN {'TCP' if tcp else 'UDP'} {size} bytes")
     flags, records, size = check(args.host, args.port, zone, zone, 1, False, args.timeout, edns=True)
-    assert (flags & 0xF) == 0 and any(t == 41 for _, t, _, _ in records), (
-        "EDNS0 response missing OPT or returned error")
-    assert size <= 1232, "EDNS0 UDP response exceeded advertised 1232-byte limit"
+    require((flags & 0xF) == 0 and any(section == "additional" and rtype == 41
+                                      for section, _, rtype, _, _ in records),
+            "EDNS0 response missing OPT or returned error")
+    require(size <= 1232, "EDNS0 UDP response exceeded advertised 1232-byte limit")
     print(f"PASS EDNS0 UDP {size} bytes")
     flags, records, _ = check(args.host, args.port, zone, zone, 6, False, args.timeout,
                               edns=True, version=1)
     # RFC 6891: the OPT TTL high byte is the upper eight bits of the
     # twelve-bit RCODE. BADVERS=16 uses extended code 1 and header RCODE 0.
-    assert any(t == 41 and (((ttl >> 24) << 4) | (flags & 0xF)) == 16
-               for _, t, _, ttl in records), (
-        "unsupported EDNS version did not report BADVERS RCODE 16")
+    require(any(section == "additional" and rtype == 41 and
+                (((ttl >> 24) << 4) | (flags & 0xF)) == 16
+                for section, _, rtype, _, ttl in records),
+            "unsupported EDNS version did not report BADVERS RCODE 16")
     print("PASS EDNS BADVERS")
     # An existing apex with an unsupported RR type is NODATA, not NXDOMAIN.
     for tcp in (False, True):
         flags, records, _ = check(args.host, args.port, zone, zone, 15, tcp, args.timeout)
-        assert (flags & 0x0400) and (flags & 0xF) == 0, "apex MX NODATA returned incorrect flags"
-        assert not any(section == "answer" and typ == 15 for section, typ, _, _ in records), (
-            "unexpected apex MX RRset")
-        assert any(section == "authority" and typ == 6 for section, typ, _, _ in records), (
-            "NODATA missing negative-caching SOA")
+        require((flags & 0x0400) and (flags & 0xF) == 0,
+                "apex MX NODATA returned incorrect flags")
+        require(not has_rr(records, "answer", zone, 15),
+                "unexpected apex MX RRset")
+        require(has_rr(records, "authority", zone, 6),
+                "NODATA missing negative-caching SOA")
         print(f"PASS NODATA {'TCP' if tcp else 'UDP'}")
     # The listener is authoritative for configured zones only.
     outside = "not-served.invalid"
     for tcp in (False, True):
         flags, _, _ = check(args.host, args.port, zone, outside, 1, tcp, args.timeout)
-        assert (flags & 0xF) == 5 and not (flags & 0x0080), "outside zone did not refuse recursion"
+        require((flags & 0xF) == 5 and not (flags & 0x0080),
+                "outside zone did not refuse recursion")
         print(f"PASS REFUSED {'TCP' if tcp else 'UDP'}")
     print("PASS authoritative UDP/TCP interoperability; no physical/soak certification implied")
 

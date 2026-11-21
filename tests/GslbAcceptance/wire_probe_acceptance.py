@@ -75,8 +75,7 @@ def run():
                         txid, wire = dns_wire_probe.question(ZONE, 6)
                         reply = dns_wire_probe.exchange("127.0.0.1", port, wire, False, 0.4)
                         flags, records = dns_wire_probe.parse(reply, txid, ZONE, 6)
-                        if flags & 0x0400 and any(section == "answer" and kind == 6
-                                                  for section, kind, _, _ in records):
+                        if flags & 0x0400 and dns_wire_probe.has_rr(records, "answer", ZONE, 6):
                             break
                     except (OSError, AssertionError):
                         pass
