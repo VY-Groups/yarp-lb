@@ -469,8 +469,45 @@ internal static class AcmeRenewalAcceptance
             }
             check(Volatile.Read(ref parsed) == 1,
                 "oversized fixed-length and chunked requests are rejected before JSON parsing");
+
+            foreach (var status in new[] { StatusCodes.Status413PayloadTooLarge, StatusCodes.Status400BadRequest })
+            {
+                var syntheticRequest = new DefaultHttpContext().Request;
+                syntheticRequest.ContentType = "application/json";
+                syntheticRequest.Body = new RejectedBodyStream(status);
+                var mappedToSizeLimit = false;
+                var otherTransportFailurePreserved = false;
+                try { _ = await AcmeRevocationRequestReader.ReadAsync(syntheticRequest, CancellationToken.None); }
+                catch (AcmeRevocationRequestTooLargeException) { mappedToSizeLimit = true; }
+                catch (BadHttpRequestException ex) when (ex.StatusCode == status)
+                { otherTransportFailurePreserved = true; }
+                check(status == StatusCodes.Status413PayloadTooLarge
+                      ? mappedToSizeLimit && !otherTransportFailurePreserved
+                      : !mappedToSizeLimit && otherTransportFailurePreserved,
+                    "only Kestrel's 413 transport rejection maps to the bounded revocation response");
+            }
         }
         finally { await app.StopAsync(); }
+    }
+
+    private sealed class RejectedBodyStream(int statusCode) : Stream
+    {
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position
+        {
+            get => throw new NotSupportedException();
+            set => throw new NotSupportedException();
+        }
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default) =>
+            ValueTask.FromException<int>(new BadHttpRequestException("Rejected by the HTTP transport", statusCode));
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override void Flush() { }
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
     }
 
     private sealed class NonSeekableReadStream(byte[] bytes) : Stream

@@ -515,7 +515,15 @@ public static class AcmeRevocationRequestReader
         {
             while (true)
             {
-                var read = await request.Body.ReadAsync(buffer.AsMemory(), cancellationToken);
+                int read;
+                try { read = await request.Body.ReadAsync(buffer.AsMemory(), cancellationToken); }
+                catch (BadHttpRequestException ex) when (ex.StatusCode == StatusCodes.Status413PayloadTooLarge)
+                {
+                    // Kestrel's transfer-encoding limit must become the same
+                    // controlled 413 response as our explicit byte-count cap.
+                    // Never log or echo the rejected request body.
+                    throw new AcmeRevocationRequestTooLargeException();
+                }
                 if (read == 0) break;
                 if (body.Length + read > MaxRequestBytes)
                     throw new AcmeRevocationRequestTooLargeException();
