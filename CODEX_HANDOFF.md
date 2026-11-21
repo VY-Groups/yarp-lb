@@ -1,31 +1,30 @@
 # GatewayCore — Codex handoff, verified repository snapshot
 
-## Continuation snapshot — DNS documentation and security review (2026-11-20)
+## Continuation snapshot — security review and release status (2026-11-20)
 
 This is the latest verified continuation state; older same-day snapshots below
 are historical when their branch, issue, or CI state differs.
 
-- `main` is `77fb20fa983bc988aaa05cade5dba5a8740439de`, including merged PR
-  #321 (L4 acceptance) and #323 (DNS capability documentation correction).
-  Both PRs passed exact-head Windows/Linux Actions before merge. #323 does not
-  implement missing DNSSEC, licensed GeoIP/ASN operations, or public DNS
-  acceptance; issue #52 remains open.
-- At this snapshot, 10 issues remain open: #34, #36, #37, #38, #48, #49, #51,
-  #52, #53, and #109. PR #324 is the only open development PR; its revised
-  head adds a direct CR/LF receipt-rejection regression check and merges the
-  latest `main`. Its complete exact-head CI must pass before merge.
-- PR #324 changes test TLS fixtures to TLS 1.2+, escapes request-derived
-  GatewayAgent log fields, and rejects malformed signed audit receipts rather
-  than transforming them. CodeQL alerts #1–#6 (test-fixture secret-file writes)
-  and #14 (pinned client-certificate authorization path) are still open and
-  have not been declared remediated.
+- `main` is `5c4efabd999efa9f58726725f2df77ab49a00b54`, including PR #321
+  (L4 fault acceptance), #323 (DNS capability documentation correction), and
+  #324 (selected CodeQL TLS/logging/receipt hardening). PR #324 passed all
+  exact-head checks, including Windows/Linux integration and ten Windows HA
+  repetitions, before merge. It did not close any remaining feature issue.
+- Ten issues remain open: #34, #36, #37, #38, #48, #49, #51, #52, #53, and
+  #109. PR #325 is the only open development PR. Its latest changes merge the
+  current main and move the OIDC client-secret file path out of serialized JSON
+  when `GATEWAY_OIDC_CLIENT_SECRET_FILE` is configured. Exact-head CI and
+  CodeQL must pass before merge; the earlier PR head had one high CodeQL alert.
 - #53 remains open for Windows console/service graceful-stop acceptance;
-  physical WAN/loss/soak/capacity acceptance is consolidated in #36. #109
-  requires real multi-node partition/fencing evidence. No issue is closed by
-  documentation alone.
-- The latest release remains `v0.1.0-test.12` (2026-11-14). A verified release
-  with SHA-256 checksums, offline install, upgrade, and rollback evidence has
-  not been published. Production remains **NO-GO**; annual 99.9% availability is
+  physical WAN/loss/soak/capacity remains in #36. #52 and #109 still require
+  software acceptance not delivered by documentation or the selected security
+  fixes in #324/#325.
+- CodeQL alerts #1–#6 (disposable test-secret file writes) and #14 (pinned
+  client-certificate policy) are not claimed resolved until the latest scan
+  confirms it. No scanner findings are dismissed or suppressed in code.
+- Latest release is `v0.1.0-test.12` (2026-11-14). A verified release with
+  SHA-256 checksums, offline install, upgrade, and rollback evidence has not
+  been published. Production remains **NO-GO**; annual 99.9% availability is
   unmeasured.
 
 
