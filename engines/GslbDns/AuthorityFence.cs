@@ -383,10 +383,10 @@ internal sealed class AuthorityFenceStore : IDisposable
     private static PersistedEpoch ReadEpoch(string path)
     {
         if (!File.Exists(path)) return new PersistedEpoch(1, 0, false);
-        EnsureNotLink(path, "authority epoch state");
-        if (OperatingSystem.IsWindows()) EnsurePrivateWindowsAcl(path, isDirectory: false);
-        if (new FileInfo(path).Length > 1024) throw new InvalidDataException("Authority epoch state exceeds bound");
-        var state = JsonSerializer.Deserialize<PersistedEpoch>(File.ReadAllBytes(path));
+        var bytes = ReadStrictState(path, "authority epoch state");
+        PersistedEpoch? state;
+        try { state = JsonSerializer.Deserialize<PersistedEpoch>(bytes); }
+        finally { CryptographicOperations.ZeroMemory(bytes); }
         if (state is null || state.Version != 1 || state.Epoch < 0)
             throw new InvalidDataException("Invalid authority epoch state");
         return state;
@@ -450,14 +450,27 @@ internal sealed class AuthorityFenceStore : IDisposable
 
     private static PersistedReplay ReadReplay(string path)
     {
-        EnsureNotLink(path, "authority replay state");
-        if (OperatingSystem.IsWindows()) EnsurePrivateWindowsAcl(path, isDirectory: false);
-        if (new FileInfo(path).Length > 1024) throw new InvalidDataException("Authority replay state exceeds bound");
-        var replay = JsonSerializer.Deserialize<PersistedReplay>(File.ReadAllBytes(path))
-            ?? throw new InvalidDataException("Malformed authority replay state");
+        var bytes = ReadStrictState(path, "authority replay state");
+        PersistedReplay? replay;
+        try { replay = JsonSerializer.Deserialize<PersistedReplay>(bytes); }
+        finally { CryptographicOperations.ZeroMemory(bytes); }
+        if (replay is null)
+            throw new InvalidDataException("Malformed authority replay state");
         if (replay.Version != 1 || replay.Epoch < 0 || replay.Sequence < 0)
             throw new InvalidDataException("Invalid authority replay state");
         return replay;
+    }
+
+    // The authority high-water marks must be parsed from a single, bounded,
+    // private, non-symlinked opened file. A duplicate case/escape alias could
+    // otherwise make two consumers disagree about the trusted epoch/sequence.
+    private static byte[] ReadStrictState(string path, string purpose)
+    {
+        if (OperatingSystem.IsWindows()) EnsurePrivateWindowsAcl(path, isDirectory: false);
+        var bytes = PrivateKeyFileSecurity.ReadPrivateFileBytes(path, purpose, 1024);
+        if (StrictJsonPropertyNames.HasNoDuplicates(bytes)) return bytes;
+        CryptographicOperations.ZeroMemory(bytes);
+        throw new InvalidDataException($"{purpose} has malformed or ambiguous JSON");
     }
 
     private static void PersistReplay(string path, PersistedReplay replay) =>
