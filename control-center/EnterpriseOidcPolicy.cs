@@ -69,6 +69,11 @@ internal sealed class EnterpriseOidcPolicy
         var settings = JsonSerializer.Deserialize<OidcSettings>(bytes,
             new JsonSerializerOptions { UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow })
             ?? throw new InvalidDataException("OIDC settings missing");
+        // Allow operators to keep secret-file locations outside the JSON file.
+        // A present but empty override is rejected by the normal path validation.
+        var secretFileOverride = Environment.GetEnvironmentVariable("GATEWAY_OIDC_CLIENT_SECRET_FILE");
+        if (secretFileOverride is not null)
+            settings = settings with { ClientSecretFile = secretFileOverride };
         return new EnterpriseOidcPolicy(settings);
     }
 
