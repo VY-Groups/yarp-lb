@@ -46,6 +46,7 @@ def run():
         config = root / "wire-zone.json"
         config.write_text(json.dumps({
             "ListenHost": "127.0.0.1",
+            "AllowDocumentationAddressesForTesting": True,
             "ListenPort": port,
             "ProbeIntervalSeconds": 30,
             "Zones": [{
