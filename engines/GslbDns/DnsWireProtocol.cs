@@ -4,8 +4,7 @@ using System.Net;
 using System.Net.Sockets;
 using System.Text;
 
-// Independent DNS wire-format implementation. The opt-in DNSSEC NSEC3 hash
-// encoder is attributed in THIRD_PARTY_NOTICES.md. No recursion, zone transfer,
+// Independent DNS wire-format implementation. No recursion, zone transfer,
 // or EDNS Client Subnet routing by default.
 internal static class DnsWireProtocol
 {

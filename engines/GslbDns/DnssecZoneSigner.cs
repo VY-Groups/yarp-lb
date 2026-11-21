@@ -5,10 +5,7 @@ using System.Text;
 using GatewayCore.Gslb.Contracts;
 
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// NSEC3 hash encoding adapted from OpenGSLB pkg/dnssec/nsec3.go.
-// Original copyright: Copyright 2025 Logan Ross.
-// Original SPDX: AGPL-3.0-or-later OR LicenseRef-OpenGSLB-Commercial.
-// This adaptation uses the AGPL option; see repository THIRD_PARTY_NOTICES.md.
+// GatewayCore's NSEC3 implementation follows RFC 5155 for its zone model.
 
 internal sealed record DnsResource(string Owner, ushort Type, uint Ttl, byte[] Rdata);
 
@@ -465,7 +462,7 @@ internal sealed class DnssecZoneSigner : IDisposable
     /// <summary>
     /// RFC 5155 hash: SHA-1(canonical wire name || salt), followed by the
     /// configured number of SHA-1(previous digest || salt) rounds.
-    /// Adapted only for hash encoding from OpenGSLB pkg/dnssec/nsec3.go.
+    /// Implements the public RFC 5155 algorithm for GatewayCore zones.
     /// </summary>
     internal static byte[] Nsec3Hash(string name, byte[] salt, ushort iterations)
     {

@@ -2,6 +2,13 @@
 
 **Read [CODEX_HANDOFF.md](CODEX_HANDOFF.md) before changing source.** That document contains the verified 2026-11-16 project snapshot, all then-current branches, PR history, open issues, exact source links, test commands and release blockers. Refresh live GitHub state; it is not a continuously updated status feed.
 
+## Owner direction — licensing phase (2026-11-21)
+
+- GatewayCore is intended as a **proprietary, owner-controlled product**, not an open-source product offering. Do not describe the entire repository as currently AGPL licensed simply because historical revisions were.
+- Do **not** implement a license server, activation gate, tiering, subscription enforcement or commercial pricing now; defer that phase until the remaining software issues are completed.
+- GatewayCore's C# NSEC3 implementation follows RFC 5155. The current checkout has no root `LICENSE`; earlier repository revisions included project-wide AGPL terms, so review that history before making distribution claims. See `PROJECT_LICENSE_STATUS.md`.
+- Keep code changes and independent reviews moving concurrently. Close individual software issues only with exact-head acceptance evidence; #36 remains the physical/operational release gate.
+
 ## Project and release boundary
 
 - GatewayCore is a **single-organization, on-premises .NET 10 + YARP L7 gateway/control plane** with optional, separate experimental DNS/GSLB, L4 and WAF integrations. Preserve the existing application, UI workflows, authorization and compatibility.
@@ -14,7 +21,7 @@
 - Begin work on the latest `origin/main`; use a new focused `codex/<issue-or-feature>` branch and a reviewed PR. Do not force-push or bypass branch protections.
 - At handoff, GSLB latency routing was on **draft PR #108**, not merged. Check current PR status and exact-head CI before making decisions.
 - **Do not merge historical branches wholesale.** The original 73-branch audit is in `control-center/docs/BRANCH_73_HAPROXY_AUDIT.md`; the newer complete 88-branch inventory is in `CODEX_HANDOFF.md`. Old branch tips often diverge because of squash merges.
-- `gslb` is an **OpenGSLB Go AGPL-3.0-or-later / commercial-license reference**. `ha-praxy` is a **GPL HAProxy C reference**. Do not import/copy modules into GatewayCore without appropriate licensing/legal approval. Study externally observable requirements and implement independent .NET behavior and tests.
+- Implement GatewayCore-specific .NET behavior against product requirements and applicable standards. Do not bulk-merge historical branches.
 - Maintain neutral GatewayCore branding. Do not hardcode a customer, employer, or internal company name into source, UI, environment variables or deliverables.
 
 ## Engineering standard

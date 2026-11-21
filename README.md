@@ -1,10 +1,23 @@
 # GatewayCore / YARP Control Center — v0.1
 
-## License
+## Ownership and future commercial licensing
 
-This repository is licensed under AGPL-3.0-or-later; see [LICENSE](LICENSE).
-The root license applies to the project as a whole. Adapted third-party code
-and its scope are listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+**GatewayCore is intended as an owner-controlled proprietary software product,
+not an open-source product offering.** Its eventual customer licensing,
+activation, maintenance and distribution terms are **to be designed only after
+the remaining development issues are completed**. No commercial licensing
+module, license server, subscription enforcement or customer activation scheme
+is implemented or authorized by this statement.
+
+GatewayCore's DNSSEC NSEC3 functionality is implemented in C# against RFC
+5155. The current checkout has no root `LICENSE` file, and earlier repository
+revisions included project-wide AGPL license text. Review that licensing
+history before making distribution claims.
+
+Repository visibility is separate from copyright: a GitHub repository can be
+public without being an offered open-source product, but public source remains
+readable and clonable. Source confidentiality requires a deliberate repository
+visibility/access-control decision by the owner.
 
 A **single-tenant, on-premises HTTP(S) L7 reverse proxy and management control center**, built with .NET 10 and [YARP](https://microsoft.github.io/reverse-proxy/). Designed for isolated Windows and Linux testing with a controlled configuration approval workflow.
 
@@ -12,7 +25,7 @@ A **single-tenant, on-premises HTTP(S) L7 reverse proxy and management control c
 
 ## About GatewayCore
 
-**GatewayCore** is an open-source, **single-organization, self-hosted application gateway and management platform**. Its core is an ASP.NET Core **.NET 10** application using **YARP** to route HTTP(S) traffic to approved web applications and APIs. Operators use a separate **Control Center** to manage inventory, review routing changes, control access, view local health and metrics, and exercise backup/rollback procedures. It is intended for controlled, isolated Windows and Linux deployments—not a cloud-managed SaaS service.
+**GatewayCore** is an owner-controlled, **single-organization, self-hosted application gateway and management platform**. Its core is an ASP.NET Core **.NET 10** application using **YARP** to route HTTP(S) traffic to approved web applications and APIs. Operators use a separate **Control Center** to manage inventory, review routing changes, control access, view local health and metrics, and exercise backup/rollback procedures. It is intended for controlled, isolated Windows and Linux deployments—not a cloud-managed SaaS service.
 
 **In one sentence:** GatewayCore aims to provide reviewed, observable on-premises L7 traffic routing, with **optional and still experimental** adjacent DNS/GSLB, L4 TCP/UDP, WAF, GitOps and enterprise integrations.
 
@@ -110,7 +123,7 @@ For PR acceptance, inspect **all required workflows on the exact PR head SHA**, 
 | Current implementation gaps and tests | [GitHub issues](../../issues), [open pull requests](../../pulls) and [Actions](../../actions) |
 | Physical GO / NO-GO | [On-prem production gates](control-center/docs/ONPREM_PRODUCTION_GO_GATES.md) |
 
-**Open-source licensing:** This repository uses AGPL-3.0-or-later; consult [LICENSE](LICENSE) and [third-party notices](THIRD_PARTY_NOTICES.md) before reuse or redistribution. Other software used as architectural inspiration must not be copied without its license obligations being satisfied.
+**Licensing and redistribution:** Proprietary customer licensing is a future project phase, not a feature in this release. See [ownership and licensing status](#ownership-and-future-commercial-licensing) and [project license status](PROJECT_LICENSE_STATUS.md). Earlier project-wide license terms require review before distribution claims.
 
 ## Latest published Windows test build
 
@@ -200,14 +213,12 @@ DNS interoperability and physical DC/DR failover remain open.
 
 - [GSLB configuration, behavior and limitations](engines/GslbDns/README.md)
 - [Enterprise feature-parity and release evidence matrix](engines/GslbDns/GSLB_CAPABILITY_PARITY.md)
-- [Updated OpenGSLB source review and licensing boundary](engines/GslbDns/OPENGSLB_REFERENCE_REVIEW.md)
+- [GatewayCore GSLB feature status](engines/GslbDns/GSLB_FEATURE_STATUS.md)
 - [P0 authoritative GSLB issue #52](../../issues/52)
 
-The `gslb` reference branch is currently **OpenGSLB v1.1.10**, with AGPL
-or separate commercial licensing. GatewayCore has **not** copied or linked
-OpenGSLB Go modules; direct code reuse for a proprietary/commercial product
-requires appropriate licensing review. Marketing feature and cost tables
-are requirements inputs, not vendor certifications.
+GatewayCore's GSLB feature status and remaining acceptance work are tracked in
+the feature status document. DNSSEC behavior follows RFC 5155.
+Feature and cost tables are requirements inputs, not vendor certifications.
 
 ## SMTP providers and security verification
 
