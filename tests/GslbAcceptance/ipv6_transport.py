@@ -50,6 +50,7 @@ def main():
         config = Path(directory) / "config.json"
         config.write_text(json.dumps({
             "ListenHost": "::1", "ListenPort": port, "ProbeIntervalSeconds": 1,
+            "AllowDocumentationAddressesForTesting": True,
             "Zones": [{"Name": "lab.example", "TtlSeconds": 10,
                        "NameServers": [{"Host": "ns.lab.example", "Address": "2001:db8::53"}],
                        "Sites": [{
