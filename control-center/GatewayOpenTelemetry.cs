@@ -2,7 +2,6 @@ using System.Buffers;
 using System.Diagnostics;
 using System.Diagnostics.Metrics;
 using System.Collections.Concurrent;
-using System.Text.RegularExpressions;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Http.Features;
@@ -255,10 +254,205 @@ public static partial class GatewayOpenTelemetry
         return ratio;
     }
 
+    internal static bool IsSafeTelemetryId(string? value)
+    {
+        if (value is not { Length: > 0 and <= 80 }) return false;
+        // Use a full ASCII scan instead of Regex and LINQ on sampled spans.
+        // The old '
+}
+
+/// <summary>
+/// Caps distinct route/cluster/destination tuples emitted to OTLP. Configured IDs
+/// are validated before becoming metric attributes; overflow is one fixed tuple.
+/// </summary>
+internal sealed class GatewayTelemetryDimensionBudget
+{
+    public const int MaximumTotalTuples = 4096;
+    private readonly int _maximumNamedTuples;
+    // These keys live on the per-request metrics path. Keep them as value tuples
+    // so an already-registered route/cluster/destination doesn't allocate a
+    // composite string for every measurement.
+    private readonly ConcurrentDictionary<(string Route, string Cluster, string Destination), byte> _tracked = new();
+    private readonly object _registrationLock = new();
+    private volatile bool _saturated;
+
+    public GatewayTelemetryDimensionBudget(int maximumTotalTuples = MaximumTotalTuples)
+    {
+        if (maximumTotalTuples < 2 || maximumTotalTuples > MaximumTotalTuples)
+            throw new ArgumentOutOfRangeException(nameof(maximumTotalTuples));
+        // Reserve one series tuple for the fixed overflow dimensions.
+        _maximumNamedTuples = maximumTotalTuples - 1;
+    }
+
+    public int TrackedTuples => _tracked.Count;
+
+    public TagList CreateTags(string? routeId, string? clusterId, string? destinationId, string statusClass)
+    {
+        var route = SafeId(routeId) ? routeId! : "_other";
+        var cluster = SafeId(clusterId) ? clusterId! : "_other";
+        var destination = SafeId(destinationId) ? destinationId! : "_other";
+        var key = (Route: route, Cluster: cluster, Destination: destination);
+        if (!_tracked.ContainsKey(key) && !_saturated)
+        {
+            lock (_registrationLock)
+            {
+                if (!_tracked.ContainsKey(key))
+                {
+                    if (_tracked.Count < _maximumNamedTuples)
+                        _tracked.TryAdd(key, 0);
+                    else
+                    {
+                        _saturated = true;
+                        route = cluster = destination = "_other";
+                    }
+                }
+            }
+        }
+        else if (!_tracked.ContainsKey(key))
+        {
+            route = cluster = destination = "_other";
+        }
+
+        return new TagList
+        {
+            { "http.response.status_class", statusClass },
+            { "gateway.route.id", route },
+            { "gateway.cluster.id", cluster },
+            { "gateway.destination.id", destination }
+        };
+    }
+
+    private static bool SafeId(string? value)
+    {
+        if (value is not { Length: > 0 and <= 80 }) return false;
+        // Avoid LINQ over string here: its interface enumerator can allocate on
+        // every proxied request when metric attributes are recorded.
+        foreach (var character in value)
+            if (!char.IsAsciiLetterOrDigit(character) && character is not ('_' or '-'))
+                return false;
+        return true;
+    }
+}
+
+/// <summary>Keep client identifiers, request paths and secrets out of OTLP spans.</summary>
+internal sealed class GatewayTelemetryPrivacyProcessor : BaseProcessor<Activity>
+{
+    // Deny by default: instrumentation upgrades and custom enrichment may
+    // introduce additional request headers, tenant identifiers or raw URLs.
+    // Preserve only explicit, bounded operational attributes.
+    public override void OnEnd(Activity data)
+    {
+        // Activity tags cannot be removed while enumerating its live tag
+        // collection. Collect ONLY rejected tag keys into a reusable pooled
+        // buffer, then remove them after enumeration. This replaces the old
+        // per-exported-span KeyValuePair[] materialization while preserving
+        // deny-by-default semantics and all attribute allowlist checks.
+        string[]? rejectedKeys = null;
+        var rejectedCount = 0;
+        try
+        {
+            foreach (var tag in data.TagObjects)
+            {
+                if (IsAllowed(tag.Key, tag.Value)) continue;
+                rejectedKeys ??= ArrayPool<string>.Shared.Rent(16);
+                if (rejectedCount == rejectedKeys.Length)
+                {
+                    var expanded = ArrayPool<string>.Shared.Rent(checked(rejectedKeys.Length * 2));
+                    Array.Copy(rejectedKeys, expanded, rejectedCount);
+                    ArrayPool<string>.Shared.Return(rejectedKeys, clearArray: true);
+                    rejectedKeys = expanded;
+                }
+                rejectedKeys[rejectedCount++] = tag.Key;
+            }
+            for (var index = 0; index < rejectedCount; index++)
+                data.SetTag(rejectedKeys![index], null);
+        }
+        finally
+        {
+            // Never allow a process-wide pooled buffer to retain keys from
+            // sensitive, untrusted trace enrichment after a span is exported.
+            if (rejectedKeys is not null)
+                ArrayPool<string>.Shared.Return(rejectedKeys, clearArray: true);
+        }
+        NormalizeAspNetCoreDisplayName(data);
+        base.OnEnd(data);
+    }
+
+    private static bool IsAllowed(string key, object? value) => key switch
+    {
+        "gateway.route.id" or "gateway.cluster.id" or "gateway.destination.id" =>
+            value is string id && GatewayOpenTelemetry.IsSafeTelemetryId(id),
+        "http.request.method" => value is string method && IsKnownMethod(method),
+        "http.response.status_code" => value is int status && status is >= 100 and <= 599
+            || value is long longStatus && longStatus is >= 100 and <= 599,
+        "http.route" => value is string route && IsSafeRouteTemplate(route),
+        "url.scheme" => value is "http" or "https",
+        "network.protocol.version" => value is "1.0" or "1.1" or "2" or "2.0" or "3" or "3.0",
+        "error.type" => value is string error && error.Length is > 0 and <= 80 &&
+            error.All(c => char.IsAsciiLetterOrDigit(c) || c is '_' or '.'),
+        _ => false
+    };
+
+    private static bool IsKnownMethod(string method) => method is
+        "GET" or "HEAD" or "POST" or "PUT" or "DELETE" or "CONNECT" or
+        "OPTIONS" or "TRACE" or "PATCH" or "_OTHER";
+
+    private static void NormalizeAspNetCoreDisplayName(Activity activity)
+    {
+        if (!string.Equals(activity.Source.Name, "Microsoft.AspNetCore", StringComparison.Ordinal))
+            return;
+
+        var method = activity.GetTagItem("http.request.method") as string;
+        if (method is null || !IsKnownMethod(method) || method == "_OTHER")
+            method = null;
+
+        var route = activity.GetTagItem("http.route") as string;
+        if (IsSafeRouteTemplate(route))
+        {
+            activity.DisplayName = $"{method ?? "HTTP"} {route}";
+            return;
+        }
+
+        activity.SetTag("http.route", null);
+        activity.DisplayName = method is null ? "HTTP request" : $"HTTP {method}";
+    }
+
+    private static bool IsSafeRouteTemplate(string? route)
+    {
+        if (route is not { Length: > 0 and <= 256 } || route[0] != '/') return false;
+        var insideParameter = false;
+        foreach (var character in route)
+        {
+            if (character == '{')
+            {
+                if (insideParameter) return false;
+                insideParameter = true;
+                continue;
+            }
+            if (character == '}')
+            {
+                if (!insideParameter) return false;
+                insideParameter = false;
+                continue;
+            }
+            if (character == '?' && !insideParameter) return false;
+            if (!char.IsAsciiLetterOrDigit(character) &&
+                character is not ('/' or '_' or '-' or '.' or ':' or '*' or '?'))
+                return false;
+        }
+        return !insideParameter;
+    }
+}
+ regex anchor accepted a trailing newline.
+        foreach (var character in value)
+            if (!char.IsAsciiLetterOrDigit(character) && character is not ('_' or '-'))
+                return false;
+        return true;
+    }
+
     private static void SetBoundedId(Activity? activity, string key, string? value)
     {
-        if (activity is not null && value is { Length: > 0 and <= 80 } &&
-            Regex.IsMatch(value, "^[A-Za-z0-9_-]+$", RegexOptions.CultureInvariant))
+        if (activity is not null && IsSafeTelemetryId(value))
             activity.SetTag(key, value);
     }
 }
