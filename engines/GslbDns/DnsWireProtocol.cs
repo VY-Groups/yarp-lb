@@ -289,6 +289,8 @@ internal static class DnsWireProtocol
                         if (zone.RoutingPolicy == "CidrRegion")
                         {
                             var region = zone.CidrTable?.RegionFor(resolverIp);
+                            EcsInput? selectedEcs = null;
+                            var selectedEcsScope = 0;
                             if (zone.EnableEcsGeoRouting && ecsInput is not null &&
                                 zone.TrustedEcsResolvers?.RegionFor(resolverIp) == "trusted")
                             {
@@ -298,7 +300,8 @@ internal static class DnsWireProtocol
                                 if (ecsRegion is { } match)
                                 {
                                     region = match.Region;
-                                    AddEcsResponse(scopedInput, match.PrefixLength, responseEcs);
+                                    selectedEcs = scopedInput;
+                                    selectedEcsScope = match.PrefixLength;
                                 }
                             }
                             if (region is not null)
@@ -306,7 +309,15 @@ internal static class DnsWireProtocol
                                 var regional = eligible.Where(s =>
                                     string.Equals(s.Region,region,
                                         StringComparison.OrdinalIgnoreCase)).ToArray();
-                                if (regional.Length > 0) eligible = regional;
+                                if (regional.Length > 0)
+                                {
+                                    eligible = regional;
+                                    // The ECS region is not the selected backend
+                                    // when all sites in it are unhealthy. Do not
+                                    // advertise an inapplicable cache scope.
+                                    if (selectedEcs is not null)
+                                        AddEcsResponse(selectedEcs, selectedEcsScope, responseEcs);
+                                }
                             }
                         }
                         else if (zone.RoutingPolicy == "GeoIpEcs" &&
