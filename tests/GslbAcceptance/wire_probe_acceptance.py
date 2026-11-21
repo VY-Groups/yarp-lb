@@ -98,9 +98,12 @@ def run():
                         except (OSError, TimeoutError):
                             response = b""
                         if response:
-                            flags, _ = dns_wire_probe.parse(
-                                response, txid, ZONE, qtype)
-                            dns_wire_probe.require((flags & 0xF) == 1,
+                            # FORMERR need not echo a malformed question, so
+                            # inspect only the DNS header, not the normal
+                            # successful-answer parser's IN-class contract.
+                            dns_wire_probe.require(len(response) >= 12 and
+                                int.from_bytes(response[:2], "big") == txid and
+                                (int.from_bytes(response[2:4], "big") & 0x800F) == 0x8001,
                                 "reserved zero question received a non-FORMERR response")
                         valid_id, valid_packet = dns_wire_probe.question(ZONE, 6)
                         valid_reply = dns_wire_probe.exchange(
