@@ -17,6 +17,8 @@ public static class PrivateKeyFileSecurity
     private const int LinuxNoFollow = 0x20000;
     private const int LinuxDirectory = 0x10000;
     private const int LinuxAtEmptyPath = 0x1000;
+    private const int LinuxFileExists = 17;
+    private const uint LinuxDirectoryPrivateMode = 0x1C0; // 0700
     private const uint LinuxStatxMode = 0x0002;
     private const uint LinuxStatxUid = 0x0008;
     private const uint GenericRead = 0x80000000;
@@ -41,30 +43,42 @@ public static class PrivateKeyFileSecurity
         finally { System.Security.Cryptography.CryptographicOperations.ZeroMemory(bytes); }
     }
 
-    /// <summary>Read bounded secret bytes from the same validated no-follow handle.</summary>
+    /// <summary>
+    /// Read using the same inspected, non-symlinked opened handle.
+    /// On Linux validate each parent directory and the final regular file;
+    /// Windows callers must separately enforce their required ACL policy.
+    /// </summary>
+    public static FileStream OpenPrivateFileRead(string? path, string purpose)
+    {
+        if (string.IsNullOrWhiteSpace(path) || !Path.IsPathFullyQualified(path))
+            throw new InvalidDataException($"{purpose} path must be absolute");
+        if (!OperatingSystem.IsWindows() && !OperatingSystem.IsLinux())
+            throw new PlatformNotSupportedException("Private-file loading supports Windows and Linux only");
+
+        SafeFileHandle? handle = null;
+        try
+        {
+            handle = OperatingSystem.IsLinux()
+                ? OpenLinuxNoFollow(path, purpose)
+                : OpenWindowsNoFollow(path, purpose);
+            var attributes = File.GetAttributes(handle);
+            if ((attributes & (FileAttributes.Directory | FileAttributes.ReparsePoint | FileAttributes.Device)) != 0)
+                throw new InvalidDataException($"{purpose} must be a regular file, not a directory, device, or link");
+            if (OperatingSystem.IsLinux())
+                ValidateLinuxOpenedObject(handle, purpose, isDirectory: false);
+            var stream = new FileStream(handle, FileAccess.Read);
+            handle = null;
+            return stream;
+        }
+        finally { handle?.Dispose(); }
+    }
+
+    /// <summary>Read bounded bytes from one validated, no-follow handle.</summary>
     public static byte[] ReadPrivateFileBytes(string? path, string purpose, int maximumBytes)
     {
         if (maximumBytes is < 1 or > 16 * 1024 * 1024)
             throw new ArgumentOutOfRangeException(nameof(maximumBytes));
-        if (string.IsNullOrWhiteSpace(path) || !Path.IsPathFullyQualified(path))
-            throw new InvalidDataException($"{purpose} path must be absolute");
-        if (!OperatingSystem.IsWindows() && !OperatingSystem.IsLinux())
-            throw new PlatformNotSupportedException("Private-key loading is supported only on Windows and Linux");
-
-        using var handle = OperatingSystem.IsLinux()
-            ? OpenLinuxNoFollow(path, purpose)
-            : OpenWindowsNoFollow(path, purpose);
-
-        var attributes = File.GetAttributes(handle);
-        if ((attributes & (FileAttributes.Directory | FileAttributes.ReparsePoint | FileAttributes.Device)) != 0)
-            throw new InvalidDataException($"{purpose} must be a regular file, not a directory, device, or link");
-
-        if (OperatingSystem.IsLinux())
-        {
-            ValidateLinuxOpenedObject(handle, purpose, isDirectory: false);
-        }
-
-        using var stream = new FileStream(handle, FileAccess.Read);
+        using var stream = OpenPrivateFileRead(path, purpose);
         var length = stream.Length;
         if (!stream.CanSeek || length <= 0 || length > maximumBytes)
             throw new InvalidDataException($"{purpose} must be a regular file no larger than {maximumBytes} bytes");
@@ -81,6 +95,35 @@ public static class PrivateKeyFileSecurity
             System.Security.Cryptography.CryptographicOperations.ZeroMemory(bytes);
             throw;
         }
+    }
+
+    /// <summary>Bounded streaming SHA-256 over the inspected handle, without a heap-sized replay buffer.</summary>
+    public static byte[] HashPrivateFileSha256(string? path, string purpose, int maximumBytes)
+    {
+        if (maximumBytes is < 1 or > 16 * 1024 * 1024)
+            throw new ArgumentOutOfRangeException(nameof(maximumBytes));
+        using var stream = OpenPrivateFileRead(path, purpose);
+        var length = stream.Length;
+        if (!stream.CanSeek || length <= 0 || length > maximumBytes)
+            throw new InvalidDataException($"{purpose} has an invalid bounded length");
+        using var hasher = System.Security.Cryptography.IncrementalHash.CreateHash(
+            System.Security.Cryptography.HashAlgorithmName.SHA256);
+        Span<byte> scratch = stackalloc byte[4096];
+        try
+        {
+            long remaining = length;
+            while (remaining > 0)
+            {
+                var read = stream.Read(scratch[..(int)Math.Min(remaining, scratch.Length)]);
+                if (read <= 0) throw new EndOfStreamException($"{purpose} shortened while hashing");
+                hasher.AppendData(scratch[..read]);
+                remaining -= read;
+            }
+            if (stream.ReadByte() != -1)
+                throw new InvalidDataException($"{purpose} grew while hashing");
+            return hasher.GetHashAndReset();
+        }
+        finally { System.Security.Cryptography.CryptographicOperations.ZeroMemory(scratch); }
     }
 
     /// <summary>
@@ -121,6 +164,70 @@ public static class PrivateKeyFileSecurity
                     next.Dispose();
                     throw new InvalidDataException($"{purpose} directory must be private to the service identity");
                 }
+
+                directory.Dispose();
+                directory = next;
+            }
+        }
+        finally { directory?.Dispose(); }
+    }
+
+    /// <summary>
+    /// Creates a private Linux state directory by walking each path component
+    /// relative to an already validated directory handle. Existing symlinks
+    /// are rejected before any child directory can be created through them.
+    /// </summary>
+    public static void EnsureLinuxPrivateStateDirectory(string? path, string purpose)
+    {
+        if (!OperatingSystem.IsLinux()) return;
+        if (string.IsNullOrWhiteSpace(path) || !Path.IsPathFullyQualified(path))
+            throw new InvalidDataException($"{purpose} directory path must be absolute");
+
+        var components = Path.GetFullPath(path).Split(Path.DirectorySeparatorChar,
+            StringSplitOptions.RemoveEmptyEntries);
+        if (components.Length == 0)
+            throw new InvalidDataException($"{purpose} directory must not be the filesystem root");
+
+        SafeFileHandle? directory = OpenLinux("/", LinuxReadOnly | LinuxDirectory | LinuxCloseOnExec,
+            purpose, "parent directory");
+        try
+        {
+            ValidateLinuxOpenedObject(directory, purpose, isDirectory: true);
+            for (var i = 0; i < components.Length; i++)
+            {
+                var created = false;
+                if (MkdirAtUnix(directory.DangerousGetHandle().ToInt32(), components[i],
+                        LinuxDirectoryPrivateMode) == 0)
+                {
+                    created = true;
+                }
+                else if (Marshal.GetLastPInvokeError() != LinuxFileExists)
+                {
+                    throw new InvalidDataException($"Unable to create {purpose} directory without following links",
+                        new Win32Exception(Marshal.GetLastPInvokeError()));
+                }
+
+                var next = OpenLinuxAt(directory, components[i],
+                    LinuxReadOnly | LinuxDirectory | LinuxNoFollow | LinuxCloseOnExec,
+                    purpose, "parent directory");
+                try
+                {
+                    var metadata = ValidateLinuxOpenedObject(next, purpose, isDirectory: true);
+                    if (created)
+                    {
+                        if (FchmodUnix(next.DangerousGetHandle().ToInt32(), LinuxDirectoryPrivateMode) != 0)
+                            throw new InvalidDataException($"Unable to set private permissions on {purpose} directory",
+                                new Win32Exception(Marshal.GetLastPInvokeError()));
+                        metadata = ValidateLinuxOpenedObject(next, purpose, isDirectory: true);
+                    }
+
+                    if (i == components.Length - 1 &&
+                        (((UnixFileMode)metadata.Mode & (UnixFileMode.GroupRead | UnixFileMode.GroupWrite |
+                          UnixFileMode.GroupExecute | UnixFileMode.OtherRead | UnixFileMode.OtherWrite |
+                          UnixFileMode.OtherExecute)) != 0))
+                        throw new InvalidDataException($"{purpose} directory must be private to the service identity");
+                }
+                catch { next.Dispose(); throw; }
 
                 directory.Dispose();
                 directory = next;
@@ -251,6 +358,12 @@ public static class PrivateKeyFileSecurity
 
     [DllImport("libc", EntryPoint = "openat", SetLastError = true, CharSet = CharSet.Ansi)]
     private static extern int OpenAtUnix(int directoryDescriptor, string path, int flags);
+
+    [DllImport("libc", EntryPoint = "mkdirat", SetLastError = true, CharSet = CharSet.Ansi)]
+    private static extern int MkdirAtUnix(int directoryDescriptor, string path, uint mode);
+
+    [DllImport("libc", EntryPoint = "fchmod", SetLastError = true)]
+    private static extern int FchmodUnix(int descriptor, uint mode);
 
     [DllImport("libc", EntryPoint = "statx", SetLastError = true, CharSet = CharSet.Ansi)]
     private static extern int StatxUnix(int directoryDescriptor, string path, int flags,

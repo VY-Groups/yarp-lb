@@ -11,7 +11,11 @@ only requests a new order inside its configured 1-to-60-day renewal window.
 
 The account private key is persisted only as ASP.NET Data Protection ciphertext
 under the private control-plane directory. Linux requires the account-key file
-and ACME JSON to be mode 0600 and the key directory to be private. Windows uses
+and ACME JSON to be mode 0600 and the key directory to be private.
+Account-key startup now validates the full Linux directory ancestry before
+creating or opening a key. Existing account ciphertext is read through the
+validated opened file handle with a 16 KiB hard bound and no symlink traversal;
+Windows retains the existing Data Protection and deployment ACL boundary. Windows uses
 the existing LocalMachine DPAPI-protected Data Protection key ring. The renewal
 worker adds up to three minutes of startup jitter, checks every six hours when
 the certificate is outside the renewal window, and uses jittered exponential
@@ -134,3 +138,16 @@ Disposable Windows/Linux TLS inventory tests validate legitimate settings,
 duplicate aliases, oversize and invalid UTF-8; Linux tests a linked ancestor.
 This is startup-input hardening only: it does not add DNS-01, staging CA
 validation, external renewal notifications or cross-node issuance coordination.
+
+### Private traffic certificate and password reads
+
+The ACME renewal coordinator and live TLS certificate rotator read the active
+PFX and password through the same bounded, no-follow opened-handle validator.
+PFX input is limited to 1 MiB (minimum 512 bytes), and password input to 16 KiB;
+temporary PFX/password byte arrays are cleared after use. Linux checks service
+or root ownership, private file modes and every parent component on the opened
+path. Windows rejects reparse-point files; service-identity ACLs remain an
+operator responsibility. Renewal fails before contacting the issuer when the
+PFX or password is linked, too large, or has unsafe Linux permissions. The
+Windows/Linux acceptance verifies live-certificate PFX link/mode rejection and
+renewal PFX/password link and password-mode rejection on Linux.
