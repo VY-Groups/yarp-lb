@@ -160,6 +160,55 @@ try
 }
 finally { outboxRoot.Delete(recursive: true); }
 
+// Resource changes now require a signed external intent plus a correlated
+// durable PREPARED event before any resource bytes are modified. This
+// disposable local test validates the spool's exact correlation and its
+// fail-closed behavior after partial/corrupt journal state.
+var resourceRoot = Directory.CreateTempSubdirectory("gateway-resource-audit-");
+try
+{
+    using var signer = System.Security.Cryptography.RSA.Create(2048);
+    using var transport = new ExternalAuditIntent(
+        new Uri("https://collector.example.invalid/audit/v1/intents"),
+        "node-test", new byte[32], signer.ExportSubjectPublicKeyInfoPem(),
+        new HttpClient(new CapturingHandler(HttpStatusCode.ServiceUnavailable, "")));
+    using var queue = new DurableAuditOutbox(resourceRoot.FullName, transport);
+    var local = new LocalAdminAudit(Path.Combine(resourceRoot.FullName, "resource-audit.jsonl"), queue);
+    var confirmed = Guid.NewGuid().ToString("N");
+    await local.AppendAsync("operator", "RESOURCE_MUTATION_PREPARED",
+        new { operation = "INVENTORY_ADD_INTENT", revision = new string('A', 64) },
+        confirmed);
+    Check(queue.Status() is { Pending: 1, StorageFault: false },
+        "verified resource PREPARED event persists before inventory/fleet mutation");
+    var eventFile = Directory.GetFiles(resourceRoot.FullName, "*.event").Single();
+    var recorded = System.Text.Json.JsonSerializer.Deserialize<ExternalAuditIntent.QueuedEvent>(
+        File.ReadAllBytes(eventFile))!;
+    using (var json = System.Text.Json.JsonDocument.Parse(recorded.Payload))
+    {
+        var row = json.RootElement;
+        Check(transport.ValidEvent(recorded) &&
+              row.GetProperty("operation").GetString() == "RESOURCE_MUTATION_PREPARED" &&
+              row.GetProperty("revision").GetString() ==
+                  Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
+                      System.Text.Encoding.ASCII.GetBytes(confirmed))),
+            "resource preparation is HMAC-authenticated and bound to exact signed intent ID");
+    }
+    var refused = false;
+    try { await local.AppendAsync("operator", "RESOURCE_MUTATION_PREPARED"); }
+    catch (InvalidDataException) { refused = true; }
+    Check(refused && queue.Status().Pending == 1,
+        "unsigned/uncorrelated resource PREPARED cannot enter durable event spool");
+    var invalidEvent = Path.Combine(resourceRoot.FullName, "incomplete.tmp");
+    File.WriteAllText(invalidEvent, "partial-append");
+    refused = false;
+    try { await local.AppendAsync("operator", "RESOURCE_MUTATION_PREPARED",
+        new { operation = "INVENTORY_DELETE_INTENT" }, confirmed); }
+    catch (InvalidDataException) { refused = true; }
+    Check(refused && queue.Status().StorageFault,
+        "corrupt resource audit queue latches failure and denies further prepared events");
+}
+finally { resourceRoot.Delete(recursive: true); }
+
 // A symlink in a *parent* component must not let a previously enrolled
 // audit queue be reopened through a different directory identity.
 if (OperatingSystem.IsLinux())
