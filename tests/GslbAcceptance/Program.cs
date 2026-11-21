@@ -92,6 +92,8 @@ try
     foreach (var request in new[] { client1Request, client1RotatedRequest, client2Request, client3Request })
     {
         request.CertificateExtensions.Add(new X509BasicConstraintsExtension(false, false, 0, true));
+        request.CertificateExtensions.Add(new X509KeyUsageExtension(
+            X509KeyUsageFlags.DigitalSignature, true));
         var eku = new OidCollection { new Oid("1.3.6.1.5.5.7.3.2") };
         request.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension(eku, true));
     }
@@ -99,6 +101,44 @@ try
     using var client1Rotated = client1RotatedRequest.CreateSelfSigned(DateTimeOffset.UtcNow.AddMinutes(-1), DateTimeOffset.UtcNow.AddHours(1));
     using var client2 = client2Request.CreateSelfSigned(DateTimeOffset.UtcNow.AddMinutes(-1), DateTimeOffset.UtcNow.AddHours(1));
     using var client3 = client3Request.CreateSelfSigned(DateTimeOffset.UtcNow.AddMinutes(-1), DateTimeOffset.UtcNow.AddHours(1));
+    if (!AgentHealthReportStore.IsValidClientAuthenticationCertificate(client1) ||
+        !AgentHealthReportStore.IsValidClientAuthenticationCertificate(client1Rotated))
+        throw new Exception("FAIL: legitimate client-auth signing leaf or overlapping pin rejected");
+
+    // A pinned transport certificate must not be a CA, server-only identity,
+    // or a leaf without explicit signing usage. Use real certificate objects
+    // rather than mocking the metadata returned by X509Certificate2.
+    using var negativeKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+    X509Certificate2 TestObserverCertificate(bool isCa, bool hasConstraints,
+        bool includeUsage, X509KeyUsageFlags usage, string ekuOid)
+    {
+        var request = new CertificateRequest("CN=observer-policy-negative",
+            negativeKey, HashAlgorithmName.SHA256);
+        if (hasConstraints)
+            request.CertificateExtensions.Add(new X509BasicConstraintsExtension(isCa, false, 0, true));
+        if (includeUsage)
+            request.CertificateExtensions.Add(new X509KeyUsageExtension(usage, true));
+        if (!string.IsNullOrEmpty(ekuOid))
+            request.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension(
+                new OidCollection { new Oid(ekuOid) }, true));
+        return request.CreateSelfSigned(DateTimeOffset.UtcNow.AddMinutes(-1),
+            DateTimeOffset.UtcNow.AddHours(1));
+    }
+    foreach (var (label, ca, basic, hasUsage, usage, eku) in new[]
+    {
+        ("CA client-auth certificate", true, true, true, X509KeyUsageFlags.DigitalSignature, "1.3.6.1.5.5.7.3.2"),
+        ("leaf lacking basic constraints", false, false, true, X509KeyUsageFlags.DigitalSignature, "1.3.6.1.5.5.7.3.2"),
+        ("leaf without explicit key usage", false, true, false, X509KeyUsageFlags.None, "1.3.6.1.5.5.7.3.2"),
+        ("encipherment-only client certificate", false, true, true, X509KeyUsageFlags.KeyEncipherment, "1.3.6.1.5.5.7.3.2"),
+        ("server-auth leaf certificate", false, true, true, X509KeyUsageFlags.DigitalSignature, "1.3.6.1.5.5.7.3.1"),
+        ("leaf without EKU", false, true, true, X509KeyUsageFlags.DigitalSignature, "")
+    })
+    {
+        using var invalid = TestObserverCertificate(ca, basic, hasUsage, usage, eku);
+        if (AgentHealthReportStore.IsValidClientAuthenticationCertificate(invalid))
+            throw new Exception("FAIL: observer mTLS accepted " + label);
+    }
+    Console.WriteLine("PASS: observer mTLS accepts only explicit client-auth signing leaf certificates");
     var key1Path = Path.Combine(reportRoot, "agent-1.pem");
     var key1RotatedPath = Path.Combine(reportRoot, "agent-1-rotated.pem");
     var key2Path = Path.Combine(reportRoot, "agent-2.pem");
@@ -239,6 +279,10 @@ try
     }
     using (var reports = new AgentHealthReportStore(agents, targets, statePath, 10, 5, 2))
     {
+        if (!reports.IsAuthorizedCertificate(client1, "agent-1") ||
+            !reports.IsAuthorizedCertificate(client1Rotated, "agent-1") ||
+            reports.IsAuthorizedCertificate(client1, "agent-2"))
+            throw new Exception("FAIL: observer mTLS certificate pin and agent scope changed");
         if (!reports.TryReserveRequest("agent-1", 100, 1) ||
             reports.TryReserveRequest("agent-1", 101, 1) ||
             !reports.TryReserveRequest("agent-1", 60_100, 1))
