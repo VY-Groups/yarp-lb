@@ -40,6 +40,43 @@ class DnsWireProbeTests(unittest.TestCase):
         self.assertEqual([tcp for _, tcp in seen], [False, True])
         self.assertEqual(seen[0][0], seen[1][0])
 
+    def test_partial_rr_on_truncated_udp_is_retried_over_tcp(self):
+        calls = []
+        def transport(host, port, packet, tcp, timeout):
+            calls.append(tcp)
+            if not tcp:
+                # TC=1 with a declared answer and incomplete RR: legal UDP
+                # truncation, but not a parseable complete RR section.
+                partial = bytearray(reply(packet, 0x8200))
+                struct.pack_into("!H", partial, 6, 1)
+                return bytes(partial) + b"\\xc0\\x0c\\x00"
+            return reply(packet, 0x8000)
+        with patch.object(probe, "exchange", side_effect=transport):
+            flags, records, _ = probe.check("127.0.0.1", 5353, "example.test",
+                                            "example.test", 1, False, 1)
+        self.assertEqual(flags, 0x8000)
+        self.assertEqual(records, [])
+        self.assertEqual(calls, [False, True])
+
+    def test_oversized_udp_reply_fails_before_tcp_retry(self):
+        calls = []
+        def transport(host, port, packet, tcp, timeout):
+            calls.append(tcp)
+            return reply(packet, 0x8200) + b"\\0" * 512
+        with patch.object(probe, "exchange", side_effect=transport):
+            with self.assertRaisesRegex(AssertionError, "advertised payload limit"):
+                probe.check("127.0.0.1", 5353, "example.test",
+                            "example.test", 1, False, 1)
+        self.assertEqual(calls, [False])
+
+    def test_truncated_udp_must_echo_valid_question(self):
+        def transport(host, port, packet, tcp, timeout):
+            return reply(packet, 0x8200)[:12]
+        with patch.object(probe, "exchange", side_effect=transport):
+            with self.assertRaisesRegex(AssertionError, "truncated DNS name"):
+                probe.check("127.0.0.1", 5353, "example.test",
+                            "example.test", 1, False, 1)
+
     def test_truncated_tcp_is_rejected(self):
         with patch.object(probe, "exchange", side_effect=lambda h, p, packet, tcp, t: reply(packet, 0x8200)):
             with self.assertRaisesRegex(AssertionError, "TCP response unexpectedly truncated"):
