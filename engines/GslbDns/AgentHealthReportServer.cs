@@ -103,6 +103,20 @@ internal sealed class AgentHealthReportServer : IAsyncDisposable
             {
                 var authenticatedAgentId = store.AgentIdForCertificate(
                     context.Connection.ClientCertificate, revoked);
+                // Authenticate and charge every admitted request before
+                // reading or parsing its body. Invalid JSON must not bypass
+                // the per-agent work budget or consume another identity's quota.
+                if (authenticatedAgentId is null)
+                {
+                    metrics.AgentReportRejected();
+                    return Results.StatusCode(StatusCodes.Status403Forbidden);
+                }
+                if (!store.TryReserveRequest(authenticatedAgentId, Environment.TickCount64, config.MaxReportsPerMinute))
+                {
+                    store.RecordRejectedReport(authenticatedAgentId);
+                    metrics.AgentReportRejected();
+                    return Results.StatusCode(StatusCodes.Status429TooManyRequests);
+                }
                 AgentHealthReport? report;
                 try
                 {
@@ -114,8 +128,7 @@ internal sealed class AgentHealthReportServer : IAsyncDisposable
                         if (read == 0) break;
                         if (body.Length + read > AgentHealthReportContract.MaximumSerializedBytes)
                         {
-                            if (authenticatedAgentId is not null)
-                                store.RecordRejectedReport(authenticatedAgentId);
+                            store.RecordRejectedReport(authenticatedAgentId);
                             metrics.AgentReportRejected();
                             return Results.StatusCode(StatusCodes.Status413PayloadTooLarge);
                         }
@@ -124,8 +137,7 @@ internal sealed class AgentHealthReportServer : IAsyncDisposable
                     var payload = body.ToArray();
                     if (!StrictJsonPropertyNames.HasNoDuplicates(payload))
                     {
-                        if (authenticatedAgentId is not null)
-                            store.RecordRejectedReport(authenticatedAgentId);
+                        store.RecordRejectedReport(authenticatedAgentId);
                         metrics.AgentReportRejected();
                         return Results.BadRequest();
                     }
@@ -133,30 +145,22 @@ internal sealed class AgentHealthReportServer : IAsyncDisposable
                 }
                 catch (JsonException)
                 {
-                    if (authenticatedAgentId is not null)
-                        store.RecordRejectedReport(authenticatedAgentId);
+                    store.RecordRejectedReport(authenticatedAgentId);
                     metrics.AgentReportRejected();
                     return Results.BadRequest();
                 }
                 if (report is null)
                 {
-                    if (authenticatedAgentId is not null)
-                        store.RecordRejectedReport(authenticatedAgentId);
+                    store.RecordRejectedReport(authenticatedAgentId);
                     metrics.AgentReportRejected();
                     return Results.BadRequest();
                 }
                 var agentId = authenticatedAgentId;
-                if (agentId is null || !string.Equals(agentId, report.AgentId, StringComparison.Ordinal))
-                {
-                    if (agentId is not null) store.RecordRejectedReport(agentId);
-                    metrics.AgentReportRejected();
-                    return Results.StatusCode(StatusCodes.Status403Forbidden);
-                }
-                if (!store.TryReserveRequest(agentId, Environment.TickCount64, config.MaxReportsPerMinute))
+                if (!string.Equals(agentId, report.AgentId, StringComparison.Ordinal))
                 {
                     store.RecordRejectedReport(agentId);
                     metrics.AgentReportRejected();
-                    return Results.StatusCode(StatusCodes.Status429TooManyRequests);
+                    return Results.StatusCode(StatusCodes.Status403Forbidden);
                 }
                 bool accepted;
                 try
