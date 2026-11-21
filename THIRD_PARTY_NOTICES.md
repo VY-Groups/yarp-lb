@@ -1,36 +1,44 @@
-# Third-party notices
+# Reference projects and historical license records
 
-## OpenGSLB NSEC3 hash encoding
+## OpenGSLB — technical reference only (owner clarification, 2026-11-21)
 
-GatewayCore's opt-in DNSSEC NSEC3 SHA-1/base32hex hash encoding in
-`engines/GslbDns/DnssecZoneSigner.cs` is adapted from the bounded hash
-calculation in OpenGSLB, `pkg/dnssec/nsec3.go`.
+The owner confirms that OpenGSLB was examined to understand DNS/GSLB
+architecture and expected functionality. GatewayCore's opt-in NSEC3 logic in
+`engines/GslbDns/DnssecZoneSigner.cs` is a separate C# implementation of
+the RFC 5155 algorithm; no OpenGSLB Go package is linked. A comparison of
+the OpenGSLB Go function and the GatewayCore C# implementation shows
+different language/framework structures implementing the same public
+DNSSEC standard. That comparison alone cannot resolve the origin of every
+historical source annotation.
 
-Copyright 2025 Logan Ross. The original file is marked
-`AGPL-3.0-or-later OR LicenseRef-OpenGSLB-Commercial`. This project uses the
-AGPL-3.0-or-later option for this adapted material. Only the canonical NSEC3
-hash encoding was adapted; OpenGSLB's synthetic denial-proof generation was
-not used. GatewayCore creates a complete hash ring from its configured
-authoritative names and constructs denial proofs from that ring.
+The existing C# source has historically carried a file-level
+`AGPL-3.0-or-later` SPDX marker and referenced the OpenGSLB source file
+`pkg/dnssec/nsec3.go`. OpenGSLB's source records
+**Copyright 2025 Logan Ross** and
+`AGPL-3.0-or-later OR LicenseRef-OpenGSLB-Commercial`.
+These details are retained as **historical provenance records pending
+independent review**, not as a confirmed conclusion that third-party
+implementation code was used. An owner statement of reference-only use also
+does not, by itself, settle the legal status of legacy marks. Preserve
+the original repository history and source notices until a review confirms
+what licensing, if any, applies to the current implementation.
 
-## GatewayCore ownership and licensing transition
+GatewayCore's denial-proof generation builds its own authoritative-name
+hash ring and RFC 5155 closest-encloser, next-closer, wildcard and exact-owner
+proofs. This file is a reference/provenance ledger, not a new software
+license, assignment or third-party endorsement.
 
-The owner intends GatewayCore to become a **proprietary commercial product**.
-A customer licensing/activation module and commercial license terms are
-**deferred until the remaining software development issues are closed**.
-There is no root `LICENSE` file in the current main-branch checkout; prior
-repository revisions included an AGPL-3.0-or-later project-wide license.
-The absence of that file now does not revoke any valid licenses previously
-granted for those revisions.
+## GatewayCore ownership and future licensing
 
-**Do not infer that the current source tree is already free of AGPL duties.**
-The NSEC3 adaptation described above remains attributed to third-party
-AGPL-3.0-or-later material. The OpenGSLB commercial alternative has **not**
-been established in this repository. Before proprietary distribution or
-use of modified network-service code, the owner must obtain appropriate
-rights or arrange a legally reviewed clean replacement. Retain provenance
-records and license notices; do not delete or relabel upstream attribution
-to force a proprietary status.
+GatewayCore is intended to be an **owner-controlled proprietary software
+product**, not an open-source product offering. The customer license,
+activation and pricing module is deferred until outstanding software
+development issues are complete.
 
-This file reports the known source provenance; it is not itself a new
-customer license or an assertion that all dependencies are cleared.
+The current checkout has no root `LICENSE` file. Earlier revisions included
+a project-wide AGPL text and an interpretation of the NSEC3 source's
+provenance that the owner has now disputed. Preserve the history; do not
+claim either that prior grants can be revoked simply by editing a README
+or that the present code necessarily carries the reference project's license.
+A proper provenance/legal review is required before issuing definitive
+closed-source distribution and network-service licensing claims.

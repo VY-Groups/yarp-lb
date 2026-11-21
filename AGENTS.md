@@ -6,8 +6,8 @@
 
 - GatewayCore is intended as a **proprietary, owner-controlled product**, not an open-source product offering. Do not describe the entire repository as currently AGPL licensed simply because historical revisions were.
 - Do **not** implement a license server, activation gate, tiering, subscription enforcement or commercial pricing now; defer that phase until the remaining software issues are completed.
-- Current `main` has no root `LICENSE` file, but its NSEC3 hash-encoding code in `engines/GslbDns/DnssecZoneSigner.cs` remains a disclosed **AGPL-derived third-party adaptation**. See `THIRD_PARTY_NOTICES.md`. Neither removal of old root license wording nor proprietary intent erases existing grants or upstream obligations.
-- Keep the original copyright/SPDX provenance and security behavior intact until a qualified licensing/provenance review permits alternative commercial rights or a properly reviewed replacement. Do not claim closed-source redistribution is cleared, and never delete third-party copyright notices merely to change branding.
+- The owner explicitly confirms **OpenGSLB was a technical reference only**; the separate C# NSEC3 implementation follows RFC 5155. **Do not describe GatewayCore code as originating from the reference project** without verified provenance evidence. The current checkout has no root `LICENSE`; older Git revisions and existing C# SPDX/copyright markings make licensing status a **review item**, not a finding. See `THIRD_PARTY_NOTICES.md`.
+- Preserve legacy source annotations and Git history while an independent provenance/licensing assessment is pending. Do not infer licensing obligations from matching an RFC algorithm, silently change source legal markers, or claim closed-source release clearance without review. Continue software development without adding a customer licensing module yet.
 - Keep code changes and independent reviews moving concurrently. Close individual software issues only with exact-head acceptance evidence; #36 remains the physical/operational release gate.
 
 ## Project and release boundary

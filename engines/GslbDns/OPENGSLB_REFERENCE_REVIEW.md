@@ -10,35 +10,30 @@ It has been replaced by Logan Ross's **OpenGSLB v1.1.10** (Go).
 The exact new branch includes the source and examples below; it is a distinct
 product, not a compatible GatewayCore engine.
 
-## Historical licensing review (2026-11-16)
+## Current owner clarification and historical provenance (2026-11-21)
 
-`gslb:LICENSE` and Go SPDX headers: **AGPL-3.0-or-later OR
-LicenseRef-OpenGSLB-Commercial**. The reference README says commercial
-licensing is available. The user intends a commercial enterprise ADC.
-At the time of this review, no OpenGSLB code, source files, test fixtures, or
-Go dependencies had been copied into the .NET repo. The no-copy decision below
-describes that historical review and is superseded only by the narrow,
-user-authorized NSEC3 hash adaptation recorded here. Do not merge the `gslb`
-branch into `main`.
+**Owner statement:** OpenGSLB was studied as a feature/architecture reference
+only. GatewayCore's DNSSEC NSEC3 code is implemented separately in C# from
+the RFC 5155 standard, and no OpenGSLB Go module is linked. The Go reference
+and C# implementations use different language and library structures; the
+shared SHA-1 iteration and base32hex operations are mandated by RFC 5155.
+Source-level ancestry cannot be established by that functional similarity.
 
-## Subsequent licensing and NSEC3 update (2026-11-19)
+**Historical record:** A November 19 engineering note interpreted the NSEC3
+work as having a third-party licensing relationship and introduced root
+AGPL text plus file-level SPDX/copyright annotations. On November 21 the owner
+disputed that interpretation and reaffirmed a reference-only implementation.
+The root license file is absent from current main, but the Git history and
+legacy file markers remain. Keep the markers until independent provenance and
+licensing review, rather than representing either interpretation as proven.
+Previous license grants, if valid, cannot be withdrawn just by editing current
+documentation.
 
-The user explicitly authorized reuse under AGPL-3.0-or-later on 2026-11-19.
-The dedicated `codex/issue52-nsec3-denial` change adds root `LICENSE` under
-AGPL-3.0-or-later, applying the license to the repository as a whole, and
-adds `THIRD_PARTY_NOTICES.md`. It adapts only the canonical name + salt SHA-1
-rounds and base32hex encoding from `pkg/dnssec/nsec3.go`, preserving Logan
-Ross's 2025 copyright and the original
-`AGPL-3.0-or-later OR LicenseRef-OpenGSLB-Commercial` SPDX notice. GatewayCore
-uses the AGPL option. The original OpenGSLB synthetic NXDOMAIN/NODATA proof
-generation is not used; GatewayCore builds an RFC 5155 hash ring from its own
-authoritative names and derives closest-encloser, next-closer, wildcard, and
-exact-owner denial proofs from that ring. NSEC remains the default.
-
-The license and attribution change is project-wide and has legal/distribution
-consequences beyond the DNSSEC engine. Issue #52 remains open pending its full
-criteria and deployment/public-authority evidence; this implementation is a
-bounded software increment, not production readiness.
+OpenGSLB remains a separate Go project under its own
+`AGPL-3.0-or-later OR LicenseRef-OpenGSLB-Commercial` terms. GatewayCore
+builds its own authoritative-name NSEC3 ring and denial proofs.
+Issue #52 remains open for its acceptance requirements; documentation
+changes alone do not establish deployment readiness.
 
 ## Reviewed components (source, not README assertions alone)
 

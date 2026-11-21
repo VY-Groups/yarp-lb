@@ -9,17 +9,17 @@ the remaining development issues are completed**. No commercial licensing
 module, license server, subscription enforcement or customer activation scheme
 is implemented or authorized by this statement.
 
-**Important current-source exception:** the current checkout has **no root
-`LICENSE` file**, but [third-party notices](THIRD_PARTY_NOTICES.md) identify
-NSEC3 hash encoding adapted from OpenGSLB under **AGPL-3.0-or-later**. Earlier
-repository revisions also contained project-wide AGPL license text. Neither
-removing a license file nor describing the intended business model retroactively
-withdraws rights previously granted or clears the adapted source for a
-closed-source product. The copyright holder must resolve provenance and
-third-party license compatibility (for example, with properly obtained
-commercial rights or independently developed replacement and legal review)
-**before any proprietary redistribution or network deployment**. Do not
-represent the current tree as fully license-cleared.
+**Reference-only clarification from the owner (2026-11-21):** OpenGSLB was
+consulted as a **technical reference**, not used as an implementation source.
+GatewayCore's DNSSEC NSEC3 functionality is written in C# to follow RFC 5155;
+no OpenGSLB Go module is linked. Historical source-level SPDX/copyright text
+and older project-wide AGPL statements require a separate provenance review,
+because those records assert a different licensing interpretation. The current
+checkout has no root `LICENSE` file. Do not present historical annotations as
+proof of third-party code reuse or label the whole product open source.
+Equally, do not delete earlier copyright/license records or claim a proprietary
+release legally cleared until their origin and any previously granted rights
+have been assessed.
 
 Repository visibility is separate from copyright: a GitHub repository can be
 public without being an offered open-source product, but public source remains
@@ -223,12 +223,14 @@ DNS interoperability and physical DC/DR failover remain open.
 - [Updated OpenGSLB source review and licensing boundary](engines/GslbDns/OPENGSLB_REFERENCE_REVIEW.md)
 - [P0 authoritative GSLB issue #52](../../issues/52)
 
-The `gslb` reference branch contains **OpenGSLB** under AGPL or separately
-negotiated commercial terms. Although GatewayCore does not link OpenGSLB Go
-modules, **the NSEC3 hash-encoding logic was adapted from that project and is
-attributed in the source**. Do not mistake the independently implemented
-other GSLB features for clearance of this specifically adapted code.
-Proprietary redistribution requires an upstream rights/provenance review.
+The `gslb` branch contains **OpenGSLB as a read-only technical reference**,
+under its own separate licensing terms. The owner confirms that GatewayCore
+was independently implemented in .NET, using standards such as RFC 5155 and
+the reference project only to understand expected features and behavior.
+No OpenGSLB Go module is linked. A historical SPDX/copyright annotation in
+the C# DNSSEC file remains under independent provenance review and is **not
+a verified finding that the implementation came from that project**. The
+review must be resolved before asserting commercial license clearance.
 Feature and cost tables are requirements inputs, not vendor certifications.
 
 ## SMTP providers and security verification
