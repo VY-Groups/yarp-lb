@@ -135,6 +135,13 @@ public static class AgentFleetRotationAcceptance
                 await RequireEventually(nodes[0], newController, HttpStatusCode.OK,
                     "node 1 accepts candidate new identity during partial rollout");
                 LogRotationOutcome(nodes[0].Index, "partial-rollout", newController, "accepted");
+                // Prove the deliberately wrong pin was actually applied.
+                // A forbidden response to the intended new controller alone
+                // also matches the pre-rollout config and is not evidence that
+                // the bad config ever became active on node 2.
+                await RequireEventually(nodes[1], wrongController, HttpStatusCode.OK,
+                    "node 2 applied the deliberately wrong controller pin before rollback");
+                LogRotationOutcome(nodes[1].Index, "partial-rollout", wrongController, "accepted");
                 await RequireStatus(nodes[1], newController, HttpStatusCode.Forbidden,
                     "node 2 rejects candidate identity after bad pin delivery");
                 LogRotationOutcome(nodes[1].Index, "partial-rollout", newController, "denied");
