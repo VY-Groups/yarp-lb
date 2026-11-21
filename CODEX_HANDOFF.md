@@ -5,17 +5,16 @@
 This is the latest verified continuation state; older same-day snapshots below
 are historical when their branch, issue, or CI state differs.
 
-- `main` is `3eaed085c1837462a803204a8339e8d342911379`, including PRs #321,
-  #323–#326. PR #325's updated CodeQL, Windows/Linux, DNS/L7, full-build and
-  ten Windows HA checks passed before merge. PR #326's exact-head CodeQL,
-  Windows/Linux DNS, L7, HA and load checks passed before merge. Main push
-  workflows for this newest merge still require verification.
+- `main` is `1501769680440c5ba6b7d9c187a3695f8ef04652`, including PRs #321,
+  #323–#330. PR #327's Windows/Linux account-key, ACME and ten-run HA checks,
+  PR #328's CodeQL inventory and actionlint checks, PR #329's documentation
+  checks, and PR #330's Windows/Linux DNS, L7, HA and CodeQL checks passed on
+  their exact heads before merge. The combined `main` DNS, L7 and CodeQL push
+  workflows are still running and must be checked before release.
 - Ten issues remain open: #34, #36, #37, #38, #48, #49, #51, #52, #53, and
-  #109. Five PRs are currently open: #327 ACME account-key storage, #328
-  CodeQL findings inventory, #329 acceptance evidence ledger, #330 authority
-  publisher shutdown, and #331 audit receipt header validation. Their latest
-  heads are being reviewed and refreshed CI is running; none is described here
-  as fully verified or merge-ready yet.
+  #109. PR #331 is the only open PR; it validates and bounds audit-receipt
+  response headers. Its updated exact-head checks and CodeQL comparison are
+  pending.
 - PR #327 addresses account-key persistence only; it does not complete ACME
   issuance and zero-downtime renewal. #330 addresses authority publisher
   shutdown only; it does not close the broader #109 health-authority scope.
