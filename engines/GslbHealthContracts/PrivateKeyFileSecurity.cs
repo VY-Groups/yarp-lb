@@ -17,6 +17,8 @@ public static class PrivateKeyFileSecurity
     private const int LinuxNoFollow = 0x20000;
     private const int LinuxDirectory = 0x10000;
     private const int LinuxAtEmptyPath = 0x1000;
+    private const int LinuxFileExists = 17;
+    private const uint LinuxDirectoryPrivateMode = 0x1C0; // 0700
     private const uint LinuxStatxMode = 0x0002;
     private const uint LinuxStatxUid = 0x0008;
     private const uint GenericRead = 0x80000000;
@@ -170,6 +172,70 @@ public static class PrivateKeyFileSecurity
         finally { directory?.Dispose(); }
     }
 
+    /// <summary>
+    /// Creates a private Linux state directory by walking each path component
+    /// relative to an already validated directory handle. Existing symlinks
+    /// are rejected before any child directory can be created through them.
+    /// </summary>
+    public static void EnsureLinuxPrivateStateDirectory(string? path, string purpose)
+    {
+        if (!OperatingSystem.IsLinux()) return;
+        if (string.IsNullOrWhiteSpace(path) || !Path.IsPathFullyQualified(path))
+            throw new InvalidDataException($"{purpose} directory path must be absolute");
+
+        var components = Path.GetFullPath(path).Split(Path.DirectorySeparatorChar,
+            StringSplitOptions.RemoveEmptyEntries);
+        if (components.Length == 0)
+            throw new InvalidDataException($"{purpose} directory must not be the filesystem root");
+
+        SafeFileHandle? directory = OpenLinux("/", LinuxReadOnly | LinuxDirectory | LinuxCloseOnExec,
+            purpose, "parent directory");
+        try
+        {
+            ValidateLinuxOpenedObject(directory, purpose, isDirectory: true);
+            for (var i = 0; i < components.Length; i++)
+            {
+                var created = false;
+                if (MkdirAtUnix(directory.DangerousGetHandle().ToInt32(), components[i],
+                        LinuxDirectoryPrivateMode) == 0)
+                {
+                    created = true;
+                }
+                else if (Marshal.GetLastPInvokeError() != LinuxFileExists)
+                {
+                    throw new InvalidDataException($"Unable to create {purpose} directory without following links",
+                        new Win32Exception(Marshal.GetLastPInvokeError()));
+                }
+
+                var next = OpenLinuxAt(directory, components[i],
+                    LinuxReadOnly | LinuxDirectory | LinuxNoFollow | LinuxCloseOnExec,
+                    purpose, "parent directory");
+                try
+                {
+                    var metadata = ValidateLinuxOpenedObject(next, purpose, isDirectory: true);
+                    if (created)
+                    {
+                        if (FchmodUnix(next.DangerousGetHandle().ToInt32(), LinuxDirectoryPrivateMode) != 0)
+                            throw new InvalidDataException($"Unable to set private permissions on {purpose} directory",
+                                new Win32Exception(Marshal.GetLastPInvokeError()));
+                        metadata = ValidateLinuxOpenedObject(next, purpose, isDirectory: true);
+                    }
+
+                    if (i == components.Length - 1 &&
+                        (((UnixFileMode)metadata.Mode & (UnixFileMode.GroupRead | UnixFileMode.GroupWrite |
+                          UnixFileMode.GroupExecute | UnixFileMode.OtherRead | UnixFileMode.OtherWrite |
+                          UnixFileMode.OtherExecute)) != 0))
+                        throw new InvalidDataException($"{purpose} directory must be private to the service identity");
+                }
+                catch { next.Dispose(); throw; }
+
+                directory.Dispose();
+                directory = next;
+            }
+        }
+        finally { directory?.Dispose(); }
+    }
+
     /// <summary>Validates an existing Linux state file using the opened object, without following links.</summary>
     public static void ValidateLinuxPrivateStateFile(string? path, string purpose)
     {
@@ -292,6 +358,12 @@ public static class PrivateKeyFileSecurity
 
     [DllImport("libc", EntryPoint = "openat", SetLastError = true, CharSet = CharSet.Ansi)]
     private static extern int OpenAtUnix(int directoryDescriptor, string path, int flags);
+
+    [DllImport("libc", EntryPoint = "mkdirat", SetLastError = true, CharSet = CharSet.Ansi)]
+    private static extern int MkdirAtUnix(int directoryDescriptor, string path, uint mode);
+
+    [DllImport("libc", EntryPoint = "fchmod", SetLastError = true)]
+    private static extern int FchmodUnix(int descriptor, uint mode);
 
     [DllImport("libc", EntryPoint = "statx", SetLastError = true, CharSet = CharSet.Ansi)]
     private static extern int StatxUnix(int directoryDescriptor, string path, int flags,

@@ -451,19 +451,15 @@ internal sealed class AgentHealthReportStore : IDisposable
     private static FileStream AcquireStateLock(string path, out bool newLock)
     {
         var parent = Path.GetDirectoryName(path)!;
-        var existed = Directory.Exists(parent);
-        Directory.CreateDirectory(parent);
-        if (!OperatingSystem.IsWindows())
-        {
-            if (!existed) File.SetUnixFileMode(parent, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
-            else if ((File.GetUnixFileMode(parent) & (UnixFileMode.GroupRead | UnixFileMode.GroupWrite |
-                    UnixFileMode.GroupExecute | UnixFileMode.OtherRead | UnixFileMode.OtherWrite |
-                    UnixFileMode.OtherExecute)) != 0)
-                throw new InvalidDataException("Replay state directory must be private to the DNS service account");
-            PrivateKeyFileSecurity.ValidateLinuxPrivateStateDirectory(
+        if (OperatingSystem.IsLinux())
+            PrivateKeyFileSecurity.EnsureLinuxPrivateStateDirectory(
                 parent, "GSLB observer replay state");
+        else if (OperatingSystem.IsWindows())
+        {
+            Directory.CreateDirectory(parent);
+            EnsurePrivateWindowsAcl(parent, isDirectory: true);
         }
-        else EnsurePrivateWindowsAcl(parent, isDirectory: true);
+        else throw new PlatformNotSupportedException("Observer replay state supports Windows and Linux only");
         var lockPath = path + ".lock";
         EnsureNotLink(lockPath);
         EnsureNotLink(path);
