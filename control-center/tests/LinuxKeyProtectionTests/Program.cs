@@ -26,7 +26,8 @@ var previousEnv=new[] {
     "YARP_LINUX_DP_CERT_PASSWORD_FILE",
     "YARP_LINUX_DP_OLD_CERT_PFX_PATH","YARP_LINUX_DP_OLD_CERT_PASSWORD_FILE",
     LinuxDpRecoveryEvidence.ManifestEnv, LinuxDpRecoveryEvidence.PublicKeyEnv,
-    LinuxDpRecoveryEvidence.MinimumRevisionEnv
+    LinuxDpRecoveryEvidence.MinimumRevisionEnv,
+    LinuxDpRecoveryEvidence.RequireEvidenceEnv
 }.ToDictionary(k=>k,k=>Environment.GetEnvironmentVariable(k));
 void Set(string key,string? value) => Environment.SetEnvironmentVariable(key,value);
 (string Pfx,string PasswordFile) CreateCertificate(string prefix,
@@ -233,6 +234,7 @@ try
         Set(LinuxDpRecoveryEvidence.ManifestEnv,attestationPath);
         Set(LinuxDpRecoveryEvidence.PublicKeyEnv,trustedPublicPath);
         Set(LinuxDpRecoveryEvidence.MinimumRevisionEnv,"42");
+        Set(LinuxDpRecoveryEvidence.RequireEvidenceEnv,"true");
         using(var service=Provider(state))
             Assert(service.GetRequiredService<IDataProtectionProvider>()
                 .CreateProtector("session-probe").Unprotect(encrypted)=="sensitive-session-value-123",
@@ -285,9 +287,23 @@ try
         Assert(Throws(()=>{using var _=Provider(state);}),
             "incomplete recovery attestation configuration fails closed");
         Set(LinuxDpRecoveryEvidence.PublicKeyEnv,trustedPublicPath);
+        Set(LinuxDpRecoveryEvidence.RequireEvidenceEnv,"TRUE");
+        Assert(Throws(()=>{using var _=Provider(state);}),
+            "unrecognized recovery requirement spelling fails closed");
+        Set(LinuxDpRecoveryEvidence.RequireEvidenceEnv,"true");
         Set(LinuxDpRecoveryEvidence.ManifestEnv,null);
         Set(LinuxDpRecoveryEvidence.PublicKeyEnv,null);
         Set(LinuxDpRecoveryEvidence.MinimumRevisionEnv,null);
+        Assert(Throws(()=>{using var _=Provider(state);}),
+            "mandatory signed Linux recovery cannot silently start without external attestation");
+        // Backward-compatible standalone mode remains optional, without
+        // turning a required signed-fleet restore into an accepted fallback.
+        Set(LinuxDpRecoveryEvidence.RequireEvidenceEnv,null);
+        using(var service=Provider(state))
+            Assert(service.GetRequiredService<IDataProtectionProvider>()
+                .CreateProtector("session-probe").Unprotect(encrypted) ==
+                "sensitive-session-value-123",
+                "standalone Linux DP mode still reads its approved encrypted ring");
     }
     // Build a real legacy plaintext ring with ASP.NET's unwrapped file
     // repository, then ensure protected mode refuses it without mutation.
