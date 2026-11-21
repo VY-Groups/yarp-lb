@@ -11,7 +11,7 @@
 
 ## Live inventory at snapshot
 
-Open development issues: #34 #37 #38 #48 #49 #51 #52 #53 #109. Open physical: #36. #100/#101 are closed but closure evidence requires an audit. Open PRs: #325 certificate authorization, #326 observer request budget, #327 ACME account-key persistence, #328 CodeQL report. **Do not assume these heads remain current.** Latest known main push runs: [Actions](https://github.com/VY-Groups/yarp-lb/actions?query=branch%3Amain) (10 successful at snapshot); CodeQL green does not prove zero open alerts.
+Open development issues and PRs are a historical snapshot only; refresh the current state with the commands below. #36 alone owns physical acceptance; CodeQL analysis success does not mean all code-scanning alerts are resolved.
 
 ## Evidence collection — run for EVERY proposed software closure
 
@@ -25,10 +25,11 @@ dotnet --info
 dotnet build engines/GslbDns/GslbDns.csproj -c Release
 dotnet run --project tests/GslbAcceptance/GslbAcceptance.csproj -c Release -- "$PWD"
 # Obtain all push runs for the exact main SHA (NOT only PR-filtered workflows):
-gh api "repos/VY-Groups/yarp-lb/actions/runs?head_sha=$(git rev-parse origin/main)&event=push&per_page=100" --jq '.workflow_runs[] | [.id,.name,.head_sha,.status,.conclusion,.html_url] | @tsv'
+REPO="$(gh repo view --json nameWithOwner --jq .nameWithOwner)"  # Resolve owner/repo from the checked-out remote
+gh api "repos/$REPO/actions/runs?head_sha=$(git rev-parse origin/main)&event=push&per_page=100" --jq '.workflow_runs[] | [.id,.name,.head_sha,.status,.conclusion,.html_url] | @tsv'
 # For each returned run, fetch ALL job pages and failures:
-gh api "repos/VY-Groups/yarp-lb/actions/runs/RUN_ID/jobs?per_page=100" --paginate --jq '.jobs[] | [.id,.name,.status,.conclusion,.html_url] | @tsv'
-gh api "repos/VY-Groups/yarp-lb/pulls/PR_NUMBER/reviews?per_page=100"
+gh api "repos/$REPO/actions/runs/RUN_ID/jobs?per_page=100" --paginate --jq '.jobs[] | [.id,.name,.status,.conclusion,.html_url] | @tsv'
+gh api "repos/$REPO/pulls/PR_NUMBER/reviews?per_page=100"
 ```
 
 Expected: clean checkout, successful build/acceptance, exact SHA match, no failing/cancelled/pending required checks, independently submitted approval for the reviewed diff, and no unaddressed security finding. Capture raw logs, OS, fixture versions, commit and artifact SHA256. If any required job is missing, skipped unexpectedly, failed or review is absent, mark **BLOCKED** and continue another independent software issue.
