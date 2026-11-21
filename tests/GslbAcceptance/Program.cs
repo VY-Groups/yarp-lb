@@ -856,7 +856,10 @@ File.WriteAllText(configuration,JsonSerializer.Serialize(new {
       Sites=new[]{new {Address="192.0.2.80",HealthUrl="http://127.0.0.1:19711/ready",Weight=1,Priority=0,HealthCheckType="Http",TcpPort=0}},
       NameServers=new[]{
           new {Host="ns1.dualstack-ns.integration.test",Address="192.0.2.53"},
-          new {Host="ns1.dualstack-ns.integration.test",Address="2001:db8::53"}}},
+          new {Host="ns1.dualstack-ns.integration.test",Address="2001:db8::53"}},
+      AcmeTxtRecords=new[]{
+          new {Host="_acme-challenge.api.dualstack-ns.integration.test",
+               Value="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}}},
  new {Name="chain.integration.test",TtlSeconds=10,Sites=chainSites,
       NameServers=new[]{new {Host="ns.chain.integration.test",Address="127.0.0.31"}},
       RoutingPolicy="WeightedFailover",FailureThreshold=1,SuccessThreshold=1,
@@ -1109,6 +1112,23 @@ try
     Must((Dns16(dualHostMx, 2) & 0xF) == 0 && Dns16(dualHostMx, 6) == 0 &&
          DnsRecordTypes(dualHostMx, 1).SequenceEqual(new ushort[] { 6 }),
          "existing dual-stack name-server hostname returns NODATA for unconfigured RR type");
+    var configuredAcmeOwner = "_acme-challenge.api.dualstack-ns.integration.test";
+    var liveTxt = await TcpQuery(DnsRequest(configuredAcmeOwner, 16));
+    if (Dns16(liveTxt, 6) != 1 ||
+        !DnsRecordTypes(liveTxt, 0).SequenceEqual(new ushort[] {16}) ||
+        liveTxt.AsSpan().IndexOf(Encoding.ASCII.GetBytes(
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")) < 0)
+        throw new Exception("FAIL: configured DNS-01 TXT did not reach the real DNS listener");
+    var liveNodata = await TcpQuery(DnsRequest(configuredAcmeOwner, 1));
+    var emptyNonTerminal = await TcpQuery(DnsRequest("api.dualstack-ns.integration.test", 16));
+    var missingTxt = await TcpQuery(DnsRequest("missing.dualstack-ns.integration.test", 16));
+    if ((Dns16(liveNodata, 2) & 15) != 0 ||
+        (Dns16(emptyNonTerminal, 2) & 15) != 0 ||
+        (Dns16(missingTxt, 2) & 15) != 3 ||
+        Dns16(liveNodata, 6) != 0 ||
+        Dns16(emptyNonTerminal, 6) != 0)
+        throw new Exception("FAIL: configured TXT owner/ancestor/extraneous name incorrectly classified");
+    Console.WriteLine("PASS: real authoritative DNS-01 TXT, existing owner NODATA and missing NXDOMAIN");
     Console.WriteLine("PASS: dual-stack authoritative NS deduplication, A/AAAA glue and NODATA");
     var delegatedNsTcp = await TcpQuery(delegatedNsRequest);
     foreach (var delegatedNs in new[] { delegatedNsUdp, delegatedNsTcp })
