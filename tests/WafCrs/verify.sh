@@ -20,7 +20,7 @@ rm -f "$DIR/benchmark-summary.json" "$DIR/waf-selected-image.txt"
 for result in last-benign-status json-http-status xml-http-status large-json-http-status pkix-der-http-status benign-query-http-status unicode-query-http-status cookie-query-http-status xss-http-status sqli-http-status traversal-http-status; do
   rm -f "$DIR/$result.txt"
 done
-rm -f "$DIR/blocking-corpus-report.json"
+rm -f "$DIR/blocking-corpus-report.json" "$DIR/detection-corpus-report.json"
 write_corpus_report() {
   python3 - "$DIR" "$1" <<'PY'
 import json, pathlib, sys
@@ -281,17 +281,47 @@ for i in $(seq 1 90); do
   sleep 0.6
 done
 [[ "$ready" == 1 ]] || { echo "FAIL: WAF detection-only restart not ready" >&2; exit 1; }
-observe_code="$(curl --silent --show-error --max-time 8 --get \
-  --data-urlencode 'q=<script>alert(1)</script>' \
-  -o "$DIR/detection-only-response.txt" -w '%{http_code}' "http://127.0.0.1:18888/")"
-printf '%s\n' "$observe_code" > "$DIR/detection-only-status.txt"
-[[ "$observe_code" == 200 ]] || { echo "FAIL: detection-only did not forward payload" >&2; exit 1; }
-grep -Fxq 'YARP-WAF-CI-BENIGN' "$DIR/detection-only-response.txt" || { echo "FAIL: detection-only response did not come from the test backend" >&2; exit 1; }
-# Require evidence that CRS actually detected the XSS, rather than merely allowing it.
+# Detect-only must forward all tested attack classes, while genuine CRS
+# 941 (XSS), 942 (SQLi) and 930 (LFI/path traversal) diagnostics are emitted.
+# This proves observation rather than merely verifying the engine stopped blocking.
+for entry in \
+  "xss|q=<script>alert(1)</script>|941" \
+  "sqli|id=1' UNION SELECT password FROM users--|942" \
+  "traversal|file=../../../../etc/passwd|930"; do
+  name="${entry%%|*}"
+  rest="${entry#*|}"
+  payload="${rest%%|*}"
+  family="${rest##*|}"
+  observe_code="$(curl --silent --show-error --max-time 8 --get \
+    --data-urlencode "$payload" -o "$DIR/detection-$name-response.txt" \
+    -w '%{http_code}' "http://127.0.0.1:18888/")"
+  printf '%s\n' "$observe_code" > "$DIR/detection-$name-status.txt"
+  [[ "$observe_code" == 200 ]] ||
+    { echo "FAIL: detection-only failed to forward $name ($observe_code)" >&2; exit 1; }
+  grep -Fxq 'YARP-WAF-CI-BENIGN' "$DIR/detection-$name-response.txt" ||
+    { echo "FAIL: detection-only $name did not reach the origin" >&2; exit 1; }
+done
 docker compose -f "$COMPOSE" logs --no-color waf > "$DIR/detection-only-audit.log" 2>&1
-if ! grep -Eq '\[id "941[0-9]{3}"\]' "$DIR/detection-only-audit.log"; then
-  echo "FAIL: detection-only XSS lacks a CRS 941xxx rule diagnostic" >&2; exit 1
-fi
+# Record only rule-family observations and HTTP statuses, not the raw request
+# values; audit logs themselves stay in disposable CI artifacts.
+python3 - "$DIR" <<'PY'
+import json, pathlib, re, sys
+root = pathlib.Path(sys.argv[1])
+audit = (root / "detection-only-audit.log").read_text(encoding="utf-8", errors="replace")
+families = {"xss": "941", "sqli": "942", "traversal": "930"}
+results = {}
+for name, family in families.items():
+    observed = bool(re.search(r'\[id "' + family + r'[0-9]{3}"\]', audit))
+    status = (root / ("detection-" + name + "-status.txt")).read_text().strip()
+    results[name] = {"httpStatus": status, "crsFamily": family,
+                     "observed": observed, "forwarded": status == "200"}
+(root / "detection-corpus-report.json").write_text(
+    json.dumps({"schemaVersion": 1, "scope": "synthetic-detection-lab-only",
+                "attackClasses": results}, indent=2, sort_keys=True) + "\n",
+    encoding="utf-8")
+if not all(row["observed"] and row["forwarded"] for row in results.values()):
+    raise SystemExit("FAIL: detection-only corpus did not observe and forward every tested category")
+PY
 # A detection-only restart must exercise the same image as the blocking phase.
 observe_id="$(docker compose -f "$COMPOSE" ps --quiet waf)"
 [[ "$(docker inspect "$observe_id" --format '{{.Image}}')" == "$waf_image_id" ]] || { echo "FAIL: WAF image changed between modes" >&2; exit 1; }
@@ -308,10 +338,21 @@ benchmark proxy-only
 WAF_MODE=On docker compose -f "$COMPOSE" up -d --force-recreate --no-deps waf
 wait_waf
 assert_same_image
-restored_code="$(curl --silent --show-error --max-time 8 --get \
-  --data-urlencode 'q=<script>alert(1)</script>' \
-  -o "$DIR/restored-block-response.txt" -w '%{http_code}' http://127.0.0.1:18888/)"
-[[ "$restored_code" == 403 ]] || { echo "FAIL: restored blocking policy did not block XSS" >&2; exit 1; }
+# Rollback from detection mode must reinstate blocking for all three tested
+# attack classes, not just the original XSS smoke test.
+for entry in \
+  "xss|q=<script>alert(1)</script>" \
+  "sqli|id=1' UNION SELECT password FROM users--" \
+  "traversal|file=../../../../etc/passwd"; do
+  name="${entry%%|*}"
+  payload="${entry#*|}"
+  restored_code="$(curl --silent --show-error --max-time 8 --get \
+    --data-urlencode "$payload" -o "$DIR/restored-$name-response.txt" \
+    -w '%{http_code}' http://127.0.0.1:18888/)"
+  printf '%s\n' "$restored_code" > "$DIR/restored-$name-status.txt"
+  [[ "$restored_code" == 403 ]] ||
+    { echo "FAIL: restored CRS blocking failed for $name ($restored_code)" >&2; exit 1; }
+done
 benchmark restored
 python3 - "$DIR" <<'PY'
 import json, pathlib, sys
