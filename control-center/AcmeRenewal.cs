@@ -88,6 +88,61 @@ public sealed class CertesAcmeCertificateIssuer(AcmeAccountKeyStore accountKeys,
         finally { challenges.Remove(dnsName, challenge.Token); }
     }
 
+    public async Task<AcmeIssuedCertificate> IssueDns01Async(
+        string directoryUrl, string dnsName, string contactEmail,
+        string pfxPassword, IAcmeDns01Publisher publisher,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(publisher);
+        var target = AcmeTargetPolicy.Validate(directoryUrl, dnsName, http01: false,
+            publicChallengeEntrypointEnabled: false);
+        if (!target.Allowed ||
+            !Uri.TryCreate(directoryUrl, UriKind.Absolute, out var directory))
+            throw new InvalidOperationException("ACME DNS-01 directory or DNS target is not approved");
+        if (string.IsNullOrWhiteSpace(contactEmail) || contactEmail.Length > 254 ||
+            !contactEmail.Contains('@') || contactEmail.Any(char.IsControl) ||
+            string.IsNullOrEmpty(pfxPassword))
+            throw new InvalidOperationException("ACME DNS-01 requires account contact and PFX password");
+
+        // Preserve the same protected on-disk ACME account identity as HTTP-01.
+        var context = new AcmeContext(directory, accountKeys.LoadOrCreate());
+        _ = await context.NewAccount(contactEmail,
+            termsOfServiceAgreed: agreeToTermsOfService).WaitAsync(cancellationToken);
+        var normalizedName = target.NormalizedDnsName!;
+        var order = await context.NewOrder([normalizedName]).WaitAsync(cancellationToken);
+        var authorization = await order.Authorization(normalizedName)
+            .WaitAsync(cancellationToken);
+        var challenge = await authorization.Dns().WaitAsync(cancellationToken);
+        var txt = context.AccountKey.DnsTxt(challenge.Token);
+
+        // Dispose removes the record whether CA validation, order finalization,
+        // certificate export or client cancellation fails. No challenge is
+        // published until an explicit provider is supplied by trusted code.
+        await using var publication = await AcmeDns01Publication.PublishAndVerifyAsync(
+            normalizedName, txt, publisher, cancellationToken);
+        await challenge.Validate().WaitAsync(cancellationToken);
+        var deadline = clock.GetUtcNow() + AuthorizationTimeout;
+        while (true)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var status = (await authorization.Resource().WaitAsync(cancellationToken)).Status;
+            if (status == AuthorizationStatus.Valid) break;
+            if (status == AuthorizationStatus.Invalid)
+                throw new CryptographicException("ACME authority rejected DNS-01 authorization");
+            if (clock.GetUtcNow() >= deadline)
+                throw new TimeoutException("ACME DNS-01 authorization did not become valid in time");
+            await Task.Delay(TimeSpan.FromSeconds(1), timeProvider: clock, cancellationToken);
+        }
+
+        var certificateKey = KeyFactory.NewKey(KeyAlgorithm.RS256);
+        var chain = await order.Generate(new CsrInfo { CommonName = normalizedName },
+            certificateKey).WaitAsync(cancellationToken);
+        var pfx = chain.ToPfx(certificateKey).Build(normalizedName, pfxPassword);
+        if (pfx.Length is < 512 or > 1_048_576)
+            throw new CryptographicException("ACME DNS-01 returned an invalid bounded PKCS#12");
+        return new AcmeIssuedCertificate(pfx, normalizedName);
+    }
+
     public async Task RevokeCertificateAsync(string directoryUrl, string contactEmail,
         byte[] certificateDer, RevocationReason reason, CancellationToken cancellationToken)
     {
