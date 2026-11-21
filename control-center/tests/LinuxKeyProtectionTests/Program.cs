@@ -192,7 +192,7 @@ try
     // Bad certificates must fail at configuration time, not at the first
     // user sign-in or when a new Data Protection key is generated.
     var signingOnly=CreateCertificate("sign-only", X509KeyUsageFlags.DigitalSignature);
-    var issuer=CreateCertificate("issuer-only", X509KeyUsageFlags.KeyCertSign, isCa:true);
+    var issuer=CreateCertificate("issuer-only", X509KeyUsageFlags.KeyCertSign|X509KeyUsageFlags.KeyEncipherment, isCa:true);
     var missingUsage=CreateCertificate("without-usage", keyUsage:null);
     var missingConstraints=CreateCertificate("without-basic-constraints", includeBasicConstraints:false);
     foreach(var invalid in new[] {
