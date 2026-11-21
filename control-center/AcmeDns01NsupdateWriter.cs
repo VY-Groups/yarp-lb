@@ -180,7 +180,7 @@ public sealed class AcmeDns01NsupdateWriter : IAcmeDns01Publisher
             var mode = File.GetUnixFileMode(options.ExecutablePath);
             if ((mode & (UnixFileMode.GroupWrite | UnixFileMode.OtherWrite)) != 0)
                 throw new InvalidOperationException("DNS-01 update executable is writable by other identities");
-            PrivateKeyFileSecurity.ValidateLinuxPrivateStateDirectory(
+            PrivateKeyFileSecurity.ValidateLinuxTrustedExecutableDirectory(
                 Path.GetDirectoryName(options.ExecutablePath)!,
                 "DNS-01 executable directory");
         }
