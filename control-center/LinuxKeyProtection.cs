@@ -218,6 +218,9 @@ public static class LinuxKeyProtection
         var keyDirectory = Path.Combine(rootDirectory, "data-protection-keys");
         CheckPrivateDirectory(keyDirectory);
         ValidateExistingKeyRing(keyDirectory);
+        // During a deliberately staged fleet restore, the independently held
+        // signed checkpoint and minimum revision must match before key import.
+        LinuxDpRecoveryEvidence.VerifyConfigured(keyDirectory);
         var current = LoadRsaProtector("YARP_LINUX_DP_CERT_PFX_PATH",
             "YARP_LINUX_DP_CERT_PASSWORD_FILE");
         dataProtection.ProtectKeysWithCertificate(current);
