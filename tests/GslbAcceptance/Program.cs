@@ -171,6 +171,18 @@ try
             Console.WriteLine("PASS: current Windows service SID is allowed by replay-state ACL policy");
         }
     }
+    if (OperatingSystem.IsLinux())
+    {
+        var linkedParent = Path.Combine(reportRoot, "observer-linked-state-parent");
+        Directory.CreateSymbolicLink(linkedParent, reportRoot);
+        var pathViaLink = Path.Combine(linkedParent, "observer-link-state.json");
+        var rejected = false;
+        try { using var invalid = new AgentHealthReportStore(agents, targets, pathViaLink, 10, 5, 2); }
+        catch (InvalidDataException) { rejected = true; }
+        if (!rejected || File.Exists(Path.Combine(reportRoot, "observer-link-state.json.lock")))
+            throw new Exception("FAIL: linked replay ancestor created state marker or enabled report store");
+        Console.WriteLine("PASS: linked observer replay directory fails before creating lock/marker");
+    }
     var duplicateVantageRejected = false;
     try
     {

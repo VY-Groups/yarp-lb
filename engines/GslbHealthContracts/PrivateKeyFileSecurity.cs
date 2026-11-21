@@ -41,30 +41,42 @@ public static class PrivateKeyFileSecurity
         finally { System.Security.Cryptography.CryptographicOperations.ZeroMemory(bytes); }
     }
 
-    /// <summary>Read bounded secret bytes from the same validated no-follow handle.</summary>
+    /// <summary>
+    /// Read using the same inspected, non-symlinked opened handle.
+    /// On Linux validate each parent directory and the final regular file;
+    /// Windows callers must separately enforce their required ACL policy.
+    /// </summary>
+    public static FileStream OpenPrivateFileRead(string? path, string purpose)
+    {
+        if (string.IsNullOrWhiteSpace(path) || !Path.IsPathFullyQualified(path))
+            throw new InvalidDataException($"{purpose} path must be absolute");
+        if (!OperatingSystem.IsWindows() && !OperatingSystem.IsLinux())
+            throw new PlatformNotSupportedException("Private-file loading supports Windows and Linux only");
+
+        SafeFileHandle? handle = null;
+        try
+        {
+            handle = OperatingSystem.IsLinux()
+                ? OpenLinuxNoFollow(path, purpose)
+                : OpenWindowsNoFollow(path, purpose);
+            var attributes = File.GetAttributes(handle);
+            if ((attributes & (FileAttributes.Directory | FileAttributes.ReparsePoint | FileAttributes.Device)) != 0)
+                throw new InvalidDataException($"{purpose} must be a regular file, not a directory, device, or link");
+            if (OperatingSystem.IsLinux())
+                ValidateLinuxOpenedObject(handle, purpose, isDirectory: false);
+            var stream = new FileStream(handle, FileAccess.Read);
+            handle = null;
+            return stream;
+        }
+        finally { handle?.Dispose(); }
+    }
+
+    /// <summary>Read bounded bytes from one validated, no-follow handle.</summary>
     public static byte[] ReadPrivateFileBytes(string? path, string purpose, int maximumBytes)
     {
         if (maximumBytes is < 1 or > 16 * 1024 * 1024)
             throw new ArgumentOutOfRangeException(nameof(maximumBytes));
-        if (string.IsNullOrWhiteSpace(path) || !Path.IsPathFullyQualified(path))
-            throw new InvalidDataException($"{purpose} path must be absolute");
-        if (!OperatingSystem.IsWindows() && !OperatingSystem.IsLinux())
-            throw new PlatformNotSupportedException("Private-key loading is supported only on Windows and Linux");
-
-        using var handle = OperatingSystem.IsLinux()
-            ? OpenLinuxNoFollow(path, purpose)
-            : OpenWindowsNoFollow(path, purpose);
-
-        var attributes = File.GetAttributes(handle);
-        if ((attributes & (FileAttributes.Directory | FileAttributes.ReparsePoint | FileAttributes.Device)) != 0)
-            throw new InvalidDataException($"{purpose} must be a regular file, not a directory, device, or link");
-
-        if (OperatingSystem.IsLinux())
-        {
-            ValidateLinuxOpenedObject(handle, purpose, isDirectory: false);
-        }
-
-        using var stream = new FileStream(handle, FileAccess.Read);
+        using var stream = OpenPrivateFileRead(path, purpose);
         var length = stream.Length;
         if (!stream.CanSeek || length <= 0 || length > maximumBytes)
             throw new InvalidDataException($"{purpose} must be a regular file no larger than {maximumBytes} bytes");
@@ -81,6 +93,35 @@ public static class PrivateKeyFileSecurity
             System.Security.Cryptography.CryptographicOperations.ZeroMemory(bytes);
             throw;
         }
+    }
+
+    /// <summary>Bounded streaming SHA-256 over the inspected handle, without a heap-sized replay buffer.</summary>
+    public static byte[] HashPrivateFileSha256(string? path, string purpose, int maximumBytes)
+    {
+        if (maximumBytes is < 1 or > 16 * 1024 * 1024)
+            throw new ArgumentOutOfRangeException(nameof(maximumBytes));
+        using var stream = OpenPrivateFileRead(path, purpose);
+        var length = stream.Length;
+        if (!stream.CanSeek || length <= 0 || length > maximumBytes)
+            throw new InvalidDataException($"{purpose} has an invalid bounded length");
+        using var hasher = System.Security.Cryptography.IncrementalHash.CreateHash(
+            System.Security.Cryptography.HashAlgorithmName.SHA256);
+        Span<byte> scratch = stackalloc byte[4096];
+        try
+        {
+            long remaining = length;
+            while (remaining > 0)
+            {
+                var read = stream.Read(scratch[..(int)Math.Min(remaining, scratch.Length)]);
+                if (read <= 0) throw new EndOfStreamException($"{purpose} shortened while hashing");
+                hasher.AppendData(scratch[..read]);
+                remaining -= read;
+            }
+            if (stream.ReadByte() != -1)
+                throw new InvalidDataException($"{purpose} grew while hashing");
+            return hasher.GetHashAndReset();
+        }
+        finally { System.Security.Cryptography.CryptographicOperations.ZeroMemory(scratch); }
     }
 
     /// <summary>
