@@ -41,13 +41,33 @@ class LocalWaf(BaseHTTPRequestHandler):
         if self.path.startswith("/blocked"):
             self.send_response(403)
             payload = b"rejected"
+            content_type = "text/plain"
         elif self.path.startswith("/redirect"):
             self.send_response(302)
             self.send_header("Location", "https://not-allowed.invalid/")
             payload = b"not-a-validated-result"
+            content_type = "text/plain"
+        elif self.path.startswith("/spoof"):
+            self.send_response(200)
+            payload = b"not-origin-YARP-WAF-CI-BENIGN\n"
+            content_type = "text/plain; charset=utf-8"
+        elif self.path.startswith("/bogus-json"):
+            self.send_response(200)
+            payload = b'{"accepted":true,"contentType":"application/json","bytes":99999}'
+            content_type = "application/json"
         else:
             self.send_response(200)
-            payload = b"YARP-WAF-CI-BENIGN"
+            if self.command == "POST":
+                content_type = "application/json"
+                payload = json.dumps({
+                    "accepted": True,
+                    "contentType": self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower(),
+                    "bytes": length,
+                }, separators=(",", ":")).encode("ascii")
+            else:
+                content_type = "text/plain; charset=utf-8"
+                payload = b"YARP-WAF-CI-BENIGN\n"
+        self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
         self.wfile.write(payload)
@@ -130,6 +150,20 @@ class OperatorCorpusTests(unittest.TestCase):
             redirect = waf.run_cases(regression, factory)
             self.assertEqual(1, redirect["counts"]["ERROR"])
             self.assertFalse(redirect["passesZeroFalsePositiveNegativeGate"])
+            # A response that merely contains the GET marker must NOT
+            # masquerade as the bounded private origin's exact response.
+            regression = copy.deepcopy(expected)
+            regression[1]["path"] = "/spoof"
+            spoof = waf.run_cases(regression, factory)
+            self.assertEqual(1, spoof["counts"]["ERROR"])
+            self.assertFalse(spoof["passesZeroFalsePositiveNegativeGate"])
+            # A spoofed POST JSON acceptance with the wrong byte count
+            # cannot qualify a benign upload as a reached origin.
+            regression = copy.deepcopy(expected)
+            regression[0]["path"] = "/bogus-json"
+            bogus = waf.run_cases(regression, factory)
+            self.assertEqual(1, bogus["counts"]["ERROR"])
+            self.assertFalse(bogus["passesZeroFalsePositiveNegativeGate"])
         finally:
             server.shutdown()
             server.server_close()
