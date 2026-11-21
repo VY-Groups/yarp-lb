@@ -1065,6 +1065,62 @@ foreach (var duplicateHost in new[]
     }
     finally { File.Delete(invalidPath); }
 }
+// Exercise the production configuration parser, not only the shared unicast
+// helper. Invalid backend, parent NS and delegated NS addresses must prevent
+// the standalone authority from starting any DNS listener.
+foreach (var (label, zoneName, target, invalidAddress, expectedError) in new[]
+{
+    ("backend-multicast", "dualstack-ns.integration.test", "site",
+        "224.0.0.1", "Invalid GSLB site address"),
+    ("backend-scoped-v6", "dualstack-ns.integration.test", "site",
+        "fe80::1234%3", "Invalid GSLB site address"),
+    ("authoritative-unspecified", "dualstack-ns.integration.test", "parent-ns",
+        "0.0.0.0", "Invalid authoritative NS hostname or unicast address"),
+    ("authoritative-linklocal", "dualstack-ns.integration.test", "parent-ns",
+        "169.254.1.50", "Invalid authoritative NS hostname or unicast address"),
+    ("delegated-multicast", "delegated.integration.test", "child-ns",
+        "ff02::1", "Invalid delegated name-server hostname or unicast address"),
+    ("delegated-scoped", "delegated.integration.test", "child-ns",
+        "fe80::53%2", "Invalid delegated name-server hostname or unicast address")
+})
+{
+    var invalidConfig = JsonNode.Parse(File.ReadAllText(configuration))!.AsObject();
+    var invalidZone = invalidConfig["Zones"]!.AsArray().Single(row =>
+        string.Equals((string?)row?["Name"], zoneName, StringComparison.Ordinal))!.AsObject();
+    if (target == "site")
+        invalidZone["Sites"]![0]!["Address"] = invalidAddress;
+    else if (target == "parent-ns")
+        invalidZone["NameServers"]![0]!["Address"] = invalidAddress;
+    else
+        invalidZone["Delegations"]![0]!["NameServers"]![0]!["Address"] = invalidAddress;
+
+    var invalidPath = Path.Combine(temp, "nonunicast-" + Guid.NewGuid().ToString("N") + ".json");
+    await File.WriteAllTextAsync(invalidPath, invalidConfig.ToJsonString());
+    try
+    {
+        var invalidInfo = new ProcessStartInfo("dotnet")
+        {
+            UseShellExecute = false, CreateNoWindow = true,
+            WorkingDirectory = Path.GetDirectoryName(dll)!,
+            RedirectStandardOutput = true, RedirectStandardError = true
+        };
+        invalidInfo.ArgumentList.Add(dll);
+        invalidInfo.ArgumentList.Add(invalidPath);
+        using var invalidDns = Process.Start(invalidInfo) ??
+            throw new Exception("Non-unicast DNS negative fixture did not start");
+        var stdout = invalidDns.StandardOutput.ReadToEndAsync();
+        var stderr = invalidDns.StandardError.ReadToEndAsync();
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await invalidDns.WaitForExitAsync(deadline.Token);
+        var output = (await stdout) + (await stderr);
+        Must(invalidDns.ExitCode != 0 &&
+             output.Contains(expectedError, StringComparison.Ordinal),
+            "DNS process startup rejects non-unicast " + label);
+    }
+    finally { File.Delete(invalidPath); }
+}
+Console.WriteLine("PASS: published DNS endpoint address validation fails closed at real process startup");
+
 // The real configured DNS listener must fail startup for malformed TXT
 // authorizations. Never fall back to serving a modified or partial RRset.
 foreach (var (label, expectedError, mutate) in new
