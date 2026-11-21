@@ -50,6 +50,9 @@ public static class AgentFleetRotationAcceptance
         var serverCertificates = new List<X509Certificate2>();
         var pfxPasswords = new List<string>();
         var expectedPinRevisions = Array.Empty<string>();
+        // Audit final transitions only if the scenario actually reached them.
+        // Otherwise a cleanup assertion masks the original rollback failure.
+        var completedFullRotation = false;
         try
         {
             using var caKey = RSA.Create(2048);
@@ -148,7 +151,11 @@ public static class AgentFleetRotationAcceptance
                 await RequireStatus(nodes[0], oldController, HttpStatusCode.OK,
                     "rollback preserves established identity on node 1");
                 LogRotationOutcome(nodes[0].Index, "rollback", oldController, "accepted");
-                await RequireStatus(nodes[1], wrongController, HttpStatusCode.Forbidden,
+                // Reading an authorized old pin does not establish that the
+                // wrong candidate pin has disappeared: live IConfiguration
+                // reload is asynchronous. Wait for actual denial, then retain
+                // the existing strict elapsed-time rollback gate below.
+                await RequireEventually(nodes[1], wrongController, HttpStatusCode.Forbidden,
                     "rollback removes incorrectly delivered pin from node 2");
                 LogRotationOutcome(nodes[1].Index, "rollback", wrongController, "denied");
                 await RequireStatus(nodes[0], newController, HttpStatusCode.Forbidden,
@@ -216,6 +223,7 @@ public static class AgentFleetRotationAcceptance
             if (nodes.Where((node, index) => node.Process.HasExited || node.Process.Id != originalPids[index]).Any())
                 throw new Exception("FAIL: Gateway Agent process restarted or exited during certificate rotation");
             Console.WriteLine("PASS: two independent real agent processes completed overlapping mTLS rotation without restart");
+            completedFullRotation = true;
         }
         finally
         {
@@ -241,7 +249,7 @@ public static class AgentFleetRotationAcceptance
                     throw new Exception("FAIL: captured Gateway Agent output contains a PFX password or private-key marker");
                 Console.WriteLine("PASS: captured Gateway Agent output contains no PFX password or private-key material");
                 if (injectFailureDuringAudit) throw new InjectedRotationFailureException();
-                if (!injectFailureDuringAudit)
+                if (!injectFailureDuringAudit && completedFullRotation)
                 {
                     foreach (var (nodeOutput, index) in capturedOutputByNode.Select((output, index) => (output, index)))
                     {
@@ -254,7 +262,7 @@ public static class AgentFleetRotationAcceptance
                             $"Controller mTLS pin-set revision changed: {expectedPinRevisions[1]} -> {expectedPinRevisions[2]}",
                             StringComparison.Ordinal);
                         if (!initialRevisionLoaded || !overlapRevisionObserved || !finalRevisionObserved)
-                            throw new Exception($"FAIL: agent node {index + 1} did not log expected old/overlap/final pin-set revision transitions");
+                            throw new Exception($"FAIL: agent node {index + 1} did not log expected pin-set revision transitions (initial={initialRevisionLoaded}, overlap={overlapRevisionObserved}, final={finalRevisionObserved})");
                     }
                     Console.WriteLine("PASS: each agent logged SHA-256 pin-set revision changes for the overlap and final rotation states");
                 }
