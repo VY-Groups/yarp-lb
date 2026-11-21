@@ -133,6 +133,75 @@ try
         Assert(dp.Unprotect(encrypted)=="sensitive-session-value-123",
             "session value decrypts across a new service provider using persisted key ring");
     }
+    // Restored encrypted keys must retain their filename/GUID identity.
+    // A second case-variant filename exercises the duplicate guard on Linux,
+    // where both paths can coexist while passing the case-insensitive GUID check.
+    var initialKeyPath = keyFiles[0];
+    var originalProtectedBytes = File.ReadAllBytes(initialKeyPath);
+    var tamperedIdentity = XDocument.Load(initialKeyPath);
+    var originalIdText = (string?)tamperedIdentity.Root?.Attribute("id")
+        ?? throw new Exception("FAIL: valid Data Protection key did not contain a GUID");
+    var originalGuid = Guid.Parse(originalIdText);
+    var otherGuid = originalGuid == Guid.Empty ? Guid.Parse("00000000-0000-0000-0000-000000000001") : Guid.Empty;
+    tamperedIdentity.Root!.SetAttributeValue("id", otherGuid.ToString("D"));
+    try
+    {
+        File.WriteAllText(initialKeyPath, tamperedIdentity.ToString(SaveOptions.DisableFormatting));
+        Assert(Throws(()=>{using var _=Provider(state);}),
+            "restored wrapped key XML with mismatched filename/embedded GUID is refused");
+    }
+    finally { File.WriteAllBytes(initialKeyPath, originalProtectedBytes); }
+
+    var canonicalKeyName = originalGuid.ToString("D");
+    var caseVariantKeyName = canonicalKeyName.ToUpperInvariant();
+    if (caseVariantKeyName == canonicalKeyName)
+    {
+        var index = canonicalKeyName.IndexOfAny("abcdef".ToCharArray());
+        if (index >= 0)
+        {
+            var chars = canonicalKeyName.ToCharArray();
+            chars[index] = char.ToUpperInvariant(chars[index]);
+            caseVariantKeyName = new string(chars);
+        }
+    }
+    if (caseVariantKeyName != canonicalKeyName)
+    {
+        var copiedKey = Path.Combine(Path.GetDirectoryName(initialKeyPath)!,
+            "key-" + caseVariantKeyName + ".xml");
+        File.WriteAllBytes(copiedKey, originalProtectedBytes);
+        File.SetUnixFileMode(copiedKey, PrivateFile);
+        try
+        {
+            Assert(Throws(()=>{using var _=Provider(state);}),
+                "duplicate master-key GUID under a case-variant filename is refused");
+        }
+        finally { File.Delete(copiedKey); }
+    }
+
+    var excessiveFiles = new List<string>();
+    try
+    {
+        for (var n = 0; n < 512; n++)
+        {
+            var rogue = Path.Combine(Path.GetDirectoryName(initialKeyPath)!,
+                "rogue-" + n.ToString("D4") + ".xml");
+            File.WriteAllText(rogue, string.Empty);
+            File.SetUnixFileMode(rogue, PrivateFile);
+            excessiveFiles.Add(rogue);
+        }
+        Assert(Throws(()=>{using var _=Provider(state);}),
+            "key-ring startup refuses an XML inventory exceeding 512 entries");
+    }
+    finally
+    {
+        foreach (var rogue in excessiveFiles) File.Delete(rogue);
+    }
+    using (var service = Provider(state))
+        Assert(service.GetRequiredService<IDataProtectionProvider>()
+            .CreateProtector("session-probe").Unprotect(encrypted) ==
+            "sensitive-session-value-123",
+            "original encrypted session remains decryptable after rejected restore tampering");
+
     // Build a real legacy plaintext ring with ASP.NET's unwrapped file
     // repository, then ensure protected mode refuses it without mutation.
     var legacyState=Path.Combine(root,"legacy-plaintext-state");
