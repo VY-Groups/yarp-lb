@@ -878,7 +878,7 @@ try
     Must(metricsText.Contains("# TYPE gatewaycore_gslb_dns_queries_total counter", StringComparison.Ordinal) &&
          metricsText.Contains("gatewaycore_gslb_dns_queries_total{transport=\"udp\"} ", StringComparison.Ordinal) &&
          metricsText.Contains("gatewaycore_gslb_dns_responses_total{transport=\"udp\",rcode=\"NOERROR\"} ", StringComparison.Ordinal) &&
-         metricsText.Contains("gatewaycore_gslb_configured_zones 12", StringComparison.Ordinal) &&
+         metricsText.Contains("gatewaycore_gslb_configured_zones 13", StringComparison.Ordinal) &&
          metricsText.Contains("gatewaycore_gslb_administratively_quarantined_sites 2", StringComparison.Ordinal) &&
          !metricsText.Contains("app.integration.test", StringComparison.Ordinal) &&
          !metricsText.Contains("127.0.0.21", StringComparison.Ordinal),
