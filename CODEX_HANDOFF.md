@@ -5,25 +5,27 @@
 This is the latest verified continuation state; older same-day snapshots below
 are historical when their branch, issue, or CI state differs.
 
-- `main` is `309d77ae6ca7caeb654cf92b809e670223561927`, including PRs #321,
-  #323–#330 and #332. PR #327's Windows/Linux account-key, ACME and ten-run HA checks,
+- `main` is `06f3d73c480b0e4da4150f0a0e39f3cffcb35eaa`, including PRs #321,
+  #323–#332. PR #327's Windows/Linux account-key, ACME and ten-run HA checks,
   PR #328's CodeQL inventory and actionlint checks, PR #329's documentation
   checks, and PR #330's Windows/Linux DNS, L7, HA and CodeQL checks passed on
   their exact heads before merge. PR #332's Windows/Linux L4 socket acceptance,
   CodeQL, L7, HA, and load checks passed before merge. The post-merge workflows
-  for this `main` commit must be checked before release.
+  for this commit (audit collector, L7, and CodeQL) all passed.
 - Ten issues remain open: #34, #36, #37, #38, #48, #49, #51, #52, #53, and
-  #109. PR #331 is the only open PR. It validates and bounds audit-receipt
-  response headers; its current head is awaiting exact-head Actions.
+  #109. PR #331's updated head passed Windows/Linux collector acceptance, all
+  CodeQL language analyses, and the full shared L7/HA/load matrix; it merged at
+  this `main` commit. PR #333 is the only open PR, adding the explicit L4
+  capability/configuration matrix required by #53; exact-head checks are in
+  progress.
 - PR #327 addresses account-key persistence only; it does not complete ACME
   issuance and zero-downtime renewal. #330 addresses authority publisher
   shutdown only; it does not close the broader #109 health-authority scope.
-  #53 remains open pending review of its complete software acceptance scope;
-  physical host/soak acceptance is tracked in #36.
-- CodeQL alert #7 (response-splitting flow in the disposable audit receipt
-  relay) remains open on main; PR #331 applies bounded base64-character
-  validation and awaits a fresh scan. Alerts #1–#6 and #14 also require a
-  current finding comparison. No findings are dismissed or suppressed.
+  #53 remains open until its explicit capability matrix PR (#333) is reviewed
+  and its checks pass; physical host/soak acceptance is tracked in #36.
+- The post-merge CodeQL run passed and the GitHub code-scanning API currently
+  reports no open alerts. This does not replace a future scan after source
+  changes. No findings are dismissed or suppressed.
 - Latest release is `v0.1.0-test.12` (2026-11-14). A verified release with
   SHA-256 checksums, offline install, upgrade, and rollback evidence has not
   been published. Production remains **NO-GO**; annual 99.9% availability is
