@@ -171,6 +171,33 @@ try
             Console.WriteLine("PASS: current Windows service SID is allowed by replay-state ACL policy");
         }
     }
+    if (OperatingSystem.IsLinux())
+    {
+        var missingTarget = Path.Combine(reportRoot, "must-not-be-created-through-link");
+        var linkToMissingTarget = Path.Combine(reportRoot, "observer-linked-missing-target");
+        Directory.CreateSymbolicLink(linkToMissingTarget, missingTarget);
+        var missingTargetRejected = false;
+        try
+        {
+            using var invalid = new AgentHealthReportStore(agents, targets,
+                Path.Combine(linkToMissingTarget, "observer-link-state.json"), 10, 5, 2);
+        }
+        catch (InvalidDataException) { missingTargetRejected = true; }
+        finally { File.Delete(linkToMissingTarget); }
+        if (!missingTargetRejected || Directory.Exists(missingTarget))
+            throw new Exception("FAIL: symlinked replay-state path created a missing target directory before rejection");
+        Console.WriteLine("PASS: linked observer replay path fails before creating a missing target directory");
+
+        var linkedParent = Path.Combine(reportRoot, "observer-linked-state-parent");
+        Directory.CreateSymbolicLink(linkedParent, reportRoot);
+        var pathViaLink = Path.Combine(linkedParent, "observer-link-state.json");
+        var rejected = false;
+        try { using var invalid = new AgentHealthReportStore(agents, targets, pathViaLink, 10, 5, 2); }
+        catch (InvalidDataException) { rejected = true; }
+        if (!rejected || File.Exists(Path.Combine(reportRoot, "observer-link-state.json.lock")))
+            throw new Exception("FAIL: linked replay ancestor created state marker or enabled report store");
+        Console.WriteLine("PASS: linked observer replay directory fails before creating lock/marker");
+    }
     var duplicateVantageRejected = false;
     try
     {

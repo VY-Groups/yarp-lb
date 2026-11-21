@@ -42,6 +42,38 @@ internal static class PrivateKeyFileSecurityTests
             serviceUid, isDirectory: false, "test key"),
             "key without owner-read permission");
 
-        Console.WriteLine("PASS: Linux key owner and parent-directory trust rules");
+        var root = Path.Combine(Path.GetTempPath(), "gslb-state-hash-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        if (OperatingSystem.IsLinux())
+            File.SetUnixFileMode(root, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        try
+        {
+            var file = Path.Combine(root, "state.json");
+            var payload = System.Text.Encoding.ASCII.GetBytes("bounded test replay state");
+            File.WriteAllBytes(file, payload);
+            if (OperatingSystem.IsLinux())
+                File.SetUnixFileMode(file, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+            var hash = PrivateKeyFileSecurity.HashPrivateFileSha256(file, "observer replay", 4096);
+            if (!hash.AsSpan().SequenceEqual(System.Security.Cryptography.SHA256.HashData(payload)))
+                throw new Exception("FAIL: opened-handle digest differs from SHA-256 payload");
+            MustReject(() => PrivateKeyFileSecurity.HashPrivateFileSha256(file, "observer replay", 4),
+                "oversized replay file in bounded hash");
+            if (OperatingSystem.IsLinux())
+            {
+                var linkedParent = Path.Combine(root, "linked-parent");
+                Directory.CreateSymbolicLink(linkedParent, root);
+                var linkedPath = Path.Combine(linkedParent, "state.json");
+                MustReject(() => PrivateKeyFileSecurity.HashPrivateFileSha256(linkedPath, "observer replay", 4096),
+                    "linked parent during periodic replay hashing");
+                MustReject(() => PrivateKeyFileSecurity.ReadPrivateFileBytes(linkedPath, "observer replay", 4096),
+                    "linked parent during observer restart");
+                var linkedLeaf = Path.Combine(root, "linked-leaf.json");
+                File.CreateSymbolicLink(linkedLeaf, file);
+                MustReject(() => PrivateKeyFileSecurity.HashPrivateFileSha256(linkedLeaf, "observer replay", 4096),
+                    "linked replay file leaf");
+            }
+        }
+        finally { Directory.Delete(root, recursive: true); }
+        Console.WriteLine("PASS: Linux key trust and bounded no-follow replay-state hashing");
     }
 }
