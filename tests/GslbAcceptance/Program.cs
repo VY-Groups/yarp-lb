@@ -663,6 +663,11 @@ File.WriteAllText(configuration,JsonSerializer.Serialize(new {
    NameServers=new[]{
    new {Host=ednsBufferNs1,Address="192.0.2.53"},
    new {Host=ednsBufferNs2,Address="198.51.100.53"}}},
+ new {Name="dualstack-ns.integration.test",TtlSeconds=10,
+      Sites=new[]{new {Address="192.0.2.80",HealthUrl="http://127.0.0.1:19711/ready",Weight=1,Priority=0,HealthCheckType="Http",TcpPort=0}},
+      NameServers=new[]{
+          new {Host="ns1.dualstack-ns.integration.test",Address="192.0.2.53"},
+          new {Host="ns1.dualstack-ns.integration.test",Address="2001:db8::53"}}},
  new {Name="chain.integration.test",TtlSeconds=10,Sites=chainSites,
       NameServers=new[]{new {Host="ns.chain.integration.test",Address="127.0.0.31"}},
       RoutingPolicy="WeightedFailover",FailureThreshold=1,SuccessThreshold=1,
@@ -858,6 +863,22 @@ try
     Console.WriteLine("PASS: operator quarantine keeps a healthy primary out of DNS failover selection");
     var (delegatedNsRequest, delegatedNsUdp) = await QueryWire("child.delegated.integration.test", 2,
         ednsVersion: 0, udpPayloadSize: 1232);
+    var dualApexNs = await TcpQuery(DnsRequest("dualstack-ns.integration.test", 2));
+    Must(Dns16(dualApexNs, 6) == 1 && Dns16(dualApexNs, 10) == 2 &&
+         DnsRecordTypes(dualApexNs, 0).SequenceEqual(new ushort[] { 2 }) &&
+         DnsRecordTypes(dualApexNs, 2).SequenceEqual(new ushort[] { 1, 28 }),
+         "dual-stack apex emits one NS per hostname and both A and AAAA glue records");
+    var dualHostA = await TcpQuery(DnsRequest("ns1.dualstack-ns.integration.test", 1));
+    var dualHostAaaa = await TcpQuery(DnsRequest("ns1.dualstack-ns.integration.test", 28));
+    Must(Dns16(dualHostA, 6) == 1 && Dns16(dualHostAaaa, 6) == 1 &&
+         DnsRecordTypes(dualHostA, 0).SequenceEqual(new ushort[] { 1 }) &&
+         DnsRecordTypes(dualHostAaaa, 0).SequenceEqual(new ushort[] { 28 }),
+         "dual-stack authoritative name-server hostname returns its requested address family");
+    var dualHostMx = await TcpQuery(DnsRequest("ns1.dualstack-ns.integration.test", 15));
+    Must((Dns16(dualHostMx, 2) & 0xF) == 0 && Dns16(dualHostMx, 6) == 0 &&
+         DnsRecordTypes(dualHostMx, 1).SequenceEqual(new ushort[] { 6 }),
+         "existing dual-stack name-server hostname returns NODATA for unconfigured RR type");
+    Console.WriteLine("PASS: dual-stack authoritative NS deduplication, A/AAAA glue and NODATA");
     var delegatedNsTcp = await TcpQuery(delegatedNsRequest);
     foreach (var delegatedNs in new[] { delegatedNsUdp, delegatedNsTcp })
         Must((Dns16(delegatedNs, 2) & 0x0400) == 0 && (Dns16(delegatedNs, 2) & 0x000f) == 0 &&
