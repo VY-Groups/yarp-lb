@@ -10,5 +10,6 @@
     <Compile Include="../../TrafficCertificateRotation.cs" Link="TrafficCertificateRotation.cs" />
     <Compile Include="../../AcmeRenewal.cs" Link="AcmeRenewal.cs" />
     <Compile Include="../../../engines/GslbHealthContracts/PrivateKeyFileSecurity.cs" Link="PrivateKeyFileSecurity.cs" />
+    <Compile Include="../../../engines/GslbHealthContracts/StrictJsonPropertyNames.cs" Link="StrictJsonPropertyNames.cs" />
   </ItemGroup>
 </Project>
