@@ -36,6 +36,21 @@ public static class AgentHealthReportContract
     private static readonly Regex DnsLabel = new("^[A-Za-z0-9_-]{1,63}$",
         RegexOptions.CultureInvariant | RegexOptions.NonBacktracking);
 
+    private static readonly IReadOnlySet<string> RequiredWireProperties =
+        new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            nameof(AgentHealthReport.Version), nameof(AgentHealthReport.AgentId),
+            nameof(AgentHealthReport.KeyId), nameof(AgentHealthReport.Zone),
+            nameof(AgentHealthReport.SiteId), nameof(AgentHealthReport.Epoch),
+            nameof(AgentHealthReport.Sequence), nameof(AgentHealthReport.ObservedAtUnixSeconds),
+            nameof(AgentHealthReport.ExpiresAtUnixSeconds), nameof(AgentHealthReport.ProbeType),
+            nameof(AgentHealthReport.Verdict), nameof(AgentHealthReport.ConfidencePermille),
+            nameof(AgentHealthReport.LatencyMilliseconds), nameof(AgentHealthReport.Signature)
+        };
+
+    public static bool HasExactSerializedFields(ReadOnlyMemory<byte> utf8Json) =>
+        StrictJsonPropertyNames.HasExactTopLevelProperties(utf8Json, RequiredWireProperties);
+
     public static bool IsValidIdentifier(string? value) =>
         value is not null && Identifier.IsMatch(value);
 

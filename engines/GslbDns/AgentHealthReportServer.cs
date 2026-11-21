@@ -147,7 +147,7 @@ internal sealed class AgentHealthReportServer : IAsyncDisposable
                         body.Write(buffer, 0, read);
                     }
                     var payload = body.ToArray();
-                    if (!StrictJsonPropertyNames.HasNoDuplicates(payload))
+                    if (!AgentHealthReportContract.HasExactSerializedFields(payload))
                     {
                         store.RecordRejectedReport(authenticatedAgentId);
                         metrics.AgentReportRejected();

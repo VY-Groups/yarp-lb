@@ -71,12 +71,30 @@ internal static class ProtocolMutationTests
         // Conflicting duplicate JSON fields must not preserve the signed value
         // after deserialization (the runtime parser uses the same serializer).
         var reportJson = JsonSerializer.Serialize(valid);
+        Require(AgentHealthReportContract.HasExactSerializedFields(Encoding.UTF8.GetBytes(reportJson)),
+            "valid signed agent report must have an exact wire field set");
+        var camelCase = JsonSerializer.Serialize(valid, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+        Require(AgentHealthReportContract.HasExactSerializedFields(Encoding.UTF8.GetBytes(camelCase)),
+            "supported web-default casing must preserve exact wire schema");
+        var extraField = reportJson.Replace("\"Version\":", "\"UnsignedOverride\":true,\"Version\":",
+            StringComparison.Ordinal);
+        Require(extraField != reportJson &&
+                !AgentHealthReportContract.HasExactSerializedFields(Encoding.UTF8.GetBytes(extraField)),
+            "unknown unsigned top-level report property must be rejected");
+        var omittedLatency = reportJson.Replace("\"LatencyMilliseconds\":23,", string.Empty,
+            StringComparison.Ordinal);
+        Require(omittedLatency != reportJson &&
+                !AgentHealthReportContract.HasExactSerializedFields(Encoding.UTF8.GetBytes(omittedLatency)),
+            "missing nullable wire property must not silently inherit a default");
+        Require(!AgentHealthReportContract.HasExactSerializedFields(
+                Encoding.UTF8.GetBytes("[" + reportJson + "]")),
+            "signed report root must be a JSON object");
         var duplicateSequence = reportJson.Replace(
             $"\"Sequence\":{valid.Sequence}",
             $"\"Sequence\":{valid.Sequence},\"Sequence\":{valid.Sequence + 1}",
             StringComparison.Ordinal);
         Require(!ReferenceEquals(duplicateSequence, reportJson), "report duplicate-field fixture was not built");
-        Require(!StrictJsonPropertyNames.HasNoDuplicates(Encoding.UTF8.GetBytes(duplicateSequence)),
+        Require(!AgentHealthReportContract.HasExactSerializedFields(Encoding.UTF8.GetBytes(duplicateSequence)),
             "duplicate report properties are rejected before last-value JSON deserialization");
         var duplicateParsed = JsonSerializer.Deserialize<AgentHealthReport>(duplicateSequence);
         Require(duplicateParsed is not null && !AgentHealthReportContract.Verify(duplicateParsed, verifier, 8),
