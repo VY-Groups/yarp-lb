@@ -204,9 +204,14 @@ records, backward-only DNS name pointers, and the complete 43-byte TXT
 character-string. A malformed, non-authoritative, unreachable or incorrect
 server contributes **no** healthy vote. The issuer's existing cleanup lease
 is still released when any required authority fails. Strict production
-construction rejects duplicate server IDs, reused IP addresses, loopback
-endpoints and non-53 ports. Loopback/ephemeral ports are enabled exclusively
-by an internal socket-test constructor.
+construction rejects duplicate server IDs, reused IP addresses, loopback,
+IPv4 multicast/reserved/link-local and scoped or link-local IPv6 destinations,
+and non-53 ports. Scope identifiers such as `fe80::1%2` and `fe80::1%3`
+cannot be treated as distinct independent authorities. Private IPv4 unicast
+(RFC1918) and IPv6 unique-local unicast remain supported for operator-managed
+on-premises DNS. Loopback/ephemeral ports are enabled exclusively by an
+internal socket-test constructor; multicast and link-local destinations remain
+invalid even in socket tests.
 
 The Windows/Linux TLS acceptance now exercises two real independent TCP
 socket listeners, a non-AA second server, wrong digests, truncated/corrupt
