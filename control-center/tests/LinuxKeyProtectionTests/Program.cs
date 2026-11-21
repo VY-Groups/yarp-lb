@@ -153,14 +153,16 @@ try
     }
     finally { File.WriteAllBytes(initialKeyPath, originalProtectedBytes); }
 
+    // Linux permits case-variant filenames. Both paths must be accepted by
+    // the filename/GUID comparison so this reaches the duplicate-ID guard.
     var copiedKey = Path.Combine(Path.GetDirectoryName(initialKeyPath)!,
-        "key-" + otherGuid.ToString("D") + ".xml");
+        "key-" + originalGuid.ToString("D").ToUpperInvariant() + ".xml");
     File.WriteAllBytes(copiedKey, originalProtectedBytes);
     File.SetUnixFileMode(copiedKey, PrivateFile);
     try
     {
         Assert(Throws(()=>{using var _=Provider(state);}),
-            "duplicate master-key GUID under a second filename is refused");
+            "duplicate master-key GUID under a case-variant filename is refused");
     }
     finally { File.Delete(copiedKey); }
 
