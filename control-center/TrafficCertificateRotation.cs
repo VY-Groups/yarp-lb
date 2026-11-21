@@ -195,14 +195,37 @@ public sealed class TrafficCertificateRotation : IDisposable
 
     private ManagedCertificate LoadAndValidateCandidate()
     {
-        CheckPrivateFile(pfxPath);
-        CheckPrivateFile(passwordPath);
-        var password = File.ReadAllText(passwordPath).TrimEnd('\r', '\n');
-        if (password.Length == 0) throw new InvalidOperationException("Traffic PFX password cannot be empty");
+        var pfxBytes = GatewayCore.Gslb.Contracts.PrivateKeyFileSecurity.ReadPrivateFileBytes(
+            pfxPath, "Traffic certificate PFX", 1_048_576);
+        byte[]? passwordBytes = null;
+        string password;
+        try
+        {
+            if (pfxBytes.Length < 512)
+                throw new CryptographicException("Traffic certificate PFX is outside the configured size bound");
+            passwordBytes = GatewayCore.Gslb.Contracts.PrivateKeyFileSecurity.ReadPrivateFileBytes(
+                passwordPath, "Traffic certificate password", 16_384);
+            var offset = passwordBytes.AsSpan().StartsWith(new byte[] { 0xef, 0xbb, 0xbf }) ? 3 : 0;
+            password = new System.Text.UTF8Encoding(false, true)
+                .GetString(passwordBytes, offset, passwordBytes.Length - offset).TrimEnd('\r', '\n');
+            if (password.Length == 0) throw new InvalidDataException("Traffic PFX password cannot be empty");
+        }
+        catch
+        {
+            CryptographicOperations.ZeroMemory(pfxBytes);
+            throw;
+        }
+        finally
+        {
+            if (passwordBytes is not null) CryptographicOperations.ZeroMemory(passwordBytes);
+        }
+
         var flags = OperatingSystem.IsWindows()
             ? X509KeyStorageFlags.UserKeySet | X509KeyStorageFlags.PersistKeySet
             : X509KeyStorageFlags.EphemeralKeySet;
-        var certificate = X509CertificateLoader.LoadPkcs12FromFile(pfxPath, password, flags);
+        X509Certificate2 certificate;
+        try { certificate = X509CertificateLoader.LoadPkcs12(pfxBytes, password, flags); }
+        finally { CryptographicOperations.ZeroMemory(pfxBytes); }
         ManagedCertificate managed;
         try { managed = ManagedCertificate.Create(certificate); }
         catch { certificate.Dispose(); throw; }
@@ -252,21 +275,6 @@ public sealed class TrafficCertificateRotation : IDisposable
         foreach (var oid in source.ApplicationPolicy) copy.ApplicationPolicy.Add(oid);
         foreach (var oid in source.CertificatePolicy) copy.CertificatePolicy.Add(oid);
         return copy;
-    }
-
-    private static void CheckPrivateFile(string path)
-    {
-        if (!File.Exists(path) || (File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0)
-            throw new InvalidOperationException("Traffic certificate and password files must exist and may not be symbolic links");
-        if (OperatingSystem.IsLinux())
-        {
-            var mode = File.GetUnixFileMode(path);
-            if ((mode & (UnixFileMode.GroupRead | UnixFileMode.GroupWrite | UnixFileMode.GroupExecute |
-                          UnixFileMode.OtherRead | UnixFileMode.OtherWrite | UnixFileMode.OtherExecute)) != 0 ||
-                (mode & (UnixFileMode.UserRead | UnixFileMode.UserWrite)) !=
-                (UnixFileMode.UserRead | UnixFileMode.UserWrite))
-                throw new InvalidOperationException("Traffic PFX and password files must be mode 0600");
-        }
     }
 
     private sealed class ManagedCertificate : IDisposable

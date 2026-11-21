@@ -81,6 +81,40 @@ internal static class AcmeRenewalAcceptance
         using var wrongNameLeaf = CreateLeaf("other.example.com", DateTimeOffset.UtcNow.AddDays(90));
         await File.WriteAllBytesAsync(activePfxPath, ToPfx(activeLeaf));
         SetPrivate(activePfxPath);
+        if (OperatingSystem.IsLinux())
+        {
+            var linkedPfx = Path.Combine(rootDir, "linked-traffic.pfx");
+            File.CreateSymbolicLink(linkedPfx, activePfxPath);
+            var linkedPfxRejected = false;
+            try
+            {
+                try { using var linkedRotation = new TrafficCertificateRotation(linkedPfx, passwordPath, [DnsName]); }
+                catch (InvalidDataException) { linkedPfxRejected = true; }
+            }
+            finally { File.Delete(linkedPfx); }
+            Check(linkedPfxRejected, "live certificate loader rejects a linked PFX leaf");
+
+            File.SetUnixFileMode(activePfxPath, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.GroupRead);
+            var exposedPfxRejected = false;
+            try
+            {
+                try { using var exposedRotation = new TrafficCertificateRotation(activePfxPath, passwordPath, [DnsName]); }
+                catch (InvalidDataException) { exposedPfxRejected = true; }
+            }
+            finally { SetPrivate(activePfxPath); }
+            Check(exposedPfxRejected, "live certificate loader rejects a group-readable PFX");
+
+            var linkedPassword = Path.Combine(rootDir, "linked-traffic.pwd");
+            File.CreateSymbolicLink(linkedPassword, passwordPath);
+            var linkedPasswordRejected = false;
+            try
+            {
+                try { using var linkedRotation = new TrafficCertificateRotation(activePfxPath, linkedPassword, [DnsName]); }
+                catch (InvalidDataException) { linkedPasswordRejected = true; }
+            }
+            finally { File.Delete(linkedPassword); }
+            Check(linkedPasswordRejected, "live certificate loader rejects a linked password leaf");
+        }
         var settingsPath = Path.Combine(rootDir, "acme.json");
         await File.WriteAllTextAsync(settingsPath, System.Text.Json.JsonSerializer.Serialize(
             new AcmeRenewalSettings(DirectoryUrl, DnsName, "admin@example.com", activePfxPath,
@@ -201,6 +235,28 @@ internal static class AcmeRenewalAcceptance
                 Check(linkRejected, "existing account key through a linked directory is rejected");
             }
             finally { Directory.Delete(linkedDirectory); }
+
+            // A symlink at a GRANDPARENT must be denied before creating
+            // another account identity; checking only the final directory
+            // is insufficient when a nested parent points elsewhere.
+            var realParent = Path.Combine(rootDir, "account-real-parent");
+            var realLeaf = Path.Combine(realParent, "private-child");
+            Directory.CreateDirectory(realParent);
+            Directory.CreateDirectory(realLeaf);
+            File.SetUnixFileMode(realParent, privateMode);
+            File.SetUnixFileMode(realLeaf, privateMode);
+            var linkedAncestor = Path.Combine(rootDir, "account-linked-ancestor");
+            Directory.CreateSymbolicLink(linkedAncestor, realParent);
+            var redirectedAccount = Path.Combine(linkedAncestor, "private-child", "unapproved-new-key.bin");
+            var ancestorRejected = false;
+            try
+            {
+                _ = new AcmeAccountKeyStore(redirectedAccount,
+                    restartedDataProtection.CreateProtector("acceptance")).LoadOrCreate();
+            }
+            catch (InvalidOperationException) { ancestorRejected = true; }
+            Check(ancestorRejected && !File.Exists(Path.Combine(realLeaf, "unapproved-new-key.bin")),
+                "ACME account key linked ancestor rejected before creation");
         }
 
         // A corrupted or oversized existing file must not trigger silent key
@@ -259,6 +315,56 @@ internal static class AcmeRenewalAcceptance
             var coordinator = new AcmeRenewalCoordinator(fakeCa, challengeStore, clock, chainPolicy,
                 thumbprint => rotation is not null && string.Equals(rotation.Current.Thumbprint,
                     thumbprint, StringComparison.OrdinalIgnoreCase), lifecycleGate);
+            if (OperatingSystem.IsLinux())
+            {
+                var linkedPfx = Path.Combine(rootDir, "renewal-linked.pfx");
+                File.CreateSymbolicLink(linkedPfx, activePfxPath);
+                var linkedPfxRejected = false;
+                try
+                {
+                    try
+                    {
+                        await coordinator.RenewIfDueAsync(DirectoryUrl, DnsName, "admin@example.com", true,
+                            linkedPfx, passwordPath, TimeSpan.FromDays(30), CancellationToken.None);
+                    }
+                    catch (InvalidDataException) { linkedPfxRejected = true; }
+                }
+                finally { File.Delete(linkedPfx); }
+                Check(linkedPfxRejected && fakeCa.IssuanceCount == 0,
+                    "ACME renewal rejects a linked PFX before contacting the issuer");
+
+                var linkedPassword = Path.Combine(rootDir, "renewal-linked.pwd");
+                File.CreateSymbolicLink(linkedPassword, passwordPath);
+                var linkedPasswordRejected = false;
+                try
+                {
+                    try
+                    {
+                        await coordinator.RenewIfDueAsync(DirectoryUrl, DnsName, "admin@example.com", true,
+                            activePfxPath, linkedPassword, TimeSpan.FromDays(30), CancellationToken.None);
+                    }
+                    catch (InvalidDataException) { linkedPasswordRejected = true; }
+                }
+                finally { File.Delete(linkedPassword); }
+                Check(linkedPasswordRejected && fakeCa.IssuanceCount == 0,
+                    "ACME renewal rejects a linked password before contacting the issuer");
+
+                File.SetUnixFileMode(passwordPath,
+                    UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.GroupRead);
+                var exposedPasswordRejected = false;
+                try
+                {
+                    try
+                    {
+                        await coordinator.RenewIfDueAsync(DirectoryUrl, DnsName, "admin@example.com", true,
+                            activePfxPath, passwordPath, TimeSpan.FromDays(30), CancellationToken.None);
+                    }
+                    catch (InvalidDataException) { exposedPasswordRejected = true; }
+                }
+                finally { SetPrivate(passwordPath); }
+                Check(exposedPasswordRejected && fakeCa.IssuanceCount == 0,
+                    "ACME renewal rejects a group-readable password before contacting the issuer");
+            }
             var result = await coordinator.RenewIfDueAsync(DirectoryUrl, DnsName, "admin@example.com",
                 publicHttp01Enabled: true, activePfxPath, passwordPath, TimeSpan.FromDays(30), CancellationToken.None);
             Check(result.Renewed && result.NotAfter > DateTimeOffset.UtcNow.AddDays(80),
