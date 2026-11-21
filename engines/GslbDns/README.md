@@ -803,3 +803,13 @@ reload/restart. This must not be used as an automated DNS-01 provider or
 production staging acceptance claim. Pair it with a future reviewed
 publisher implementation and explicit authority convergence before enabling
 ACME DNS-01 automatic renewal. Issue #52 remains open for broader conformance.
+
+### Observer and authority signing trust-anchor PEMs
+
+Public signing trust anchors are bounded to 16 KiB, loaded from a single
+validated no-follow file handle, and checked for SubjectPublicKeyInfo PEM
+content. On Linux, the file must be owned by root or the service identity and
+must not be group/other-writable or executable; read-only 0644 or 0640 modes
+are accepted because the key is public. Parent directories retain the
+existing safe-ancestry policy. Private signing keys keep their owner-only
+permission requirements.

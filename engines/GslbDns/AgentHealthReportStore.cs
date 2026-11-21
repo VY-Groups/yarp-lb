@@ -93,7 +93,8 @@ internal sealed class AgentHealthReportStore : IDisposable
                 foreach (var keyPath in item.SigningPublicKeyPems)
                 {
                     using var key = ECDsa.Create();
-                    key.ImportFromPem(File.ReadAllText(keyPath));
+                    key.ImportFromPem(PrivateKeyFileSecurity.ReadTrustedPublicKeyPem(
+                        keyPath, "Agent health report signing trust anchor"));
                     if (key.ExportParameters(false).Curve.Oid.Value != "1.2.840.10045.3.1.7")
                         throw new InvalidDataException("Agent report signing keys must use P-256");
                     var encodedKey = key.ExportSubjectPublicKeyInfo();
