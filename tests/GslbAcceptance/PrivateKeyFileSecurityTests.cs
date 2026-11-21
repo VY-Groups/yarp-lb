@@ -59,7 +59,7 @@ internal static class PrivateKeyFileSecurityTests
             MustReject(() => PrivateKeyFileSecurity.HashPrivateFileSha256(file, "observer replay", 4),
                 "oversized replay file in bounded hash");
             var trustedPem = Path.Combine(root, "trusted-signing.pem");
-            const string publicPem = "-----BEGIN PUBLIC KEY-----\\nQUJD\\n-----END PUBLIC KEY-----\\n";
+            const string publicPem = "-----BEGIN PUBLIC KEY-----\nQUJD\n-----END PUBLIC KEY-----\n";
             File.WriteAllText(trustedPem, publicPem);
             if (OperatingSystem.IsLinux())
                 File.SetUnixFileMode(trustedPem, UnixFileMode.UserRead | UnixFileMode.UserWrite);
