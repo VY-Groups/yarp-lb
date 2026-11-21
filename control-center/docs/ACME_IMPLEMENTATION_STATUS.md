@@ -219,3 +219,53 @@ an operator. A production-approved DNS publication implementation, bounded
 credential rotation, DNSSEC validation where required, live external
 propagation and CA staging order remain outstanding. This code is a
 verification layer, **not** a complete DNS provider or release acceptance.
+
+### Bounded RFC 2136/TSIG DNS-01 publication option
+
+`AcmeDns01NsupdateWriter` adds an operator-provisioned DNS-01 publication
+backend for externally managed RFC 2136 authoritative zones. It invokes a
+locally installed and **SHA-256-pinned** `nsupdate` binary with `-v`
+(TCP) and `-k <private-key-file>` through an argument list, not through a
+shell. The binary is checked again before each add/delete. A single
+owner-only (0600), bounded TSIG file containing exactly one
+`algorithm hmac-sha256` key is validated before use; the shared secret is
+never included in argv, command input, log output or error messages.
+The process has a 12-second hard timeout and all output is drained without
+retaining or logging the text.
+
+The writer accepts only canonical public hostnames strictly beneath one
+configured public DNS zone, the exact `_acme-challenge` owner and a
+canonical 43-character SHA-256 base64url digest. It sends only:
+
+```text
+server <pinned-update-server-IP> 53
+zone <configured-public-zone>.
+update add _acme-challenge.api.example.com. 30 TXT "<43-character-digest>"
+send
+```
+
+Cleanup is `update delete <same-owner>. TXT "<same-digest>"`, not a
+whole-owner or whole-TXT-RRset removal. Disposing a successful publication
+lease performs that exact-value delete independently of the ACME
+cancellation token. An ambiguous failed add triggers bounded best-effort
+compensating deletion. **DNS TTL is not a lease:** a crashed process can
+leave an authoritative record behind; durable clean-up recovery and update
+idempotency across multiple gateway nodes are still required.
+
+The writer deliberately refuses to self-attest TXT propagation.
+Operators must wrap it in `AcmeDns01WireVerifiedPublisher` using separately
+pinned authoritative endpoints; only those direct TCP DNS answers can
+satisfy the issuer's two-or-more-authority readiness gate. Grant its TSIG
+identity update permission **only** for the approved `_acme-challenge`
+TXT names, never unrestricted zone write authority. Keep the executable,
+TSIG file and their parent paths root-/service-controlled and out of
+source control; do not configure DNS update credentials in public API or UI.
+
+The Windows/Linux test harness checks the strict script and configuration;
+Linux additionally runs a disposable fake `nsupdate` process to verify
+stdin/argv separation, exact cleanup, nonzero-exit compensation and
+executable tampering rejection. A fake executable is not proof of a live
+RFC 2136 server or public DNS operation. No automatic scheduler/provider
+configuration or CA staging validation is enabled by this PR; external DNS
+network credentials, signed response trust, live DNSSEC/TSIG interoperability,
+fleet coordination and physical #36 remain pending.
