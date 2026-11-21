@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "exceptionId": "lab-pkix-920420",
+  "environment": "disposable-lab-only",
+  "owner": "gatewaycore-ci-waf-fixture",
+  "reason": "Allow valid X.509 public DER uploads in a private acceptance lab",
+  "approvedForProduction": false,
+  "httpMethod": "POST",
+  "path": "/acceptance",
+  "contentType": "application/pkix-cert",
+  "removedRuleId": 920420,
+  "issuedAtUtc": "2026-11-21T00:00:00Z",
+  "expiresAtUtc": "2026-12-19T00:00:00Z"
+}
