@@ -26,6 +26,28 @@ internal static class DnsWireProtocol
             label[0] != '-' && label[^1] != '-');
     }
 
+    // A/AAAA backend and authoritative/delegated NS addresses become DNS
+    // answers visible to resolvers. Reject non-unicast, scoped and link-local
+    // endpoints before the zone can start. Private RFC1918/ULA and loopback
+    // are kept for on-premises and isolated integration fixtures respectively.
+    // Whether loopback is suitable for a publicly delegated zone remains a
+    // separate deployment-validation requirement.
+    internal static bool ValidPublishedUnicastAddress(IPAddress? address)
+    {
+        if (address is null || address.IsIPv4MappedToIPv6 ||
+            address.AddressFamily is not (AddressFamily.InterNetwork or AddressFamily.InterNetworkV6) ||
+            address.Equals(IPAddress.Any) || address.Equals(IPAddress.IPv6Any) ||
+            address.Equals(IPAddress.Broadcast) || address.IsIPv6Multicast)
+            return false;
+
+        if (address.AddressFamily == AddressFamily.InterNetworkV6)
+            return address.ScopeId == 0 && !address.IsIPv6LinkLocal && !address.IsIPv6SiteLocal;
+
+        var bytes = address.GetAddressBytes();
+        return bytes[0] != 0 && bytes[0] < 224 &&
+               !(bytes[0] == 169 && bytes[1] == 254);
+    }
+
     public static byte[]? Build(ReadOnlySpan<byte> query, IReadOnlyDictionary<string, SiteGroup> zones,
         bool tcp, IPAddress? resolverIp = null, AgentHealthReportStore? agentReports = null,
         AuthorityFenceStore? authorityFence = null)
