@@ -49,6 +49,9 @@ public sealed class AcmeDns01NsupdateWriter : IAcmeDns01Publisher
             throw new InvalidOperationException("DNS-01 RFC2136 writer requires pinned executable, private TSIG and canonical public zone");
     }
 
+    /// <summary>Validate the pinned updater binary and TSIG file without issuing a DNS update.</summary>
+    internal void VerifyPreflight() => ValidateToolsAndKey();
+
     public async Task<IAsyncDisposable> PublishAsync(string fqdn, string txtValue,
         TimeSpan lifetime, CancellationToken cancellationToken)
     {
