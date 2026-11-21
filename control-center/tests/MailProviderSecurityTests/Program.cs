@@ -160,6 +160,39 @@ try
 }
 finally { outboxRoot.Delete(recursive: true); }
 
+// A symlink in a *parent* component must not let a previously enrolled
+// audit queue be reopened through a different directory identity.
+if (OperatingSystem.IsLinux())
+{
+    var ancestry = Directory.CreateTempSubdirectory("gateway-audit-ancestor-");
+    try
+    {
+        var actualParent = Path.Combine(ancestry.FullName, "real");
+        var actualSpool = Path.Combine(actualParent, "spool");
+        Directory.CreateDirectory(actualSpool);
+        File.SetUnixFileMode(actualParent,
+            UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        File.SetUnixFileMode(actualSpool,
+            UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        using var verifier = System.Security.Cryptography.RSA.Create(2048);
+        using var transport = new ExternalAuditIntent(
+            new Uri("https://collector.example.invalid/audit/v1/intents"), "node-test",
+            new byte[32], verifier.ExportSubjectPublicKeyInfoPem(),
+            new HttpClient(new CapturingHandler(HttpStatusCode.ServiceUnavailable, "")));
+        using (var queue = new DurableAuditOutbox(actualSpool, transport))
+            queue.Enqueue("operator", "LOGIN_SUCCESS", DateTimeOffset.UtcNow, new string('A', 64));
+        var linkedParent = Path.Combine(ancestry.FullName, "linked");
+        Directory.CreateSymbolicLink(linkedParent, actualParent);
+        var refused = false;
+        try { using var _ = new DurableAuditOutbox(Path.Combine(linkedParent, "spool"), transport); }
+        catch (InvalidDataException) { refused = true; }
+        Check(refused, "Linux audit queue refuses a symlinked ancestor even if final spool has mode 0700");
+        using (var queue = new DurableAuditOutbox(actualSpool, transport))
+            Check(queue.Status().Pending == 1, "original no-follow audit queue remains readable");
+    }
+    finally { ancestry.Delete(recursive: true); }
+}
+
 sealed class CapturingHandler : HttpMessageHandler
 {
     readonly HttpStatusCode status;
