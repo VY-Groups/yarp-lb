@@ -190,3 +190,18 @@ The bounded 32 KiB Content-Length and chunked transport limits are unchanged,
 and real HTTP negative tests check the exact request boundary. This hardens
 the existing HTTP-01 revocation path; it does not implement DNS-01 or prove
 public-CA staging validation.
+
+
+### DNS-01 publisher boundary — cleanup lease before side effects
+
+The opt-in Certes DNS-01 path requires an explicitly supplied trusted publisher.
+The provider first acquires a cleanup lease without changing DNS; publication
+then occurs through that lease. If an update partially reaches a provider and
+then times out or throws, the already-held lease is disposed on the failure
+path so it can remove or reconcile the exact challenge. A provider that fails
+while acquiring the lease must leave DNS unchanged. Readiness still requires
+the exact TXT value at at least two distinct configured authoritative servers.
+
+No DNS provider is registered by default. This interface contract and its
+synthetic partial-write regression test do not establish a live provider,
+staging CA order, multi-node fencing, or full issue #37 acceptance.
