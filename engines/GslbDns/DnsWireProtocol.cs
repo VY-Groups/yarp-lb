@@ -156,12 +156,14 @@ internal static class DnsWireProtocol
                     domain.EndsWith("." + cut.Name, StringComparison.OrdinalIgnoreCase))
                 .OrderByDescending(cut => cut.Name.Length)
                 .FirstOrDefault();
-            var ns = zone.NameServers.FirstOrDefault(n =>
+            var nsHostExists = zone.NameServers.Any(n =>
                 n.Host.Equals(domain, StringComparison.OrdinalIgnoreCase));
+            var ns = zone.NameServers.FirstOrDefault(n =>
+                n.Host.Equals(domain, StringComparison.OrdinalIgnoreCase) && n.RecordType == qtype);
             // A configured address below this name makes it an existing empty
             // non-terminal. NXDOMAIN would incorrectly deny its entire subtree
             // to caching resolvers (RFC 8020 section 3.1).
-            var emptyNonTerminal = !atApex && ns is null &&
+            var emptyNonTerminal = !atApex && !nsHostExists &&
                 (zone.NameServers.Any(n =>
                     n.Host.EndsWith("." + domain, StringComparison.OrdinalIgnoreCase)) ||
                  zone.Delegations.Any(cut =>
@@ -211,7 +213,7 @@ internal static class DnsWireProtocol
                     else authority.AddRange(parentSigner.DenialProof(delegation.Name, nxDomain: false));
                 }
             }
-            else if (!atApex && ns is null)
+            else if (!atApex && !nsHostExists)
             {
                 rcode = emptyNonTerminal ? 0 : 3; // NODATA vs true NXDOMAIN
                 AddNegativeSoa();
@@ -393,9 +395,11 @@ internal static class DnsWireProtocol
                 answers.Add(SoaRecord(apex!, zone));
             else if (qtype == Ns && atApex && zone.NameServers.Length != 0)
             {
+                var uniqueServerHosts = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                 foreach (var server in zone.NameServers)
                 {
-                    answers.Add(new DnsResource(apex!, Ns, (uint)zone.Ttl, WireName(server.Host)));
+                    if (uniqueServerHosts.Add(server.Host))
+                        answers.Add(new DnsResource(apex!, Ns, (uint)zone.Ttl, WireName(server.Host)));
                     if (server.Host.EndsWith("." + apex!, StringComparison.OrdinalIgnoreCase))
                         extra.Add(new DnsResource(server.Host, server.RecordType, (uint)zone.Ttl, server.Address.GetAddressBytes()));
                 }
