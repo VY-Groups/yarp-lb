@@ -26,6 +26,19 @@ internal sealed record AuthorityFenceConfig(string NodeId, string ListenAddress,
 internal sealed record AuthorityFenceTarget(string Zone, string SiteId, Func<long, bool> LocalEligible);
 
 /// <summary>
+/// Bounded, read-only state for an operator's private GSLB diagnostics channel.
+/// Contains neither addresses, certificate trust pins, signing keys nor raw
+/// health reports. Local backend readiness is still independently required
+/// by DNS routing after this peer fence is satisfied.
+/// </summary>
+internal sealed record AuthorityFenceDiagnostics(
+    int Version, string AuthorityId, string PeerAuthorityId,
+    bool DurableStateTrusted, bool PeerSnapshotFresh, bool PeerAcknowledgementFresh,
+    bool PeerFenceReady, int ConfiguredTargets, int EligiblePeerTargets,
+    long LocalEpoch, long LastAcceptedPeerEpoch, long LastAcceptedPeerSequence,
+    long PeerSnapshotRemainingMilliseconds, long PeerAcknowledgementRemainingMilliseconds);
+
+/// <summary>
 /// Opt-in strict two-authority lease fence. DNS admits a target only while its
 /// local policy is eligible and the sole configured peer has acknowledged the
 /// same configuration fingerprint and a fresh eligible decision.
@@ -146,6 +159,36 @@ internal sealed class AuthorityFenceStore : IDisposable
                 outboundAcknowledgedUntilTick is long outboundDeadline && nowTick < outboundDeadline &&
                 live is { } state && nowTick < state.ExpiresAtTick &&
                 state.Decisions.TryGetValue(TargetKey(zone, siteId), out var eligible) && eligible;
+        }
+    }
+
+    /// <summary>
+    /// Snapshot evidence under the same durable-state and lease gates as
+    /// DNS eligibility. Never evaluates probe callbacks or renews peer leases;
+    /// inspection cannot grant authority during a partition or a restore fault.
+    /// </summary>
+    public AuthorityFenceDiagnostics Inspect(long nowTick)
+    {
+        lock (gate)
+        {
+            var durable = CheckDurableState(nowTick);
+            var snapshotFresh = durable &&
+                live is { } state && nowTick < state.ExpiresAtTick;
+            var acknowledged = durable &&
+                outboundAcknowledgedUntilTick is long until && nowTick < until;
+            var ready = snapshotFresh && acknowledged;
+            var peerTargets = ready && live is { } current
+                ? current.Decisions.Values.Count(eligible => eligible)
+                : 0;
+            long Remaining(long? untilTick) => durable && untilTick is long deadline && deadline > nowTick
+                ? Math.Min(config.LeaseSeconds * 1000L, deadline - nowTick)
+                : 0;
+            return new AuthorityFenceDiagnostics(
+                1, config.NodeId, config.Peer.NodeId, durable, snapshotFresh,
+                acknowledged, ready, targetKeys.Count, peerTargets,
+                localEpoch, replay.Epoch, replay.Sequence,
+                Remaining(live?.ExpiresAtTick),
+                Remaining(outboundAcknowledgedUntilTick));
         }
     }
 
