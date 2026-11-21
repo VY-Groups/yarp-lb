@@ -162,3 +162,17 @@ operator responsibility. Renewal fails before contacting the issuer when the
 PFX or password is linked, too large, or has unsafe Linux permissions. The
 Windows/Linux acceptance verifies live-certificate PFX link/mode rejection and
 renewal PFX/password link and password-mode rejection on Linux.
+
+### Exact JSON schema for destructive revocation requests
+
+`POST /admin/api/tls/acme/revoke` now requires precisely the four declared
+JSON properties (`certificateDerBase64`, `thumbprint`, `confirmation`,
+`reason`) once each. The existing case-insensitive web serializer continues
+to accept PascalCase and camelCase, but duplicate/case-aliased names, missing
+fields, unknown extension fields, arrays, and malformed input produce HTTP 400
+*before* the request proceeds to the administrator audit or certificate
+revocation coordinator. No insecure compatibility fallback is provided.
+The bounded 32 KiB Content-Length and chunked transport limits are unchanged,
+and real HTTP negative tests check the exact request boundary. This hardens
+the existing HTTP-01 revocation path; it does not implement DNS-01 or prove
+public-CA staging validation.

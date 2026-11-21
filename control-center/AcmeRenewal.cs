@@ -537,6 +537,14 @@ public static class AcmeRevocationRequestReader
 {
     public const int MaxRequestBytes = 32 * 1024;
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+    // Web-default JSON deserialization is case-insensitive and accepts
+    // unknown/duplicate properties. A destructive certificate revocation
+    // must never silently interpret an ambiguous confirmation envelope.
+    private static readonly IReadOnlySet<string> RequiredRequestFields =
+        new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "certificateDerBase64", "thumbprint", "confirmation", "reason"
+        };
 
     public static async Task<AcmeRevocationRequest> ReadAsync(HttpRequest request,
         CancellationToken cancellationToken)
@@ -569,6 +577,8 @@ public static class AcmeRevocationRequestReader
                 body.Write(buffer, 0, read);
             }
             payload = body.ToArray();
+            if (!StrictJsonPropertyNames.HasExactTopLevelProperties(payload, RequiredRequestFields))
+                throw new InvalidDataException("ACME revocation request has missing, duplicate or unknown fields.");
             return JsonSerializer.Deserialize<AcmeRevocationRequest>(payload, JsonOptions)
                 ?? throw new InvalidDataException("ACME revocation request JSON is empty.");
         }

@@ -616,6 +616,52 @@ internal static class AcmeRenewalAcceptance
                 check(response.StatusCode == HttpStatusCode.OK, "bounded JSON revocation request reaches the handler");
             }
 
+            // Use the real HTTP endpoint, not only a JSON helper, to confirm
+            // that malformed/ambiguous admin revocation bodies never reach the
+            // parsed/issuer path. Keep existing PascalCase clients and the web
+            // default camelCase spelling compatible.
+            async Task CheckWireAsync(byte[] json, HttpStatusCode expected, string label)
+            {
+                using var request = new HttpRequestMessage(HttpMethod.Post, "/admin/api/tls/acme/revoke")
+                {
+                    Content = new ByteArrayContent(json)
+                };
+                request.Content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/json");
+                using var response = await client.SendAsync(request);
+                check(response.StatusCode == expected, label);
+            }
+            var camelCase = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(
+                new AcmeRevocationRequest("AA==", new string('A', 40), "REVOKE " + new string('A', 40), "Superseded"),
+                new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web));
+            await CheckWireAsync(camelCase, HttpStatusCode.OK,
+                "camelCase revocation request remains compatible with web JSON clients");
+
+            var acceptedJson = Encoding.UTF8.GetString(acceptedBody);
+            var duplicateCaseAlias = acceptedJson.Replace(
+                "\"Thumbprint\":", "\"thumbprint\":\"overridden\",\"Thumbprint\":",
+                StringComparison.Ordinal);
+            var duplicateExact = acceptedJson.Replace(
+                "\"Reason\":", "\"Reason\":\"Unspecified\",\"Reason\":",
+                StringComparison.Ordinal);
+            var omittedField = acceptedJson.Replace(
+                ",\"Reason\":\"Superseded\"", string.Empty, StringComparison.Ordinal);
+            var extraField = acceptedJson[..^1] + ",\"auditOverride\":true}";
+            check(duplicateCaseAlias != acceptedJson && duplicateExact != acceptedJson &&
+                omittedField != acceptedJson, "revocation negative JSON fixtures must mutate the real payload");
+            foreach (var (badJson, label) in new[]
+            {
+                (duplicateCaseAlias, "case-aliased confirmation ambiguity"),
+                (duplicateExact, "exact duplicate revocation member"),
+                (omittedField, "missing revocation reason"),
+                (extraField, "unknown revocation field"),
+                ("[" + acceptedJson + "]", "array root instead of revocation object"),
+                (acceptedJson[..^1], "truncated revocation JSON")
+            })
+                await CheckWireAsync(Encoding.UTF8.GetBytes(badJson), HttpStatusCode.BadRequest,
+                    "revocation parser rejects " + label);
+            check(Volatile.Read(ref parsed) == 2,
+                "duplicate, omitted, unknown and malformed revocation payloads never enter the parsed handler");
+
             var oversizedBody = Enumerable.Repeat((byte)' ', AcmeRevocationRequestReader.MaxRequestBytes + 1).ToArray();
             using (var fixedLength = new HttpRequestMessage(HttpMethod.Post, "/admin/api/tls/acme/revoke")
             {
@@ -645,7 +691,7 @@ internal static class AcmeRenewalAcceptance
                 check(response.StatusCode == HttpStatusCode.RequestEntityTooLarge,
                     "Kestrel rejects an oversized chunked revocation body");
             }
-            check(Volatile.Read(ref parsed) == 1,
+            check(Volatile.Read(ref parsed) == 2,
                 "oversized fixed-length and chunked requests are rejected before JSON parsing");
 
             foreach (var status in new[] { StatusCodes.Status413PayloadTooLarge, StatusCodes.Status400BadRequest })
