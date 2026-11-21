@@ -45,6 +45,9 @@ public static class ProductLinuxStartupSmoke
         using var rsa=RSA.Create(3072);
         var req=new CertificateRequest("CN=CI Linux key protection",rsa,
             HashAlgorithmName.SHA256,RSASignaturePadding.Pkcs1);
+        req.CertificateExtensions.Add(new X509BasicConstraintsExtension(false,false,0,true));
+        req.CertificateExtensions.Add(new X509KeyUsageExtension(
+            X509KeyUsageFlags.KeyEncipherment|X509KeyUsageFlags.DataEncipherment,true));
         using var cert=req.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1),
             DateTimeOffset.UtcNow.AddDays(7));
         var pfx=Path.Combine(root,"keys.pfx");

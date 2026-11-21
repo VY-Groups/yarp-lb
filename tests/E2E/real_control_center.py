@@ -190,8 +190,14 @@ def gateway(cwd:Path, dll:Path, root:Path, listen_port:int, https_port:int|None=
         YARP_LINUX_DP_CERT_PASSWORD_FILE=str(root/"secrets"/"dp-password"),
     )
     if https_port is not None:
+        # Test fixtures may require an independently trusted server TLS
+        # certificate. Keep that distinct from the dedicated RSA Data
+        # Protection wrapping leaf when a tls.pfx was provisioned.
+        tls_pfx = root/"secrets"/"tls.pfx"
+        if not tls_pfx.is_file():
+            tls_pfx = root/"secrets"/"dp.pfx"
         env.update(
-            ASPNETCORE_Kestrel__Certificates__Default__Path=str(root/"secrets"/"dp.pfx"),
+            ASPNETCORE_Kestrel__Certificates__Default__Path=str(tls_pfx),
             ASPNETCORE_Kestrel__Certificates__Default__Password="temporary-e2e-only-password",
         )
     logs=open(root/"gateway.log","a",encoding="utf8")
@@ -235,12 +241,33 @@ def openssl_state(root:Path,origin_port:int):
     key=secrets/"dp.key"
     cert=secrets/"dp.crt"
     subprocess.run(["openssl","req","-x509","-newkey","rsa:3072","-nodes","-days","7",
-        "-subj","/CN=temporary-gatewaycore-e2e", "-keyout",str(key),"-out",str(cert)],
+        "-subj","/CN=temporary-gatewaycore-e2e", "-keyout",str(key),"-out",str(cert),
+        # The disposable Data Protection PFX must satisfy the same dedicated
+        # encryption leaf profile as production, rather than relying on
+        # OpenSSL distribution-specific req defaults.
+        "-addext","basicConstraints=critical,CA:FALSE",
+        "-addext","keyUsage=critical,keyEncipherment"],
         check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
     subprocess.run(["openssl","pkcs12","-export","-out",str(secrets/"dp.pfx"),
         "-inkey",str(key),"-in",str(cert),"-passout","pass:temporary-e2e-only-password"],
         check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
     for p in (key,cert,secrets/"dp.pfx"): p.chmod(0o600)
+
+    # Kestrel needs a separate TLS identity with signing usage. Never reuse
+    # the encryption-only Data Protection wrapper as a server certificate.
+    tls_key=secrets/"tls.key"
+    tls_cert=secrets/"tls.crt"
+    tls_pfx=secrets/"tls.pfx"
+    subprocess.run(["openssl","req","-x509","-newkey","rsa:3072","-nodes","-days","7",
+        "-subj","/CN=127.0.0.1", "-keyout",str(tls_key),"-out",str(tls_cert),
+        "-addext","subjectAltName=IP:127.0.0.1",
+        "-addext","basicConstraints=critical,CA:FALSE",
+        "-addext","keyUsage=critical,digitalSignature,keyEncipherment"],
+        check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+    subprocess.run(["openssl","pkcs12","-export","-out",str(tls_pfx),
+        "-inkey",str(tls_key),"-in",str(tls_cert),"-passout","pass:temporary-e2e-only-password"],
+        check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+    for p in (tls_key,tls_cert,tls_pfx): p.chmod(0o600)
     appconfig=config/"appsettings.json"
     appconfig.write_text(json.dumps({"Logging":{"LogLevel":{"Default":"Warning"}},
         "AllowedHosts":"localhost;127.0.0.1",

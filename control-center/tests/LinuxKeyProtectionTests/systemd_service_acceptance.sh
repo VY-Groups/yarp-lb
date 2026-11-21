@@ -88,7 +88,9 @@ chmod 0600 "$state_dir/config/appsettings.json"
 
 openssl req -x509 -newkey rsa:3072 -keyout "$state_dir/secrets/protection.key" \
   -out "$state_dir/secrets/protection.crt" -days 7 -nodes \
-  -subj "/CN=GatewayCore systemd acceptance ${id}" >/dev/null 2>&1
+  -subj "/CN=GatewayCore systemd acceptance ${id}" \
+  -addext 'basicConstraints=critical,CA:FALSE' \
+  -addext 'keyUsage=critical,keyEncipherment' >/dev/null 2>&1
 openssl rand -hex 32 > "$state_dir/secrets/protection.password"
 openssl pkcs12 -export -out "$state_dir/secrets/protection.pfx" \
   -inkey "$state_dir/secrets/protection.key" -in "$state_dir/secrets/protection.crt" \

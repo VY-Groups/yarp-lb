@@ -6,7 +6,10 @@ chmod 0700 /state /state/config /state/secrets /state/data-protection-keys
 if [ ! -f /state/secrets/current.pfx ]; then
   openssl rand -hex 32 > /state/secrets/pfx-password
   openssl req -x509 -newkey rsa:3072 -sha256 -nodes -days 7 \
-    -subj "/CN=ci-dataprotection" -keyout /state/secrets/private.pem \
+    -subj "/CN=ci-dataprotection" \
+    -addext 'basicConstraints=critical,CA:FALSE' \
+    -addext 'keyUsage=critical,keyEncipherment' \
+    -keyout /state/secrets/private.pem \
     -out /state/secrets/protector.crt >/dev/null 2>&1
   openssl pkcs12 -export -in /state/secrets/protector.crt \
     -inkey /state/secrets/private.pem -out /state/secrets/current.pfx \
