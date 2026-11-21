@@ -1,6 +1,8 @@
 using System.Diagnostics;
+using System.ComponentModel;
 using System.Net;
 using System.Net.Sockets;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
 
@@ -248,7 +250,7 @@ try
     Assert(await ValidatePublicBindDenied(), "public listener requires explicit opt-in");
     await ValidatePartialStartupFailure();
     if (OperatingSystem.IsLinux()) await ValidateGracefulShutdown();
-    else Console.WriteLine("SIGTERM graceful shutdown acceptance is Linux-only; Windows console-control acceptance remains separate.");
+    else if (OperatingSystem.IsWindows()) await ValidateWindowsConsoleShutdown();
     Console.WriteLine("L4 TCP+UDP REAL-SOCKET ACCEPTANCE PASSED");
 }
 finally
@@ -327,6 +329,96 @@ async Task ValidateGracefulShutdown()
     Assert(heldClosed, "held TCP stream is released after bounded shutdown");
     using var udpRebound = new UdpClient(new IPEndPoint(IPAddress.Loopback, 19021));
     Assert(true, "UDP listener released on graceful process exit");
+}
+
+async Task ValidateWindowsConsoleShutdown()
+{
+    const int listenPort = 19040;
+    const int udpPort = 19041;
+    var configPath = Path.Combine(scratch, "l4-windows-console-shutdown.json");
+    File.WriteAllText(configPath, JsonSerializer.Serialize(new
+    {
+        AllowNonLoopbackListeners = false,
+        Tcp = new[] { new {
+            Name = "windows-console-shutdown", ListenHost = "127.0.0.1", ListenPort = listenPort,
+            TcpIdleTimeoutSeconds = 30,
+            Backends = new[] { new { Host = "127.0.0.1", Port = 19116 } }
+        } },
+        Udp = new[] { new {
+            Name = "windows-console-shutdown-udp", ListenHost = "127.0.0.1", ListenPort = udpPort,
+            UdpIdleTimeoutSeconds = 30,
+            Backends = new[] { new { Host = "127.0.0.1", Port = 19121 } }
+        } }
+    }));
+
+    using var child = WindowsConsoleProcess.StartNewGroup(dll, configPath);
+    using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+    var token = deadline.Token;
+    using var drain = await ConnectWhenReady(listenPort, child, token);
+    using var held = await ConnectWhenReady(listenPort, child, token);
+    var drainStream = drain.GetStream();
+    var heldStream = held.GetStream();
+    var greeting = new byte[1];
+    await drainStream.ReadExactlyAsync(greeting, token);
+    Assert(greeting[0] == 1, "Windows console-control drain stream reached its backend");
+    await heldStream.ReadExactlyAsync(greeting, token);
+    Assert(greeting[0] == 1, "Windows console-control held stream reached its backend");
+
+    var elapsed = Stopwatch.StartNew();
+    WindowsConsoleProcess.SendBreak(child.Id);
+    var admissionStopped = false;
+    while (elapsed.Elapsed < TimeSpan.FromSeconds(3))
+    {
+        using var candidate = new TcpClient(AddressFamily.InterNetwork);
+        try { await candidate.ConnectAsync(IPAddress.Loopback, listenPort, token); }
+        catch (SocketException ex) when (ex.SocketErrorCode == SocketError.ConnectionRefused)
+        { admissionStopped = true; break; }
+        await Task.Delay(25, token);
+    }
+    Assert(admissionStopped, "Windows CTRL+BREAK stops new TCP admission");
+    Assert(!child.HasExited, "Windows engine remains alive while established streams drain");
+
+    var payload = Encoding.ASCII.GetBytes("finish-during-console-drain");
+    await drainStream.WriteAsync(payload, token);
+    var reply = new byte[payload.Length];
+    await drainStream.ReadExactlyAsync(reply, token);
+    Assert(reply.AsSpan().SequenceEqual(payload), "Windows established TCP transaction completes during drain");
+    drain.Client.Shutdown(SocketShutdown.Send);
+    Assert(await drainStream.ReadAsync(new byte[1], token) == 0,
+        "Windows completed TCP stream drains through EOF");
+
+    await child.WaitForExitAsync(token);
+    Assert(child.ExitCode == 0 && elapsed.Elapsed < TimeSpan.FromSeconds(10),
+        "Windows console-control shutdown exits within the bounded drain budget");
+    var heldClosed = false;
+    try { heldClosed = await heldStream.ReadAsync(new byte[1], token) == 0; }
+    catch (IOException) { heldClosed = true; }
+    Assert(heldClosed, "Windows held TCP stream is released after bounded shutdown");
+    using var udpRebound = new UdpClient(new IPEndPoint(IPAddress.Loopback, udpPort));
+    Assert(true, "Windows UDP listener is released after console-control shutdown");
+}
+
+async Task<TcpClient> ConnectWhenReady(int port, WindowsConsoleProcess child, CancellationToken token)
+{
+    var limit = Stopwatch.StartNew();
+    while (limit.Elapsed < TimeSpan.FromSeconds(10))
+    {
+        token.ThrowIfCancellationRequested();
+        if (child.HasExited)
+            throw new InvalidOperationException($"Windows L4 child exited before binding (code {child.ExitCode}).");
+        var client = new TcpClient(AddressFamily.InterNetwork);
+        try
+        {
+            await client.ConnectAsync(IPAddress.Loopback, port, token);
+            return client;
+        }
+        catch (SocketException ex) when (ex.SocketErrorCode == SocketError.ConnectionRefused)
+        {
+            client.Dispose();
+            await Task.Delay(50, token);
+        }
+    }
+    throw new TimeoutException("Windows L4 child did not bind its shutdown listener.");
 }
 
 async Task<string> TcpRoundTrip(string message, int port=19011)
@@ -785,4 +877,145 @@ static async Task AdmissionBackend(TcpListener listener, CancellationToken token
     }
     catch (OperationCanceledException) when (token.IsCancellationRequested) { }
     catch (SocketException) when (token.IsCancellationRequested) { }
+}
+
+internal sealed class WindowsConsoleProcess : IDisposable
+{
+    private const uint CreateNewProcessGroup = 0x00000200;
+    private const uint CtrlBreakEvent = 1;
+    private readonly Process process;
+    private readonly bool ownsConsole;
+    private readonly IntPtr processHandle;
+
+    private WindowsConsoleProcess(Process process, bool ownsConsole, IntPtr processHandle)
+    {
+        this.process = process;
+        this.ownsConsole = ownsConsole;
+        this.processHandle = processHandle;
+    }
+
+    internal int Id => process.Id;
+    internal bool HasExited => process.HasExited;
+    internal int ExitCode => GetExitCodeProcess(processHandle, out var code)
+        ? checked((int)code)
+        : throw new Win32Exception(Marshal.GetLastWin32Error(), "Could not read L4 process exit code.");
+    internal Task WaitForExitAsync(CancellationToken token) => process.WaitForExitAsync(token);
+
+    internal static WindowsConsoleProcess StartNewGroup(string dll, string config)
+    {
+        if (!OperatingSystem.IsWindows())
+            throw new PlatformNotSupportedException("Windows console-control acceptance requires Windows.");
+        var ownsConsole = false;
+        if (GetConsoleWindow() == IntPtr.Zero)
+        {
+            if (AllocConsole())
+                ownsConsole = true;
+            else
+            {
+                var error = Marshal.GetLastWin32Error();
+                // Pseudoconsole hosts can be attached without exposing a normal
+                // console window; AllocConsole reports ERROR_ACCESS_DENIED there.
+                if (error != 5)
+                    throw new Win32Exception(error, "Could not attach a console for CTRL+BREAK acceptance.");
+            }
+        }
+
+        var startup = new StartupInfo { cb = Marshal.SizeOf<StartupInfo>() };
+        var command = new StringBuilder($"\"dotnet.exe\" \"{dll}\" \"{config}\"");
+        if (!CreateProcessW(null, command, IntPtr.Zero, IntPtr.Zero, false,
+                CreateNewProcessGroup, IntPtr.Zero, Path.GetDirectoryName(dll), ref startup, out var info))
+        {
+            var error = Marshal.GetLastWin32Error();
+            if (ownsConsole) _ = FreeConsole();
+            throw new Win32Exception(error, "Could not start the L4 child in an isolated console process group.");
+        }
+
+        try
+        {
+            return new WindowsConsoleProcess(Process.GetProcessById(checked((int)info.dwProcessId)),
+                ownsConsole, info.hProcess);
+        }
+        catch
+        {
+            _ = TerminateProcess(info.hProcess, 1);
+            _ = CloseHandle(info.hProcess);
+            if (ownsConsole) _ = FreeConsole();
+            throw;
+        }
+        finally
+        {
+            _ = CloseHandle(info.hThread);
+        }
+    }
+
+    internal static void SendBreak(int processGroupId)
+    {
+        if (!GenerateConsoleCtrlEvent(CtrlBreakEvent, checked((uint)processGroupId)))
+            throw new Win32Exception(Marshal.GetLastWin32Error(), "Could not send CTRL+BREAK to the L4 process group.");
+    }
+
+    public void Dispose()
+    {
+        if (!process.HasExited)
+        {
+            try { process.Kill(entireProcessTree: true); }
+            catch (InvalidOperationException) { }
+        }
+        process.Dispose();
+        _ = CloseHandle(processHandle);
+        if (ownsConsole) _ = FreeConsole();
+    }
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct StartupInfo
+    {
+        public int cb;
+        [MarshalAs(UnmanagedType.LPWStr)] public string? lpReserved;
+        [MarshalAs(UnmanagedType.LPWStr)] public string? lpDesktop;
+        [MarshalAs(UnmanagedType.LPWStr)] public string? lpTitle;
+        public uint dwX, dwY, dwXSize, dwYSize, dwXCountChars, dwYCountChars, dwFillAttribute, dwFlags;
+        public short wShowWindow, cbReserved2;
+        public IntPtr lpReserved2, hStdInput, hStdOutput, hStdError;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ProcessInformation
+    {
+        public IntPtr hProcess, hThread;
+        public uint dwProcessId, dwThreadId;
+    }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true, EntryPoint = "CreateProcessW")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool CreateProcessW(string? applicationName, StringBuilder commandLine,
+        IntPtr processAttributes, IntPtr threadAttributes, [MarshalAs(UnmanagedType.Bool)] bool inheritHandles,
+        uint creationFlags, IntPtr environment, string? currentDirectory, ref StartupInfo startupInfo,
+        out ProcessInformation processInformation);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GenerateConsoleCtrlEvent(uint controlEvent, uint processGroupId);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool AllocConsole();
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool FreeConsole();
+
+    [DllImport("kernel32.dll")]
+    private static extern IntPtr GetConsoleWindow();
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool CloseHandle(IntPtr handle);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool TerminateProcess(IntPtr process, uint exitCode);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetExitCodeProcess(IntPtr process, out uint exitCode);
 }
