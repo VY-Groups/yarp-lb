@@ -150,6 +150,24 @@ def has_rr(records, section, owner, rtype):
                for record_section, record_owner, record_type, record_class, _ in records)
 
 
+def validate_edns0_response(records):
+    """Validate the response OPT envelope, not just its presence.
+
+    RFC 6891 reserves the OPT TTL low 16 bits for EDNS flags; only DO is
+    defined. An ordinary EDNS0 query without DO must not receive unexpected
+    flags or a nonzero EDNS version.
+    """
+    opts = [(owner, rclass, ttl) for section, owner, rtype, rclass, ttl in records
+            if rtype == 41]
+    require(len(opts) == 1, "EDNS0 response must contain exactly one OPT RR")
+    owner, payload_size, ttl = opts[0]
+    require(owner == (), "EDNS0 OPT owner must be the root")
+    require(payload_size >= 512, "EDNS0 response advertised invalid UDP size")
+    require(((ttl >> 16) & 0xFF) == 0, "EDNS0 response version must be zero")
+    require((ttl & 0xFFFF) == 0, "EDNS0 response contains unexpected flags")
+    require((ttl >> 24) == 0, "EDNS0 response has unexpected extended RCODE")
+
+
 def validate_parser_guards():
     txid = 0x1234
     header = struct.pack("!HHHHHH", txid, 0x8000, 1, 0, 0, 0)
@@ -227,10 +245,8 @@ def run(args):
                 "NXDOMAIN missing negative-caching SOA")
         print(f"PASS NXDOMAIN {'TCP' if tcp else 'UDP'} {size} bytes")
     flags, records, size = check(args.host, args.port, zone, zone, 1, False, args.timeout, edns=True)
-    opts = [(owner, rclass, ttl) for section, owner, rtype, rclass, ttl in records
-            if section == "additional" and rtype == 41]
-    require((flags & 0xF) == 0 and len(opts) == 1 and opts[0][0] == (),
-            "EDNS0 response must contain exactly one root-owned additional OPT RR")
+    require((flags & 0xF) == 0, "EDNS0 response must return NOERROR")
+    validate_edns0_response(records)
     require(size <= 1232, "EDNS0 UDP response exceeded advertised 1232-byte limit")
     print(f"PASS EDNS0 UDP {size} bytes")
     flags, records, _ = check(args.host, args.port, zone, zone, 6, False, args.timeout,
