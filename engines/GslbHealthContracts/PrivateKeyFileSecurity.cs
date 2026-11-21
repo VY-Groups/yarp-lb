@@ -44,6 +44,26 @@ public static class PrivateKeyFileSecurity
     }
 
     /// <summary>
+    /// A signing public key is a trusted policy input even though it is not secret.
+    /// Use a bounded, no-follow opened handle and private state permissions.
+    /// </summary>
+    public static string ReadTrustedPublicKeyPem(string? path, string purpose)
+    {
+        const int MaximumTrustAnchorBytes = 16 * 1024;
+        var bytes = ReadPrivateFileBytes(path, purpose, MaximumTrustAnchorBytes);
+        try
+        {
+            var pem = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false,
+                throwOnInvalidBytes: true).GetString(bytes);
+            if (!pem.Contains("-----BEGIN PUBLIC KEY-----", StringComparison.Ordinal) ||
+                !pem.Contains("-----END PUBLIC KEY-----", StringComparison.Ordinal))
+                throw new InvalidDataException("Trusted signing key must be a SubjectPublicKeyInfo PEM");
+            return pem;
+        }
+        finally { System.Security.Cryptography.CryptographicOperations.ZeroMemory(bytes); }
+    }
+
+    /// <summary>
     /// Read using the same inspected, non-symlinked opened handle.
     /// On Linux validate each parent directory and the final regular file;
     /// Windows callers must separately enforce their required ACL policy.
