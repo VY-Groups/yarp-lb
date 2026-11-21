@@ -47,7 +47,10 @@ internal sealed class AgentHealthReportServer : IAsyncDisposable
         if (!IPAddress.TryParse(config.ListenAddress, out var address) ||
             address.IsIPv4MappedToIPv6 ||
             address.AddressFamily is not (System.Net.Sockets.AddressFamily.InterNetwork or System.Net.Sockets.AddressFamily.InterNetworkV6) ||
-            ((address.Equals(IPAddress.Any) || address.Equals(IPAddress.IPv6Any)) && !config.AllowNonLoopbackListener) ||
+            // Every non-loopback bind, including a specific interface address,
+            // requires an explicit operator opt-in. Previously only wildcard
+            // binds were guarded, so a literal LAN/public IP bypassed the gate.
+            (!IPAddress.IsLoopback(address) && !config.AllowNonLoopbackListener) ||
             (IPAddress.IsLoopback(address) && config.AllowNonLoopbackListener) ||
             config.ListenPort is < 1025 or > 65535 ||
             !Path.IsPathFullyQualified(config.ServerCertificatePem) ||
