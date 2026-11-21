@@ -11,7 +11,11 @@ only requests a new order inside its configured 1-to-60-day renewal window.
 
 The account private key is persisted only as ASP.NET Data Protection ciphertext
 under the private control-plane directory. Linux requires the account-key file
-and ACME JSON to be mode 0600 and the key directory to be private. Windows uses
+and ACME JSON to be mode 0600 and the key directory to be private.
+Account-key startup now validates the full Linux directory ancestry before
+creating or opening a key. Existing account ciphertext is read through the
+validated opened file handle with a 16 KiB hard bound and no symlink traversal;
+Windows retains the existing Data Protection and deployment ACL boundary. Windows uses
 the existing LocalMachine DPAPI-protected Data Protection key ring. The renewal
 worker adds up to three minutes of startup jitter, checks every six hours when
 the certificate is outside the renewal window, and uses jittered exponential

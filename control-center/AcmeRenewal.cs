@@ -8,6 +8,7 @@ using Certes.Acme.Resource;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using GatewayCore.Gslb.Contracts;
 
 /// <summary>Issued leaf and chain in a password-protected PKCS#12 container.</summary>
 public sealed record AcmeIssuedCertificate(byte[] Pfx, string DnsName);
@@ -172,6 +173,14 @@ public sealed class AcmeAccountKeyStore
             throw new InvalidOperationException("ACME account key directory may not be a symbolic link.");
         if (OperatingSystem.IsLinux())
         {
+            // Check every directory component before creating a new key or
+            // opening an existing encrypted account identity. Leaf-only
+            // path checks allow an intermediate symlink to redirect writes.
+            try { PrivateKeyFileSecurity.ValidateLinuxPrivateStateDirectory(directory, "ACME account key directory"); }
+            catch (InvalidDataException ex)
+            {
+                throw new InvalidOperationException("Unsafe ACME account key directory ancestry", ex);
+            }
             var mode = File.GetUnixFileMode(directory);
             if ((mode & (UnixFileMode.GroupRead | UnixFileMode.GroupWrite | UnixFileMode.GroupExecute |
                          UnixFileMode.OtherRead | UnixFileMode.OtherWrite | UnixFileMode.OtherExecute)) != 0)
@@ -193,16 +202,23 @@ public sealed class AcmeAccountKeyStore
                 (UnixFileMode.UserRead | UnixFileMode.UserWrite))
                 throw new InvalidOperationException("ACME account key ciphertext must have mode 0600.");
         }
-        using var file = new FileStream(keyPath, FileMode.Open, FileAccess.Read, FileShare.Read);
-        var length = file.Length;
-        if (length is < 64 or > 16_384)
-            throw new CryptographicException("ACME account key ciphertext length is outside its accepted bound.");
-        var ciphertext = new byte[(int)length];
+        // Keep the existing encrypted ciphertext size and cryptographic
+        // rejection contract, but read the opened regular file only after
+        // validating the exact handle and Linux ancestor chain.
+        byte[] ciphertext;
         try
         {
-            file.ReadExactly(ciphertext);
-            if (file.ReadByte() != -1)
-                throw new CryptographicException("ACME account key ciphertext changed during read.");
+            ciphertext = PrivateKeyFileSecurity.ReadPrivateFileBytes(
+                keyPath, "ACME account key ciphertext", 16_384);
+        }
+        catch (InvalidDataException ex)
+        {
+            throw new CryptographicException("ACME account key ciphertext failed bounded file validation", ex);
+        }
+        try
+        {
+            if (ciphertext.Length < 64)
+                throw new CryptographicException("ACME account key ciphertext length is outside its accepted bound.");
             var pem = protector.Unprotect(ciphertext);
             try { return KeyFactory.FromPem(Encoding.UTF8.GetString(pem)); }
             finally { CryptographicOperations.ZeroMemory(pem); }
