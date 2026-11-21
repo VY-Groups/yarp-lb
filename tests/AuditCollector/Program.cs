@@ -28,6 +28,26 @@ static (string Id, byte[] Body) Intent()
         operation = "CONFIG_APPLY_INTENT", revision = new string('A',64), targetDigest = new string('B',64)
     }));
 }
+// Authenticated resource PREPARED records must be accepted by the external
+// collector only when they carry a nonzero signed intent correlation digest.
+byte[] RecordedResource(string operation, string revision)
+{
+    var eventId = Guid.NewGuid().ToString("N");
+    return JsonSerializer.SerializeToUtf8Bytes(new
+    {
+        schema = 2, eventId, node = "lab", utc = DateTimeOffset.UtcNow,
+        actor = "operator", operation, revision, targetDigest = new string('A', 64)
+    });
+}
+Check(AuditContract.Parse(RecordedResource("RESOURCE_MUTATION_PREPARED",
+        new string('B', 64))) is { RecordedEvent: true },
+    "collector recognizes correlated durable resource PREPARED event");
+Check(AuditContract.Parse(RecordedResource("RESOURCE_MUTATION_PREPARED",
+        new string('0', 64))) is null,
+    "collector rejects resource PREPARED without verified intent correlation");
+Check(AuditContract.Parse(RecordedResource("UNRELATED_ADMIN_EVENT",
+        new string('B', 64))) is null,
+    "collector does not allow arbitrary audit event to claim a signed intent");
 using var signer = RSA.Create(2048);
 var root = Directory.CreateTempSubdirectory("audit-retention-");
 try
