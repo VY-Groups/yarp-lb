@@ -54,6 +54,26 @@ var localAuthority = AcmeTargetPolicy.Validate("https://127.0.0.1:14000/director
     allowLoopbackTestAuthority: true);
 if (!localAuthority.Allowed)
     throw new Exception("explicit loopback test authority should be accepted for isolated fixture use");
+if (!AcmeTargetPolicy.IsApprovedDirectoryUrl(staging) ||
+    !AcmeTargetPolicy.IsApprovedDirectoryUrl("https://acme-v02.api.letsencrypt.org/directory"))
+    throw new Exception("approved ACME authorities must be usable for certificate revocation");
+foreach (var unapproved in new[] {
+    "http://acme-staging-v02.api.letsencrypt.org/directory",
+    "https://example.invalid/directory",
+    "https://user:secret@acme-staging-v02.api.letsencrypt.org/directory",
+    "https://acme-staging-v02.api.letsencrypt.org:8443/directory",
+    "https://acme-staging-v02.api.letsencrypt.org/not-directory",
+    "https://acme-staging-v02.api.letsencrypt.org/directory?token=x",
+    "https://acme-staging-v02.api.letsencrypt.org/directory#fragment",
+    "https://127.0.0.1:14000/directory"
+})
+{
+    if (AcmeTargetPolicy.IsApprovedDirectoryUrl(unapproved))
+        throw new Exception("unsafe ACME revocation directory passed preflight");
+}
+if (!AcmeTargetPolicy.IsApprovedDirectoryUrl(
+        "https://127.0.0.1:14000/directory", allowLoopbackTestAuthority: true))
+    throw new Exception("explicit isolated loopback test policy should remain supported");
 Console.WriteLine("PASS: ACME target preflight rejects unsafe authority, hostname and HTTP-01 inputs");
 await AcmeHttp01Acceptance.RunAsync();
 await TrafficHttp3Acceptance.RunAsync();
