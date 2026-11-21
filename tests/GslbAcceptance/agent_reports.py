@@ -1,6 +1,7 @@
 """Disposable multi-process acceptance for mTLS signed async health reports."""
 import contextlib
 import hashlib
+import http.client
 import http.server
 import json
 import os
@@ -223,6 +224,26 @@ def post_agent_report_status(authority, agent, ca_path, body):
     except urllib.error.HTTPError as error:
         error.close()
         return error.code
+
+
+def post_oversized_chunked_report_status(authority, agent, ca_path):
+    context = ssl.create_default_context(cafile=str(ca_path))
+    context.load_cert_chain(str(agent["cert"]), str(agent["key"]))
+    connection = http.client.HTTPSConnection(
+        "127.0.0.1", authority["report_port"], timeout=5, context=context)
+    try:
+        # 8 KiB ingress bound: stream three 4096-byte chunks without a
+        # Content-Length so Kestrel must enforce the transfer-encoding cap.
+        body = (b"x" * 4096 for _ in range(3))
+        connection.request("POST", "/agent-health/v1/reports", body=body,
+                           headers={"Content-Type": "application/json"},
+                           encode_chunked=True)
+        response = connection.getresponse()
+        status = response.status
+        response.read()
+        return status
+    finally:
+        connection.close()
 
 
 def signed_report_frame(agent, sequence, epoch):
@@ -932,6 +953,11 @@ def main():
                 if time.monotonic() >= deadline:
                     raise AssertionError("rate-limit authority HTTPS listener did not start")
                 time.sleep(.1)
+        oversized_status = post_oversized_chunked_report_status(
+            authority_b, agents[2], root / "ca.pem")
+        assert oversized_status == 413, (
+            f"authenticated oversized chunked report returned {oversized_status}, expected 413")
+        assert rate_dns.poll() is None, "DNS authority exited after oversized chunked report"
         for _ in range(3):
             assert post_agent_report_status(authority_b, agents[1], root / "ca.pem",
                                             b"{malformed-json") == 400

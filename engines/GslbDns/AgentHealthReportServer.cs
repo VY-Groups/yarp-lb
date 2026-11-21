@@ -124,7 +124,19 @@ internal sealed class AgentHealthReportServer : IAsyncDisposable
                     var buffer = new byte[2048];
                     while (true)
                     {
-                        var read = await context.Request.Body.ReadAsync(buffer, context.RequestAborted);
+                        int read;
+                        try { read = await context.Request.Body.ReadAsync(buffer, context.RequestAborted); }
+                        catch (Microsoft.AspNetCore.Server.Kestrel.Core.BadHttpRequestException ex)
+                            when (ex.StatusCode == StatusCodes.Status413PayloadTooLarge)
+                        {
+                            // Chunked requests can trip Kestrel's transport
+                            // bound before our explicit accumulated-byte check.
+                            // Count them as rejected reports instead of letting
+                            // an expected size refusal escape as an app error.
+                            store.RecordRejectedReport(authenticatedAgentId);
+                            metrics.AgentReportRejected();
+                            return Results.StatusCode(StatusCodes.Status413PayloadTooLarge);
+                        }
                         if (read == 0) break;
                         if (body.Length + read > AgentHealthReportContract.MaximumSerializedBytes)
                         {

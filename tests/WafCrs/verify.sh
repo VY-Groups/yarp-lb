@@ -17,7 +17,7 @@ done
 rm -f "$DIR/benchmark-summary.json" "$DIR/waf-selected-image.txt"
 # Clear only this run's known synthetic result files; never count stale
 # evidence from an earlier invocation as a successful observation.
-for result in last-benign-status json-http-status xml-http-status large-json-http-status benign-query-http-status xss-http-status sqli-http-status traversal-http-status; do
+for result in last-benign-status json-http-status xml-http-status large-json-http-status pkix-der-http-status benign-query-http-status unicode-query-http-status cookie-query-http-status xss-http-status sqli-http-status traversal-http-status; do
   rm -f "$DIR/$result.txt"
 done
 rm -f "$DIR/blocking-corpus-report.json"
@@ -34,13 +34,20 @@ cases = (
     ("benign-json", "/acceptance", "benign", "json-http-status"),
     ("benign-xml", "/acceptance", "benign", "xml-http-status"),
     ("benign-large-json", "/acceptance", "benign", "large-json-http-status"),
+    ("benign-pkix-der", "/acceptance", "benign", "pkix-der-http-status"),
     ("benign-query", "/", "benign", "benign-query-http-status"),
+    ("benign-unicode-query", "/", "benign", "unicode-query-http-status"),
+    ("benign-cookie-query", "/", "benign", "cookie-query-http-status"),
     ("xss", "/", "malicious", "xss-http-status"),
     ("sqli", "/", "malicious", "sqli-http-status"),
     ("traversal", "/", "malicious", "traversal-http-status"),
 )
 rows = []
 matrices = {}
+# Severity is the fixed fixture's ground truth; do not misrepresent it as
+# upstream CRS severity or inferred risk from an HTTP response.
+severity = {"xss": "high", "sqli": "high", "traversal": "high"}
+severity_matrices = {}
 for name, route, expected, file_name in cases:
     file = directory / (file_name + ".txt")
     status = file.read_text(encoding="utf-8").strip() if file.exists() else None
@@ -52,13 +59,20 @@ for name, route, expected, file_name in cases:
         outcome = "missing" if status is None else "unexpected_status"
     counts = matrices.setdefault(route, dict.fromkeys(("TP", "TN", "FP", "FN", "missing", "unexpected_status"), 0))
     counts[outcome] += 1
+    severity_name = severity.get(name, "none")
+    severity_counts = severity_matrices.setdefault(
+        route, {}).setdefault(severity_name,
+                              dict.fromkeys(("TP", "TN", "FP", "FN", "missing", "unexpected_status"), 0))
+    severity_counts[outcome] += 1
     rows.append({"case": name, "route": route, "expected": expected,
+                 "groundTruthSeverity": severity_name,
                  "httpStatus": status, "outcome": outcome})
 totals = {key: sum(counts[key] for counts in matrices.values())
           for key in ("TP", "TN", "FP", "FN", "missing", "unexpected_status")}
 complete = totals["missing"] == totals["unexpected_status"] == 0
 report = {"schemaVersion": 1, "scope": "synthetic-blocking-lab-only",
-          "complete": complete, "cases": rows, "perRoute": matrices, "totals": totals,
+          "complete": complete, "cases": rows, "perRoute": matrices,
+          "perRouteAndGroundTruthSeverity": severity_matrices, "totals": totals,
           "falsePositiveRate": totals["FP"] / (totals["FP"] + totals["TN"])
               if complete else None,
           "falseNegativeRate": totals["FN"] / (totals["FN"] + totals["TP"])
@@ -69,7 +83,10 @@ if strict and (not complete or totals["FP"] or totals["FN"]):
     raise SystemExit("FAIL: synthetic WAF blocking corpus incomplete or misclassified")
 PY
 }
+WAF_CERT_TMP=""  # Never act on an inherited environment value during cleanup.
 function teardown {
+  # Never upload a private disposable certificate key with the WAF artifacts.
+  if [[ -n "${WAF_CERT_TMP:-}" ]]; then rm -rf -- "$WAF_CERT_TMP"; fi
   # Preserve missing/unexpected outcomes even after a fail-fast assertion.
   write_corpus_report 0 || true
   docker compose -f "$COMPOSE" logs --no-color >"$DIR/docker-compose.log" 2>&1 || true
@@ -169,6 +186,26 @@ size = path.stat().st_size
 assert 16_384 < size < 65_536, size
 PY
 assert_benign_post large-json application/json "$DIR/large-json.json" "$DIR/large-json-response.json"
+# Use a real disposable, syntactically valid public X.509 DER leaf to exercise
+# the CA/PKI upload content type. Its private key stays in a restricted,
+# separately cleaned temporary directory, never in uploaded artifacts.
+WAF_CERT_TMP="$(mktemp -d)"
+chmod 700 "$WAF_CERT_TMP"
+openssl req -new -x509 -newkey rsa:2048 -nodes -days 1 \
+  -subj "/CN=Disposable WAF Acceptance Certificate" \
+  -keyout "$WAF_CERT_TMP/private.key" -out "$WAF_CERT_TMP/public.pem" >/dev/null 2>&1
+openssl x509 -in "$WAF_CERT_TMP/public.pem" -outform DER -out "$DIR/benign-cert.der"
+assert_benign_post pkix-der application/pkix-cert "$DIR/benign-cert.der" "$DIR/pkix-der-response.json"
+# A certificate upload outside the exact, approved lab endpoint must still
+# hit the original CRS content-type policy. Fail if our exclusion is broad.
+outside_pkix_code="$(curl --silent --show-error --max-time 8 -X POST \
+  -H 'Content-Type: application/pkix-cert' \
+  --data-binary "@$DIR/benign-cert.der" \
+  -o "$DIR/outside-pkix-response.txt" -w '%{http_code}' "http://127.0.0.1:18888/not-allowed")"
+printf '%s\n' "$outside_pkix_code" > "$DIR/outside-pkix-http-status.txt"
+[[ "$outside_pkix_code" == "403" ]] ||
+  { echo "FAIL: PKIX content-type exception unexpectedly escaped its exact route" >&2; exit 1; }
+echo "PASS: PKIX exception applies only to the exact POST /acceptance route"
 xss_code="$(curl --silent --show-error --max-time 8 -o "$DIR/xss-response.txt" \
   -w '%{http_code}' --get --data-urlencode \
   'q=<script>alert(1)</script>' "http://127.0.0.1:18888/")"
@@ -199,6 +236,16 @@ benign_code="$(curl --silent --show-error --max-time 8 --get \
   -o "$DIR/benign-query.txt" -w '%{http_code}' "http://127.0.0.1:18888/")"
 printf '%s\n' "$benign_code" > "$DIR/benign-query-http-status.txt"
 [[ "$benign_code" == "200" ]] || { echo "FAIL: false positive on benign query" >&2; exit 1; }
+unicode_code="$(curl --silent --show-error --max-time 8 --get \
+  --data-urlencode 'q=café façade – legitimate inventory' \
+  -o "$DIR/unicode-query.txt" -w '%{http_code}' "http://127.0.0.1:18888/")"
+printf '%s\n' "$unicode_code" > "$DIR/unicode-query-http-status.txt"
+[[ "$unicode_code" == "200" ]] || { echo "FAIL: false positive on benign Unicode query" >&2; exit 1; }
+cookie_code="$(curl --silent --show-error --max-time 8 \
+  -H 'Cookie: session=opaqueFixture; preference=en-US' \
+  -o "$DIR/cookie-query.txt" -w '%{http_code}' "http://127.0.0.1:18888/")"
+printf '%s\n' "$cookie_code" > "$DIR/cookie-query-http-status.txt"
+[[ "$cookie_code" == "200" ]] || { echo "FAIL: false positive on benign cookie request" >&2; exit 1; }
 # Reject bodies above the configured 128 KiB total body cap.
 head -c 180000 /dev/zero > "$DIR/oversized-request.bin"
 body_code="$(curl --silent --show-error --max-time 10 -X POST \

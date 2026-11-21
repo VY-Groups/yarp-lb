@@ -10,16 +10,118 @@ A **single-tenant, on-premises HTTP(S) L7 reverse proxy and management control c
 
 > **Status: GO for controlled test/staging environments; NOT production-certified.** Successful GitHub Actions and real-browser integration tests do not prove actual-server HA, sustained capacity, external identity/PKI acceptance or security signoff. Do not deploy this test build in front of production services.
 
-## Latest Windows test build
+## About GatewayCore
 
-**[GatewayCore v0.1.0-test.11 — GitHub Release](../../releases/tag/v0.1.0-test.11)**
+**GatewayCore** is an open-source, **single-organization, self-hosted application gateway and management platform**. Its core is an ASP.NET Core **.NET 10** application using **YARP** to route HTTP(S) traffic to approved web applications and APIs. Operators use a separate **Control Center** to manage inventory, review routing changes, control access, view local health and metrics, and exercise backup/rollback procedures. It is intended for controlled, isolated Windows and Linux deployments—not a cloud-managed SaaS service.
+
+**In one sentence:** GatewayCore aims to provide reviewed, observable on-premises L7 traffic routing, with **optional and still experimental** adjacent DNS/GSLB, L4 TCP/UDP, WAF, GitOps and enterprise integrations.
+
+**Audience:** platform/DevOps engineers, network and application operators, and security reviewers who need to operate self-hosted HTTP reverse proxies behind their own firewall/VIP and connect them to existing applications. It can front IIS, Apache, Nginx and compatible HTTP backends without taking ownership of their application databases, signing keys, or internal business transactions.
+
+**Repository About description (suggested):** `Self-hosted .NET 10/YARP L7 gateway with an approval-based Control Center; experimental GSLB, L4, WAF and GitOps integrations.`
+
+> **Release boundary:** The software is suitable for **controlled test/staging evaluation only**. A green workflow or a successful local proxy request is **not** proof of independent physical-node HA, secure public DNS delegation, 60-minute capacity, enterprise PKI/IdP, or production availability. **Production: NO-GO** until the [physical and operational acceptance gates](control-center/docs/ONPREM_PRODUCTION_GO_GATES.md) are signed off.
+
+## How the architecture fits together
+
+```text
+                         Clients / internal applications
+                                     |
+                    Operator-managed DNS / firewall / VIP
+                                     |
+                Optional external WAF and ingress (separate)
+                            /                   \
+                  Gateway instance A       Gateway instance B
+                  .NET 10 + YARP L7        .NET 10 + YARP L7
+                            \                   /
+                             \                 /
+                       HTTP(S) destination cluster
+                       IIS / Apache / Nginx / APIs
+                                     |
+                   Existing application databases/services
+                     (not controlled by GatewayCore)
+
+    Separate management plane:
+    Administrators -> Control Center -> reviewed change requests
+                    -> authorization/audit -> approved YARP config
+
+    Opt-in standalone/lab components, NOT in the L7 request path by default:
+       GSLB authoritative DNS | L4 TCP/UDP engine | external OWASP CRS WAF
+       GitOps read-only planner | fleet / telemetry integration contracts
+```
+
+This diagram shows the **target topology**, not a claim that the repository provisions a floating VIP or has completed physical two-host failover. Gateway instances are active HTTP workers, **not database replication masters**. A working active/active site requires separate ingress health checks and a valid configuration on each participating host. Backend PostgreSQL/Pgpool or other transactional systems remain independent and must handle their own consistency and disaster recovery.
+
+### Components and current support
+
+| Component | What it does today | What it does **not** establish |
+| --- | --- | --- |
+| **YARP L7 data plane** | HTTP routing to destination clusters, balancing, active/passive health, controlled routing changes and local liveness/readiness. | Guaranteed zero-error node failure, automatic ingress VIP creation, signed-transaction replay safety or a physical traffic SLA. |
+| **Control Center** | Single-organization setup, administrator access, route/cluster inventory, revision checks, CSRF/RBAC, different requester/approver, audit records and managed change/restore workflows. | A multi-tenant SaaS control plane, an immutable external WORM audit service or fully accepted enterprise SSO. |
+| **Fleet/availability** | Local or selected signed configuration/agent contracts and disposable failure/restart tests. | Proven physical multi-gateway synchronization, independent host failure, power-loss recovery or deployment-wide traffic availability. |
+| **DNS / GSLB** | A separate opt-in .NET authority-style engine with UDP/TCP, NS/SOA, EDNS, signed health reports/authority fencing and selected DNSSEC/geo policies; see its own tests. | Public delegation certification, complete DNS standard interoperability, production multi-NS consistency or managed Control Center provisioning. |
+| **L4 engine** | Separate experimental TCP stream and UDP endpoint relay with bounded sessions, health/drain and platform socket tests. | L4 as YARP middleware, production-grade cross-host L4 control, TLS/SNI switching or all PROXY protocol variants. |
+| **WAF** | A **separate external** ModSecurity/OWASP CRS Docker lab with detection/blocking-mode tests and measured synthetic traffic. | An embedded gateway WAF, universal attack coverage, a production policy exception lifecycle or verified site false-positive rates. |
+| **GitOps/config plans** | Authenticated server-side dry-run and a read-only offline schema-limited route/cluster diff planner. | Automated signed Git reconciliation, a Terraform provider, Kubernetes Gateway API controller or automatic apply. |
+| **Identity, email, certificates, observability** | Local administrator/security flows, mail/OTP configuration and isolated relay tests, selected certificate/data-protection controls, local metrics and optional telemetry export. | Live provider delivery, production OIDC/AD/LDAPS, CA/HSM/OCSP verification, external immutable audit or delivered on-call alerts. |
+
+### How an operator change reaches traffic
+
+1. **Bootstrap** a *fresh, isolated* installation; configure the organization and create its first recovery administrator. Back up existing test state before upgrading.
+2. **Register and validate** intended websites, destination clusters and routing rules. A dry-run plan can describe differences, but a plan alone never activates a route.
+3. **Request a configuration change** under the administrator role and the site's authorization/CSRF policies. The change is revision-bound; a stale revision is rejected.
+4. **Approve independently** with a different authorized reviewer. A successful approval triggers the supported state/config application path and records a local audit event.
+5. **Verify** liveness, readiness, backend HTTP behavior, logs and metrics; exercise a documented rollback before accepting the change.
+
+Do not place the management listener on the public data-plane interface, treat a matching YARP route as a firewall rule, or retry a non-idempotent signing/transaction POST merely because an upstream timed out.
+
+### What to install — and what not to expect
+
+- **Windows x64 disposable evaluation:** use the latest verified **test pre-release** and the [Windows test launcher guide](ops/windows-test/README.md). The launcher defaults to loopback; its parameter `-IisBackendUrl` is a compatibility name and can point at other approved local HTTP origins. It does not install IIS, a service, a firewall rule, an ingress VIP or a production certificate.
+- **Linux source/systemd evaluation:** follow [Control Center setup](control-center/README.md), [platform key-ring support](control-center/docs/DATA_PROTECTION_PLATFORM_SUPPORT.md) and the [systemd template](ops/systemd/gatewaycore-yarp.service). A source build and an example service file do not equal an installed or approved production service.
+- **Optional components:** [GSLB](engines/GslbDns/README.md), [L4](engines/L4/README.md), [external WAF](integrations/WafCrs/README.md) and [offline config planner](control-center/tools/GatewayConfigPlan/README.md) each have separate configuration, safety limits and test harnesses. None is silently installed by the Windows launcher.
+
+### Developer quick reference
+
+Requires the **.NET 10 SDK** (see [global.json](global.json)) for source builds, Python 3 for selected acceptance harnesses, and Docker for the standalone WAF integration lab. These are development/test commands from a clean checkout, **not production deployment commands**:
+
+```bash
+dotnet build control-center/GatewayCoreYarp.csproj -c Release
+dotnet build engines/GslbDns/GslbDns.csproj -c Release
+dotnet run --project tests/GslbAcceptance/GslbAcceptance.csproj -c Release -- "$PWD"
+python3 -m unittest discover -s tests/CI/branding -p 'test_*.py' -v
+
+# Optional: uses disposable containers; does not configure a production WAF.
+bash tests/WafCrs/verify.sh
+```
+
+For PR acceptance, inspect **all required workflows on the exact PR head SHA**, including CodeQL, Windows/Linux builds, real-process integrations and domain-specific tests. [CI release evidence](ops/release/README.md) and the [software/physical acceptance ledger](ops/acceptance/V1_CONSOLIDATED_EVIDENCE_LEDGER.md) explain the distinction. Failed, queued or missing checks are not success.
+
+### Maintainer documentation map
+
+| Need | Authoritative project guide |
+| --- | --- |
+| Topology, management/data-plane separation | [Architecture specification](control-center/docs/ARCHITECTURE.md) |
+| Setup, operators, API and approvals | [Control Center README](control-center/README.md) |
+| Security and Data Protection by platform | [Windows/Linux support matrix](control-center/docs/DATA_PROTECTION_PLATFORM_SUPPORT.md) |
+| Offline install, packaging and rollback | [Windows test guide](ops/windows-test/README.md) and [release procedure](ops/release/README.md) |
+| Traffic metrics and load acceptance | [Capacity kit](ops/capacity/README.md) |
+| GSLB, L4, WAF and GitOps boundaries | [DNS](engines/GslbDns/README.md), [L4](engines/L4/README.md), [WAF](integrations/WafCrs/README.md), [GitOps](control-center/tools/GatewayConfigPlan/README.md) |
+| Current implementation gaps and tests | [GitHub issues](../../issues), [open pull requests](../../pulls) and [Actions](../../actions) |
+| Physical GO / NO-GO | [On-prem production gates](control-center/docs/ONPREM_PRODUCTION_GO_GATES.md) |
+
+**Open-source licensing:** This repository uses AGPL-3.0-or-later; consult [LICENSE](LICENSE) and [third-party notices](THIRD_PARTY_NOTICES.md) before reuse or redistribution. Other software used as architectural inspiration must not be copied without its license obligations being satisfied.
+
+## Latest published Windows test build
+
+**[GatewayCore v0.1.0-test.12 — GitHub Release](../../releases/tag/v0.1.0-test.12)**
 
 - Self-contained **Windows x64** test application; no local .NET SDK installation is required to launch the published executable.
 - Includes Mail & OTP provider presets, Gmail/Microsoft OAuth2 client flows, Zoho India SMTP, an enforced security verification workflow, and fixes for same-page form resets and scrollable navigation.
 - Built and tested with real Windows executable/proxy smoke, frontend TypeScript parity, real-process API acceptance, and headless Chromium browser tests.
 - The test release is not a Windows Service installer or code-signed production release. Windows Smart App Control or organizational application-control policy may block an unsigned executable. **Do not disable endpoint protection** to work around it.
 
-[Windows test installation and precautions](ops/windows-test/README.md) · [Windows release workflow](.github/workflows/windows-test-release.yml) · [Release SHA-256 checksums](../../releases/download/v0.1.0-test.11/SHA256SUMS.txt)
+[Windows test installation and precautions](ops/windows-test/README.md) · [Windows release workflow](.github/workflows/windows-test-release.yml) · [Release SHA-256 checksums](../../releases/download/v0.1.0-test.12/SHA256SUMS.txt)
 
 ### First test on a disposable Windows server
 
@@ -69,7 +171,7 @@ Relevant tests and workflows:
 - [Standalone DNS/GSLB acceptance (Windows & Linux)](.github/workflows/gslb-acceptance.yml) — [test code](tests/GslbAcceptance/)
 - [External integration evidence and manual acceptance ledger](control-center/docs/EXTERNAL_INTEGRATION_ACCEPTANCE.md)
 
-**Verified source reference:** [PR #71](../../pull/71) passed **11/11 exact-commit CI workflows**, including the new mail-provider security gate; [PR #68](../../pull/68) delivered the earlier browser fixes. The [test.11 Windows release workflow](.github/workflows/windows-test-release.yml) independently gates source parity, Windows executable smoke and security tests. These results apply only to their verified commits, not to future changes. Check the [latest Actions status](../../actions) before installation.
+**Verified source reference:** [PR #71](../../pull/71) passed **11/11 exact-commit CI workflows**, including the new mail-provider security gate; [PR #68](../../pull/68) delivered the earlier browser fixes. The [Windows test-release workflow](.github/workflows/windows-test-release.yml) independently gates source parity, Windows executable smoke and security tests. These results apply only to their verified commits, not to future changes. Check the [latest Actions status](../../actions) before installation.
 
 ## Experimental GSLB engine — opt-in lab only
 
