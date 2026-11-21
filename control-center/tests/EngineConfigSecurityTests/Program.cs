@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.Configuration;
 using System.Text.Json.Nodes;
 
 if (args.Length > 0 && args[0] == "--fleet-recovery-fixture")
@@ -383,6 +384,38 @@ Must(!AgentClientCertificatePolicy.IsAuthorized(allowed,wrongPin),
 allowed.Connection.ClientCertificate = otherCert;
 Must(!AgentClientCertificatePolicy.IsAuthorized(allowed,pinned),
     "presented wrong identity rejected even when configured thumbprint is unchanged");
+// Exercise the live request gate, separately from TLS transport acceptance.
+var livePins = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string,string?>
+{
+    ["Agent:TrustedClientThumbprints:0"] = sha256Pin
+}).Build();
+allowed.Request.Scheme = "https";
+allowed.Connection.ClientCertificate = clientCert;
+Must(AgentClientCertificatePolicy.IsAuthorizedLive(allowed,livePins),
+    "live pin policy grants only a configured trusted certificate");
+allowed.Connection.ClientCertificate = otherCert;
+Must(!AgentClientCertificatePolicy.IsAuthorizedLive(allowed,livePins),
+    "empty denylist does not authorize an untrusted certificate");
+allowed.Connection.ClientCertificate = clientCert;
+livePins["Agent:RevokedClientThumbprints:0"] = sha256Pin;
+Must(!AgentClientCertificatePolicy.IsAuthorizedLive(allowed,livePins),
+    "revocation overrides an exact trusted SHA-256 pin");
+livePins["Agent:RevokedClientThumbprints:0"] = otherCert.Thumbprint;
+Must(AgentClientCertificatePolicy.IsAuthorizedLive(allowed,livePins),
+    "revocation of another certificate does not deny the trusted identity");
+livePins["Agent:RevokedClientThumbprints:0"] = "invalid";
+Must(!AgentClientCertificatePolicy.IsAuthorizedLive(allowed,livePins),
+    "malformed live revocation configuration fails closed");
+livePins["Agent:RevokedClientThumbprints:0"] = clientCert.Thumbprint;
+Must(!AgentClientCertificatePolicy.IsAuthorizedLive(allowed,livePins),
+    "legacy deny pin overrides a modern trust pin for the same certificate");
+allowed.Request.Scheme = "http";
+Must(!AgentClientCertificatePolicy.IsAuthorizedLive(allowed,livePins),
+    "plaintext live request denied");
+allowed.Request.Scheme = "https";
+allowed.Connection.ClientCertificate = null;
+Must(!AgentClientCertificatePolicy.IsAuthorizedLive(allowed,livePins),
+    "missing TLS identity denied");
 var invalidPins=false;
 try { AgentClientCertificatePolicy.ParsePinnedThumbprints(new[]{"not-a-thumbprint"}); }
 catch (InvalidOperationException) { invalidPins=true; }
