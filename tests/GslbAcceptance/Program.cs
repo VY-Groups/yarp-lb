@@ -1043,6 +1043,61 @@ foreach (var duplicateHost in new[]
     }
     finally { File.Delete(invalidPath); }
 }
+// The real configured DNS listener must fail startup for malformed TXT
+// authorizations. Never fall back to serving a modified or partial RRset.
+foreach (var (label, expectedError, mutate) in new
+    (string Label, string Expected, Action<JsonObject> Mutate)[]
+{
+    ("duplicate-case-alias", "unique canonical SHA-256", zone =>
+        zone["AcmeTxtRecords"]!.AsArray().Add(new JsonObject {
+            ["Host"] = "_ACME-CHALLENGE.API.DUALSTACK-NS.INTEGRATION.TEST.",
+            ["Value"] = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" })),
+    ("out-of-zone", "in-bailiwick", zone =>
+        zone["AcmeTxtRecords"]![0]!["Host"] = "_acme-challenge.other.invalid"),
+    ("truncated-digest", "Invalid bounded ACME TXT record", zone =>
+        zone["AcmeTxtRecords"]![0]!["Value"] = "short"),
+    ("noncanonical-base64", "unique canonical SHA-256", zone =>
+        zone["AcmeTxtRecords"]![0]!["Value"] =
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB"),
+    ("too-many-values", "At most four TXT values", zone =>
+    {
+        foreach (var prefix in new[] { "B", "C", "D", "E" })
+            zone["AcmeTxtRecords"]!.AsArray().Add(new JsonObject {
+                ["Host"] = "_acme-challenge.api.dualstack-ns.integration.test",
+                ["Value"] = prefix + new string('A', 42)
+            });
+    })
+})
+{
+    var invalidConfig = JsonNode.Parse(File.ReadAllText(configuration))!.AsObject();
+    var zone = invalidConfig["Zones"]!.AsArray().Single(value =>
+        string.Equals((string?)value?["Name"], "dualstack-ns.integration.test",
+            StringComparison.Ordinal))!.AsObject();
+    mutate(zone);
+    var invalidPath = Path.Combine(temp, "invalid-acme-txt-" + Guid.NewGuid().ToString("N") + ".json");
+    await File.WriteAllTextAsync(invalidPath, invalidConfig.ToJsonString());
+    try
+    {
+        var invalidInfo = new ProcessStartInfo("dotnet") {
+            UseShellExecute = false, CreateNoWindow = true,
+            WorkingDirectory = Path.GetDirectoryName(dll)!,
+            RedirectStandardOutput = true, RedirectStandardError = true };
+        invalidInfo.ArgumentList.Add(dll);
+        invalidInfo.ArgumentList.Add(invalidPath);
+        using var invalidDns = Process.Start(invalidInfo) ??
+            throw new Exception("TXT invalid-config fixture failed to start");
+        var stdout = invalidDns.StandardOutput.ReadToEndAsync();
+        var stderr = invalidDns.StandardError.ReadToEndAsync();
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await invalidDns.WaitForExitAsync(deadline.Token);
+        var output = (await stdout) + (await stderr);
+        Must(invalidDns.ExitCode != 0 &&
+             output.Contains(expectedError, StringComparison.Ordinal),
+             "ACME TXT startup rejects " + label);
+    }
+    finally { File.Delete(invalidPath); }
+}
+Console.WriteLine("PASS: malformed DNS-01 TXT configuration fails closed before serving DNS");
 var info=new ProcessStartInfo("dotnet"){ UseShellExecute=false,CreateNoWindow=true,
  WorkingDirectory=Path.GetDirectoryName(dll)!,RedirectStandardOutput=true,RedirectStandardError=true };
 info.ArgumentList.Add(dll);info.ArgumentList.Add(configuration);
