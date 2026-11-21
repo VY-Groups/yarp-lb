@@ -241,14 +241,11 @@ internal sealed class AgentHealthReportStore : IDisposable
         lastStateCheckTick = nowTick;
         try
         {
-            EnsurePrivateFile(statePath);
-            var length = new FileInfo(statePath).Length;
-            if (length is < 1 || length > MaximumReplayStateBytes())
-                throw new InvalidDataException("Replay state size is invalid");
-            // Use streaming SHA-256 to bound allocation on the DNS answer
-            // path. Authenticated report writes always recheck before update.
-            using var stream = File.OpenRead(statePath);
-            var actualHash = SHA256.HashData(stream);
+            EnsurePrivateFile(statePath); // Windows ACL and Linux mode.
+            // Open and hash the same bounded, no-follow validated file handle.
+            // No payload-sized allocations on the DNS eligibility read path.
+            var actualHash = PrivateKeyFileSecurity.HashPrivateFileSha256(
+                statePath, "GSLB observer replay state", MaximumReplayStateBytes());
             if (persistedStateHash is null ||
                 !CryptographicOperations.FixedTimeEquals(actualHash, persistedStateHash))
                 throw new InvalidDataException("Replay state changed outside accepted report persistence");
@@ -400,29 +397,31 @@ internal sealed class AgentHealthReportStore : IDisposable
     private Dictionary<string, ReplayPoint> LoadReplayState(string path)
     {
         if (!File.Exists(path)) return new Dictionary<string, ReplayPoint>(StringComparer.Ordinal);
-        EnsurePrivateFile(path);
-        if (new FileInfo(path).Length is < 1 || new FileInfo(path).Length > MaximumReplayStateBytes())
-            throw new InvalidDataException("Replay state exceeds configured storage bound");
-        var bytes = File.ReadAllBytes(path);
-        if (bytes.Length > MaximumReplayStateBytes() ||
-            !StrictJsonPropertyNames.HasNoDuplicates(bytes))
-            throw new InvalidDataException("Replay state contains invalid or ambiguous JSON");
-        var file = JsonSerializer.Deserialize<ReplayFile>(bytes)
-            ?? throw new InvalidDataException("Malformed agent replay state");
-        if (file.Version != 1 || file.Points is null || file.Points.Any(p =>
-            string.IsNullOrWhiteSpace(p.Key) || p.Value is null || p.Value.Epoch <= 0 || p.Value.Sequence <= 0))
-            throw new InvalidDataException("Invalid agent replay state");
-        persistedStateHash = SHA256.HashData(bytes);
-        return new Dictionary<string, ReplayPoint>(file.Points, StringComparer.Ordinal);
+        EnsurePrivateFile(path); // Preserve Windows ACL policy.
+        var bytes = PrivateKeyFileSecurity.ReadPrivateFileBytes(
+            path, "GSLB observer replay state", MaximumReplayStateBytes());
+        try
+        {
+            if (!StrictJsonPropertyNames.HasNoDuplicates(bytes))
+                throw new InvalidDataException("Replay state contains invalid or ambiguous JSON");
+            var file = JsonSerializer.Deserialize<ReplayFile>(bytes)
+                ?? throw new InvalidDataException("Malformed agent replay state");
+            if (file.Version != 1 || file.Points is null || file.Points.Any(p =>
+                string.IsNullOrWhiteSpace(p.Key) || p.Value is null || p.Value.Epoch <= 0 || p.Value.Sequence <= 0))
+                throw new InvalidDataException("Invalid agent replay state");
+            persistedStateHash = SHA256.HashData(bytes);
+            return new Dictionary<string, ReplayPoint>(file.Points, StringComparer.Ordinal);
+        }
+        finally { CryptographicOperations.ZeroMemory(bytes); }
     }
 
     private void PersistReplayState()
     {
         var temporary = statePath + "." + Guid.NewGuid().ToString("N") + ".tmp";
+        var bytes = JsonSerializer.SerializeToUtf8Bytes(new ReplayFile(1,
+            new Dictionary<string, ReplayPoint>(highWater, StringComparer.Ordinal)));
         try
         {
-            var bytes = JsonSerializer.SerializeToUtf8Bytes(new ReplayFile(1,
-                new Dictionary<string, ReplayPoint>(highWater, StringComparer.Ordinal)));
             using (var stream = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write,
                 FileShare.None, 4096, FileOptions.WriteThrough))
             {
@@ -438,6 +437,7 @@ internal sealed class AgentHealthReportStore : IDisposable
         }
         finally
         {
+            CryptographicOperations.ZeroMemory(bytes);
             if (File.Exists(temporary)) File.Delete(temporary);
         }
     }
@@ -451,17 +451,15 @@ internal sealed class AgentHealthReportStore : IDisposable
     private static FileStream AcquireStateLock(string path, out bool newLock)
     {
         var parent = Path.GetDirectoryName(path)!;
-        var existed = Directory.Exists(parent);
-        Directory.CreateDirectory(parent);
-        if (!OperatingSystem.IsWindows())
+        if (OperatingSystem.IsLinux())
+            PrivateKeyFileSecurity.EnsureLinuxPrivateStateDirectory(
+                parent, "GSLB observer replay state");
+        else if (OperatingSystem.IsWindows())
         {
-            if (!existed) File.SetUnixFileMode(parent, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
-            else if ((File.GetUnixFileMode(parent) & (UnixFileMode.GroupRead | UnixFileMode.GroupWrite |
-                    UnixFileMode.GroupExecute | UnixFileMode.OtherRead | UnixFileMode.OtherWrite |
-                    UnixFileMode.OtherExecute)) != 0)
-                throw new InvalidDataException("Replay state directory must be private to the DNS service account");
+            Directory.CreateDirectory(parent);
+            EnsurePrivateWindowsAcl(parent, isDirectory: true);
         }
-        else EnsurePrivateWindowsAcl(parent, isDirectory: true);
+        else throw new PlatformNotSupportedException("Observer replay state supports Windows and Linux only");
         var lockPath = path + ".lock";
         EnsureNotLink(lockPath);
         EnsureNotLink(path);
