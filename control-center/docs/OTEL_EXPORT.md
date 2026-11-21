@@ -79,3 +79,22 @@ The per-helper allocation bound is not whole-proxy throughput or memory
 evidence. Issue #34 remains subject to three paired pinned before/after
 whole-gateway tests, allocation stack attribution, correctness/TLS/POST/streaming
 matrix and independent reviewer approval.
+
+#### Exact-head two-mode #34 paired profile
+
+The `Issue 34 - paired allocation profile` workflow now performs **two**
+separate pinned three-pair before/after runs for the same PR base/head, VUs,
+payload and k6 load script. It first profiles with an actual OTLP receiver
+and active instrumentation. It then runs an **additional no-OTLP/no-subscriber
+profile**, because `Instrument.Enabled` is the optimization boundary of the
+unobserved request-metrics fast path. Both modes record bounded allocation
+traces and separate 95% paired uncertainty intervals in the workflow summary
+and artifact tree:
+
+- `artifacts/issue34/paired-report.json`: OTLP-enabled result
+- `artifacts/issue34/unobserved/paired-report.json`: OTLP-disabled result
+
+The test does not aggregate unlike modes into one result or label a negative
+delta in either mode as 500 Mbps production acceptance. Missing off-mode
+paired reports or trace files fail the job. Actual Windows paired execution
+and deployed one-hour, 500 Mbps physical/operational soak remain unverified.
