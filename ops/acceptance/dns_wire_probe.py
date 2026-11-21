@@ -107,7 +107,7 @@ def labels_for(name):
     return tuple(label.lower() for label in name.rstrip(".").encode("ascii").split(b"."))
 
 
-def parse(response, txid, expected_name, expected_qtype):
+def parse(response, txid, expected_name, expected_qtype, *, allow_truncated=False):
     if len(response) < 12:
         raise AssertionError("short DNS header")
     rid, flags, qd, an, ns, ar = struct.unpack_from("!HHHHHH", response)
@@ -125,6 +125,10 @@ def parse(response, txid, expected_name, expected_qtype):
     require(question_type == expected_qtype and question_class == 1,
             "question type/class mismatch")
     pos += 4
+    if flags & 0x0200 and allow_truncated:
+        # A UDP TC=1 response may end in the middle of an RR. Its header and
+        # echoed question are validated, but its RR sections are not evidence.
+        return flags, []
     rrsets = []
     for section, count in (("answer", an), ("authority", ns), ("additional", ar)):
         for _ in range(count):
@@ -187,7 +191,10 @@ def validate_parser_guards():
 def check(host, port, zone, name, qtype, tcp, timeout, *, edns=False, version=0):
     txid, packet = question(name, qtype, edns=edns, version=version)
     response = exchange(host, port, packet, tcp, timeout)
-    flags, records = parse(response, txid, name, qtype)
+    if not tcp:
+        require(len(response) <= (1232 if edns else 512),
+                "UDP response exceeded advertised payload limit")
+    flags, records = parse(response, txid, name, qtype, allow_truncated=not tcp)
     if flags & 0x0200:
         # RFC 1035: truncated UDP replies are not complete evidence. Reissue
         # the same question over TCP and verify its independently framed reply.
