@@ -131,7 +131,15 @@ public static class LinuxKeyProtection
     private static void ValidateExistingKeyRing(string directory)
     {
         const string protectionNamespace = "http://schemas.asp.net/2015/03/dataProtection";
-        foreach (var path in Directory.EnumerateFiles(directory, "*.xml"))
+        // Bound and validate the full restore inventory before framework import.
+        const int MaximumKeyRingXmlFiles = 512;
+        var inventory = Directory.EnumerateFiles(directory, "*.xml")
+            .Take(MaximumKeyRingXmlFiles + 1).ToArray();
+        if (inventory.Length > MaximumKeyRingXmlFiles)
+            throw new InvalidOperationException(
+                "Linux Data Protection key-ring XML inventory exceeds 512 entries");
+        var seenKeys = new HashSet<Guid>();
+        foreach (var path in inventory)
         {
             if ((File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0)
                 throw new InvalidOperationException("Existing Linux key-ring XML must not be a symlink");
@@ -159,6 +167,20 @@ public static class LinuxKeyProtection
                 if (!isRevocation && !isKey)
                     throw new InvalidOperationException(
                         "Existing Linux key ring is not certificate-wrapped; isolate and recover an approved protected backup");
+
+                if (isKey)
+                {
+                    // Data Protection identifies keys by GUID, so the file name
+                    // and embedded id must describe the same unique key.
+                    var id = reader.GetAttribute("id");
+                    if (!Guid.TryParseExact(id, "D", out var keyId) ||
+                        !string.Equals(Path.GetFileName(path),
+                            "key-" + keyId.ToString("D") + ".xml",
+                            StringComparison.OrdinalIgnoreCase) ||
+                        !seenKeys.Add(keyId))
+                        throw new InvalidOperationException(
+                            "Linux Data Protection key-ring XML identity mismatch or duplicate");
+                }
 
                 // Walk element names only. Do not materialize the document's
                 // text into an XDocument, where a legacy plaintext master key
