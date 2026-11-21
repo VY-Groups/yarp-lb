@@ -87,6 +87,11 @@ internal static class DnsWireProtocol
             if (BinaryPrimitives.ReadUInt16BigEndian(query.Slice(pos, 2)) != Opt) return null;
             var advertised = BinaryPrimitives.ReadUInt16BigEndian(query.Slice(pos + 2, 2));
             var ttl = BinaryPrimitives.ReadUInt32BigEndian(query.Slice(pos + 4, 4));
+            // RFC 6891: the upper eight bits of OPT TTL carry the
+            // extended response code and MUST be zero in a request.
+            // Treat a nonzero client-supplied response code as malformed
+            // instead of normalizing it into a valid authoritative answer.
+            if ((ttl & 0xFF000000u) != 0) return null;
             dnssecOk = (ttl & 0x00008000u) != 0;
             var rdlen = BinaryPrimitives.ReadUInt16BigEndian(query.Slice(pos + 8, 2));
             pos += 10;
