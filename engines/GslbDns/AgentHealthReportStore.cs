@@ -7,6 +7,22 @@ using System.Runtime.Versioning;
 using System.Text.Json;
 using GatewayCore.Gslb.Contracts;
 
+/// <summary>Common operator-configured freshness bounds for signed observers.
+/// The GslbObserver sender caps its report TTL at 300 seconds; the receiver
+/// must not accept an effectively unlimited health lease or clock window.
+/// </summary>
+internal static class AgentReportTimeBounds
+{
+    public const int MaximumTtlSeconds = 300;
+    public const int MaximumAgeSeconds = 300;
+    public const int MaximumClockSkewSeconds = 30;
+
+    public static bool Valid(int ttlSeconds, int ageSeconds, int clockSkewSeconds) =>
+        ttlSeconds is >= 1 and <= MaximumTtlSeconds &&
+        ageSeconds is >= 1 and <= MaximumAgeSeconds &&
+        clockSkewSeconds is >= 0 and <= MaximumClockSkewSeconds;
+}
+
 internal sealed record AgentTrust(string AgentId, string VantageGroup,
     string[] CertificateSha256, string[] SigningPublicKeyPems);
 internal sealed record AgentReportTarget(string Zone, string SiteId, string[] RequiredAgentIds,
@@ -52,9 +68,10 @@ internal sealed class AgentHealthReportStore : IDisposable
         IEnumerable<AgentReportTarget> configuredTargets, string replayStatePath,
         int maxTtlSeconds, int maxAgeSeconds, int maxClockSkewSeconds)
     {
-        if (!Path.IsPathFullyQualified(replayStatePath) || maxTtlSeconds < 1 ||
-            maxAgeSeconds < 1 || maxClockSkewSeconds < 0)
-            throw new InvalidDataException("Agent report bounds and absolute replay state path are required");
+        if (!Path.IsPathFullyQualified(replayStatePath) ||
+            !AgentReportTimeBounds.Valid(maxTtlSeconds, maxAgeSeconds, maxClockSkewSeconds))
+            throw new InvalidDataException(
+                "Agent report TTL and age must be 1..300 seconds and clock skew 0..30 seconds, with an absolute replay state path");
         this.statePath = replayStatePath;
         this.maxTtlSeconds = maxTtlSeconds;
         this.maxAgeSeconds = maxAgeSeconds;
