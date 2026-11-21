@@ -165,6 +165,64 @@ class ReportTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "existing <1%"):
             build_report(test_records, "before-sha", "after-sha")
 
+
+    def test_rejects_impossible_rate_latency_and_counter_evidence(self):
+        cases = (
+            ("checks_rate", 1.25, "between 0 and 1"),
+            ("rps", -1, "request rate must be positive"),
+            ("p95_ms", -10, "latency ordering"),
+            ("p99_ms", 5, "latency ordering"),
+            ("requests", 4500.5, "whole numbers"),
+            ("errors", 0.5, "whole numbers"),
+        )
+        for field, value, reason in cases:
+            with self.subTest(field=field):
+                samples = records()
+                samples[0]["proxy"][field] = value
+                if field == "errors":
+                    samples[0]["proxy"]["failed_rate"] = value / 4500
+                with self.assertRaisesRegex(ValueError, reason):
+                    build_report(samples, "before-sha", "after-sha")
+
+    def test_rejects_rps_inconsistent_with_request_count_and_duration(self):
+        for impossible_rps in (1e100, 1e-100):
+            with self.subTest(rps=impossible_rps):
+                samples = records()
+                samples[0]["proxy"]["rps"] = impossible_rps
+                with self.assertRaisesRegex(ValueError, "does not match request count"):
+                    build_report(samples, "before-sha", "after-sha")
+
+    def test_rejects_missing_or_unbounded_workload_metadata(self):
+        cases = (
+            ("vus", 0, "virtual-user"),
+            ("duration", "1s", "duration"),
+            ("payload_bytes", -1, "payload byte"),
+            ("connection_reuse", "true", "connection-reuse"),
+            ("payload_bytes", None, "missing required workload"),
+        )
+        for field, value, reason in cases:
+            with self.subTest(field=field, value=value):
+                samples = records()
+                if value is None:
+                    samples[0]["workload"].pop(field)
+                else:
+                    samples[0]["workload"][field] = value
+                with self.assertRaisesRegex(ValueError, reason):
+                    build_report(samples, "before-sha", "after-sha")
+
+    def test_many_paired_rounds_use_conservative_student_t_critical(self):
+        from report import _mean_ci, T95
+        sample = [0.0] * 15 + [1.0] * 16
+        summary = _mean_ci(sample)
+        self.assertEqual(summary["count"], 31)
+        # The 30-DF critical is not tabulated: keep the conservative 29-DF
+        # bound instead of shrinking it to the normal approximation.
+        import math
+        import statistics
+        margin = T95[29] * statistics.stdev(sample) / math.sqrt(len(sample))
+        self.assertAlmostEqual(summary["ci95_high"], round(
+            statistics.fmean(sample) + margin, 3))
+
     def test_requires_all_revisions_and_pinned_commits_per_round(self):
         test_records = records()
         test_records.pop()
