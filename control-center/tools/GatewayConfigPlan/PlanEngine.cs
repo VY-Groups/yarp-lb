@@ -58,7 +58,7 @@ public static class PlanEngine
         }
         var allowed = new HashSet<string>(["schemaVersion", "routes", "clusters"], StringComparer.Ordinal);
         var unknown = root.Select(x => x.Key).Where(k => !allowed.Contains(k)).ToArray();
-        if (unknown.Length != 0) throw new ArgumentException($"{label} config: unsupported field(s): {string.Join(", ", unknown)}", nameof(json));
+        if (unknown.Length != 0) throw new ArgumentException($"{label} config: unsupported field(s)", nameof(json));
         if (!TryInt(root["schemaVersion"], out var schemaVersion) || schemaVersion != 1)
             throw new ArgumentException($"{label} config: schemaVersion must be 1", nameof(json));
         var routes = root["routes"] as JsonObject ?? throw new ArgumentException($"{label} config: routes must be an object", nameof(json));

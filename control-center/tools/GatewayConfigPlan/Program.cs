@@ -69,7 +69,9 @@ static async Task<string> ReadBoundedJsonAsync(string path)
         await stream.ReadExactlyAsync(bytes);
         if (stream.ReadByte() != -1)
             throw new ArgumentException("Planner input changed during read");
-        return new System.Text.UTF8Encoding(false, true).GetString(bytes);
+        try { return new System.Text.UTF8Encoding(false, true).GetString(bytes); }
+        catch (System.Text.DecoderFallbackException)
+        { throw new ArgumentException("Planner input is not valid UTF-8"); }
     }
     finally
     {

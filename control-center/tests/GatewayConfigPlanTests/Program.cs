@@ -59,6 +59,11 @@ try
     cli = RunCli("validate", desiredPath);
     Check(cli.ExitCode == 1 && cli.StdOut.Length == 0,
           "oversized planner file is rejected before unbounded read");
+    File.WriteAllBytes(desiredPath, [0xC3, 0x28]); // Invalid UTF-8 continuation.
+    cli = RunCli("validate", desiredPath);
+    Check(cli.ExitCode == 1 && cli.StdOut.Length == 0 &&
+          !cli.StdErr.Contains("System.Text.", StringComparison.Ordinal),
+          "invalid UTF-8 is rejected without an unhandled exception trace");
 }
 finally { File.Delete(desiredPath); }
 
