@@ -235,7 +235,12 @@ def openssl_state(root:Path,origin_port:int):
     key=secrets/"dp.key"
     cert=secrets/"dp.crt"
     subprocess.run(["openssl","req","-x509","-newkey","rsa:3072","-nodes","-days","7",
-        "-subj","/CN=temporary-gatewaycore-e2e", "-keyout",str(key),"-out",str(cert)],
+        "-subj","/CN=temporary-gatewaycore-e2e", "-keyout",str(key),"-out",str(cert),
+        # The disposable Data Protection PFX must satisfy the same dedicated
+        # encryption leaf profile as production, rather than relying on
+        # OpenSSL distribution-specific req defaults.
+        "-addext","basicConstraints=critical,CA:FALSE",
+        "-addext","keyUsage=critical,keyEncipherment"],
         check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
     subprocess.run(["openssl","pkcs12","-export","-out",str(secrets/"dp.pfx"),
         "-inkey",str(key),"-in",str(cert),"-passout","pass:temporary-e2e-only-password"],
