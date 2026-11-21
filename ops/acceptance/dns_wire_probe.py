@@ -157,10 +157,11 @@ def validate_edns0_response(records):
     defined. An ordinary EDNS0 query without DO must not receive unexpected
     flags or a nonzero EDNS version.
     """
-    opts = [(owner, rclass, ttl) for section, owner, rtype, rclass, ttl in records
+    opts = [(section, owner, rclass, ttl) for section, owner, rtype, rclass, ttl in records
             if rtype == 41]
     require(len(opts) == 1, "EDNS0 response must contain exactly one OPT RR")
-    owner, payload_size, ttl = opts[0]
+    section, owner, payload_size, ttl = opts[0]
+    require(section == "additional", "EDNS0 OPT must be in additional section")
     require(owner == (), "EDNS0 OPT owner must be the root")
     require(payload_size >= 512, "EDNS0 response advertised invalid UDP size")
     require(((ttl >> 16) & 0xFF) == 0, "EDNS0 response version must be zero")
