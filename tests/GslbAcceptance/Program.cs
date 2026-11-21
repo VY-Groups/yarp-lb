@@ -301,6 +301,51 @@ try
             recovered.IsHealthy("lab.example.test", "mumbai", 1110))
             throw new Exception("FAIL: replay state fault was silently reset in the running process");
     }
+    // A syntactically valid old replay-state snapshot must not preserve
+    // healthy DNS eligibility or admit a new signed revision while running.
+    // Restore the exact latest bytes to prove that this fault is sticky.
+    var rollbackPath = Path.Combine(reportRoot, "rollback-replay-state.json");
+    using (var rollback = new AgentHealthReportStore(agents, targets, rollbackPath, 10, 5, 2))
+    {
+        if (!rollback.TryAccept(Report("agent-1", 1, "healthy", 1000, 12, signing1),
+                client1, DateTimeOffset.FromUnixTimeSeconds(observed), 100))
+            throw new Exception("FAIL: rollback fixture first signed report rejected");
+        var validOlderSnapshot = File.ReadAllBytes(rollbackPath);
+        if (!rollback.TryAccept(Report("agent-2", 1, "healthy", 1000, 20, signing2),
+                client2, DateTimeOffset.FromUnixTimeSeconds(observed), 100) ||
+            !rollback.IsHealthy("lab.example.test", "mumbai", 101))
+            throw new Exception("FAIL: rollback fixture failed to establish healthy quorum");
+        var validLatestSnapshot = File.ReadAllBytes(rollbackPath);
+        File.WriteAllBytes(rollbackPath, validOlderSnapshot);
+        if (!OperatingSystem.IsWindows())
+            File.SetUnixFileMode(rollbackPath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+        if (rollback.IsHealthy("lab.example.test", "mumbai", 1200) ||
+            rollback.EvidenceCounts(1200) != (0, 0, 0, 3) ||
+            rollback.AgentStatus(1200).Any(status => status.FreshReports != 0) ||
+            rollback.TryAccept(Report("agent-2", 2, "healthy", 1000, 20, signing2),
+                client2, DateTimeOffset.FromUnixTimeSeconds(observed), 1201))
+            throw new Exception("FAIL: replaced valid old replay state kept or renewed healthy quorum");
+        File.WriteAllBytes(rollbackPath, validLatestSnapshot);
+        if (!OperatingSystem.IsWindows())
+            File.SetUnixFileMode(rollbackPath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+        if (rollback.IsHealthy("lab.example.test", "mumbai", 1202) ||
+            rollback.TryAccept(Report("agent-2", 2, "healthy", 1000, 20, signing2),
+                client2, DateTimeOffset.FromUnixTimeSeconds(observed), 1203))
+            throw new Exception("FAIL: restoring replay state silently cleared sticky rollback fault");
+    }
+    // Duplicate JSON names are ambiguous even if the deserializer would
+    // choose a seemingly valid last value. Reject at service startup.
+    var duplicateReplayPath = Path.Combine(reportRoot, "duplicate-replay-state.json");
+    using (var initial = new AgentHealthReportStore(agents, targets, duplicateReplayPath, 10, 5, 2)) { }
+    File.WriteAllText(duplicateReplayPath, "{\"Version\":1,\"Version\":1,\"Points\":{}}");
+    if (!OperatingSystem.IsWindows())
+        File.SetUnixFileMode(duplicateReplayPath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+    var duplicateStateRejected = false;
+    try { using var invalid = new AgentHealthReportStore(agents, targets, duplicateReplayPath, 10, 5, 2); }
+    catch (InvalidDataException) { duplicateStateRejected = true; }
+    if (!duplicateStateRejected)
+        throw new Exception("FAIL: replay startup accepted ambiguous duplicate JSON properties");
+    Console.WriteLine("PASS: valid replay snapshot rollback and ambiguous state JSON fail closed");
     File.Delete(statePath);
     var missingReplayRejected = false;
     try
