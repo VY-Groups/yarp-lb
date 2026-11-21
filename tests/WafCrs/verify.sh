@@ -20,7 +20,7 @@ rm -f "$DIR/benchmark-summary.json" "$DIR/waf-selected-image.txt"
 for result in last-benign-status json-http-status xml-http-status large-json-http-status pkix-der-http-status benign-query-http-status unicode-query-http-status cookie-query-http-status xss-http-status sqli-http-status traversal-http-status; do
   rm -f "$DIR/$result.txt"
 done
-rm -f "$DIR/blocking-corpus-report.json" "$DIR/detection-corpus-report.json"
+rm -f "$DIR/blocking-corpus-report.json" "$DIR/detection-corpus-report.json" "$DIR/operator-corpus-report.json"
 write_corpus_report() {
   python3 - "$DIR" "$1" <<'PY'
 import json, pathlib, sys
@@ -96,6 +96,7 @@ trap teardown EXIT
 # A lab exception requires an explicit, short-lived, exact-scope policy
 # manifest. Fail before starting containers if it expires or broadens.
 python3 -m unittest discover -s tests/WafCrs -p 'test_exception_policy.py' -v
+python3 -m unittest discover -s tests/WafCrs -p 'test_operator_corpus_acceptance.py' -v
 python3 tests/WafCrs/exception_policy.py --validate
 docker compose -f "$COMPOSE" config --quiet
 WAF_MODE=On docker compose -f "$COMPOSE" up --detach
@@ -353,6 +354,14 @@ for entry in \
   [[ "$restored_code" == 403 ]] ||
     { echo "FAIL: restored CRS blocking failed for $name ($restored_code)" >&2; exit 1; }
 done
+# Customer/operator fixtures are never shipped with the repository and are
+# NEVER copied into the artifact directory. This is opt-in local acceptance,
+# using only the pinned 127.0.0.1:18888 disposable WAF port.
+if [[ -n "${WAF_OPERATOR_CORPUS:-}" ]]; then
+  python3 tests/WafCrs/operator_corpus_acceptance.py \
+    --corpus "$WAF_OPERATOR_CORPUS" \
+    --report "$DIR/operator-corpus-report.json"
+fi
 benchmark restored
 python3 - "$DIR" <<'PY'
 import json, pathlib, sys
