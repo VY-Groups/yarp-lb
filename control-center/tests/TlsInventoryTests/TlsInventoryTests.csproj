@@ -9,5 +9,6 @@
     <Compile Include="../../TrafficHttpProtocols.cs" Link="TrafficHttpProtocols.cs" />
     <Compile Include="../../TrafficCertificateRotation.cs" Link="TrafficCertificateRotation.cs" />
     <Compile Include="../../AcmeRenewal.cs" Link="AcmeRenewal.cs" />
+    <Compile Include="../../../engines/GslbHealthContracts/PrivateKeyFileSecurity.cs" Link="PrivateKeyFileSecurity.cs" />
   </ItemGroup>
 </Project>

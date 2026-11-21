@@ -54,34 +54,58 @@ internal sealed class ExternalAuditIntent : IDisposable
         if (!Uri.TryCreate(url, UriKind.Absolute, out var uri) || node is null ||
             senderKeyFile is null || collectorPublicKeyFile is null)
             throw new InvalidOperationException("External audit configuration must be complete");
-        static byte[] ReadBounded(string file, int max, bool secret)
+        // The sender HMAC key is security-critical: resolve each Linux path
+        // component without following links, validate the opened object and
+        // its ownership/mode, and read bytes through that exact file handle.
+        // Keep the existing public collector verification-key contract.
+        static byte[] ReadPublicKeyBounded(string file)
         {
             if (!Path.IsPathFullyQualified(file) || !File.Exists(file) ||
                 (File.GetAttributes(file) & FileAttributes.ReparsePoint) != 0)
-                throw new InvalidOperationException("External audit requires absolute, non-symlinked key files");
-            if (secret && !OperatingSystem.IsWindows() &&
-                (File.GetUnixFileMode(file) & (UnixFileMode.GroupRead | UnixFileMode.GroupWrite |
-                UnixFileMode.GroupExecute | UnixFileMode.OtherRead | UnixFileMode.OtherWrite |
-                UnixFileMode.OtherExecute)) != 0)
-                throw new InvalidOperationException("External audit sender key requires owner-only access");
+                throw new InvalidOperationException("External audit requires an absolute, non-symlinked public key file");
             using var f = File.OpenRead(file);
-            if (f.Length is < 1 || f.Length > max)
-                throw new InvalidOperationException("External audit key file exceeds allowed size");
+            if (f.Length is < 1 or > 4096)
+                throw new InvalidOperationException("External audit public key file exceeds allowed size");
             var bytes = new byte[(int)f.Length];
-            f.ReadExactly(bytes);
-            if (f.ReadByte() != -1) throw new InvalidOperationException("External audit key changed during read");
-            return bytes;
+            try
+            {
+                f.ReadExactly(bytes);
+                if (f.ReadByte() != -1)
+                    throw new InvalidOperationException("External audit public key changed during read");
+                return bytes;
+            }
+            catch
+            {
+                CryptographicOperations.ZeroMemory(bytes);
+                throw;
+            }
         }
-        var sender = ReadBounded(senderKeyFile, 32, secret: true);
-        var collector = Encoding.ASCII.GetString(ReadBounded(collectorPublicKeyFile, 4096, secret: false));
-        var http = new HttpClient(new SocketsHttpHandler
+        var sender = GatewayCore.Gslb.Contracts.PrivateKeyFileSecurity.ReadPrivateFileBytes(
+            senderKeyFile, "External audit sender HMAC key", 32);
+        try
         {
-            AllowAutoRedirect = false, UseCookies = false, UseProxy = false,
-            ConnectTimeout = TimeSpan.FromSeconds(3)
-        }) { Timeout = Timeout.InfiniteTimeSpan };
-        try { return new ExternalAuditIntent(uri, node, sender, collector, http); }
-        catch { http.Dispose(); throw; }
-        finally { CryptographicOperations.ZeroMemory(sender); }
+            // Fail closed on a non-32-byte file; the constructor also enforces
+            // the same contract, but do not construct transport for bad input.
+            if (sender.Length != 32)
+                throw new InvalidOperationException("External audit requires a 32-byte sender key");
+            var publicKeyBytes = ReadPublicKeyBounded(collectorPublicKeyFile);
+            string collector;
+            try { collector = Encoding.ASCII.GetString(publicKeyBytes); }
+            finally { CryptographicOperations.ZeroMemory(publicKeyBytes); }
+            var http = new HttpClient(new SocketsHttpHandler
+            {
+                AllowAutoRedirect = false, UseCookies = false, UseProxy = false,
+                ConnectTimeout = TimeSpan.FromSeconds(3)
+            }) { Timeout = Timeout.InfiniteTimeSpan };
+            try { return new ExternalAuditIntent(uri, node, sender, collector, http); }
+            catch { http.Dispose(); throw; }
+        }
+        finally
+        {
+            // Includes failure when opening or parsing the collector key:
+            // previously this failure bypassed sender-key buffer clearing.
+            CryptographicOperations.ZeroMemory(sender);
+        }
     }
 
     private static byte[] SignatureInput(string purpose, string id, byte[] body) =>
