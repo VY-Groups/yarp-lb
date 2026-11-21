@@ -136,8 +136,12 @@ def run(args):
     print(f"PASS EDNS0 UDP {size} bytes")
     flags, records, _ = check(args.host, args.port, zone, zone, 6, False, args.timeout,
                               edns=True, version=1)
-    assert any(t == 41 and (ttl >> 24) == 16 for _, t, _, ttl in records), (
-        "unsupported EDNS version did not report BADVERS extended RCODE")
+    # RFC 6891: the OPT TTL high byte is the *upper eight bits* of the
+    # twelve-bit RCODE. BADVERS=16 therefore uses extended code 1 and
+    # the ordinary DNS header's low four bits are 0.
+    assert any(t == 41 and (((ttl >> 24) << 4) | (flags & 0xF)) == 16
+               for _, t, _, ttl in records), (
+        "unsupported EDNS version did not report BADVERS RCODE 16")
     print("PASS EDNS BADVERS")
     # An existing apex with an unsupported RR type is NODATA, not NXDOMAIN.
     for tcp in (False, True):
