@@ -338,6 +338,8 @@ def main():
             signer = root / f"authority-{node}-signing.key"
             openssl("ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out", str(signer))
             openssl("pkey", "-in", str(signer), "-pubout", "-out", str(public_key))
+            if os.name != "nt":
+                public_key.chmod(0o600)
             der = subprocess.run(["openssl", "x509", "-in", str(cert), "-outform", "DER"],
                                  capture_output=True, check=True).stdout
             authorities_identity[node] = {
@@ -353,6 +355,8 @@ def main():
             signer = root / f"{agent_id}-signing.key"
             openssl("ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out", str(signer))
             openssl("pkey", "-in", str(signer), "-pubout", "-out", str(public_key))
+            if os.name != "nt":
+                public_key.chmod(0o600)
             der = subprocess.run(["openssl", "x509", "-in", str(cert), "-outform", "DER"],
                                  capture_output=True, check=True).stdout
             agents.append({"id": agent_id, "vantage_group": vantage_group,
@@ -366,6 +370,8 @@ def main():
         signer = root / "agent-fanout-signing.key"
         openssl("ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out", str(signer))
         openssl("pkey", "-in", str(signer), "-pubout", "-out", str(public_key))
+        if os.name != "nt":
+            public_key.chmod(0o600)
         der = subprocess.run(["openssl", "x509", "-in", str(cert), "-outform", "DER"],
                              capture_output=True, check=True).stdout
         fanout_agent = {"id": "agent-fanout", "vantage_group": "vantage-fanout",
