@@ -44,7 +44,14 @@ def check(condition, message):
 
 def safe_receipt_response(status, response_body, receipt):
     """Reject malformed signed receipts instead of forwarding a modified value."""
-    if receipt and ("\r" in receipt or "\n" in receipt):
+    # Collector signatures use standard base64. Restrict the value to a small,
+    # bounded ASCII alphabet before placing it in an HTTP response header.
+    # Keep the value unchanged: the gateway verifies the exact signed bytes.
+    if receipt is not None and (
+        len(receipt) > 1024 or not receipt or len(receipt) % 4 != 0 or
+        any(character not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/="
+            for character in receipt) or receipt.count("=") > 2 or "=" in receipt[:-2]
+    ):
         return 503, b"", None
     return status, response_body, receipt
 
@@ -99,7 +106,11 @@ class ReceiptProxy:
                     status, response_body, receipt)
                 self.send_response(status)
                 if receipt:
-                    self.send_header("X-GC-Audit-Receipt", receipt)
+                    # Belt-and-suspenders CR/LF encoding at the actual header
+                    # sink for static analysis. The strict base64 guard above
+                    # rejects these bytes first, so valid signatures are unchanged.
+                    self.send_header("X-GC-Audit-Receipt",
+                                     receipt.replace("\r", "").replace("\n", ""))
                 self.send_header("Content-Length", str(len(response_body)))
                 self.send_header("Connection", "close")
                 self.end_headers()
@@ -150,11 +161,11 @@ def fixture_smtp_trust(ca):
 def main():
     if os.environ.get("GITHUB_ACTIONS") != "true":
         raise SystemExit("Disposable CI only")
-    check(safe_receipt_response(201, b"ok", "signed") ==
-          (201, b"ok", "signed"), "valid signed receipt is forwarded unchanged")
-    for malformed in ("signed\rInjected: true", "signed\nInjected: true"):
+    check(safe_receipt_response(201, b"ok", "c2lnbmVk") ==
+          (201, b"ok", "c2lnbmVk"), "valid base64 receipt is forwarded unchanged")
+    for malformed in ("signed\rInjected: true", "signed\nInjected: true", "signed\x00", "signed\x09", "signed\u2028", "x" * 1025):
         check(safe_receipt_response(201, b"ok", malformed) ==
-              (503, b"", None), "CR/LF in signed receipt fails closed")
+              (503, b"", None), "invalid or oversized signed receipt fails closed")
     dll = Path(sys.argv[1]).resolve()
     with tempfile.TemporaryDirectory(prefix="audit-fixture-") as tmp, fixture_secret_directory() as sd:
         root = Path(tmp)
