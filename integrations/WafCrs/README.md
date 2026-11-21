@@ -132,3 +132,18 @@ mechanism for evidence that operators must still provide and review. Real
 multi-tenant rule lifecycle/approval, sustainable p95/p99/CPU/allocations,
 independent Windows/Linux deployment and signed policy rollback remain open
 in #51. No issue closure or production WAF GO is implied.
+### Exact private backend response contract in operator corpus replay
+
+The optional private-corpus runner now verifies the actual bounded lab
+backend's method-specific success response rather than searching for a
+substring marker. A successful GET must return exactly the fixed newline-
+terminated text marker and its text/plain media type. A successful POST must
+return the exact small JSON object `accepted=true`, expected normalized
+`contentType` and exact byte count; unknown/duplicate fields, mismatched
+bytes, unrelated HTTP 200 responses and malformed response bodies are
+classified as **ERROR**, never accepted as a true-negative response or a
+false-negative WAF bypass. Unit tests use the real backend response shape and
+prove forged GET markers or POST metadata cannot pass. Request bodies and
+backend payloads remain excluded from the generated report. This validates
+only the disposable loopback acceptance origin, not a production backend,
+customer WAF integration or the remaining #51 criteria.

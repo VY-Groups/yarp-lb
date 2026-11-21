@@ -98,6 +98,28 @@ def load_corpus(filename):
     return cases
 
 
+def verified_origin_response(method, content_type, body_size, response_type, payload):
+    """Accept only the real private origin's bounded GET or POST response.
+
+    A substring marker or arbitrary JSON cannot establish that a response
+    reached the expected backend. Never return body bytes to the report.
+    """
+    if method == "GET":
+        return (response_type == "text/plain; charset=utf-8"
+                and payload == b"YARP-WAF-CI-BENIGN\n")
+    if method != "POST" or response_type != "application/json" or len(payload) > 4096:
+        return False
+    try:
+        record = json.loads(payload.decode("ascii", "strict"),
+                            object_pairs_hook=strict_pairs)
+    except (ValueError, UnicodeError):
+        return False
+    return (type(record) is dict and set(record) == {"accepted", "contentType", "bytes"}
+            and record["accepted"] is True
+            and type(record["bytes"]) is int and record["bytes"] == body_size
+            and record["contentType"] == content_type)
+
+
 def run_cases(cases, connection_factory=None):
     if connection_factory is None:
         connection_factory = lambda: http.client.HTTPConnection(
@@ -117,7 +139,10 @@ def run_cases(cases, connection_factory=None):
                                         "Connection": "close"})
             response = connection.getresponse()
             status = response.status
-            marker = b"YARP-WAF-CI-BENIGN" in response.read(4097)
+            payload = response.read(4097)
+            marker = verified_origin_response(
+                case["method"], case["contentType"], len(body),
+                response.getheader("Content-Type", ""), payload)
         except (OSError, TimeoutError, http.client.HTTPException):
             pass  # mark ERROR; never log a raw request or exception
         finally:
