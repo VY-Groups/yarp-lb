@@ -71,10 +71,14 @@ class Handler(BaseHTTPRequestHandler):
             self.close_connection = True
             self._write_json(400, {"error": "ambiguous_request_framing"})
             return
-        try:
-            length = int(self.headers.get("Content-Length", "-1"))
-        except ValueError:
-            length = -1
+        # Accept only canonical decimal framing. Python int() also accepts
+        # signs, whitespace and Unicode digits, which are ambiguous to peers.
+        raw_length = self.headers.get("Content-Length", "")
+        if not raw_length or not raw_length.isascii() or not raw_length.isdecimal():
+            self.close_connection = True
+            self._write_json(400, {"error": "ambiguous_request_framing"})
+            return
+        length = int(raw_length)
         if length < 1 or length > MAX_BODY_BYTES:
             self.close_connection = True
             self._write_json(413, {"error": "invalid_body_size"})
