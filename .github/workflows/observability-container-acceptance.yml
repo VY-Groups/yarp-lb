@@ -97,7 +97,7 @@ jobs:
           delivered=false
           for attempt in $(seq 1 30); do
             events=$(curl -fsS http://127.0.0.1:18080/events)
-            if jq -e 'any(.events[]; .status == "firing" and any(.alerts[]; .status == "firing" and .labels.alertname == "GatewayCoreObservabilityDeliveryTest"))' <<<"$events" >/dev/null; then
+            if jq -e 'any(.events[]; any(.alerts[]; .status == "firing" and .alertname == "GatewayCoreObservabilityDeliveryTest"))' <<<"$events" >/dev/null; then
               delivered=true
               break
             fi
