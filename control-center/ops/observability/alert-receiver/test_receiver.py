@@ -152,6 +152,25 @@ class ReceiverTests(unittest.TestCase):
                 finally:
                     connection.close()
 
+    def test_unknown_post_path_closes_unread_body_socket(self):
+        import http.client
+        connection = http.client.HTTPConnection("127.0.0.1", self.server.server_port, timeout=2)
+        try:
+            connection.putrequest("POST", "/not-alerts")
+            connection.putheader("Content-Type", "application/json")
+            connection.putheader("Content-Length", "100")
+            connection.endheaders()
+            # Deliberately send no body: the server must not await it or
+            # allow its bytes to be parsed as a subsequent request.
+            response = connection.getresponse()
+            self.assertEqual(response.status, 404)
+            self.assertEqual(response.getheader("Connection"), "close")
+            self.assertEqual(json.loads(response.read()), {"error": "not_found"})
+            with urlopen(f"{self.base_url}/events", timeout=2) as evidence:
+                self.assertEqual(json.load(evidence)["count"], 0)
+        finally:
+            connection.close()
+
     def test_rejects_wrong_content_type(self):
         self.assertEqual(self.post({"version": "4", "alerts": []}, "text/plain")[0], 415)
 
