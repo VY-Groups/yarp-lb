@@ -51,7 +51,28 @@ class ReceiverTests(unittest.TestCase):
         with urlopen(f"{self.base_url}/events", timeout=2) as response:
             events = json.load(response)
         self.assertEqual(events["count"], 1)
-        self.assertEqual(events["events"][0]["alerts"], [alert])
+        self.assertEqual(events["events"][0]["alerts"], [{"status": "firing", "alertname": "GatewayCoreObservabilityDeliveryTest"}])
+
+    def test_events_never_expose_private_alert_metadata(self):
+        alert = {
+            "status": "firing",
+            "labels": {"alertname": "GatewayCorePrivate", "instance": "private-host"},
+            "annotations": {"description": "secret-token"},
+            "generatorURL": "https://private-host/internal",
+        }
+        self.assertEqual(self.post({"version": "4", "alerts": [alert], "externalURL": "private"})[0], 200)
+        with urlopen(f"{self.base_url}/events", timeout=2) as response:
+            evidence = json.load(response)
+        self.assertEqual(evidence["events"][0]["alerts"], [
+            {"status": "firing", "alertname": "GatewayCorePrivate"}
+        ])
+        self.assertNotIn("secret-token", json.dumps(evidence))
+        self.assertNotIn("private-host", json.dumps(evidence))
+        alert["labels"]["alertname"] = "unsafe/private"
+        self.assertEqual(self.post({"version": "4", "alerts": [alert]})[0], 200)
+        with urlopen(f"{self.base_url}/events", timeout=2) as response:
+            evidence = json.load(response)
+        self.assertEqual(evidence["events"][-1]["alerts"][0]["alertname"], "redacted")
 
     def test_rejects_non_object_and_invalid_alertmanager_payloads(self):
         self.assertEqual(self.post(["not", "an", "object"])[0], 400)
