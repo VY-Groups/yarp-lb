@@ -18,8 +18,23 @@ def _fraction(value, name):
     return float(value)
 
 
+MAX_CORPUS_CASES = 100_000
+MAX_POLICY_CLASSES = 1_024
+MAX_INPUT_BYTES = 16 * 1024 * 1024
+
+
+def _read_bounded_json(path):
+    if path.stat().st_size > MAX_INPUT_BYTES:
+        raise ValueError("WAF evidence input exceeds 16 MiB")
+    with path.open("rb") as stream:
+        raw = stream.read(MAX_INPUT_BYTES + 1)
+    if len(raw) > MAX_INPUT_BYTES:
+        raise ValueError("WAF evidence input exceeds 16 MiB")
+    return json.loads(raw.decode("utf-8"))
+
+
 def evaluate(corpus, policy):
-    if not isinstance(corpus, list) or not corpus:
+    if not isinstance(corpus, list) or not corpus or len(corpus) > MAX_CORPUS_CASES:
         raise ValueError("nonempty corpus array required")
     if not isinstance(policy, dict) or not policy:
         raise ValueError("explicit route/severity policy required")
@@ -28,6 +43,8 @@ def evaluate(corpus, policy):
         if not isinstance(route, str) or not route or not isinstance(severities, dict) or not severities:
             raise ValueError("invalid policy route")
         for severity, values in severities.items():
+            if len(limits) >= MAX_POLICY_CLASSES:
+                raise ValueError("WAF policy exceeds class budget")
             if severity not in ("low", "medium", "high", "critical") or not isinstance(values, dict):
                 raise ValueError("invalid severity policy")
             if set(values) != {"max_fp_rate", "max_fn_rate", "min_benign", "min_attack"}:
@@ -87,8 +104,8 @@ def main():
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args()
     try:
-        result = evaluate(json.loads(args.corpus.read_text(encoding="utf-8")),
-                          json.loads(args.policy.read_text(encoding="utf-8")))
+        result = evaluate(_read_bounded_json(args.corpus),
+                          _read_bounded_json(args.policy))
         args.out.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         return 0 if result["pass"] else 1
     except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
