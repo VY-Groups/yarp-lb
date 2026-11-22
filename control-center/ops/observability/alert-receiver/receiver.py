@@ -56,6 +56,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         if self.path != "/alerts":
+            # Unknown POST paths may carry unread bodies: never reuse the socket.
+            self.close_connection = True
             self._write_json(404, {"error": "not_found"})
             return
         if self.headers.get_content_type() != "application/json":
