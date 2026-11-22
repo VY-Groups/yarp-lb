@@ -7,6 +7,15 @@ MAX_BODY_BYTES = 1_048_576
 MAX_EVENTS = 100
 
 
+def reject_duplicate_keys(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON property")
+        result[key] = value
+    return result
+
+
 class Receiver(ThreadingHTTPServer):
     daemon_threads = True
     def __init__(self, server_address, handler_class):
@@ -50,6 +59,7 @@ class Handler(BaseHTTPRequestHandler):
             self._write_json(404, {"error": "not_found"})
             return
         if self.headers.get_content_type() != "application/json":
+            self.close_connection = True
             self._write_json(415, {"error": "unsupported_media_type"})
             return
         # Reject ambiguous framing before reading a persistent HTTP/1.1 socket.
@@ -63,11 +73,12 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError:
             length = -1
         if length < 1 or length > MAX_BODY_BYTES:
+            self.close_connection = True
             self._write_json(413, {"error": "invalid_body_size"})
             return
         try:
-            document = json.loads(self.rfile.read(length))
-        except (json.JSONDecodeError, UnicodeDecodeError):
+            document = json.loads(self.rfile.read(length), object_pairs_hook=reject_duplicate_keys)
+        except (ValueError, UnicodeDecodeError):
             self._write_json(400, {"error": "invalid_json"})
             return
         if not isinstance(document, dict):
