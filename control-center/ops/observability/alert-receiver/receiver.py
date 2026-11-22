@@ -74,7 +74,8 @@ class Handler(BaseHTTPRequestHandler):
         # Accept only canonical decimal framing. Python int() also accepts
         # signs, whitespace and Unicode digits, which are ambiguous to peers.
         raw_length = self.headers.get("Content-Length", "")
-        if not raw_length or not raw_length.isascii() or not raw_length.isdecimal():
+        if (not raw_length or len(raw_length) > 7 or
+                not raw_length.isascii() or not raw_length.isdecimal()):
             self.close_connection = True
             self._write_json(400, {"error": "ambiguous_request_framing"})
             return
