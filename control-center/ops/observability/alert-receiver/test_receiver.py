@@ -112,6 +112,26 @@ class ReceiverTests(unittest.TestCase):
                 finally:
                     connection.close()
 
+    def test_noncanonical_content_length_is_rejected_without_reading_body(self):
+        import http.client
+        for value in ("+28", " 28", "28 ", "٢٨", "1_0", "0x20", "-1"):
+            with self.subTest(value=value):
+                connection = http.client.HTTPConnection(
+                    "127.0.0.1", self.server.server_port, timeout=2)
+                try:
+                    connection.putrequest("POST", "/alerts")
+                    connection.putheader("Content-Type", "application/json")
+                    connection.putheader("Content-Length", value)
+                    connection.endheaders()
+                    # No body: malformed framing must be rejected immediately.
+                    response = connection.getresponse()
+                    self.assertEqual(response.status, 400)
+                    self.assertEqual(response.getheader("Connection"), "close")
+                    self.assertEqual(json.loads(response.read()),
+                                     {"error": "ambiguous_request_framing"})
+                finally:
+                    connection.close()
+
     def test_duplicate_json_keys_fail_closed(self):
         import http.client
         for payload in (
