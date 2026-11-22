@@ -90,6 +90,6 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    ThreadingHTTPServer.allow_reuse_address = True
+    Receiver.allow_reuse_address = True
     Receiver(("0.0.0.0", 8080), Handler).serve_forever()
 
