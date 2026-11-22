@@ -5,6 +5,7 @@ import threading
 
 MAX_BODY_BYTES = 1_048_576
 MAX_EVENTS = 100
+READ_TIMEOUT_SECONDS = 5  # Disposable receiver: bound incomplete webhook bodies.
 
 
 def reject_duplicate_keys(pairs):
@@ -79,7 +80,14 @@ class Handler(BaseHTTPRequestHandler):
             self._write_json(413, {"error": "invalid_body_size"})
             return
         try:
+            self.connection.settimeout(READ_TIMEOUT_SECONDS)
             document = json.loads(self.rfile.read(length), object_pairs_hook=reject_duplicate_keys)
+        except TimeoutError:
+            # A sender that declares a body but never finishes it must not
+            # retain a worker or permit late bytes to become a new request.
+            self.close_connection = True
+            self._write_json(408, {"error": "request_body_timeout"})
+            return
         except (ValueError, UnicodeDecodeError):
             self._write_json(400, {"error": "invalid_json"})
             return
