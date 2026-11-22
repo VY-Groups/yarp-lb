@@ -1,5 +1,4 @@
 """HTTP contract checks for the disposable Alertmanager webhook receiver."""
-from http.server import ThreadingHTTPServer
 import json
 import threading
 import unittest
@@ -12,9 +11,7 @@ from receiver import Handler, Receiver
 class ReceiverTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-        cls.server.events = []
-        cls.server.events_lock = threading.Lock()
+        cls.server = Receiver(("127.0.0.1", 0), Handler)
         cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
         cls.thread.start()
         cls.base_url = f"http://127.0.0.1:{cls.server.server_port}"
