@@ -1,0 +1,39 @@
+# GatewayCore v1 consolidated acceptance evidence matrix
+
+Status: **template only; no physical or enterprise-environment acceptance is asserted**. Issue #36 owns real-site validation. Software defects found here must be returned to their development issue; CI failures and unimplemented software cannot be waived as environmental work. Follow `AGENTS.md`, `ops/automation/ONPREM_RUN_ORDER.md`, `ops/capacity/EOD_500MBPS_RELEASE_PLAN.md` and `control-center/docs/ONPREM_PRODUCTION_GO_GATES.md`. Do not run against production without a CAB-approved window and rollback.
+
+## Evidence manifest (required for every gate)
+
+Record: gate ID; issue URL; exact tested main SHA and signed artifact SHA-256; configuration revision/digest and signer; tester and independent reviewer; host/OS/runtime/NIC/CPU details; UTC start/end; command with secrets redacted; stdout/stderr and raw machine-readable artifacts; expected vs actual; PASS/FAIL/NOT RUN; rollback evidence; reviewer signoff. Never convert NOT RUN to PASS. Preserve original unredacted evidence in access-controlled storage, publish only sanitized hashes/links.
+
+## Software preflight — owner: independent reviewer
+
+- **S1 — source and release:** Prerequisites: reviewed integrated source, exact-head Windows/Ubuntu CI and push-triggered workflows for the merged main SHA, CodeQL, clean release build and offline dependencies. Commands: `git rev-parse HEAD`, `git status --porcelain`, `dotnet --info`, `dotnet test -c Release`, `sha256sum <artifact>` (PowerShell: `Get-FileHash <artifact> -Algorithm SHA256`). Expected: clean checkout, required checks successful, reproducible SHA-256, no unapproved source drift. Fail on any unknown, skipped required test, missing artifact, or mismatch. Attach workflow run/job URLs and installer/upgrade/rollback transcript.
+- **S2 — GSLB #52/#109:** Prerequisites: isolated delegated test zone, at least two authoritative nodes and geographically separate signed observers, approved trust anchors and DNSSEC policy. Commands: `dig @<authority-ip> <zone> SOA +norecurse`, `dig @<authority-ip> <zone> NS +tcp +norecurse`, `dig @<authority-ip> <host> A +dnssec +bufsize=1232`, `dig @<authority-ip> <missing> A +dnssec`, `dig +trace <host>`, `delv <host>` (where a validated chain exists). Expected: AA/RCODE/TTL/serial/referrals/negative proofs match configured policy; recursion refused; signed health stale/replay/conflict/partition tests fail closed, recovery converges within specified TTL. Attach packet captures with client identifiers redacted, serial timelines, health signatures and fault-injection logs. Missing geo-license data or untested network behavior is NOT RUN, not PASS.
+- **S3 — security and integrations #37/#38/#48/#49/#50/#51/#100/#101:** Prerequisites: disposable CA/IdP/mailbox, isolated TSIG/DNS-01 zone, Windows and Linux service accounts, encrypted DP key backups, collector, representative sanitized WAF corpus and peer network. Commands: run each issue's repository acceptance script and record its exact path/arguments; `openssl s_client -connect <host:port> -servername <dns-name> -verify_return_error` for TLS; `curl --fail-with-body --cacert <ca.pem> https://<management-host>/gateway/health` for management health when authorized. Expected: strict TLS/mTLS, renewal/rollback, fail-closed key recovery, durable audited mutations, redacted OTLP and bounded losses, WAF confusion matrix, bounded per-destination queues and replay-safe peer restart. Capture negative tests, crash/restart, encrypted key inspection, and Windows/Ubuntu parity. An absent script or unimplemented feature is a software blocker, not a physical waiver.
+
+## Physical and enterprise gate — #36, performed independently
+
+- **P1 — HA and separation:** Two independent physical gateway hosts, independent failure domains, signed identical monotonically versioned configuration, VRRP VIP or documented ECMP. Verify `sha256sum <approved-config>` on both nodes and signed revision/identity through the product's documented verification command. Exercise power-off, NIC loss, upstream refusal, management-plane loss, split brain and return-to-service; record per-request failures, ejection/failover duration and rollback. PASS only with unchanged configured thresholds and no unsafe replay of non-idempotent POST.
+- **P2 — capacity:** Confirm from NIC/source evidence that the actual peak is **500 Mbps**, not 500 MB/s. Measure actual peak RPS first. On **each node alone**, run a separate 60-minute sustained profile at **at least 750 Mbps response-body throughput AND 1.5 × measured peak RPS**, using representative response sizes, keepalive and TLS mix. Collect per-minute throughput, RPS, p50/p95/p99, absolute failures, gateway CPU/working set/GC Gen0/1/2/pause, NIC drops, log drops, backend utilization and generator saturation. PASS only if every minute meets the previously approved p99/error/operability gates; do not average away failing windows. Repeat with gateway graceful stop and hard failure under load. Preserve raw load-generator output and exact scenario config.
+- **P3 — DNS and PKI:** Obtain written authorization for public DNS delegation, ACME staging and enterprise CA/OCSP/CRL/HSM tests. Verify public resolvers from multiple networks, chain validation, rollover, revocation, expiry alarm, negative caching, TSIG interoperability, orphan TXT cleanup and offline manual-chain rollback. No real credential or private key in CI artifacts.
+- **P4 — enterprise integrations:** With test-only identities, verify AD/LDAPS/OIDC logout and revocation, scoped RBAC, email delivery and failure alarms across approved providers, signed audit receipt durability and collector outage/recovery, monitored dashboard/alert delivery. Capture redacted request IDs and operator signoff.
+- **P5 — CAB decision:** Attach S1–S3 and P1–P4 evidence, unresolved risk register, deployment/upgrade/offline installer rollback, on-call ownership and change window. **GO only when all mandatory gates PASS and CAB signs**. Otherwise NO-GO; keep #36 open.
+
+## Issue-by-issue evidence ledger
+
+| Issue | Software acceptance evidence required before integration | External acceptance under #36 |
+| --- | --- | --- |
+| #34 | Paired Windows/Linux allocation traces, confidence intervals, streaming/TLS/POST/affinity regression and p99 | Representative 60-minute traffic |
+| #37 | Fake-CA DNS-01/HTTP-01, scheduler, rollback, secure keys and restart tests | Authorized staging CA/domain and enterprise PKI |
+| #38 | Durable signed audit across admin mutations, collector failure/recovery and redaction | Enterprise collector and retention approval |
+| #48 | Windows DPAPI and encrypted Linux keyring restart/tamper/rotation/DR tests | Site key custody and DR drill |
+| #50 | Real disposable Collector/Grafana, absent-collector overhead and alert tests | Production monitoring and on-call receipt |
+| #51 | Pinned ruleset, benign/malicious replay, FP/FN, rollback and load tests | Approved customer corpus and WAF change governance |
+| #52 | DNS protocol/DNSSEC/GeoIP and fault-injection suites | Public delegation and multiple-network resolver tests |
+| #100 | Per-destination slot/queue lifecycle and cancellation/failover tests | Capacity under site backend mix |
+| #101 | Replay/epoch/TTL/partition and peer-restart convergence tests | Multi-host network partition drill |
+| #109 | mTLS signed multi-vantage quorum, freshness, fencing and RBAC tests | Physical multi-site observer and DNS convergence |
+| #36 | Consolidated acceptance checklist, signed evidence and rollback plan | All P1–P5, independent review and CAB |
+
+Historical issues #35/#49/#53 and deferred #39/#61 must be checked against their actual current state and canonical scope; do not silently reopen or claim them complete from this matrix. This file is an operator evidence template, not a test result.
