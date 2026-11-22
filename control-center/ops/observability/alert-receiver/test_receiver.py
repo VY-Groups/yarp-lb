@@ -93,6 +93,25 @@ class ReceiverTests(unittest.TestCase):
         self.assertEqual(self.post({"version": "3", "alerts": []})[0], 400)
         self.assertEqual(self.post({"version": "4", "alerts": [{"status": "unknown"}]})[0], 400)
 
+    def test_rejects_ambiguous_http_framing(self):
+        import http.client
+        for headers in ({"Transfer-Encoding": "chunked"}, {"Content-Length": "2"}):
+            with self.subTest(headers=headers):
+                connection = http.client.HTTPConnection("127.0.0.1", self.server.server_port, timeout=2)
+                try:
+                    connection.putrequest("POST", "/alerts")
+                    connection.putheader("Content-Type", "application/json")
+                    connection.putheader("Content-Length", "28")
+                    for key, value in headers.items():
+                        connection.putheader(key, value)
+                    connection.endheaders()
+                    response = connection.getresponse()
+                    self.assertEqual(response.status, 400)
+                    self.assertEqual(json.loads(response.read())["error"], "ambiguous_request_framing")
+                    self.assertEqual(response.getheader("Connection"), "close")
+                finally:
+                    connection.close()
+
     def test_rejects_wrong_content_type(self):
         self.assertEqual(self.post({"version": "4", "alerts": []}, "text/plain")[0], 415)
 
