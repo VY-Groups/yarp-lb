@@ -70,8 +70,18 @@ class Handler(BaseHTTPRequestHandler):
                for alert in alerts):
             self._write_json(400, {"error": "invalid_alert"})
             return
+        # Retain only bounded delivery evidence. Labels, annotations and URLs
+        # can contain credentials or private topology; never echo them at /events.
+        safe_alerts = []
+        for alert in alerts:
+            labels = alert.get("labels")
+            name = labels.get("alertname") if isinstance(labels, dict) else None
+            safe_name = (name if isinstance(name, str) and 0 < len(name) <= 128
+                         and all(ch.isascii() and (ch.isalnum() or ch in "_:-") for ch in name)
+                         else "redacted")
+            safe_alerts.append({"status": alert["status"], "alertname": safe_name})
         with self.server.events_lock:
-            self.server.events.append(document)
+            self.server.events.append({"version": "4", "alerts": safe_alerts})
             del self.server.events[:-MAX_EVENTS]
         self._write_json(200, {"accepted": True})
 
