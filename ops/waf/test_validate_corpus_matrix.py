@@ -1,6 +1,7 @@
 """Offline negative acceptance for the redacted WAF confusion-matrix gate."""
 import importlib.util
 import unittest
+import tempfile
 from pathlib import Path
 
 spec = importlib.util.spec_from_file_location("waf_matrix", Path(__file__).with_name("validate_corpus_matrix.py"))
@@ -18,6 +19,24 @@ class MatrixTests(unittest.TestCase):
             {"case_id": "attack-1", "route": "/api", "severity": "high",
              "expected_attack": True, "blocked": True, "mode": "block"},
         ]
+
+    def test_oversized_corpus_rejected(self):
+        with self.assertRaises(ValueError):
+            module.evaluate([self.cases[0]] * (module.MAX_CORPUS_CASES + 1), self.policy)
+
+    def test_policy_class_budget_rejected(self):
+        policy = {f"/route-{i}": {"high": dict(self.policy["/api"]["high"])}
+                  for i in range(module.MAX_POLICY_CLASSES + 1)}
+        with self.assertRaises(ValueError):
+            module.evaluate(self.cases, policy)
+
+    def test_bounded_json_reader_rejects_oversized_input(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "oversized.json"
+            with path.open("wb") as stream:
+                stream.truncate(module.MAX_INPUT_BYTES + 1)
+            with self.assertRaises(ValueError):
+                module._read_bounded_json(path)
 
     def test_clean_pass(self):
         result = module.evaluate(self.cases, self.policy)
