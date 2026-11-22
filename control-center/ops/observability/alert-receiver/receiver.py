@@ -9,8 +9,11 @@ MAX_EVENTS = 100
 
 class Receiver(ThreadingHTTPServer):
     daemon_threads = True
-    events = []
-    events_lock = threading.Lock()
+    def __init__(self, server_address, handler_class):
+        super().__init__(server_address, handler_class)
+        # Never share delivery evidence across independently started receivers.
+        self.events = []
+        self.events_lock = threading.Lock()
 
 
 class Handler(BaseHTTPRequestHandler):
