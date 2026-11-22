@@ -112,6 +112,46 @@ class ReceiverTests(unittest.TestCase):
                 finally:
                     connection.close()
 
+    def test_duplicate_json_keys_fail_closed(self):
+        import http.client
+        for payload in (
+            b'{"version":"4","version":"4","alerts":[]}',
+            b'{"version":"4","alerts":[{"status":"firing","status":"resolved"}]}',
+            b'{"version":"4","alerts":[{"status":"firing","labels":{"alertname":"ok","alertname":"spoof"}}]}',
+        ):
+            with self.subTest(payload=payload):
+                connection = http.client.HTTPConnection("127.0.0.1", self.server.server_port, timeout=2)
+                try:
+                    connection.request("POST", "/alerts", body=payload,
+                                       headers={"Content-Type": "application/json"})
+                    response = connection.getresponse()
+                    self.assertEqual(response.status, 400)
+                    response.read()
+                finally:
+                    connection.close()
+        with urlopen(f"{self.base_url}/events", timeout=2) as response:
+            self.assertEqual(json.load(response)["count"], 0)
+
+    def test_unread_body_rejections_close_connection(self):
+        import http.client
+        for headers, expected in (
+            ({"Content-Type": "text/plain"}, 415),
+            ({"Content-Type": "application/json", "Content-Length": "0"}, 413),
+        ):
+            with self.subTest(headers=headers):
+                connection = http.client.HTTPConnection("127.0.0.1", self.server.server_port, timeout=2)
+                try:
+                    connection.putrequest("POST", "/alerts")
+                    for key, value in headers.items():
+                        connection.putheader(key, value)
+                    connection.endheaders()
+                    response = connection.getresponse()
+                    self.assertEqual(response.status, expected)
+                    self.assertEqual(response.getheader("Connection"), "close")
+                    response.read()
+                finally:
+                    connection.close()
+
     def test_rejects_wrong_content_type(self):
         self.assertEqual(self.post({"version": "4", "alerts": []}, "text/plain")[0], 415)
 
