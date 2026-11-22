@@ -50,6 +50,12 @@ class Handler(BaseHTTPRequestHandler):
         if self.headers.get_content_type() != "application/json":
             self._write_json(415, {"error": "unsupported_media_type"})
             return
+        # Reject ambiguous framing before reading a persistent HTTP/1.1 socket.
+        # The disposable receiver accepts fixed-length JSON only, never chunks.
+        if self.headers.get("Transfer-Encoding") is not None or len(self.headers.get_all("Content-Length", [])) != 1:
+            self.close_connection = True
+            self._write_json(400, {"error": "ambiguous_request_framing"})
+            return
         try:
             length = int(self.headers.get("Content-Length", "-1"))
         except ValueError:
