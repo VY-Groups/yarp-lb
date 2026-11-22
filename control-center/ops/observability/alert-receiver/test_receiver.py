@@ -74,6 +74,23 @@ class ReceiverTests(unittest.TestCase):
             evidence = json.load(response)
         self.assertEqual(evidence["events"][-1]["alerts"][0]["alertname"], "redacted")
 
+    def test_independent_receivers_do_not_share_alert_evidence(self):
+        other = Receiver(("127.0.0.1", 0), Handler)
+        worker = threading.Thread(target=other.serve_forever, daemon=True)
+        worker.start()
+        try:
+            with urlopen(f"http://127.0.0.1:{other.server_port}/events", timeout=2) as response:
+                self.assertEqual(json.load(response)["count"], 0)
+            self.assertEqual(self.post({"version": "4", "alerts": [
+                {"status": "firing", "labels": {"alertname": "GatewayCoreIsolation"}}
+            ]})[0], 200)
+            with urlopen(f"http://127.0.0.1:{other.server_port}/events", timeout=2) as response:
+                self.assertEqual(json.load(response), {"count": 0, "events": []})
+        finally:
+            other.shutdown()
+            other.server_close()
+            worker.join(timeout=2)
+
     def test_rejects_non_object_and_invalid_alertmanager_payloads(self):
         self.assertEqual(self.post(["not", "an", "object"])[0], 400)
         self.assertEqual(self.post({"version": "3", "alerts": []})[0], 400)
