@@ -171,7 +171,13 @@ try
         ("<key id=\"" + disguisedId + "\"><x:masterKey xmlns:x=\"urn:untrusted\">plaintext-test-only</x:masterKey>" +
          "<encryptedSecret xmlns=\"http://schemas.asp.net/2015/03/dataProtection\"" +
          " decryptorType=\"EncryptedXmlDecryptor\"/></key>",
-         "namespace-qualified plaintext master key is refused")
+         "namespace-qualified plaintext master key is refused"),
+        ("<key id=\"" + disguisedId + "\"><encryptedSecret xmlns=\"http://schemas.asp.net/2015/03/dataProtection\"" +
+         " decryptorType=\"UnapprovedEncryptedXmlDecryptor, Unapproved.Assembly\"/></key>",
+         "lookalike decryptor type cannot certify certificate protection"),
+        ("<key id=\"" + disguisedId + "\"><encryptedSecret xmlns=\"http://schemas.asp.net/2015/03/dataProtection\"" +
+         " decryptorType=\"Microsoft.AspNetCore.DataProtection.XmlEncryption.EncryptedXmlDecryptor, Unapproved.Assembly\"/></key>",
+         "correct class in wrong assembly cannot certify certificate protection")
     })
     {
         File.WriteAllText(disguisedFile, xmlText);
