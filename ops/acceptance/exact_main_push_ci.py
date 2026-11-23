@@ -82,6 +82,13 @@ def collect(repo, sha, token):
                                        if s.get("conclusion") in ("failure", "cancelled")]}
                      for j in jobs],
         })
+    # A merge may advance main while paginated runs and job details are
+    # being collected. An audit of an old tip cannot be accepted as the
+    # latest main proof, even if the original ref read was correct.
+    tip_after = get_json("/repos/" + encoded + "/git/ref/heads/main", token)
+    final_sha = tip_after.get("object", {}).get("sha") if isinstance(tip_after, dict) else None
+    if final_sha != sha:
+        raise ValueError("main branch tip changed during push evidence audit")
     return evidence
 
 
