@@ -1,6 +1,7 @@
 """Deterministic negative and positive tests for WAF corpus evidence gate."""
 import csv
 import importlib.util
+import math
 import tempfile
 import unittest
 from pathlib import Path
@@ -66,6 +67,13 @@ class EvidenceGateTests(unittest.TestCase):
         self.write([("/a", "1", "benign", "allowed", "block")])
         with self.assertRaises(ValueError):
             gate.assess(self.path, -1, 0, 1, 1)
+
+    def test_nonfinite_rate_rejected_by_library_entrypoint(self):
+        self.write([("/a", "1", "benign", "allowed", "block"),
+                    ("/a", "2", "malicious", "blocked", "block")])
+        for invalid in (math.nan, math.inf, -math.inf):
+            with self.subTest(rate=invalid), self.assertRaisesRegex(ValueError, "rates"):
+                gate.assess(self.path, invalid, 0, 1, 1)
 
     def test_unknown_csv_columns_rejected(self):
         self.path.write_text("route,case_id,expected,observed,mode,secret\n", encoding="utf-8")
