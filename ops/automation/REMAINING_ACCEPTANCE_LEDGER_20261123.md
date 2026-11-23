@@ -28,6 +28,45 @@ Prerequisites: pinned ruleset and shadow/block policy, privately owned synthetic
 
 Confirm measured 500 **Mbps**, not MB/s. If the real peak is 500 Mbps and approved headroom 50%, test **each gateway alone** at >=750 Mbps response-body **and** >=1.5x measured peak RPS for **every one of 60 consecutive one-minute windows**, zero HTTP/transport errors, and unchanged preapproved p99/NIC-drop/GC/log-loss gates. Exercise graceful drain, abrupt kill, blackhole, VIP migration, split network, signed-config divergence/replay, cert rotation, DNS convergence, failback and rolling rollback. Collect timestamped per-minute raw generator, NIC, proxy, backend and monitor evidence, absolute failed requests, loss interval and alerts delivered to the real destination. Verify real CA signing POST never replays, real enterprise SSO/OTP recovery, audit retention, public DNS resolvers, monitoring and CAB signoff. FAIL on any missing gate; retain #36 open and production NO-GO.
 
+## Canonical evidence index and physical handover details
+
+This ledger is the proposed single living checklist; related draft-only worksheets
+[#419](https://github.com/VY-Groups/yarp-lb/pull/419),
+[#420](https://github.com/VY-Groups/yarp-lb/pull/420),
+[#421](https://github.com/VY-Groups/yarp-lb/pull/421),
+[#422](https://github.com/VY-Groups/yarp-lb/pull/422),
+[#423](https://github.com/VY-Groups/yarp-lb/pull/423),
+[#424](https://github.com/VY-Groups/yarp-lb/pull/424), and
+[#425](https://github.com/VY-Groups/yarp-lb/pull/425) are reference
+drafts, **not execution evidence**. Preserve their unique prerequisites here
+before marking any as superseded; never merge multiple conflicting checklists.
+
+For each acceptance row maintain: issue / test identifier; reviewer and
+operator; approval and UTC start/end; exact merged source SHA and release
+artifact hash; OS, runtime, service identity and sanitized topology; signed
+configuration revision/digest; exact commands with versions and exit codes;
+expected and observed results; raw log/metric/trace/packet artifact references
+and SHA-256; explicit PASS / FAIL / BLOCKED; remediation and retest reference.
+Keep confidential raw evidence in an access-controlled location, not public
+GitHub. A missing artifact or unrun test must not count as PASS.
+
+Physical execution under #36 is a separate **authorized operator** batch,
+after the software entry gate, and must record these independently witnessed
+subgates:
+
+| Subgate | Evidence and fail-closed decision |
+|---|---|
+| Topology and isolation | Two physically independent power/network failure domains; health from each node; external unauthorized probes against management and metrics; accepted mTLS only from approved management IPs |
+| Signed routing and rollback | Signed monotonic config revision, signer identity and digest on both nodes; invalid/stale/divergent revision and mutation fencing; signed receipts and rollback audit |
+| Failover | Graceful drain, process kill, physical host loss, VIP/ECMP loss, link flap, blackhole, asymmetric partition, failback and upgrade; preserve absolute errors and first/last error timestamps for each independently repeated drill; no CA signing POST replay |
+| Solo-node capacity | Verify actual peak **Mbps versus MB/s** and peak RPS with switch/ISP records before defining targets; for a proven 500 Mbps peak each *individual* surviving node must achieve >=750 Mbps **response-body** and >=1.5x measured peak RPS in **each of 60 consecutive one-minute windows**, zero errors, unchanged approved p99, NIC-drop, GC and log-loss gates |
+| External integrations | Authorized public DNS delegation/DS and independent resolvers; test CA/OCSP/CRL/HSM; enterprise identity/OTP/mail; real Collector/Grafana alert delivery and retention; platform-specific restricted service start/restart, key restore and rollback |
+| Release / CAB | Immutable release SHA, signed package/hash, offline installation and recovery, approval records, unredacted restricted evidence inventory and independent witness; any missing required result remains NO-GO |
+
+CI process-kill timings do not establish physical VRRP/ECMP convergence.
+Do not transfer missing deterministic software acceptance, unsupported
+platform implementations or failed exact-head checks into #36.
+
 ## Scope and handoff
 
 #39 and #61 remain deferred post-v1. No branch merges, issue closures, release publication, server changes or production GO are authorized by this checklist. This file records the currently open work without shifting incomplete software to physical testing. If later issue search shows additional open or reopened development tickets, add their original criteria before final handoff.
