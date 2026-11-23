@@ -2,6 +2,9 @@ name: OTLP Collector, Prometheus and Grafana container acceptance
 on:
   pull_request:
     paths:
+      - "ops/acceptance/check_audit_outbox_metrics.py"
+      - "ops/acceptance/test_check_audit_outbox_metrics.py"
+      - "control-center/docs/TELEMETRY_SITE_ACCEPTANCE.md"
       - "control-center/GatewayOpenTelemetry.cs"
       - "control-center/OtlpEndpointPolicy.cs"
       - "control-center/tests/EngineConfigSecurityTests/**"
@@ -16,6 +19,9 @@ on:
   push:
     branches: [main]
     paths:
+      - "ops/acceptance/check_audit_outbox_metrics.py"
+      - "ops/acceptance/test_check_audit_outbox_metrics.py"
+      - "control-center/docs/TELEMETRY_SITE_ACCEPTANCE.md"
       - "control-center/GatewayOpenTelemetry.cs"
       - "control-center/OtlpEndpointPolicy.cs"
       - "control-center/tests/EngineConfigSecurityTests/**"
@@ -39,6 +45,9 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 10.0.x
+      - name: Test fail-closed per-gateway site audit metric acceptance
+        shell: bash
+        run: python3 -m unittest discover -s ops/acceptance -p 'test_check_audit_outbox_metrics.py' -v
       - name: Validate dashboard and container configuration
         shell: bash
         run: |
