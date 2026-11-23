@@ -122,9 +122,14 @@ public static class WindowsFleetKeyProtection
                         (isRevocation && reader.LocalName == "encryptedSecret"))
                         throw new InvalidOperationException(
                             "Windows fleet key XML contains unexpected key material");
-                    if (isKey && reader.LocalName == "encryptedSecret" &&
-                        reader.NamespaceURI == protectionNamespace)
+                    if (isKey && reader.LocalName == "encryptedSecret")
                     {
+                        // An attacker-controlled foreign-namespace element must
+                        // not coexist with the approved wrapped secret: the
+                        // framework may interpret the document differently.
+                        if (reader.NamespaceURI != protectionNamespace)
+                            throw new InvalidOperationException(
+                                "Windows fleet key XML contains a foreign encryptedSecret element");
                         // A substring check accepts unapproved lookalike
                         // types and assemblies. Only the framework's exact
                         // certificate XML decryptor and assembly identity

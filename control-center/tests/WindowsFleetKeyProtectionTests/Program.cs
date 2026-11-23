@@ -177,7 +177,11 @@ try
          "lookalike decryptor type cannot certify certificate protection"),
         ("<key id=\"" + disguisedId + "\"><encryptedSecret xmlns=\"http://schemas.asp.net/2015/03/dataProtection\"" +
          " decryptorType=\"Microsoft.AspNetCore.DataProtection.XmlEncryption.EncryptedXmlDecryptor, Unapproved.Assembly\"/></key>",
-         "correct class in wrong assembly cannot certify certificate protection")
+         "correct class in wrong assembly cannot certify certificate protection"),
+        ("<key id=\"" + disguisedId + "\"><encryptedSecret xmlns=\"http://schemas.asp.net/2015/03/dataProtection\"" +
+         " decryptorType=\"Microsoft.AspNetCore.DataProtection.XmlEncryption.EncryptedXmlDecryptor, Microsoft.AspNetCore.DataProtection\"/>" +
+         "<x:encryptedSecret xmlns:x=\"urn:untrusted\" decryptorType=\"untrusted\"/></key>",
+         "foreign-namespace wrapped secret cannot coexist with approved certificate decryptor")
     })
     {
         File.WriteAllText(disguisedFile, xmlText);
