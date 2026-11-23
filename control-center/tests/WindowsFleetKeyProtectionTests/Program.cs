@@ -130,11 +130,31 @@ try
     Environment.SetEnvironmentVariable(Previous, null);
     Environment.SetEnvironmentVariable(Current, signOnly.Thumbprint);
     bool signingOnlyRejected = false;
-    try { WindowsFleetKeyProtection.TryConfigure(baseline); }
+    try
+    {
+        var empty = Path.Combine(root, "validated-empty");
+        Directory.CreateDirectory(empty);
+        WindowsFleetKeyProtection.TryConfigure(baseline, empty);
+    }
     catch (InvalidOperationException) { signingOnlyRejected = true; }
     Check(signingOnlyRejected, "signing-only private key cannot wrap fleet DP data");
 
     Environment.SetEnvironmentVariable(Current, t1);
+    var legacy = Path.Combine(root, "legacy-machine-bound");
+    Directory.CreateDirectory(legacy);
+    File.WriteAllText(Path.Combine(legacy, "key-legacy.xml"),
+        "<key><encryptedSecret decryptorType=\"Microsoft.AspNetCore.DataProtection.XmlEncryption.DpapiXmlDecryptor\" /></key>");
+    bool legacyRejected = false;
+    try { WindowsFleetKeyProtection.TryConfigure(baseline, legacy); }
+    catch (InvalidOperationException) { legacyRejected = true; }
+    Check(legacyRejected, "Windows fleet refuses silent import of host-bound legacy DPAPI key XML");
+    File.WriteAllText(Path.Combine(legacy, "key-legacy.xml"),
+        "<key><masterKey>test-only-no-real-secret</masterKey></key>");
+    bool plaintextRejected = false;
+    try { WindowsFleetKeyProtection.TryConfigure(baseline, legacy); }
+    catch (InvalidOperationException) { plaintextRejected = true; }
+    Check(plaintextRejected, "Windows fleet refuses unwrapped existing key material");
+
     using var first = Build("gateway-one");
     var protect = first.GetRequiredService<IDataProtectionProvider>()
         .CreateProtector("gatewaycore-windows-fleet-cookie-v1");
