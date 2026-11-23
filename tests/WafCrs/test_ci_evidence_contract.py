@@ -34,7 +34,7 @@ def artifact_paths(workflow_text):
     step = workflow_text.split(marker, 1)[1]
     if step.count("uses: actions/upload-artifact@v4") != 1:
         raise ValueError("protected upload step is missing or ambiguous")
-    match = re.search(r"(?m)^          path: \\|\\n((?:            [^\\n]+\\n)+)", step)
+    match = re.search(r"(?m)^          path: \|\n((?:            [^\n]+\n)+)", step)
     if not match:
         raise ValueError("expected explicit multiline WAF artifact file allowlist")
     names = [line.strip() for line in match.group(1).splitlines()]
