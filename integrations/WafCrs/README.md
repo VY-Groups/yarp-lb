@@ -44,6 +44,27 @@ The lab uses `MODSEC_RULE_ENGINE=On` for blocking acceptance, then explicitly re
 
 **Important:** an edge-only WAF cannot stop direct origin access. Keep the backend private, pin an upstream container digest for production, set and audit policy exclusions with real traffic in detection-only mode, and measure throughput/latency against an unprotected control. Ruleset updates must go through an independently approved signed and reversible deployment path, which does not yet exist.
 
+## Request-to-rule audit evidence binding (synthetic lab only)
+
+Detection-only acceptance now tags each of the three synthetic attack
+requests with a fixed lab header, and requires a **complete native audit
+transaction** containing BOTH that exact request header (section B) and
+the expected CRS rule family (section H). A rule-family ID anywhere in
+the aggregated log is no longer evidence for a different request. Duplicate,
+missing, cross-bound or truncated audit transactions fail the acceptance.
+The redacted detection matrix exports only synthetic case identifiers,
+HTTP status, expected CRS family and outcome; it excludes native transaction
+IDs, request paths and headers. Raw ModSecurity audit output remains only
+inside the disposable CI workspace and is not included in the GitHub
+artifact allowlist.
+
+This strengthens the **synthetic test observation** only. It does not
+authenticate real customer audit records, independently verify a production
+ruleset signer, support private tenant attribution, or satisfy representative
+site FP/FN, WAF policy rollout, p99/CPU and full Windows/Linux support.
+Issue #51 remains open for those software gates; the physical site checks
+remain in #36.
+
 ## Corpus evidence artifact
 
 `artifacts/waf-crs/blocking-corpus-report.json` records the fixed synthetic blocking corpus by case and route, with HTTP status, expected class, TP/TN/FP/FN counts, missing and unexpected responses. Incomplete runs retain explicitly missing results and do not publish false-positive/false-negative rates. The test requires every fixture to complete without a false positive or false negative. The report contains no request payloads and excludes body-limit and detection-only checks, which retain their existing separate assertions. This is a small synthetic regression corpus, not a production false-positive/false-negative estimate or a replacement for an agreed representative corpus, severity analysis, or load testing.
