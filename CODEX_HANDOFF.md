@@ -5,6 +5,58 @@
 The owner intends GatewayCore to be **proprietary** and to postpone commercial licensing/activation development until software issues close. The .NET NSEC3 functionality follows RFC 5155. Earlier repository revisions included project-wide AGPL text; review that history before making distribution claims. See `README.md`, `PROJECT_LICENSE_STATUS.md`, and `AGENTS.md`; older snapshots below are historical, not the owner's current direction.
 
 
+## Verified continuation — independent PR integration and evidence (2026-11-23)
+
+This section supersedes older snapshots below; **verify current GitHub heads and
+checks again before every merge or release decision**.
+
+- Last verified `main`: `03976ae023f412adcbf3b8b125bb6ce4fdf1548a`.
+  PR #434 (SourceIpHash pooled destination candidates) merged as
+  `cea2407ff6e03ddc883f1c90f30dd97b9761a056` after independently approved
+  exact-head tests. PR #436 (WAF corpus response framing) merged as
+  `03976ae023f412adcbf3b8b125bb6ce4fdf1548a` after independent approval.
+  The earlier `main` push for #434 had one **cancelled** L7 workflow because
+  the branch advanced; do not represent combined post-merge push CI as fully
+  accepted. Use the exact-main verifier before final software release.
+- PR #435 source-address access logging avoids per-request peer IP hex
+  allocations with an empty trusted-proxy allowlist. The original PR head
+  `4ffba9cd86731f28bdbd19ca41ff7cd5c7fa2b86` had 16/16 CI success and
+  measured −72.212 bytes/request (paired 95% CI −74.127..−70.297). Merging
+  #434 caused a conflict in the profile workflow/README. Updated merge head
+  `cbcdb68b6d44a759b97081098ebeb6124acff447` now combines the two
+  profiling paths and retains the original source/test changes; this **new
+  head** requires all exact-head CI and a **new independent reviewer approval**
+  before merge. Do not add isolated benchmark deltas to claim whole-gateway
+  production savings.
+- PR #432 latest head `a2e47e8f427abec38a5c5ff4f58c7fa21ea24afe`
+  passed 18/18 triggered CI workflows, including the redacted OTLP Collector
+  and three-pair allocation profile: candidate-minus-baseline −7.974
+  bytes/request (95% CI −12.045..−3.903) with active OTLP. A prior head had
+  a measured +847.222 bytes/request regression; its local duplicate-export
+  formatting was removed. The historical CHANGES_REQUESTED review still
+  requires **fresh independent approval**.
+- PR #433 latest head `f278a323172ab6feac5d8a4508a647482d24a9d3`
+  passed 4/4 triggered CI checks. It fails closed on DNSSEC signer faults
+  and preserves RD/CD across normal, REFUSED and signer-failure replies, with
+  UDP/TCP acceptance. Historical review blockers require **fresh approval**.
+- PR #438 updated head `090eb36f519513103e8e0347452c9cc7db9c3f65`
+  addresses three inline independent review defects: branch-qualified
+  `main` push evidence, mandatory nonblank required-workflow gate and neutral
+  usage text. A Windows+Ubuntu offline regression workflow was added; the
+  resulting tests, branding and workflow lint were green. Do not merge without
+  the remaining exact-head checks and fresh independent approval; the
+  earlier CHANGES_REQUESTED has not been waived.
+- PR #437 records the engineering/security review of the **deleted**
+  standalone `gslb` branch; its independent Go history and source were
+  **not merged or copied** into the .NET product. The report is a risk/architecture
+  review only. Its CI was 13/13 successful at head `4f49209243aaa4351534ca62c241a6e7bc68fca5`.
+  It remains a review/documentation PR, not a production GSLB acceptance.
+- Current open issues #34 (allocations), #48 (key persistence/recovery),
+  #50 (OTLP operations), #51 (WAF lifecycle/coverage), and #36 (physical
+  capacity and gateway HA) remain separate. **Production NO-GO**. No release
+  artifact/offline upgrade/rollback or 750-Mbps single-node 60-minute physical
+  acceptance has been verified by these merges.
+
 ## Continuation snapshot — security review and release status (2026-11-21)
 
 This is the latest verified continuation state; older same-day snapshots below
