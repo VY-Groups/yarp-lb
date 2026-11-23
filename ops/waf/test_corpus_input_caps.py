@@ -35,7 +35,7 @@ class BoundedCorpusInputTests(unittest.TestCase):
     def test_invalid_utf8_and_symlink_are_rejected(self):
         with tempfile.TemporaryDirectory() as root:
             target = Path(root) / "target.json"
-            target.write_bytes(b"\\xff".decode("unicode_escape").encode("latin1"))
+            target.write_bytes(bytes([0xff]))
             with self.assertRaises(UnicodeError):
                 gate.read_bounded_utf8(target, gate.MAX_POLICY_BYTES)
             alias = Path(root) / "alias.json"
