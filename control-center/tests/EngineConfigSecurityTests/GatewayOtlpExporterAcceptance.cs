@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Buffers.Binary;
 using System.Diagnostics;
+using System.Diagnostics.Metrics;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
@@ -17,6 +18,47 @@ using OpenTelemetry.Trace;
 /// <summary>Exercises the real OTLP HTTP exporters against a loopback collector fixture.</summary>
 public static class GatewayOtlpExporterAcceptance
 {
+    private static void VerifyAuditOutboxGaugeContract()
+    {
+        var values = new ConcurrentDictionary<string, (int Value, int Tags)>(
+            StringComparer.Ordinal);
+        using var listener = new MeterListener();
+        listener.InstrumentPublished = (instrument, current) =>
+        {
+            if (instrument.Meter.Name == GatewayOpenTelemetry.ActivitySourceName &&
+                instrument.Name.StartsWith("gateway.audit.outbox.", StringComparison.Ordinal))
+                current.EnableMeasurementEvents(instrument);
+        };
+        listener.SetMeasurementEventCallback<int>((instrument, value, tags, _) =>
+            values[instrument.Name] = (value, tags.Length));
+        listener.Start();
+
+        GatewayOpenTelemetry.ReportAuditOutboxStatus(
+            enabled: true, pending: 3, storageFault: true, deliveryBlocked: true);
+        listener.RecordObservableInstruments();
+        foreach (var (name, expected) in new[]
+        {
+            ("gateway.audit.outbox.enabled", 1),
+            ("gateway.audit.outbox.pending", 3),
+            ("gateway.audit.outbox.storage_fault", 1),
+            ("gateway.audit.outbox.delivery_blocked", 1)
+        })
+        {
+            if (!values.TryGetValue(name, out var observed) ||
+                observed.Value != expected || observed.Tags != 0)
+                throw new Exception("Identity-free audit status gauge missing or incorrect: " + name);
+        }
+
+        GatewayOpenTelemetry.ReportAuditOutboxStatus(
+            enabled: false, pending: 4096, storageFault: true, deliveryBlocked: true);
+        values.Clear();
+        listener.RecordObservableInstruments();
+        if (values.Count != 4 || values.Any(item =>
+                item.Value.Value != 0 || item.Value.Tags != 0))
+            throw new Exception("Disabled external audit outbox exported nonzero status or dynamic labels");
+        Console.WriteLine("PASS: OTLP audit outbox status has exactly four fixed, identity-free gauges");
+    }
+
     public static Task RunWithoutCollectorAsync()
     {
         var oldEndpoint = Environment.GetEnvironmentVariable("YARP_OTEL_ENDPOINT");
@@ -81,6 +123,9 @@ public static class GatewayOtlpExporterAcceptance
             var tracerProvider = provider.GetRequiredService<TracerProvider>();
             var meterProvider = provider.GetRequiredService<MeterProvider>();
             var loggerProvider = provider.GetRequiredService<LoggerProvider>();
+            VerifyAuditOutboxGaugeContract();
+            GatewayOpenTelemetry.ReportAuditOutboxStatus(
+                enabled: true, pending: 3, storageFault: false, deliveryBlocked: true);
             using var loggingDropScenario = EmitLoggingDropCounters();
             var parent = new ActivityContext(ActivityTraceId.CreateRandom(), ActivitySpanId.CreateRandom(),
                 ActivityTraceFlags.Recorded);
@@ -104,7 +149,7 @@ public static class GatewayOtlpExporterAcceptance
             if (!tracerProvider.ForceFlush(10000) || !meterProvider.ForceFlush(10000) || !loggerProvider.ForceFlush(10000))
                 throw new Exception("Container OTLP exporters failed to flush before acceptance deadline");
             await VerifyPrometheusLoggingCountersAsync(endpoint, loggingDropScenario);
-            Console.WriteLine("PASS: real OpenTelemetry Collector accepted traces and metrics via OTLP/HTTP");
+            Console.WriteLine("PASS: real OpenTelemetry Collector accepted traces, metrics and bounded audit export gauges via OTLP/HTTP");
         }
         finally
         {
@@ -314,7 +359,9 @@ public static class GatewayOtlpExporterAcceptance
                          "gateway.proxy.requests", "gateway.proxy.request.duration", "5xx",
                          "gateway.route.id", "acceptance_route", "gateway.cluster.id", "acceptance_cluster",
                          "gateway.destination.id", "target_a", "gateway.proxy.local_rejections",
-                         "gateway.proxy.rejection.reason"
+                         "gateway.proxy.rejection.reason",
+                         "gateway.audit.outbox.enabled", "gateway.audit.outbox.pending",
+                         "gateway.audit.outbox.storage_fault", "gateway.audit.outbox.delivery_blocked"
                      })
                 if (!metricPayload.Contains(expected, StringComparison.Ordinal))
                     throw new Exception($"Expected bounded proxy metric was absent: {expected}");

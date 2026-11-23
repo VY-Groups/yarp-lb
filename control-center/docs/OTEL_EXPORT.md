@@ -18,6 +18,33 @@ OTEL_EXPORTER_OTLP_HEADERS=Authorization=Bearer%20<short-lived-token>
 
 Export uses the SDK's bounded batch queue and background worker; request handling does not synchronously wait for collector delivery. When the queue is full or the collector is unavailable, telemetry may be dropped. The proxy path continues serving traffic. Metrics export every 15 seconds with a five-second timeout. Trace batch limits use the OpenTelemetry SDK defaults for the pinned package version. The exporter includes the bounded console writer's total/low/high priority drop and write-error counters from the `GatewayCoreYarp.Logging` meter.
 
+## Durable external audit delivery state (opt-in)
+
+When OTLP is configured, the `GatewayCore.ControlCenter` meter exports four
+**label-free** observable gauges: `gateway.audit.outbox.enabled` (0/1),
+`gateway.audit.outbox.pending` (0..4096, or -1 when unreadable),
+`gateway.audit.outbox.storage_fault` (0/1), and
+`gateway.audit.outbox.delivery_blocked` (0/1). No event IDs, actor names,
+request paths, outbox file contents, intent data, signatures, URLs or
+credentials are exported. The existing `AuditOutboxWorker` refreshes a
+cached status after each bounded delivery pass (2-second schedule); OTLP
+measurement callbacks merely read four integers and never enumerate files,
+block the proxy request path or contact the audit collector.
+
+The gauges are seeded during application startup. **enabled=0 does not
+mean successful audit delivery**: it means the durable external audit queue
+was not configured and the other three gauges are zero. enabled=1 with
+pending=-1 or storage_fault=1 requires an urgent operator investigation;
+delivery_blocked=1 indicates the authenticated transport was unsuccessful.
+Gauges are a weakly consistent operational snapshot, **not** immutable
+audit records or proof that a particular remote event was received.
+The protected `/admin/api/audit/delivery` endpoint remains the detailed
+admin-only status source. CI validates all gauge values and zero labels
+through a .NET `MeterListener` and validates actual OTLP metric names
+through the disposable wire-collector capture. Production sites must still
+verify retained immutable receipts, two-host continuity, alert routing and
+disaster recovery; those are outstanding #50/#36 acceptance gates.
+
 ## Bounded console writer recovery and loss evidence
 
 The background console output writer counts failed output records in
