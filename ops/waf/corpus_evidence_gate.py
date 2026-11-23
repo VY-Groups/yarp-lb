@@ -56,7 +56,22 @@ def read_bounded_utf8(path, limit):
         raise ValueError("WAF evidence input cannot be a symlink")
     flags = (os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) |
              getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0))
-    fd = os.open(path, flags)
+    # On POSIX, pin each ancestor as a directory descriptor. Checking
+    # resolve() alone is racy: a directory can be replaced with a symlink
+    # between the check and the final open. Never follow such a replacement.
+    if os.name == "posix":
+        directory_fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            for component in path.parent.parts[1:]:
+                next_fd = os.open(component, os.O_RDONLY | os.O_DIRECTORY |
+                                  os.O_NOFOLLOW, dir_fd=directory_fd)
+                os.close(directory_fd)
+                directory_fd = next_fd
+            fd = os.open(path.name, flags, dir_fd=directory_fd)
+        finally:
+            os.close(directory_fd)
+    else:
+        fd = os.open(path, flags)
     with os.fdopen(fd, "rb") as handle:
         before = os.fstat(handle.fileno())
         if not stat.S_ISREG(before.st_mode) or before.st_size > limit:
