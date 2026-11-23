@@ -148,10 +148,28 @@ try
     using var second = Build("gateway-two");
     Check(CanRead(second, token), "second isolated Windows gateway reads approved portable cookie");
 
-    Environment.SetEnvironmentVariable(Current, t3);
-    using var untrusted = Build("gateway-untrusted");
-    CopyKeys("gateway-one", "gateway-untrusted");
-    Check(!CanRead(untrusted, token), "wrong certificate cannot decrypt copied fleet key ring");
+    // A one-host test with BOTH private certificates in LocalMachine\My is
+    // not a cross-host negative: ASP.NET can resolve the XML-encrypted key's
+    // embedded recipient thumbprint against that shared machine store.
+    // Remove the approved leaf from the recipient's available store before
+    // probing the wrong-only identity, then restore it for rotation tests.
+    using (var machineStore = new X509Store(StoreName.My, StoreLocation.LocalMachine))
+    {
+        machineStore.Open(OpenFlags.ReadWrite);
+        machineStore.Remove(active);
+        try
+        {
+            Environment.SetEnvironmentVariable(Current, t3);
+            using var untrusted = Build("gateway-untrusted");
+            CopyKeys("gateway-one", "gateway-untrusted");
+            Check(!CanRead(untrusted, token),
+                "isolated recipient without approved wrapping certificate cannot decrypt ring");
+        }
+        finally
+        {
+            machineStore.Add(active);
+        }
+    }
 
     Environment.SetEnvironmentVariable(Current, t2);
     Environment.SetEnvironmentVariable(Previous, t1);
