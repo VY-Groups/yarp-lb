@@ -147,3 +147,19 @@ prove forged GET markers or POST metadata cannot pass. Request bodies and
 backend payloads remain excluded from the generated report. This validates
 only the disposable loopback acceptance origin, not a production backend,
 customer WAF integration or the remaining #51 criteria.
+
+### Strict benchmark origin-response evidence (#51)
+
+The disposable five-phase synthetic benchmark rejects ambiguous or truncated
+declared response lengths, duplicate HTTP Content-Length framing, unsupported
+transfer encoding, and oversized or wrong-media-type origin responses. JSON
+POST success requires the *exact* accepted/contentType/bytes fields with an
+actual integer byte count and no duplicate JSON properties. GET requires the
+exact fixed origin marker and text media type. The benchmark supports valid
+chunked responses without a declared Content-Length.
+
+Run `python3 -m unittest discover -s tests/WafCrs -p 'test_benchmark_contract.py' -v`
+to exercise positive and forged-origin examples before Docker acceptance.
+This prevents false benchmark successes; it does **not** provide representative
+customer FP/FN, signed production rule governance, real YARP+WAF Windows
+and Linux capacity, or certify issue #51 as complete.
