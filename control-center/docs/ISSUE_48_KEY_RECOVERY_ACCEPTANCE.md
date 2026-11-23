@@ -15,7 +15,7 @@ From a clean checkout at the **exact candidate SHA**, with .NET 10 SDK installed
 ```sh
 git rev-parse HEAD
 dotnet --info
-dotnet build control-center/GatewayCoreYarp/GatewayCoreYarp.csproj -c Release
+dotnet build control-center/GatewayCoreYarp.csproj -c Release
 ```
 
 Expected: zero exit codes, recorded SDK/runtime versions and exact commit. Also run all existing dedicated Data Protection tests, Windows HA tests, Control Center API/browser tests, Linux real-start/systemd and RHEL-family UBI9 workflows at the same head; capture workflow/job URLs and artifact digests. A build alone does not pass any lifecycle test. If a path or test command changes, record the actual invocation from the checked-out CI workflow rather than silently substituting a smoke test.
