@@ -63,7 +63,12 @@ def receipt(path, item):
     fd = None
     try:
         fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-        os.write(fd, result)
+        offset = 0
+        while offset < len(result):
+            written = os.write(fd, result[offset:])
+            if written <= 0:
+                raise OSError("incomplete protected receipt write")
+            offset += written
         os.fsync(fd)
         os.close(fd)
         fd = None
