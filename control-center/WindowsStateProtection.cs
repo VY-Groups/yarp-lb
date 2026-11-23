@@ -35,10 +35,13 @@ public static class WindowsStateProtection
 
     private static void EnsurePrivateDirectory(string path)
     {
+        // Directory.CreateDirectory follows existing parent junctions and
+        // symlinks. Reject linked ancestors BEFORE creating any state under
+        // their targets, not just a linked final component after creation.
+        RejectReparseAncestors(path);
         var existed = Directory.Exists(path);
         if (!existed) Directory.CreateDirectory(path);
-        if ((File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0)
-            throw new InvalidOperationException("Windows control-plane state must not be a reparse point");
+        RejectReparseAncestors(path);
 
         if (existed)
         {
@@ -58,6 +61,32 @@ public static class WindowsStateProtection
         new DirectoryInfo(path).SetAccessControl(security);
 
         ValidatePrivateDirectoryAcl(path);
+    }
+
+    private static void RejectReparseAncestors(string path)
+    {
+        var current = Path.GetFullPath(path);
+        while (true)
+        {
+            try
+            {
+                // LinkTarget also catches a dangling link, where Exists()
+                // may report false. Inspect every existing ancestor, including
+                // those above the product directory and the final component.
+                if (new DirectoryInfo(current).LinkTarget is not null ||
+                    (File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0)
+                    throw new InvalidOperationException(
+                        "Windows control-plane state path must not traverse a junction or symbolic link");
+            }
+            catch (FileNotFoundException) { } // Not yet created; inspect its parent.
+            catch (DirectoryNotFoundException) { }
+
+            var parent = Path.GetDirectoryName(current);
+            if (string.IsNullOrEmpty(parent) ||
+                string.Equals(parent, current, StringComparison.OrdinalIgnoreCase))
+                break;
+            current = parent;
+        }
     }
 
     private static void ValidatePrivateDirectoryAcl(string path)

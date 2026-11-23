@@ -35,6 +35,25 @@ the application does not turn it on by default.
 | DNS/GSLB | `tests/GslbAcceptance/Program.cs` covers selected authoritative DNS and failover paths on Windows and Ubuntu. `.github/workflows/gslb-acceptance.yml` also runs two-node validators, signed agent reports, DNSSEC signing/independent validation, and IPv6 interop in Linux CI. | Experimental standalone engine. DNSSEC test-chain behavior is CI-tested; production key storage/rollover, licensed GeoIP/ECS operations, public delegation, multi-network authoritative conformance, and physical authority acceptance remain unqualified; see issue #52. |
 | WAF | `tests/WafCrs/verify.sh` exercises selected benign and blocking traffic through ModSecurity/OWASP CRS via `.github/workflows/waf-crs-acceptance.yml`. | Optional external lab integration only. No built-in GatewayCore WAF, production ruleset operations, false-positive qualification, or supported production WAF deployment is claimed; see issue #51. |
 
+### Windows state path ancestor protection
+
+Before creating new product, ControlPlane or key-ring directories, startup
+checks every existing ancestor of the configured Windows state path for a
+junction, symlink or other reparse point; it repeats that check after creation.
+This prevents a pre-existing linked parent from silently redirecting initial
+state creation into an external directory even if the final path component is
+not itself a link. Existing protected ACL checks remain mandatory and no
+automatic migration of existing protected keys is performed.
+
+Windows CI includes disposable existing-target and dangling-parent-link
+regressions when the runner allows directory-link creation; an unavailable
+link-creation privilege is reported as an explicit SKIP, not evidence of
+passing that particular path. This preflight is not an atomic handle-based
+directory walk against a concurrently privileged filesystem attacker.
+Use protected system-owned parent directories and independently qualify the
+real service identity and filesystem permissions before production. Issue #48
+remains open for full recovery, rotation and platform acceptance.
+
 On Windows, a fresh startup creates protected product, state and key directories
 with explicit ACLs granting access only to the current process identity,
 LocalSystem and local Administrators. Existing directories must already have a

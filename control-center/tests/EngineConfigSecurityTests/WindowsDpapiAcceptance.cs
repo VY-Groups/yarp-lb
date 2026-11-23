@@ -183,6 +183,62 @@ public static class WindowsDpapiAcceptance
             Directory.Delete(unsafeKeyProduct, recursive: true);
         }
 
+        // Reject a pre-existing parent link before any Windows DPAPI state
+        // is created beneath its target. Test both live and dangling links
+        // when the Windows runner permits directory symlink creation.
+        var linkFixture = Path.Combine(Path.GetTempPath(),
+            "gatewaycore-windows-linked-parent-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(linkFixture);
+        try
+        {
+            foreach (var existingTarget in new[] { true, false })
+            {
+                var target = Path.Combine(linkFixture,
+                    existingTarget ? "real-target" : "missing-target");
+                if (existingTarget) Directory.CreateDirectory(target);
+                var link = Path.Combine(linkFixture,
+                    existingTarget ? "existing-link" : "dangling-link");
+                var linkCreated = false;
+                try
+                {
+                    try
+                    {
+                        Directory.CreateSymbolicLink(link, target);
+                        linkCreated = true;
+                    }
+                    catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                    {
+                        Console.WriteLine("SKIP: Windows directory symlink fixture unavailable: " +
+                            ex.GetType().Name);
+                    }
+
+                    if (linkCreated)
+                    {
+                        var linkedProduct = Path.Combine(link, "new-product");
+                        var rejected = false;
+                        try
+                        {
+                            WindowsStateProtection.InitializeStateDirectory(linkedProduct,
+                                Path.Combine(linkedProduct, "ControlPlane"));
+                        }
+                        catch (InvalidOperationException) { rejected = true; }
+                        Must(rejected && !Directory.Exists(Path.Combine(target, "new-product")),
+                            "Windows DPAPI bootstrap refuses " +
+                            (existingTarget ? "existing" : "dangling") +
+                            " ancestor link before touching its target");
+                    }
+                }
+                finally
+                {
+                    if (linkCreated) Directory.Delete(link);
+                }
+            }
+        }
+        finally
+        {
+            Directory.Delete(linkFixture, recursive: true);
+        }
+
         var legacyRoot = Path.Combine(Path.GetTempPath(), "gatewaycore-windows-legacy-state-" + Guid.NewGuid().ToString("N"));
         var programData = Path.Combine(legacyRoot, "ProgramData");
         var priorState = Path.Combine(programData, "PriorYarp", "ControlPlane");
