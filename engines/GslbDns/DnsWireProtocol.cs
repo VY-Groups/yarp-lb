@@ -604,7 +604,9 @@ internal static class DnsWireProtocol
         BinaryPrimitives.WriteUInt16BigEndian(reply.AsSpan(0, 2), id);
         BinaryPrimitives.WriteUInt16BigEndian(reply.AsSpan(2, 2),
             (ushort)(0x8000 | (authoritativeAnswer ? 0x0400 : 0) |
-                (truncated ? 0x0200 : 0) | (flags & 0x0100) | rcode));
+                // Preserve RD and CD from the validated request, but never copy
+                // client-provided AD into an authoritative response.
+                (truncated ? 0x0200 : 0) | (flags & 0x0110) | rcode));
         BinaryPrimitives.WriteUInt16BigEndian(reply.AsSpan(4, 2), 1);
         BinaryPrimitives.WriteUInt16BigEndian(reply.AsSpan(6, 2), (ushort)an);
         BinaryPrimitives.WriteUInt16BigEndian(reply.AsSpan(8, 2), (ushort)nsCount);
