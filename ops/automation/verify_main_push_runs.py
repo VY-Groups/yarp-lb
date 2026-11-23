@@ -2,7 +2,7 @@
 """Fail-closed exact-main push-run evidence collector (stdlib only).
 
 Usage: GITHUB_TOKEN=... python ops/automation/verify_main_push_runs.py \
-  --repo VY-Groups/yarp-lb --sha <40-hex-main-sha> \
+  --repo example/repository --sha <40-hex-main-sha> \
   --required "CodeQL Advanced" --required "Control Center 0.1 - complete application source checks"
 Writes sanitized JSON to stdout; never prints the token.
 """
@@ -52,12 +52,17 @@ def collect(repo, sha, required, token):
         raise ValueError("invalid repository")
     if not SHA.fullmatch(sha):
         raise ValueError("expected lowercase full 40-character commit SHA")
+    if not required or any(not isinstance(name, str) or not name.strip() for name in required):
+        raise ValueError("at least one non-blank required workflow name is mandatory")
     base = "/repos/" + repo
     initial = get_json(base + "/git/ref/heads/main", token)["object"]["sha"]
     if initial != sha:
         raise RuntimeError("main moved or supplied SHA is not current main")
     runs = pages(base + "/actions/runs?event=push&head_sha=" + sha, "workflow_runs", token)
-    runs = [run for run in runs if run["head_sha"] == sha and run["event"] == "push"]
+    # The same commit can be pushed to multiple branches. SHA + event alone
+    # is not evidence of the protected default-branch push.
+    runs = [run for run in runs if run.get("head_sha") == sha and
+            run.get("event") == "push" and run.get("head_branch") == "main"]
     names = {run["name"] for run in runs}
     missing = sorted(set(required) - names)
     evidence = []
@@ -75,7 +80,7 @@ def collect(repo, sha, required, token):
             "jobs": len(jobs), "non_success_jobs": failed_jobs,
         }
         evidence.append(record)
-        if run["status"] != "completed" or run.get("conclusion") != "success" or failed_jobs:
+        if not jobs or run["status"] != "completed" or run.get("conclusion") != "success" or failed_jobs:
             failures.append(run["id"])
     final = get_json(base + "/git/ref/heads/main", token)["object"]["sha"]
     accepted = bool(runs) and not missing and not failures and final == initial
@@ -91,7 +96,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", required=True)
     parser.add_argument("--sha", required=True)
-    parser.add_argument("--required", action="append", default=[])
+    parser.add_argument("--required", action="append", required=True, help="Required exact-name workflow; repeat for every acceptance gate")
     args = parser.parse_args()
     try:
         report = collect(args.repo, args.sha, args.required, os.getenv("GITHUB_TOKEN", ""))
