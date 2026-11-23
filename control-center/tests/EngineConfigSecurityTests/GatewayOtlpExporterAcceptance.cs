@@ -271,7 +271,7 @@ public static class GatewayOtlpExporterAcceptance
             // OpenTelemetry EnrichWithHttpResponse callback can stamp the
             // trusted route, and a live URL customer token must never reach
             // the collector. A synthetic marker alone cannot prove that.
-            await RunSelectedAspNetRouteOverRealHttpAsync();
+            var inboundW3cTraceId = await RunSelectedAspNetRouteOverRealHttpAsync();
 
             var response = new Microsoft.AspNetCore.Http.DefaultHttpContext();
             response.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
@@ -330,7 +330,12 @@ public static class GatewayOtlpExporterAcceptance
             if (traces.Length == 0 || metrics.Length == 0 || logs.Length == 0)
                 throw new Exception($"Expected OTLP traces, metrics and logs; received: {string.Join(", ", captured.Select(x => x.Path))}");
 
-            var tracePayload = Encoding.Latin1.GetString(traces.SelectMany(x => x.Body).ToArray());
+            var traceBytes = traces.SelectMany(x => x.Body).ToArray();
+            var tracePayload = Encoding.Latin1.GetString(traceBytes);
+            if (traceBytes.AsSpan().IndexOf(Convert.FromHexString(
+                    inboundW3cTraceId.ToHexString())) < 0)
+                throw new Exception(
+                    "W3C remote trace ID from actual Kestrel HTTP request was absent in OTLP export");
             foreach (var sensitive in new[]
                      {
                          "203.0.113.99", "203.0.113.77", "otlp-secret-canary",
@@ -450,12 +455,25 @@ public static class GatewayOtlpExporterAcceptance
             .LogWarning("Application diagnostic marker {Secret}", "otlp-application-secret-canary");
     }
 
-    private static async Task RunSelectedAspNetRouteOverRealHttpAsync()
+    private static async Task<ActivityTraceId> RunSelectedAspNetRouteOverRealHttpAsync()
     {
+        // A real W3C remote parent must survive Kestrel's ASP.NET tracing
+        // instrumentation and reach the exact OTLP collector wire payload.
+        // A random local Activity alone cannot prove inbound propagation.
+        var remoteTrace = ActivityTraceId.CreateRandom();
+        var remoteParent = ActivitySpanId.CreateRandom();
         var builder = WebApplication.CreateBuilder(Array.Empty<string>());
         builder.WebHost.UseUrls("http://127.0.0.1:0");
         await using var app = builder.Build();
-        app.MapGet("/verified-route/{opaqueId}", () => Results.Text("ok"));
+        app.MapGet("/verified-route/{opaqueId}", () =>
+        {
+            var current = Activity.Current;
+            if (current is null || current.IdFormat != ActivityIdFormat.W3C ||
+                current.TraceId != remoteTrace || current.ParentSpanId != remoteParent)
+                throw new InvalidOperationException(
+                    "Actual selected ASP.NET route did not preserve its W3C remote traceparent");
+            return Results.Text("ok");
+        });
         await app.StartAsync();
         try
         {
@@ -463,9 +481,13 @@ public static class GatewayOtlpExporterAcceptance
                 url.StartsWith("http://127.0.0.1:", StringComparison.Ordinal));
             using var client = new HttpClient(new HttpClientHandler { UseProxy = false })
             { Timeout = TimeSpan.FromSeconds(5) };
-            using var response = await client.GetAsync(
+            using var request = new HttpRequestMessage(HttpMethod.Get,
                 localAddress.TrimEnd('/') + "/verified-route/live-route-customer-canary");
+            request.Headers.TryAddWithoutValidation("traceparent",
+                $"00-{remoteTrace.ToHexString()}-{remoteParent.ToHexString()}-01");
+            using var response = await client.SendAsync(request);
             response.EnsureSuccessStatusCode();
+            return remoteTrace;
         }
         finally
         {
