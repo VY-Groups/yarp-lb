@@ -7,6 +7,7 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Primitives;
 using Microsoft.Extensions.Logging;
 using OpenTelemetry;
 using OpenTelemetry.Exporter;
@@ -52,6 +53,9 @@ public static partial class GatewayOpenTelemetry
     private static readonly Counter<long> ProxyRequests = Meter.CreateCounter<long>("gateway.proxy.requests");
     private static readonly Histogram<double> ProxyDuration = Meter.CreateHistogram<double>("gateway.proxy.request.duration", "ms");
     private static readonly Counter<long> LocalProxyRejections = Meter.CreateCounter<long>("gateway.proxy.local_rejections");
+    // This counts configuration reload notifications only; it does not mean YARP accepted the new state.
+    private static readonly Counter<long> ConfigurationReloadNotifications =
+        Meter.CreateCounter<long>("gateway.configuration.reload_notifications");
     // These four observable gauges have ZERO dynamic labels. Export only
     // aggregate durable-audit outbox state, never actor, event ID, digest,
     // destination URI or delivery credential. Read cached values rather than
@@ -135,6 +139,13 @@ public static partial class GatewayOpenTelemetry
         // Publish enabled last so consumers can distinguish opt-out from a
         // configured queue, even if they see one intermediate snapshot.
         Interlocked.Exchange(ref _auditOutboxEnabled, enabled ? 1 : 0);
+    }
+
+    public static IDisposable WatchConfigurationReloads(IConfiguration configuration)
+    {
+        ArgumentNullException.ThrowIfNull(configuration);
+        return ChangeToken.OnChange(configuration.GetReloadToken,
+            () => ConfigurationReloadNotifications.Add(1));
     }
 
     public static bool Configure(IServiceCollection services, string? machineName = null)
