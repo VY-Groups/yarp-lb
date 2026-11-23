@@ -114,7 +114,7 @@ if (OperatingSystem.IsWindows())
     // with a pinned, independently provisioned LocalMachine RSA certificate.
     // An invalid fleet configuration fails startup; NEVER silently falls
     // back to local DPAPI or unencrypted persistent key storage.
-    if (!WindowsFleetKeyProtection.TryConfigure(dataProtection))
+    if (!WindowsFleetKeyProtection.TryConfigure(dataProtection, keyDir))
         dataProtection.ProtectKeysWithDpapi(protectToLocalMachine: true);
 }
 else if (OperatingSystem.IsLinux() && !ec2Lab)
