@@ -64,7 +64,7 @@ class LocalWaf(BaseHTTPRequestHandler):
             self.send_header("Transfer-Encoding", "gzip")
             self.send_header("Connection", "close")
             self.end_headers()
-            self.wfile.write(b"YARP-WAF-CI-BENIGN\\n".replace(b"\\n", b"\n"))
+            self.wfile.write(b"YARP-WAF-CI-BENIGN\n")
             self.close_connection = True
             return
         elif self.path.startswith("/mislength"):
@@ -149,13 +149,13 @@ class OperatorCorpusTests(unittest.TestCase):
                 message.add_header(name, value)
             return message
 
-        payload = b"YARP-WAF-CI-BENIGN\\n".replace(b"\\n", b"\n")
+        payload = b"YARP-WAF-CI-BENIGN\n"
         self.assertTrue(waf.verified_response_framing(
-            headers(("Content-Length"), str(len(payload))), payload))
+            headers(("Content-Length", str(len(payload)))), payload))
         self.assertTrue(waf.verified_response_framing(
-            headers(("Transfer-Encoding"), "chunked"), payload))
+            headers(("Transfer-Encoding", "chunked")), payload))
         self.assertTrue(waf.verified_response_framing(
-            headers(("Transfer-Encoding"), "CHUNKED"), payload))
+            headers(("Transfer-Encoding", "CHUNKED")), payload))
         self.assertTrue(waf.verified_response_framing(headers(), payload))
         for bad in (
             (("Transfer-Encoding", "gzip"),),
