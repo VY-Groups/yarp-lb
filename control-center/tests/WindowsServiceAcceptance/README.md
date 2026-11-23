@@ -48,9 +48,13 @@ password or place credential material in the workflow logs.
 
 Only on a clean disposable GitHub runner, an elevated test process first
 creates the otherwise nonexistent `%ProgramData%\GatewayCoreYarp` root
-with inheritance disabled and full-control allow rules **only** for the
-well-known LocalService, LocalSystem and Administrators SIDs. It stages
-the application executable under that restricted directory, registers
+with inheritance disabled and **read/execute-only** allow rights for
+LocalService, while SYSTEM and Administrators retain full control. A
+separate protected `ControlPlane` directory grants the service its required
+write rights for keys, session state and audit; the service is expressly
+refused any write/delete/ACL-owner rights over its **published executable**
+directory. It stages the application executable under that restricted
+directory, registers
 a manual SCM service running `NT AUTHORITY\LocalService` (not
 LocalSystem), verifies its observed SCM identity and startup, and checks
 the same protected state ACL, encrypted key XML and original cookie
@@ -67,6 +71,13 @@ Active Directory/LDAPS, production Windows reboot, encrypted key-ring
 migration from a live instance, or physical two-host DR. Customer
 service identities still need explicit certificate, firewall, state
 and event-log permissions plus site acceptance in #36.
+
+The built-in LocalService SID is shared by other local services.
+This test demonstrates reduced privileges relative to LocalSystem, but
+**does not establish isolation from a different service using that SID**.
+Customer deployments should prefer a dedicated service SID or approved
+managed identity with narrower state ACLs and independently verified
+private-key permissions; those remain unqualified here.
 
 The `-Identity LocalService` setting is a **test fixture**, not an
 installer option. Do not run this verification against real
