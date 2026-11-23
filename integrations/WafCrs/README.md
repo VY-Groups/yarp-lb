@@ -176,3 +176,17 @@ unsupported `gzip` transfer code and must yield ERROR rather than TN.
 Additional unit cases reject duplicate and combined framing declarations.
 This strengthens evidence integrity, not CRS rule coverage, production rule
 governance, or measured false-positive/false-negative performance.
+
+### Whole-response validation for synthetic WAF throughput (#51)
+
+The five-phase lab benchmark now rejects **all** duplicated
+`Transfer-Encoding` response headers, mixed/combined transfer codings,
+`Content-Length` conflicts, and any response whose bounded read has not
+reached end-of-message. A valid HTTP status or an exact-looking prefix does
+not count as successful origin delivery. The existing 4 KiB evidence bound,
+no-retry workload, fixed concurrency and no-relaxed-threshold gate remain
+unchanged. Real loopback regression tests cover duplicate transfer coding,
+large responses with unread bytes, truncated chunked framing, and a valid
+complete response. Benchmark results are still synthetic comparative
+diagnostics, **not** representative Windows/Linux YARP+CRS capacity or
+customer security acceptance. Issue #51 remains open.
