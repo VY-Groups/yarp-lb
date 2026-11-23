@@ -48,7 +48,7 @@ decision and `would_block` must match; disagreement fails immediately.
 
 Version-1 corpus files (which lacked `would_block`) are **rejected**,
 rather than silently treating an observed allowance as an undetected attack.
-Every approved route requires both benign and malicious cases. The per-route
+The CSV evidence gate fails closed above 100,000 cases or 4,096 characters in any CSV field. This is a bounded offline evidence processor, not a bulk telemetry store; partition larger private corpora into separately approved runs rather than truncating evidence. Every approved route requires both benign and malicious cases. The per-route
 FP/FN thresholds are never weakened or auto-selected from the CSV.
 
 ## Run and protect results
