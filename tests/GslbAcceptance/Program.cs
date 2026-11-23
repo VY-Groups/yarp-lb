@@ -108,7 +108,30 @@ Console.WriteLine("PASS: published DNS targets reject RFC 5737/3849 and loopback
                     !DnsRecordTypes(reply, 1).SequenceEqual(new ushort[] { 6 }))
                     throw new Exception("FAIL: TXT owner/ancestor NXDOMAIN or NODATA incorrect");
             }
-            Console.WriteLine("PASS: in-bailiwick ACME TXT, DNSSEC signatures and correct NXDOMAIN/NODATA");
+            // Fault injection: a configured signed zone must not return
+            // partially signed or unsigned NOERROR records when signing
+            // becomes unavailable. A bounded SERVFAIL keeps the DNS receive
+            // loop alive and requires no secret material in error responses.
+            group.Dnssec!.Dispose();
+            foreach (var transport in new[] { true, false })
+            {
+                var request = DnsRequest(owner, 16, (byte)0);
+                var failed = DnsWireProtocol.Build(request, zones, tcp: transport,
+                    resolverIp: IPAddress.Loopback);
+                if (failed is null || (Dns16(failed, 2) & 15) != 2 ||
+                    Dns16(failed, 4) != 1 || Dns16(failed, 6) != 0 ||
+                    Dns16(failed, 8) != 0 || Dns16(failed, 10) != 0 ||
+                    (Dns16(failed, 2) & 0x0020) != 0 ||
+                    (Dns16(failed, 2) & 0x0400) != 0 ||
+                    failed.Length > request.Length)
+                    throw new Exception("FAIL: DNSSEC signer fault must return bounded unsigned-data-free SERVFAIL");
+            }
+            // Other queries still resolve through the same packet builder.
+            var outside = DnsWireProtocol.Build(DnsRequest("unowned.unit.test", 1),
+                zones, tcp: false, resolverIp: IPAddress.Loopback);
+            if (outside is null || (Dns16(outside, 2) & 15) != 5)
+                throw new Exception("FAIL: DNS service cannot answer after signer fault");
+            Console.WriteLine("PASS: in-bailiwick ACME TXT, DNSSEC signatures, NXDOMAIN/NODATA and signer-fault SERVFAIL");
         }
         finally { group.Dnssec?.Dispose(); }
     }
