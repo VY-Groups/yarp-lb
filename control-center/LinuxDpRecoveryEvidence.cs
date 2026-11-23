@@ -227,7 +227,8 @@ public static class LinuxDpRecoveryEvidence
             try
             {
                 bytes = PrivateKeyFileSecurity.ReadPrivateFileBytes(
-                    file, "Linux DP recovery XML ciphertext", MaximumXmlBytes);
+                    file, "Linux DP recovery XML ciphertext", MaximumXmlBytes,
+                    requireSingleLink: true);
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException)
             {
