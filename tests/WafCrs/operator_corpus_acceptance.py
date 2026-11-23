@@ -157,6 +157,7 @@ def run_cases(cases, connection_factory=None):
         connection = connection_factory()
         status = None
         marker = False
+        framing_ok = False
         try:
             body = case["body"].encode("utf-8")
             # No redirects, dynamic hostname, auth or arbitrary headers.
@@ -165,17 +166,25 @@ def run_cases(cases, connection_factory=None):
                                         "Connection": "close"})
             response = connection.getresponse()
             status = response.status
+            # A received HTTP status is not proof of a completed response.
+            # Partial bodies and unsupported framing must never count as
+            # a successful WAF block, even when the status line says 403.
             payload = response.read(4097)
-            marker = verified_response_framing(response.headers, payload) and verified_origin_response(
+            # Bounded reads can stop before EOF for large or chunked 403
+            # bodies. Never accept a status line while unread response
+            # bytes remain, even if its headers claim valid framing.
+            framing_ok = (response.isclosed() and len(payload) <= 4096 and
+                          verified_response_framing(response.headers, payload))
+            marker = framing_ok and verified_origin_response(
                 case["method"], case["contentType"], len(body),
                 response.getheader("Content-Type", ""), payload)
         except (OSError, TimeoutError, http.client.HTTPException):
             pass  # mark ERROR; never log a raw request or exception
         finally:
             connection.close()
-        if status == 200 and marker:
+        if framing_ok and status == 200 and marker:
             result = "TN" if case["expected"] == "benign" else "FN"
-        elif status == 403:
+        elif framing_ok and status == 403:
             result = "FP" if case["expected"] == "benign" else "TP"
         else:
             result = "ERROR"

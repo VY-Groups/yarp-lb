@@ -67,6 +67,39 @@ class LocalWaf(BaseHTTPRequestHandler):
             self.wfile.write(b"YARP-WAF-CI-BENIGN\n")
             self.close_connection = True
             return
+        elif self.path.startswith("/incomplete-block"):
+            # A 403 with an interrupted declared body is not verified
+            # blocking evidence; http.client raises IncompleteRead.
+            self.send_response(403)
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Length", "100")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(b"cut short")
+            self.close_connection = True
+            return
+        elif self.path.startswith("/unsupported-block-transfer"):
+            # A 403 with unsupported transfer coding cannot establish a
+            # complete WAF decision from the status line alone.
+            self.send_response(403)
+            self.send_header("Transfer-Encoding", "gzip")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(b"rejected")
+            self.close_connection = True
+            return
+        elif self.path.startswith("/oversized-block-chunked"):
+            # A syntactically valid chunked 403 body bigger than the bounded
+            # read cannot count as verified blocking while unread bytes remain.
+            self.send_response(403)
+            self.send_header("Transfer-Encoding", "chunked")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            oversized = b"x" * 5000
+            self.wfile.write(f"{len(oversized):X}\r\n".encode("ascii"))
+            self.wfile.write(oversized + b"\r\n0\r\n\r\n")
+            self.close_connection = True
+            return
         elif self.path.startswith("/mislength"):
             # A valid origin marker with an inaccurate HTTP length must never
             # qualify as proof that the complete private origin was reached.
@@ -214,6 +247,30 @@ class OperatorCorpusTests(unittest.TestCase):
             truncated = waf.run_cases(regression, factory)
             self.assertEqual(1, truncated["counts"]["ERROR"])
             self.assertFalse(truncated["passesZeroFalsePositiveNegativeGate"])
+            # A truncated 403 must not be counted as a successful attack
+            # block after the response reader raises IncompleteRead.
+            regression = copy.deepcopy(expected)
+            regression[2]["path"] = "/incomplete-block"
+            incomplete_block = waf.run_cases(regression, factory)
+            self.assertEqual(1, incomplete_block["counts"]["ERROR"])
+            self.assertEqual(1, incomplete_block["counts"]["TP"])
+            self.assertFalse(incomplete_block["passesZeroFalsePositiveNegativeGate"])
+            # Unsupported transfer framing on a 403 is likewise ERROR,
+            # never proof that the WAF fully processed the request.
+            regression = copy.deepcopy(expected)
+            regression[2]["path"] = "/unsupported-block-transfer"
+            unsupported_block = waf.run_cases(regression, factory)
+            self.assertEqual(1, unsupported_block["counts"]["ERROR"])
+            self.assertEqual(1, unsupported_block["counts"]["TP"])
+            self.assertFalse(unsupported_block["passesZeroFalsePositiveNegativeGate"])
+            # Large chunked 403 bodies are deliberately not drained beyond
+            # the bounded read; unread bytes must invalidate the block.
+            regression = copy.deepcopy(expected)
+            regression[2]["path"] = "/oversized-block-chunked"
+            oversized_block = waf.run_cases(regression, factory)
+            self.assertEqual(1, oversized_block["counts"]["ERROR"])
+            self.assertEqual(1, oversized_block["counts"]["TP"])
+            self.assertFalse(oversized_block["passesZeroFalsePositiveNegativeGate"])
             # An unknown transfer coding cannot be accepted merely
             # because the undecoded bytes equal the expected origin marker.
             regression = copy.deepcopy(expected)
