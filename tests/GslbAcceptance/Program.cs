@@ -1935,8 +1935,32 @@ try
     foreach (var validFlags in new ushort[] { 0x0000, 0x0010, 0x0020, 0x0030, 0x0100, 0x0110, 0x0120, 0x0130 })
     {
         var request = WithHeaderFlags(validFlags);
-        Must(DnsWireProtocol.Build(request, new Dictionary<string, SiteGroup>(), tcp: false) is { Length: > 12 },
-            $"valid RD/AD/CD query header 0x{validFlags:X4} is accepted");
+        foreach (var tcpMode in new[] { false, true })
+        {
+            var refused = DnsWireProtocol.Build(request, new Dictionary<string, SiteGroup>(),
+                tcp: tcpMode);
+            Must(refused is { Length: > 12 } &&
+                 (Dns16(refused, 2) & 0x0130) == (validFlags & 0x0110) &&
+                 (Dns16(refused, 2) & 0x000F) == 5,
+                "REFUSED preserves RD/CD, never AD for query flags " +
+                    validFlags.ToString("X4") + " over " + (tcpMode ? "TCP" : "UDP"));
+        }
+        // Exercise real sockets as well as the packet builder. AD must not
+        // be copied from untrusted client headers; RD and CD must survive.
+        var liveTcp = await TcpQuery(request);
+        Must((Dns16(liveTcp, 2) & 0x0130) == (validFlags & 0x0110) &&
+             (Dns16(liveTcp, 2) & 0x8000) != 0 &&
+             (Dns16(liveTcp, 2) & 0x0400) != 0,
+            "authoritative TCP reply preserves RD/CD without AD for " + validFlags.ToString("X4"));
+        await client.SendAsync(request);
+        using var replyTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+        var liveUdp = await client.ReceiveAsync(replyTimeout.Token);
+        Must(liveUdp.Buffer.Length >= 12 &&
+             Dns16(liveUdp.Buffer, 0) == 0x4613 &&
+             (Dns16(liveUdp.Buffer, 2) & 0x0130) == (validFlags & 0x0110) &&
+             (Dns16(liveUdp.Buffer, 2) & 0x8000) != 0 &&
+             (Dns16(liveUdp.Buffer, 2) & 0x0400) != 0,
+            "authoritative UDP reply preserves RD/CD without AD for " + validFlags.ToString("X4"));
     }
     var nonAsciiName = (byte[])malformedBase.Clone();
     nonAsciiName[13] = 0xFF;
