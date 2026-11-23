@@ -13,6 +13,48 @@ CONCURRENCY = 4
 PAYLOAD = b'{"service":"fixture","operation":"inventory","count":42}'
 WORKLOAD = "alternating-fixed-get-json-post-http1-close-v1"
 
+def reject_duplicate_json_keys(pairs):
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError("duplicate origin JSON property")
+        value[key] = item
+    return value
+
+
+def verified_origin(index, headers, payload):
+    """Require complete, unambiguous origin data for every benchmark success."""
+    if len(payload) > 4096:
+        return False
+    lengths = headers.get_all("Content-Length", [])
+    encoding = headers.get("Transfer-Encoding")
+    if len(lengths) > 1 or (lengths and encoding):
+        return False
+    if encoding is not None and encoding.lower() != "chunked":
+        return False
+    if lengths:
+        declared = lengths[0]
+        if (not declared or len(declared) > 10 or not declared.isascii()
+                or not declared.isdecimal() or int(declared) != len(payload)):
+            return False
+    if index % 2:
+        if headers.get("Content-Type") != "application/json":
+            return False
+        try:
+            record = json.loads(payload.decode("ascii", "strict"),
+                                object_pairs_hook=reject_duplicate_json_keys)
+        except (ValueError, UnicodeError):
+            return False
+        return (type(record) is dict and
+                set(record) == {"accepted", "contentType", "bytes"} and
+                record["accepted"] is True and
+                type(record["bytes"]) is int and
+                record["bytes"] == len(PAYLOAD) and
+                record["contentType"] == "application/json")
+    return (headers.get("Content-Type") == "text/plain; charset=utf-8"
+            and payload == b"YARP-WAF-CI-BENIGN\n")
+
+
 def request(index, host, port):
     started = time.perf_counter()
     connection = http.client.HTTPConnection(host, port, timeout=5)
@@ -23,15 +65,12 @@ def request(index, host, port):
         else:
             connection.request("GET", "/", headers={"Connection": "close", "Host": "localhost"})
         response = connection.getresponse()
-        body = response.read(4096)
+        # Read one byte beyond the evidence cap to reject oversized replies.
+        body = response.read(4097)
         if response.status != 200:
             return None, f"http-{response.status}"
-        if index % 2:
-            expected = {"accepted": True, "contentType": "application/json", "bytes": len(PAYLOAD)}
-            if json.loads(body) != expected:
-                return None, "invalid-body"
-        elif body != b"YARP-WAF-CI-BENIGN\n":
-            return None, "invalid-body"
+        if not verified_origin(index, response.headers, body):
+            return None, "invalid-origin-evidence"
         return (time.perf_counter() - started) * 1000, None
     except (OSError, http.client.HTTPException, ValueError) as error:
         return None, type(error).__name__
