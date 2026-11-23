@@ -325,7 +325,7 @@ class OperatorCorpusTests(unittest.TestCase):
             "--fixture1-A--\n--fixture1-B--\n"
             f"X-GatewayCore-Corpus-Run: {run_id}\n"
             "X-GatewayCore-Corpus-Case: malicious1\n"
-            '--fixture1-H--\nMessage: Access denied with code 403 [id "941100"]\n'
+            '--fixture1-H--\nModSecurity: Access denied with code 403 [id "941100"]\n'
             "--fixture1-Z--\n")
         accepted = waf.native_crs_blocks(fixture, run_id, {"malicious1"})
         self.assertEqual({"malicious1"}, accepted)
@@ -334,6 +334,8 @@ class OperatorCorpusTests(unittest.TestCase):
             fixture.replace("--fixture1-Z--", ""),
             fixture.replace('[id "941100"]', '[id "100001"]'),
             fixture.replace("Access denied with code 403", "Warning only"),
+            fixture.replace("ModSecurity: Access denied with code 403",
+                            'ModSecurity: Warning. [data "Access denied with code 403"]'),
         ):
             self.assertEqual(set(), waf.native_crs_blocks(invalid, run_id, {"malicious1"}))
         for ambiguous in (
@@ -370,7 +372,7 @@ class OperatorCorpusTests(unittest.TestCase):
                         f"--{txn}-A--\n--{txn}-B--\n"
                         f"X-GatewayCore-Corpus-Run: {run_id}\n"
                         f"X-GatewayCore-Corpus-Case: {case_id}\n"
-                        f'--{txn}-H--\nMessage: Access denied with code 403 [id "941100"]\n'
+                        f'--{txn}-H--\nModSecurity: Access denied with code 403 [id "941100"]\n'
                         f"--{txn}-Z--\n")
                 return "".join(transactions)
 
