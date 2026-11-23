@@ -50,7 +50,8 @@ assert 'Windows Server 2022' in support_doc and 'Ubuntu 24.04' in support_doc
 assert 'RHEL-family Linux' in support_doc and 'Not qualified for deployment' in support_doc
 # SCM integration is context-aware. It must not change the Windows DPAPI
 # scope or turn the offline source-staging installer into a service installer.
-assert 'if (OperatingSystem.IsWindows())\\n    builder.Services.AddWindowsService' in support_program
+assert support_program.count('builder.Services.AddWindowsService') == 1
+assert support_program.split('builder.Services.AddWindowsService', 1)[0].rstrip().endswith('if (OperatingSystem.IsWindows())')
 assert 'Microsoft.Extensions.Hosting.WindowsServices' in support_project
 assert 'Microsoft.Extensions.Hosting.WindowsServices' in support_installer
 assert 'Windows Service lifetime is registered' in support_doc
