@@ -177,6 +177,12 @@ def stop_processes(processes: list[subprocess.Popen]) -> None:
 
 
 def write_lab_config(gateway_bin: Path) -> Path:
+    # Choose one reviewed policy for both pinned before/after lab revisions.
+    # An unknown value cannot silently turn a performance test into a
+    # different algorithm or fallback configuration.
+    policy = os.environ.get("YARP_LAB_LOAD_BALANCING_POLICY", "WeightedRandom")
+    if policy not in ("WeightedRandom", "SourceIpHash"):
+        raise ValueError("Unsupported issue34 lab load-balancing policy")
     config = {
         "ReverseProxy": {
             "Routes": {
@@ -184,7 +190,7 @@ def write_lab_config(gateway_bin: Path) -> Path:
             },
             "Clusters": {
                 "api": {
-                    "LoadBalancingPolicy": "WeightedRandom",
+                    "LoadBalancingPolicy": policy,
                     "HealthCheck": {
                         "AvailableDestinationsPolicy": "HealthyAndUnknown",
                         "Active": {
