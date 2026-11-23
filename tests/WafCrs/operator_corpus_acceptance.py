@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import re
+import stat
 import sys
 
 MAX_INPUT = 512 * 1024
@@ -43,11 +44,31 @@ def require_object(value, allowed):
 
 
 def load_corpus(filename):
+    # An operator corpus may contain private request bodies. Do not follow
+    # symlink/hardlink aliases or silently switch to a different inode after
+    # checking the path; never open a FIFO that could hang the CI process.
     path = Path(filename)
-    if path.stat().st_size > MAX_INPUT or path.stat().st_size < 2:
+    before = path.lstat()
+    if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+        raise ValueError("private WAF corpus must be a single-link regular file")
+    flags = (os.O_RDONLY | getattr(os, "O_BINARY", 0) |
+             getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+    fd = os.open(path, flags)
+    try:
+        opened = os.fstat(fd)
+        if (not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1 or
+                (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)):
+            raise ValueError("private WAF corpus input changed or is aliased")
+        if not 2 <= opened.st_size <= MAX_INPUT:
+            raise ValueError("operator WAF corpus exceeds input limit or is empty")
+        with os.fdopen(fd, "rb") as handle:
+            fd = -1
+            source = handle.read(MAX_INPUT + 1)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+    if not 2 <= len(source) <= MAX_INPUT:
         raise ValueError("operator WAF corpus exceeds input limit or is empty")
-    with path.open("rb") as handle:
-        source = handle.read(MAX_INPUT + 1)
     try:
         doc = json.loads(source.decode("utf-8", "strict"), object_pairs_hook=strict_pairs)
     except (UnicodeError, json.JSONDecodeError) as exc:
