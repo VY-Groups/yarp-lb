@@ -20,7 +20,7 @@ MAX_ROWS = 100000
 
 
 def assess(path, max_fp, max_fn, min_benign, min_malicious):
-    if not (0 <= max_fp <= 1 and 0 <= max_fn <= 1):
+    if not (math.isfinite(max_fp) and math.isfinite(max_fn) and 0 <= max_fp <= 1 and 0 <= max_fn <= 1):
         raise ValueError("rates must be within [0,1]")
     if min_benign < 1 or min_malicious < 1:
         raise ValueError("minimum corpus counts must be positive")
