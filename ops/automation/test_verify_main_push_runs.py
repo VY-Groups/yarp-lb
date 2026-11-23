@@ -9,7 +9,7 @@ spec = importlib.util.spec_from_file_location(
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 SHA = "a" * 40
-RUN = {"id": 123, "name": "Required", "head_sha": SHA, "event": "push",
+RUN = {"id": 123, "name": "Required", "head_sha": SHA, "event": "push", "head_branch": "main",
        "status": "completed", "conclusion": "success", "html_url": "https://github.com/example/r/actions/runs/123"}
 JOB = {"id": 456, "name": "build", "status": "completed", "conclusion": "success",
        "html_url": "https://github.com/example/r/actions/runs/123/job/456"}
@@ -40,6 +40,29 @@ class EvidenceTests(unittest.TestCase):
 
     def test_missing_required_workflow_fails(self):
         self.assertFalse(self.verify(required=("Required", "Security"))["accepted"])
+
+    def test_same_sha_non_main_push_is_never_evidence(self):
+        matching_sha_from_feature = {**RUN, "head_branch": "feature"}
+        self.assertFalse(self.verify(runs=[matching_sha_from_feature])["accepted"])
+
+    def test_only_required_main_push_is_counted(self):
+        feature = {**RUN, "id": 124, "head_branch": "feature",
+                   "conclusion": "failure"}
+        self.assertTrue(self.verify(runs=[feature, RUN])["accepted"])
+
+    def test_same_sha_non_main_success_cannot_hide_missing_main_workflow(self):
+        feature = {**RUN, "name": "Security", "head_branch": "feature"}
+        self.assertFalse(self.verify(runs=[RUN, feature],
+                                     required=("Required", "Security"))["accepted"])
+
+    def test_empty_required_workflows_are_rejected(self):
+        for invalid in ((), ("",), ("  ",), ("Required", "")):
+            with self.subTest(invalid=invalid):
+                with self.assertRaisesRegex(ValueError, "required workflow"):
+                    self.verify(required=invalid)
+
+    def test_completed_run_without_jobs_fails(self):
+        self.assertFalse(self.verify(jobs=[])["accepted"])
 
     def test_no_push_runs_fails(self):
         self.assertFalse(self.verify(runs=[])["accepted"])
