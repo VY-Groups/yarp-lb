@@ -13,6 +13,8 @@ if [[ -n "${WAF_IMAGE:-}" && ! "$WAF_IMAGE" =~ ^owasp/modsecurity-crs@sha256:[a-
 fi
 for phase in direct blocking detection proxy-only restored; do
   rm -f "$DIR/benchmark-$phase.json"
+  rm -f "$DIR/resource-$phase.json" "$DIR/resource-$phase-before.private.json" \
+    "$DIR/resource-$phase-after.private.json"
 done
 rm -f "$DIR/benchmark-summary.json" "$DIR/waf-selected-image.txt"
 # Clear only this run's known synthetic result files; never count stale
@@ -106,6 +108,7 @@ python3 -m unittest discover -s tests/WafCrs -p 'test_ci_evidence_contract.py' -
 python3 -m unittest discover -s tests/WafCrs -p 'test_exception_policy.py' -v
 python3 -m unittest discover -s tests/WafCrs -p 'test_operator_corpus_acceptance.py' -v
 python3 -m unittest discover -s tests/WafCrs -p 'test_correlate_native_audit.py' -v
+python3 -m unittest discover -s tests/WafCrs -p 'test_docker_resource_sample.py' -v
 python3 -m unittest discover -s tests/WafCrs -p 'test_benchmark_contract.py' -v
 python3 tests/WafCrs/exception_policy.py --validate
 docker compose -f "$COMPOSE" config --quiet
@@ -137,9 +140,21 @@ assert_same_image() {
     { echo "FAIL: immutable WAF image changed during mode switch" >&2; exit 1; }
 }
 benchmark() {
-  local phase="$1"
+  local phase="$1" id
+  # Record cumulative CPU and memory for the SAME WAF container that handles
+  # each matched fixture phase. The direct-origin phase measures idle WAF CPU.
+  id="$(docker inspect "$(docker compose -f "$COMPOSE" ps --quiet waf)" --format '{{.Id}}')"
+  python3 tests/WafCrs/docker_resource_sample.py capture --container "$id" \
+    --out "$DIR/resource-$phase-before.private.json"
   docker compose -f "$COMPOSE" --profile benchmark run --rm --no-deps -T benchmark "$phase" \
     > "$DIR/benchmark-$phase.json"
+  python3 tests/WafCrs/docker_resource_sample.py capture --container "$id" \
+    --out "$DIR/resource-$phase-after.private.json"
+  python3 tests/WafCrs/docker_resource_sample.py report \
+    --before "$DIR/resource-$phase-before.private.json" \
+    --after "$DIR/resource-$phase-after.private.json" \
+    --phase "$phase" --benchmark "$DIR/benchmark-$phase.json" \
+    --out "$DIR/resource-$phase.json"
 }
 wait_waf() {
   local i
