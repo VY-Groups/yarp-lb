@@ -87,14 +87,39 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # Disposable GitHub runner images may advertise unreachable regional
+          # HTTP mirrors ahead of a working official Ubuntu HTTPS archive.
+          # Prefer the already-configured official archive, retaining Ubuntu
+          # signature checks and the mandatory HTTP/3 integration assertions.
+          # Never edit production host repositories or accept unsigned APT data.
+          if [[ -f /etc/apt/apt-mirrors.txt ]] &&
+             grep -Eq '^https://archive[.]ubuntu[.]com/ubuntu/?' /etc/apt/apt-mirrors.txt; then
+            # Azure and AWS regional HTTP mirrors can be unreachable while
+            # the official HTTPS fallback is healthy. Remove ONLY the
+            # regional/default Ubuntu HTTP archive entries from this runner.
+            sudo sed -i -E '/^http:\/\/([[:alnum:].-]+\.)?archive\.ubuntu\.com\/ubuntu\/?/d' \
+              /etc/apt/apt-mirrors.txt
+          fi
+          # Fail loudly on an unresponsive package mirror rather than
+          # silently consuming the entire 25-minute application-test job.
+          # HTTP/3 acceptance below remains mandatory; no skip or fallback.
           if ! apt-cache show libmsquic >/dev/null 2>&1; then
-            curl --fail --silent --show-error --location --retry 3 \
+            curl --fail --silent --show-error --location --retry 2 \
+              --connect-timeout 10 --max-time 60 \
               https://packages.microsoft.com/config/ubuntu/24.04/packages-microsoft-prod.deb \
               --output "$RUNNER_TEMP/packages-microsoft-prod.deb"
-            sudo dpkg -i "$RUNNER_TEMP/packages-microsoft-prod.deb"
+            timeout 60s sudo dpkg -i "$RUNNER_TEMP/packages-microsoft-prod.deb"
           fi
-          sudo apt-get update
-          sudo apt-get install --yes libmsquic
+          timeout 120s sudo apt-get update \
+            -o Acquire::Retries=1 \
+            -o Acquire::http::Timeout=20 \
+            -o Acquire::https::Timeout=20 \
+            -o DPkg::Lock::Timeout=30
+          timeout 120s sudo env DEBIAN_FRONTEND=noninteractive apt-get install --yes libmsquic \
+            -o Acquire::Retries=1 \
+            -o Acquire::http::Timeout=20 \
+            -o Acquire::https::Timeout=20 \
+            -o DPkg::Lock::Timeout=30
       - name: Test TLS inventory and exact HTTP/2 and HTTP/3 gRPC transport
         env:
           GATEWAYCORE_REQUIRE_HTTP3_ACCEPTANCE: ${{ runner.os == 'Linux' && '1' || '0' }}
