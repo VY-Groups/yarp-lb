@@ -90,7 +90,7 @@ jobs:
               --format Speedscope --output "$base"
             result="${base}.speedscope.json"
             test -s "$result"
-            python3 -m json.tool "$result" >/dev/null
+            python3 source/candidate/tests/L7/performance/issue34/verify_speedscope.py "$result"
           done
           # Keep the original .nettrace archives: Speedscope conversion
           # loses runtime event details and is a review aid, not independent
