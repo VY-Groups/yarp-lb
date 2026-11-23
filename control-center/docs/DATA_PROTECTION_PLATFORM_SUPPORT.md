@@ -40,6 +40,55 @@ backup/DR, or Windows Service physical qualification. Track those under the
 remaining #48 acceptance and real host #36 evidence; do not mark Windows
 Service installation supported solely because an SCM lifetime is registered.
 
+## Offline Linux recovery checkpoint issuance (software-only)
+
+The standalone .NET 10 tool at
+`control-center/tools/LinuxDpRecoverySigner/LinuxDpRecoverySigner.csproj`
+issues the exact P-256 IEEE-P1363 signed inventory schema accepted by
+`LinuxDpRecoveryEvidence.Verify`. It never reads decrypted Data Protection
+master keys, changes the encrypted key ring, copies certificates to fleet
+nodes, or advances a protected rollout revision.
+
+A deliberately authorized Linux operator supplies **absolute** paths to the
+already encrypted private key ring, an independently held private P-256
+signing PEM, the corresponding independently pinned public verification
+PEM, an outside-state private minimum-revision file, and a new checkpoint
+destination below an owner-only 0700 directory. Signer, verifier, floor,
+and output must be outside the recovered state tree:
+
+```bash
+dotnet run --project control-center/tools/LinuxDpRecoverySigner/LinuxDpRecoverySigner.csproj -- \
+  --ring /var/lib/gatewaycore-yarp/control-plane/data-protection-keys \
+  --revision 43 \
+  --signing-key /secure/recovery-authority/private-issuer.pem \
+  --trust-public-key /secure/recovery-authority/trusted-verifier.pem \
+  --minimum-revision-file /secure/recovery-authority/min-revision.txt \
+  --manifest /secure/recovery-checkpoints/manifest-rev43.json
+```
+
+This is a *read-only inventory issuer* except for creating the selected
+new manifest. The P-256 private signer and the revision floor require
+independently managed custody and owner-only private files; the manifest
+is created owner-only (0600) with exclusive-new creation and atomic move.
+A pre-existing manifest is never overwritten; old or equal revisions,
+wrong public signer, linked/private-file aliases and insecure directories
+fail closed. The pre-existing `LinuxDpRecoveryEvidence.Verify` must validate
+the manifest and inventory before any restore is authorized. CI reuses
+an actual disposable encrypted key ring and exercises issuance, verification,
+no-overwrite and rollback refusal.
+
+**Operator acceptance remains mandatory.** Issuance does *not* mean that
+the key ring is synchronized safely to a second gateway, that a trustworthy
+backup exists, that the minimum revision has advanced, or that rotation and
+disaster recovery succeeded. This tool is not a privileged signing-service
+deployment, HSM integration, transactional fleet rollout, physical host
+reboot or DR evidence. No private customer signer material is committed.
+The authorized external recovery controller must fence affected gateways,
+verify a stable backup and restore inventory, separately advance the
+independent trusted revision and prove cross-node cookie continuity.
+Keep #48 open until its remaining operational and platform gates pass; #36
+tracks physical site proof.
+
 ## HTTP protocol and optional-engine support boundary
 
 “CI tested” means the named isolated runner exercised the stated code path. It
