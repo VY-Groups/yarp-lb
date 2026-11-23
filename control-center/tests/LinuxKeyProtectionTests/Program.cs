@@ -316,6 +316,58 @@ try
         File.SetUnixFileMode(trustedPublicPath,PrivateFile);
         var keyDirectory=Path.Combine(state,"data-protection-keys");
         var inventoryHash=LinuxDpRecoveryEvidence.ComputeInventoryDigest(keyDirectory);
+        // The standalone issuer must produce a byte-for-byte compatible
+        // checkpoint using an independently custodied P-256 signer. Run the
+        // real tool on this disposable encrypted key ring, not a JSON mock.
+        var signerPrivatePath=Path.Combine(secrets,"offline-issuer-private.pem");
+        var revisionFloorPath=Path.Combine(secrets,"offline-revision-floor.txt");
+        var generatedManifest=Path.Combine(secrets,"issued-offline-recovery.json");
+        File.WriteAllText(signerPrivatePath,attestationSigner.ExportECPrivateKeyPem());
+        File.SetUnixFileMode(signerPrivatePath,PrivateFile);
+        File.WriteAllText(revisionFloorPath,"42" + Environment.NewLine);
+        File.SetUnixFileMode(revisionFloorPath,PrivateFile);
+        var issuerProject=Path.GetFullPath(Path.Combine("tools","LinuxDpRecoverySigner",
+            "LinuxDpRecoverySigner.csproj"));
+        Assert(File.Exists(issuerProject),"offline recovery issuer project exists");
+        int RunIssuer(string signedRevision,string target,string verificationKey)
+        {
+            var start=new System.Diagnostics.ProcessStartInfo("dotnet")
+            {
+                UseShellExecute=false,
+                RedirectStandardError=true,
+                RedirectStandardOutput=true
+            };
+            foreach (var arg in new[] {
+                "run","--project",issuerProject,"--configuration","Release","--",
+                "--ring",keyDirectory,"--revision",signedRevision,
+                "--signing-key",signerPrivatePath,"--trust-public-key",verificationKey,
+                "--minimum-revision-file",revisionFloorPath,
+                "--manifest",target })
+                start.ArgumentList.Add(arg);
+            using var process=System.Diagnostics.Process.Start(start)
+                ?? throw new Exception("FAIL: Cannot start offline checkpoint issuer");
+            if (!process.WaitForExit(120000))
+            {
+                process.Kill(entireProcessTree:true);
+                throw new Exception("FAIL: offline checkpoint issuer timeout");
+            }
+            return process.ExitCode;
+        }
+        Assert(RunIssuer("43",generatedManifest,trustedPublicPath)==0,
+            "real offline P-256 issuer creates signed revision 43");
+        Assert((File.GetUnixFileMode(generatedManifest)&(UnixFileMode.GroupRead|
+            UnixFileMode.GroupWrite|UnixFileMode.OtherRead|UnixFileMode.OtherWrite))==0,
+            "offline checkpoint remains owner-only on disk");
+        LinuxDpRecoveryEvidence.Verify(keyDirectory,generatedManifest,trustedPublicPath,43);
+        Assert(true,"real restore verifier accepts offline-issued inventory");
+        var generatedOriginal=File.ReadAllBytes(generatedManifest);
+        Assert(RunIssuer("43",generatedManifest,trustedPublicPath)!=0 &&
+            File.ReadAllBytes(generatedManifest).SequenceEqual(generatedOriginal),
+            "offline issuer cannot overwrite pre-existing signed checkpoint");
+        var rejectedManifest=Path.Combine(secrets,"rejected-stale-recovery.json");
+        Assert(RunIssuer("42",rejectedManifest,trustedPublicPath)!=0 &&
+            !File.Exists(rejectedManifest),
+            "offline issuer rejects non-increasing independent revision");
         var revision=42L;
         LinuxDpRecoveryManifest MakeAttestation(long signedRevision,string digest)
         {
