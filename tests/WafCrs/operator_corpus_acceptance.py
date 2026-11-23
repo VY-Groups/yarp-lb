@@ -36,7 +36,7 @@ SAFE_ID = re.compile(r"^[A-Za-z0-9_-]{1,48}\Z", re.ASCII)
 RUN_HEADER = re.compile(r"(?im)^X-GatewayCore-Corpus-Run:\s*([0-9a-f]{32})\s*$")
 CASE_HEADER = re.compile(r"(?im)^X-GatewayCore-Corpus-Case:\s*([A-Za-z0-9_-]{1,48})\s*$")
 CRS_RULE = re.compile(r'\[id "9[0-9]{5}"\]')
-DENIED_403 = re.compile(r"Access denied with code 403", re.IGNORECASE)
+DENIED_403 = re.compile(r"^ModSecurity: Access denied with code 403(?:\s|\()", re.IGNORECASE)
 
 
 def strict_pairs(pairs):
@@ -227,8 +227,10 @@ def native_crs_blocks(text, run_id, allowed_cases):
         if case_id in seen:
             raise ValueError("duplicate private WAF audit transaction")
         seen.add(case_id)
-        messages = "\n".join(transaction["H"])
-        if CRS_RULE.search(messages) and DENIED_403.search(messages):
+        # A denial phrase echoed inside warning data is not an intervention.
+        # Require the real native message prefix and CRS ID on that line.
+        if any(DENIED_403.match(line) and CRS_RULE.search(line)
+               for line in transaction["H"]):
             matched.add(case_id)
     return matched
 
