@@ -281,6 +281,34 @@ try
         finally { File.Delete(copiedKey); }
     }
 
+    // A restored ring may carry an approved wrapped element and a second
+    // foreign-namespace lookalike. Reject the whole document before import.
+    var foreignSecretDocument = XDocument.Load(initialKeyPath);
+    foreignSecretDocument.Root!.Add(new XElement(
+        XName.Get("encryptedSecret", "urn:gatewaycore:test:foreign"), "disposable-fixture"));
+    try
+    {
+        File.WriteAllText(initialKeyPath,
+            foreignSecretDocument.ToString(SaveOptions.DisableFormatting));
+        Assert(Throws(()=>{using var _=Provider(state);}),
+            "foreign-namespace encryptedSecret beside valid wrapper is refused");
+    }
+    finally { File.WriteAllBytes(initialKeyPath, originalProtectedBytes); }
+
+    var foreignDecryptorDocument = XDocument.Load(initialKeyPath);
+    var wrappedElement = foreignDecryptorDocument.Descendants()
+        .Single(element => element.Name.LocalName == "encryptedSecret");
+    wrappedElement.SetAttributeValue("decryptorType",
+        "Other.Namespace.EncryptedXmlDecryptor, Microsoft.AspNetCore.DataProtection");
+    try
+    {
+        File.WriteAllText(initialKeyPath,
+            foreignDecryptorDocument.ToString(SaveOptions.DisableFormatting));
+        Assert(Throws(()=>{using var _=Provider(state);}),
+            "unapproved certificate decryptor type is refused");
+    }
+    finally { File.WriteAllBytes(initialKeyPath, originalProtectedBytes); }
+
     var excessiveFiles = new List<string>();
     try
     {
