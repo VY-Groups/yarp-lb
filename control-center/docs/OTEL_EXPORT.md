@@ -40,8 +40,10 @@ Gauges are a weakly consistent operational snapshot, **not** immutable
 audit records or proof that a particular remote event was received.
 The protected `/admin/api/audit/delivery` endpoint remains the detailed
 admin-only status source. CI validates all gauge values and zero labels
-through a .NET `MeterListener` and validates actual OTLP metric names
-through the disposable wire-collector capture. Production sites must still
+through a .NET `MeterListener`, validates actual OTLP metric names
+through the disposable wire-collector capture, and queries Prometheus after
+Collector translation to verify all four audit outbox gauges and expected
+values. Production sites must still
 verify retained immutable receipts, two-host continuity, alert routing and
 disaster recovery; those are outstanding #50/#36 acceptance gates.
 

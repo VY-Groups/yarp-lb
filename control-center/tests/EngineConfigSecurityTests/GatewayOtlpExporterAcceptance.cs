@@ -148,7 +148,7 @@ public static class GatewayOtlpExporterAcceptance
             EmitRestrictedLogs(provider);
             if (!tracerProvider.ForceFlush(10000) || !meterProvider.ForceFlush(10000) || !loggerProvider.ForceFlush(10000))
                 throw new Exception("Container OTLP exporters failed to flush before acceptance deadline");
-            await VerifyPrometheusLoggingCountersAsync(endpoint, loggingDropScenario);
+            await VerifyPrometheusMetricsAsync(endpoint, loggingDropScenario);
             Console.WriteLine("PASS: real OpenTelemetry Collector accepted traces, metrics and bounded audit export gauges via OTLP/HTTP");
         }
         finally
@@ -495,7 +495,7 @@ public static class GatewayOtlpExporterAcceptance
         }
     }
 
-    private static async Task VerifyPrometheusLoggingCountersAsync(string collectorEndpoint,
+    private static async Task VerifyPrometheusMetricsAsync(string collectorEndpoint,
         LoggingDropScenario scenario)
     {
         var collector = new Uri(collectorEndpoint, UriKind.Absolute);
@@ -505,15 +505,20 @@ public static class GatewayOtlpExporterAcceptance
         var prometheusBase = new UriBuilder(collector) { Port = 9090, Path = "/api/v1/query", Query = "" };
         using var client = new HttpClient(new HttpClientHandler { UseProxy = false })
         { Timeout = TimeSpan.FromSeconds(3) };
-        foreach (var (name, expected) in new[]
+        foreach (var (name, expected, requirePositive) in new (string Name, double Expected, bool RequirePositive)[]
                  {
-                     ("yarp_logging_dropped_total", scenario.TotalDropped),
-                     ("yarp_logging_dropped_low_priority_total", scenario.LowPriorityDropped),
-                     ("yarp_logging_dropped_high_priority_total", scenario.HighPriorityDropped),
-                     ("yarp_logging_write_errors_total", scenario.WriteErrors)
+                     ("yarp_logging_dropped_total", scenario.TotalDropped, true),
+                     ("yarp_logging_dropped_low_priority_total", scenario.LowPriorityDropped, true),
+                     ("yarp_logging_dropped_high_priority_total", scenario.HighPriorityDropped, true),
+                     ("yarp_logging_write_errors_total", scenario.WriteErrors, true),
+                     ("gateway_audit_outbox_enabled", 1, false),
+                     ("gateway_audit_outbox_pending", 3, false),
+                     ("gateway_audit_outbox_storage_fault", 0, false),
+                     ("gateway_audit_outbox_delivery_blocked", 1, false)
                  })
         {
-            if (expected <= 0) throw new Exception($"Container counter fixture did not produce {name}");
+            if (requirePositive && expected <= 0)
+                throw new Exception($"Container counter fixture did not produce {name}");
             var deadline = DateTimeOffset.UtcNow.AddSeconds(30);
             var observed = false;
             string lastQueryResult = "<Prometheus query not completed>";
@@ -543,19 +548,19 @@ public static class GatewayOtlpExporterAcceptance
             }
             if (!observed)
             {
-                var observedSeries = await ReadPrometheusLoggingSeriesAsync(client, prometheusBase.Uri);
+                var observedSeries = await ReadPrometheusRelevantSeriesAsync(client, prometheusBase.Uri);
                 throw new Exception($"Collector-to-Prometheus pipeline did not expose {name}={expected}. " +
                     $"Last exact query response: {lastQueryResult}. " +
-                    $"Observed yarp_logging series: {observedSeries}");
+                    $"Observed relevant Prometheus series: {observedSeries}");
             }
             Console.WriteLine($"PASS: Prometheus received Collector-exported {name}={expected}");
         }
     }
 
-    private static async Task<string> ReadPrometheusLoggingSeriesAsync(HttpClient client, Uri prometheusBase)
+    private static async Task<string> ReadPrometheusRelevantSeriesAsync(HttpClient client, Uri prometheusBase)
     {
         var request = new UriBuilder(prometheusBase)
-        { Query = "query=" + Uri.EscapeDataString("{__name__=~\"yarp_logging_.*\"}") };
+        { Query = "query=" + Uri.EscapeDataString("{__name__=~\"(yarp_logging_.*|gateway_audit_outbox_.*)\"}") };
         try
         {
             using var response = await client.GetAsync(request.Uri);
