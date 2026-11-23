@@ -210,6 +210,36 @@ def run_cases(cases, connection_factory=None):
     return report
 
 
+def write_private_report(report, target):
+    """Atomically publish only a 0600 local report without following a link.
+
+    The operator chooses the destination directory; this never uploads data
+    or emits case identifiers to standard output. Reject a stale or
+    attacker-created .tmp pathname rather than overwriting/following it.
+    """
+    target = Path(target)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_name(target.name + ".tmp")
+    if target.is_symlink():
+        raise ValueError("private WAF report destination must not be a symlink")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(temporary, flags, 0o600)
+    created = True
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(report, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        if target.is_symlink():
+            raise ValueError("private WAF report destination changed into a symlink")
+        os.replace(temporary, target)
+        created = False
+    finally:
+        if created:
+            temporary.unlink(missing_ok=True)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--corpus", required=True)
@@ -218,12 +248,7 @@ def main(argv=None):
     try:
         cases = load_corpus(args.corpus)
         report = run_cases(cases)
-        target = Path(args.report)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        temporary = target.with_name(target.name + ".tmp")
-        temporary.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n",
-                             encoding="utf-8")
-        os.replace(temporary, target)
+        write_private_report(report, args.report)
         if not report["passesZeroFalsePositiveNegativeGate"]:
             print("FAIL: private corpus contains blocked benign, allowed malicious or failed requests",
                   file=sys.stderr)
