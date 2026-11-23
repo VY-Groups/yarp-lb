@@ -57,7 +57,7 @@ var localAudit = new LocalAdminAudit(Path.Combine(privateDir, "admin-audit.jsonl
 var builder = WebApplication.CreateBuilder(args);
 if (auditOutbox is not null)
     builder.Services.AddHostedService(sp => new AuditOutboxWorker(auditOutbox, sp.GetRequiredService<ILogger<AuditOutboxWorker>>()));
-GatewayOpenTelemetry.Configure(builder.Services);
+var otlpConfigured = GatewayOpenTelemetry.Configure(builder.Services);
 // Explicit v0.1 multi-socket mode; legacy loopback remains CI migration-only.
 var isolatedListeners = GatewayListenerIsolation.FromEnvironment();
 var acmeChallengeSetting = Environment.GetEnvironmentVariable("YARP_ACME_HTTP01_PUBLIC_ENTRYPOINT");
@@ -286,6 +286,11 @@ if (peerSyncSettings is not null)
 }
 var app = builder.Build();
 var accessLogger = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("GatewayCore.AccessLog");
+// Avoid even constructing/exporting the additional access-summary event
+// when no OTLP exporter was configured at startup.
+var telemetryAccessLogger = otlpConfigured
+    ? app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("GatewayCore.TelemetryAccess")
+    : null;
 var trustedAccessLogProxies = GatewayClientAddress.ParseTrustedProxyAddresses(
     Environment.GetEnvironmentVariable("GATEWAY_TRUSTED_PROXY_IPS"));
 var peerStateJournal = app.Services.GetService<PeerStateJournal>();
@@ -488,10 +493,18 @@ app.Use(async (ctx, next) =>
         var routeCandidate = ctx.Features.Get<IReverseProxyFeature>()?.Route?.Config.RouteId;
         var routeId = routeCandidate is not null && ValidId(routeCandidate) ? routeCandidate : "unmatched";
         var timestampUtc = DateTimeOffset.UtcNow;
+        var durationMs = Math.Round(elapsed * 1000.0 /
+            System.Diagnostics.Stopwatch.Frequency, 3);
         GatewayOpenTelemetry.LogAccess(accessLogger,
             timestampUtc, clientAddress.Address?.ToString() ?? "unknown", clientAddress.Source,
-            ctx.Request.Method, routeId, ctx.Response.StatusCode,
-            Math.Round(elapsed * 1000.0 / System.Diagnostics.Stopwatch.Frequency, 3));
+            ctx.Request.Method, routeId, ctx.Response.StatusCode, durationMs);
+        // Only bounded, non-identifying fields cross the OTLP exporter.
+        // The local access record above remains unchanged for every request.
+        if (telemetryAccessLogger is not null)
+            GatewayOpenTelemetry.LogTelemetryAccess(telemetryAccessLogger,
+                timestampUtc, GatewayOpenTelemetry.BoundedTelemetryMethod(ctx.Request.Method),
+                GatewayOpenTelemetry.IsSafeTelemetryId(routeId) ? routeId : "_other",
+                ctx.Response.StatusCode, durationMs);
     }
 });
 var destinationTelemetry = new DestinationTelemetry();

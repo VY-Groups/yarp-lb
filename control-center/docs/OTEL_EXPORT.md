@@ -24,7 +24,7 @@ Export uses the SDK's bounded batch queue and background worker; request handlin
 - A deny-by-default span attribute processor preserves only bounded gateway route/cluster/destination IDs, known HTTP request methods, numeric HTTP response status, safe configured route templates, HTTP scheme/protocol version and bounded error type. All other span attributes (including arbitrary header names/arrays, vendor enrichment, raw URLs, client/network addresses and user agent) are removed before export. Unknown methods do not become raw span names. The route template is the supported request dimension; never add request bodies, headers, IPs, query strings, credentials, or arbitrary user data to span attributes or events. This attribute contract is separate from access logs, trace context and metrics; it does not claim blanket PII removal across every signal.
 - Proxy request count and duration metrics contain validated configured route, cluster and destination IDs plus a fixed response-status class (`2xx`, `3xx`, `4xx`, `5xx`, or `other`). The tuple budget is capped at 4,096 total combinations, with the overflow tuple included in that limit. IDs must match `[A-Za-z0-9_-]{1,80}`; invalid IDs and overflow are aggregated as `_other`. These labels come only from YARP configuration, never from request data. Metrics do not include client IPs, request paths, headers or tenant/user identifiers. The existing local Prometheus endpoint and authenticated per-destination diagnostics remain separate for health and queue details.
 - Local proxy rejection counts use `gateway.proxy.local_rejections` and the single `gateway.proxy.rejection.reason` attribute. The exporter reads a private per-request marker set by GatewayCore's local rejection middleware, never the public response header. Only the fixed GatewayCore codes `gateway_shutdown`, `admission_destination_unresolved`, `admission_policy_conflict`, `invalid_admission_config`, `admission_configuration_unavailable`, `destination_queue_timeout`, `destination_queue_full`, and `destination_unavailable_after_queue` are retained; any other internal code maps to `other`. Upstream response headers cannot create rejection metric samples. This metric does not export raw response headers, destination identity, exception text, request data, client IPs or backend-provided strings. Its reason cardinality is at most nine series per process. It supplements, but does not replace, the local Prometheus endpoint and authenticated per-destination queue/health diagnostics.
-- OTLP logs are provider-filtered to the `GatewayCore.AccessLog` category at Information and above. Authentication, application, and audit categories are excluded. Access records include a UTC timestamp and client IP by default; a forwarded address is trusted only when the immediate peer exactly matches `GATEWAY_TRUSTED_PROXY_IPS`. Access-log IPs are intentionally customer-visible data and require an approved recipient, access-control, and retention policy. The lossy console writer is never an immutable audit source.
+- OTLP logs are provider-filtered to the **`GatewayCore.TelemetryAccess`** category at Information and above. Each exported access summary contains UTC timestamp, a fixed allowlisted HTTP method (unrecognized methods become `_OTHER`), validated route ID or `_other`, response status and duration. The outbound provider **excludes** the separate `GatewayCore.AccessLog` category, which still includes client IP and trusted-forwarded address source for local controlled operations. No client IP, source address, forwarded header, raw path, query, body or user/tenant ID is present in the exported access summary. Authentication, application and audit categories also remain excluded. Keep local access logs access-controlled and retention-limited; this deliberate OTLP privacy change removes the formerly exported IP fields. Neither the lossy local logger nor OTLP is an immutable audit source.
 
 ## Current limits
 
@@ -55,3 +55,21 @@ than matching the old regular-expression `$` anchor. Regression tests verify
 actual rejection and preservation in the privacy processor. This is a
 trace-instrumentation candidate, not a demonstrated 8.6 KiB/request reduction;
 new exact-head paired profiling and independent review are required.
+
+### Export-only log cost and default-disabled behavior
+
+The IP-free `GatewayCore.TelemetryAccess` event is emitted **only** when an
+OTLP exporter is configured at startup. When `YARP_OTEL_ENDPOINT` is absent,
+no outbound event is created; normal local `GatewayCore.AccessLog` remains
+unchanged. When export is enabled, the bounded console provider excludes the
+export-only category, preventing a second formatted INFO line per request.
+The independent OTLP logger provider still receives the structured safe
+summary and its bounded async queue/timeout settings remain unchanged.
+
+The first three-pair profile of the privacy PR (head `5cd4a2ba`) measured
+**+847.222 B/request** (95% CI **+846.456 to +847.989**) with active OTLP.
+That measurable overhead was **not accepted as a production optimization**.
+This follow-up removes local duplicate formatting and redundant disabled-mode
+work; it requires a *fresh* exact-head paired profile before any claim of
+reduced full-gateway overhead. Both old and new profiles use synthetic loopback
+traffic and do not replace Windows/Ubuntu or production monitoring acceptance.
