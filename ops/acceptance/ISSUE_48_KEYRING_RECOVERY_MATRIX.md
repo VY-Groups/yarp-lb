@@ -1,6 +1,18 @@
 # GatewayCore #48 — key-ring recovery and platform acceptance matrix
 
-**Status: NOT ACCEPTED.** This is a reproducible evidence plan, not a test report. Base revision: `88d2e5be6b00716a93924dc2a7626a8f539ed421`. Do not close #48 on documentation alone. Never copy live authentication keys or cookies into CI or GitHub.
+**Status: NOT ACCEPTED.** This is a reproducible evidence plan, not a test report. Evidence snapshot revision: `9d7fcee0836c51f6dfb2b33ee1d1bcbfd93293fd`. Do not close #48 on documentation alone. Never copy live authentication keys or cookies into CI or GitHub.
+
+
+
+## Latest automated evidence (2026-11-23; CI only)
+
+These runs exercise real processes on disposable GitHub-hosted runners. They update the rows below but do **not** qualify an operator-managed installation or production platform.
+
+- **Windows Server 2022 DPAPI and SCM:** PR #476 exact-head checks (Actions run 45165804522) completed 41/41 with no failures. The dedicated SCM restart test (Actions run 45165804189, job 137662317769) ran the real executable as LocalSystem, checked protected state/DPAPI XML, and verified the original cookie after service stop/start. It did not test a customer service SID, VM reboot, installed package, or Windows event-log operations.
+- **Ubuntu 24.04 systemd and encrypted key ring:** the same exact-head Linux build/acceptance job (Actions run 45165804522, job 137662320118) passed the real systemd restart, mode-0700 encrypted key-ring, and pre-restart cookie continuity checks. This is hosted-runner evidence, not a customer VM restore/DR drill.
+- **UBI 9 .NET 10 userspace:** PR #478 checks (Actions run 45166799728) completed without failures; the actual Linux DP suite in UBI 9 (Actions run 45166799728, job 137665716627) passed with a digest-recorded Red Hat base image. It ran inside a container on an Ubuntu runner; **RHEL 9 host systemd, SELinux and kernel behavior remain untested**.
+
+The PR heads were #476 `1f09eef7595bc78bfd971a5f0381c82714eb75e7` and #478 `9c3b76ec0852d3511d56bde84413cbe4ba2bab93`. The rows below distinguish CI passes from still-unrun deployment and recovery work.
 
 ## Prerequisites and custody
 
@@ -10,10 +22,10 @@ The supported/unsupported matrix is **unverified** until all rows below have act
 
 | Platform / lifetime | Protection | Required evidence | Status |
 | --- | --- | --- | --- |
-| Windows Server 2022 interactive | DPAPI LocalMachine | restart, cookie continuity, ACL and negative access | NOT RUN |
-| Windows Server 2022 SCM service | DPAPI LocalMachine | install/start/reboot/stop, identity, event log, same-machine recovery | NOT RUN; PR #470 is not service acceptance |
-| Ubuntu 24.04 systemd | encrypted certificate-backed key ring | real headless restart, XML inspection, permissions, key loss/restore | NOT RUN |
-| RHEL 9 systemd | encrypted certificate-backed key ring | SELinux enforcing, file contexts, headless restart and recovery | NOT RUN |
+| Windows Server 2022 interactive | DPAPI LocalMachine | restart, cookie continuity, ACL and negative access | CI PASS on hosted Windows Server 2022 runner (see above); customer interactive installation NOT RUN |
+| Windows Server 2022 SCM service | DPAPI LocalMachine | install/start/reboot/stop, identity, event log, same-machine recovery | CI PASS for LocalSystem start/stop/start and cookie continuity; customer service SID, VM reboot and event-log review NOT RUN |
+| Ubuntu 24.04 systemd | encrypted certificate-backed key ring | real headless restart, XML inspection, permissions, key loss/restore | CI PASS for encrypted ring, permissions and restart cookie continuity; customer VM key-loss/restore NOT RUN |
+| RHEL 9 systemd | encrypted certificate-backed key ring | SELinux enforcing, file contexts, headless restart and recovery | RHEL host NOT RUN; UBI 9 userspace suite passed, but host systemd/SELinux remain unqualified |
 | Linux container | explicit persistent encrypted volume and recovery material | restart/recreate with volume, fail closed without wrapper | NOT RUN |
 | Cross-machine shared fleet | explicitly provisioned shared encryption and key-ring identity | cookie continuity, staged rotation, rollback and partition | NOT RUN |
 
