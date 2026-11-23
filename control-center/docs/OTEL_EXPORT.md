@@ -18,6 +18,8 @@ OTEL_EXPORTER_OTLP_HEADERS=Authorization=Bearer%20<short-lived-token>
 
 Export uses the SDK's bounded batch queue and background worker; request handling does not synchronously wait for collector delivery. When the queue is full or the collector is unavailable, telemetry may be dropped. The proxy path continues serving traffic. Metrics export every 15 seconds with a five-second timeout. Trace batch limits use the OpenTelemetry SDK defaults for the pinned package version. The exporter includes the bounded console writer's total/low/high priority drop and write-error counters from the `GatewayCoreYarp.Logging` meter.
 
+The `gateway.configuration.reload_notifications` counter increments when the effective `IConfiguration` reload token signals. It has no labels and is disposed with application shutdown. This records a reload notification only; it is **not proof** that YARP accepted or applied a routing update. Pair it with the signed configuration audit and the actual loaded-route state before treating a rollout as successful.
+
 ## Durable external audit delivery state (opt-in)
 
 When OTLP is configured, the `GatewayCore.ControlCenter` meter exports four
