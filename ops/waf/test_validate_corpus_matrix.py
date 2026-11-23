@@ -38,6 +38,21 @@ class MatrixTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 module._read_bounded_json(path)
 
+    def test_duplicate_policy_and_corpus_json_fields_rejected(self):
+        # Duplicate properties must never override an operator-approved
+        # threshold or the ground-truth classification of a WAF test case.
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "evidence.json"
+            for raw in (
+                '{"route":{"high":{"max_fp_rate":0,"max_fp_rate":1}}}',
+                '[{"case_id":"case-1","expected_attack":true,"expected_attack":false}]',
+                '{"a":{"nested":1,"nested":2}}',
+            ):
+                with self.subTest(raw=raw):
+                    path.write_text(raw, encoding="utf-8")
+                    with self.assertRaisesRegex(ValueError, "duplicate JSON property"):
+                        module._read_bounded_json(path)
+
     def test_clean_pass(self):
         result = module.evaluate(self.cases, self.policy)
         self.assertTrue(result["pass"])
