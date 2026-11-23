@@ -193,7 +193,7 @@ included):
 When a configured zone's signing key becomes unavailable while answering a
 DNSSEC-requesting query, the engine returns a minimal **SERVFAIL** response
 containing the original question but **no partially signed or unsigned zone
-records**. This response does not claim AD, AA, or DO, and does not echo EDNS
+records**. This response preserves the request's RD and CD flags, but does not claim AD, AA, or DO, and does not echo EDNS
 options or sensitive data. UDP and TCP responses use the same fail-closed
 handler. A signer fault must not terminate the UDP receive loop or prevent
 valid out-of-zone queries from being processed.
