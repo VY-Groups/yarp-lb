@@ -1,0 +1,16 @@
+# Only loaded by the opt-in Collector + Prometheus reference stack.
+# Do not add this required-collector inventory policy to the generic
+# gateway-alerts.yml used by deployments that intentionally disable OTLP.
+groups:
+  - name: gatewaycore-required-collector-inventory
+    interval: 5s
+    rules:
+      - alert: GatewayOtelCollectorTargetMissing
+        expr: absent(up{job="otel-collector"})
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "GatewayCore required OTLP Collector target is absent"
+          description: "Prometheus has no configured otel-collector scrape series. Check target inventory and rule wiring; an absent target must not silently count as healthy telemetry."
+          runbook: "control-center/docs/OTEL_EXPORT.md"
