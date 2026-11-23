@@ -42,7 +42,9 @@ jobs:
             exit 1
           fi
           echo "UBI9_SDK_IMAGE=$digest"
-          # .NET builds and executes a temporary native apphost; only this\n          # disposable tmpfs needs execute permission. Root remains read-only.\n          docker run --rm --network none --read-only --cap-drop ALL \
+          # .NET builds and executes a temporary native apphost; only this
+          # disposable tmpfs needs execute permission. Root remains read-only.
+          docker run --rm --network none --read-only --cap-drop ALL \
             --security-opt no-new-privileges --pids-limit 256 --memory 2g \
             --tmpfs /tmp:rw,exec,nosuid,nodev,size=768m \
             --user 1001:0 --volume "$PWD:/repo:ro" \
