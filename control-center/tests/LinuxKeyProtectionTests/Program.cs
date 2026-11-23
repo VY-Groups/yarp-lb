@@ -15,10 +15,10 @@ if (!OperatingSystem.IsLinux())
     return;
 }
 // DP-09/DP-13: execute the real key-ring loader in a separate OS process.
- // The disposable protected cookie travels over stdin, never argv or logs.
+// The disposable protected cookie and expected plaintext travel over stdin, never argv or logs.
 if (args.Length > 0 && args[0] == "--verify-cookie")
 {
-    if (args.Length != 5) Environment.Exit(2);
+    if (args.Length != 4) Environment.Exit(2);
     try
     {
         Environment.SetEnvironmentVariable("YARP_CONTROL_PLANE_DIR", args[1]);
@@ -31,9 +31,11 @@ if (args.Length > 0 && args[0] == "--verify-cookie")
         using var childProvider = childServices.BuildServiceProvider();
         var protectedCookie = Console.In.ReadLine()
             ?? throw new InvalidOperationException("Missing disposable cookie");
+        var expectedPlaintext = Console.In.ReadLine()
+            ?? throw new InvalidOperationException("Missing expected plaintext");
         var clear = childProvider.GetRequiredService<IDataProtectionProvider>()
             .CreateProtector(args[3]).Unprotect(protectedCookie);
-        Environment.Exit(clear == args[4] ? 0 : 3);
+        Environment.Exit(clear == expectedPlaintext ? 0 : 3);
     }
     catch (Exception)
     {
@@ -121,11 +123,12 @@ int VerifyInFreshProcess(string statePath, string applicationName,
         RedirectStandardError = true
     };
     foreach (var arg in new[] { assemblyPath, "--verify-cookie", statePath,
-        applicationName, purpose, expected })
+        applicationName, purpose })
         start.ArgumentList.Add(arg);
     using var child = System.Diagnostics.Process.Start(start)
         ?? throw new Exception("FAIL: disposable child process could not start");
     child.StandardInput.WriteLine(protectedCookie);
+    child.StandardInput.WriteLine(expected);
     child.StandardInput.Close();
     if (!child.WaitForExit(60000))
     {
