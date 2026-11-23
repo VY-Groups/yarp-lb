@@ -125,11 +125,19 @@ public static class WindowsFleetKeyProtection
                     if (isKey && reader.LocalName == "encryptedSecret" &&
                         reader.NamespaceURI == protectionNamespace)
                     {
+                        // A substring check accepts unapproved lookalike
+                        // types and assemblies. Only the framework's exact
+                        // certificate XML decryptor and assembly identity
+                        // may be imported from a staged fleet key ring.
                         var decryptor = reader.GetAttribute("decryptorType");
-                        if (decryptor is null ||
-                            !decryptor.Contains("EncryptedXmlDecryptor", StringComparison.Ordinal))
+                        var assemblyQualified = decryptor?.Split(
+                            ',', StringSplitOptions.TrimEntries);
+                        if (assemblyQualified is null || assemblyQualified.Length < 2 ||
+                            assemblyQualified[0] !=
+                                "Microsoft.AspNetCore.DataProtection.XmlEncryption.EncryptedXmlDecryptor" ||
+                            assemblyQualified[1] != "Microsoft.AspNetCore.DataProtection")
                             throw new InvalidOperationException(
-                                "Windows fleet key XML is not certificate-wrapped");
+                                "Windows fleet key XML is not from the approved certificate decryptor");
                         wrappedSecrets++;
                     }
                 }
