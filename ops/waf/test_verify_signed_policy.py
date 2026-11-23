@@ -69,22 +69,36 @@ class SignedPolicyTests(unittest.TestCase):
             path.write_text(json.dumps(obj), encoding="utf-8")
             self.approvals.append(path)
 
-    def check(self, observed=RULESET, mode=None):
+    def check(self, observed=RULESET, mode=None, shadow=None):
         return gate.verify(self.policy_file, self.approvals, self.keys, self.min_file,
-                           observed, self.policy["mode"] if mode is None else mode, NOW)
+                           observed, self.policy["mode"] if mode is None else mode, NOW,
+                           shadow_evidence_path=shadow)
 
     def test_two_distinct_p256_signers_approve_detect(self):
         self.assertEqual(self.check(), 7)
 
-    def test_block_requires_signed_shadow_evidence(self):
+    def test_block_requires_exact_signed_shadow_evidence_file(self):
+        shadow = self.trust_dir / "approved-shadow-evidence.json"
+        shadow.write_text('{"scope":"synthetic-approved-shadow"}', encoding="utf-8")
         self.policy["mode"] = "block"
-        self.policy["shadowEvidenceSha256"] = "B" * 64
+        self.policy["shadowEvidenceSha256"] = hashlib.sha256(shadow.read_bytes()).hexdigest().upper()
         self.sign()
-        self.assertEqual(self.check(), 7)
+        with self.assertRaisesRegex(ValueError, "supplied shadow evidence"):
+            self.check()
+        self.assertEqual(self.check(shadow=shadow), 7)
+        shadow.write_bytes(b'{"scope":"modified"}')
+        with self.assertRaisesRegex(ValueError, "does not match reviewed digest"):
+            self.check(shadow=shadow)
+        shadow.write_text('{"scope":"synthetic-approved-shadow"}', encoding="utf-8")
         self.policy["shadowEvidenceSha256"] = None
         self.sign()
         with self.assertRaises(ValueError):
-            self.check()
+            self.check(shadow=shadow)
+        self.policy["mode"] = "detect"
+        self.policy["shadowEvidenceSha256"] = None
+        self.sign()
+        with self.assertRaisesRegex(ValueError, "must not assert blocking evidence"):
+            self.check(shadow=shadow)
 
     def test_actual_mode_or_ruleset_mismatch_fails(self):
         with self.assertRaises(ValueError):
