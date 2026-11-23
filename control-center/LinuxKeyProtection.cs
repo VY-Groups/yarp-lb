@@ -146,7 +146,8 @@ public static class LinuxKeyProtection
             if ((File.GetUnixFileMode(path) & PublicPermissions) != 0)
                 throw new InvalidOperationException("Existing Linux key-ring XML requires owner-only permissions");
             byte[] bytes;
-            try { bytes = PrivateKeyFileSecurity.ReadPrivateFileBytes(path, "Linux key-ring XML", 1024 * 1024); }
+            try { bytes = PrivateKeyFileSecurity.ReadPrivateFileBytes(path, "Linux key-ring XML", 1024 * 1024,
+                requireSingleLink: true); }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException)
             { throw new InvalidOperationException("Unsafe existing Linux key-ring XML", ex); }
             try
