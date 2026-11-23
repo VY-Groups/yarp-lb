@@ -24,6 +24,7 @@ ALLOWED = frozenset({
     "artifacts/waf-crs/resource-detection.json",
     "artifacts/waf-crs/resource-restored.json",
     "artifacts/waf-crs/blocking-corpus-report.json",
+    "artifacts/waf-crs/blocking-native-audit-report.json",
     "artifacts/waf-crs/detection-corpus-report.json",
     "artifacts/waf-crs/waf-image-id.txt",
     "artifacts/waf-crs/waf-image-digests.json",
