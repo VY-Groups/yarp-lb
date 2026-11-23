@@ -1,0 +1,25 @@
+name: WAF operator corpus evidence policy contract
+on:
+  push:
+    branches: [main, "feature/**"]
+    paths:
+      - "ops/waf/**"
+      - ".github/workflows/waf-corpus-evidence.yml"
+  pull_request:
+    paths:
+      - "ops/waf/**"
+      - ".github/workflows/waf-corpus-evidence.yml"
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  evidence-gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Reject malformed or ambiguous WAF policy and corpus evidence
+        run: python3 -m unittest discover -s ops/waf -p 'test_*.py' -v
