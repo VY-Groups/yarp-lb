@@ -19,11 +19,17 @@ METRICS = (
     "gateway_audit_outbox_storage_fault",
     "gateway_audit_outbox_delivery_blocked",
 )
-FORBIDDEN_LABEL_PARTS = (
-    "actor", "user", "customer", "tenant", "cookie", "secret", "token",
-    "authorization", "client_ip", "clientip", "path", "query", "request",
-    "password", "credential", "session",
-)
+# A label-free OTLP instrument may still have a bounded standard
+# resource identity and Prometheus scrape labels. Enumerate those explicitly;
+# arbitrary route, cluster, destination or user-provided dimensions are NOT
+# acceptable on these four audit outbox gauges, even without obvious PII.
+ALLOWED_LABELS = frozenset((
+    "__name__", "job", "instance", "service_instance_id", "service_name",
+    "service_version", "service_namespace", "telemetry_sdk_name",
+    "telemetry_sdk_language", "telemetry_sdk_version", "otel_scope_name",
+    "otel_scope_version", "otel_scope_schema_url", "deployment_environment",
+    "host_name",
+))
 
 
 class NoRedirect(HTTPRedirectHandler):
@@ -93,9 +99,8 @@ def verify(payloads, expected_nodes, now=None, maximum_age=180):
             node = labels.get("service_instance_id")
             if labels.get("job") != "otel-collector" or node not in expected or node in found:
                 raise ValueError(name + ": wrong, unexpected or duplicate node series")
-            if any(any(part in key.lower() for part in FORBIDDEN_LABEL_PARTS)
-                   for key in labels):
-                raise ValueError(name + ": forbidden high-cardinality or private label")
+            if any(key not in ALLOWED_LABELS for key in labels):
+                raise ValueError(name + ": unsupported or potentially private metric label")
             sample = row.get("value")
             if not isinstance(sample, list) or len(sample) != 2:
                 raise ValueError(name + ": missing instant sample")
