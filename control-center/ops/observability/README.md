@@ -90,3 +90,21 @@ software policy, not deployed pager delivery or customer-site retention.
 The missing-evidence security principle is also documented in
 [the GatewayCore GSLB engineering review](../../docs/GSLB_BRANCH_DEEP_REVIEW.md).
 No source code from that reviewed separate runtime was imported.
+
+## Durable audit failure detection (requires #452)
+
+The shared Prometheus rules now define
+`GatewayAuditOutboxDeliveryFault` (critical after one minute) for
+`gateway_audit_outbox_storage_fault == 1`,
+`gateway_audit_outbox_delivery_blocked == 1`, or an unreadable
+`gateway_audit_outbox_pending < 0`, explicitly scoped to the
+`otel-collector` scrape job. Real pinned `promtool` rule tests cover each
+failure and a healthy configured negative control. These are identity-free
+per-node measurements produced by the pending audit telemetry implementation
+in PR #452; **merge and verify #452 first**. Do not interpret an absent
+series, `outbox.enabled=0`, a recovered metric, or a successful proxy
+request as proof of durable external audit delivery. Missing Collector
+inventory/scrapes have separate monitoring rules, and actual independent
+receiver receipts/retention must be proven in production. This alert never
+replaces an immutable audit sink, customer approved SLAs or issue #36's
+physical tests.

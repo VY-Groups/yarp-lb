@@ -364,3 +364,63 @@ tests:
       - eval_time: 3m
         alertname: GatewayOtelCollectorScrapeFailed
         exp_alerts: []
+
+  # Durable audit export is separate from lossy access telemetry.
+  # Alert when the independently authenticated outbox is not deliverable.
+  - interval: 1m
+    input_series:
+      - series: 'gateway_audit_outbox_storage_fault{job="otel-collector",instance="otel-collector:8889",service_instance_id="gateway-node-a"}'
+        values: '0 1 1 1 1'
+      - series: 'gateway_audit_outbox_delivery_blocked{job="otel-collector",instance="otel-collector:8889",service_instance_id="gateway-node-a"}'
+        values: '0 0 0 0 0'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: GatewayAuditOutboxDeliveryFault
+        exp_alerts:
+          - exp_labels: {job: otel-collector, instance: "otel-collector:8889", service_instance_id: gateway-node-a, severity: critical}
+            exp_annotations:
+              summary: "GatewayCore durable audit outbox cannot deliver or inspect pending events"
+              description: "External authenticated audit outbox on gateway-node-a reports blocked delivery, persistent storage fault or an unreadable pending count. Verify the admin-only audit delivery status and collector receipts before clearing the incident."
+              runbook: "control-center/docs/EXTERNAL_AUDIT_INTENT.md"
+  - interval: 1m
+    input_series:
+      - series: 'gateway_audit_outbox_storage_fault{job="otel-collector",instance="otel-collector:8889",service_instance_id="gateway-node-a"}'
+        values: '0 0 0 0 0'
+      - series: 'gateway_audit_outbox_delivery_blocked{job="otel-collector",instance="otel-collector:8889",service_instance_id="gateway-node-a"}'
+        values: '0 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: GatewayAuditOutboxDeliveryFault
+        exp_alerts:
+          - exp_labels: {job: otel-collector, instance: "otel-collector:8889", service_instance_id: gateway-node-a, severity: critical}
+            exp_annotations:
+              summary: "GatewayCore durable audit outbox cannot deliver or inspect pending events"
+              description: "External authenticated audit outbox on gateway-node-a reports blocked delivery, persistent storage fault or an unreadable pending count. Verify the admin-only audit delivery status and collector receipts before clearing the incident."
+              runbook: "control-center/docs/EXTERNAL_AUDIT_INTENT.md"
+  - interval: 1m
+    input_series:
+      - series: 'gateway_audit_outbox_pending{job="otel-collector",instance="otel-collector:8889",service_instance_id="gateway-node-a"}'
+        values: '0 -1 -1 -1 -1'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: GatewayAuditOutboxDeliveryFault
+        exp_alerts:
+          - exp_labels: {job: otel-collector, instance: "otel-collector:8889", service_instance_id: gateway-node-a, severity: critical}
+            exp_annotations:
+              summary: "GatewayCore durable audit outbox cannot deliver or inspect pending events"
+              description: "External authenticated audit outbox on gateway-node-a reports blocked delivery, persistent storage fault or an unreadable pending count. Verify the admin-only audit delivery status and collector receipts before clearing the incident."
+              runbook: "control-center/docs/EXTERNAL_AUDIT_INTENT.md"
+  - interval: 1m
+    input_series:
+      - series: 'gateway_audit_outbox_enabled{job="otel-collector",instance="otel-collector:8889",service_instance_id="gateway-node-a"}'
+        values: '1 1 1 1 1'
+      - series: 'gateway_audit_outbox_pending{job="otel-collector",instance="otel-collector:8889",service_instance_id="gateway-node-a"}'
+        values: '0 0 0 0 0'
+      - series: 'gateway_audit_outbox_storage_fault{job="otel-collector",instance="otel-collector:8889",service_instance_id="gateway-node-a"}'
+        values: '0 0 0 0 0'
+      - series: 'gateway_audit_outbox_delivery_blocked{job="otel-collector",instance="otel-collector:8889",service_instance_id="gateway-node-a"}'
+        values: '0 0 0 0 0'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: GatewayAuditOutboxDeliveryFault
+        exp_alerts: []

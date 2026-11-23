@@ -195,6 +195,22 @@
       ],
       "title": "Observed external interruption time (rolling 1h)",
       "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "gatewaycore-prometheus"},
+      "description": "Opt-in durable external audit outbox status. 1 is configured or faulted, -1 pending means unreadable. Disabled or missing telemetry does not establish remote audit receipt delivery. Requires PR #452 metrics and the independent receiver.",
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 56},
+      "id": 16,
+      "options": {"legend": {"displayMode": "table", "placement": "bottom"}, "tooltip": {"mode": "multi"}},
+      "targets": [
+        {"expr": "gateway_audit_outbox_enabled{job=\"otel-collector\"}", "legendFormat": "{{service_instance_id}} enabled", "refId": "A"},
+        {"expr": "gateway_audit_outbox_pending{job=\"otel-collector\"}", "legendFormat": "{{service_instance_id}} pending", "refId": "B"},
+        {"expr": "gateway_audit_outbox_storage_fault{job=\"otel-collector\"}", "legendFormat": "{{service_instance_id}} storage fault", "refId": "C"},
+        {"expr": "gateway_audit_outbox_delivery_blocked{job=\"otel-collector\"}", "legendFormat": "{{service_instance_id}} delivery blocked", "refId": "D"}
+      ],
+      "title": "Durable external audit outbox (opt-in)",
+      "type": "timeseries"
     }
   ],
   "refresh": "30s",
