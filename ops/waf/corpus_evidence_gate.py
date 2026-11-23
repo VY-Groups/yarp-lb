@@ -19,6 +19,8 @@ EXPECTED = {"benign", "malicious"}
 OBSERVED = {"allow", "block"}
 MODES = {"block", "detect"}
 SEVERITIES = {"low", "medium", "high", "critical"}
+MAX_CASES = 100_000
+MAX_FIELD_CHARS = 4096
 
 
 def evaluate(rows, policy):
@@ -39,6 +41,10 @@ def evaluate(rows, policy):
     count = 0
     for row in rows:
         count += 1
+        if count > MAX_CASES:
+            raise ValueError("corpus exceeds bounded case count")
+        if any(type(v) is not str or len(v) > MAX_FIELD_CHARS for v in row.values()):
+            raise ValueError(f"row {count}: oversized or invalid field")
         if set(row) != FIELDS or any(not isinstance(v, str) for v in row.values()):
             raise ValueError(f"row {count}: invalid columns")
         case_id, route = row["case_id"], row["route"]
@@ -131,12 +137,13 @@ def main():
                             object_pairs_hook=strict_object,
                             parse_constant=lambda _: (_ for _ in ()).throw(
                                 ValueError("non-JSON policy numeric constant")))
+        csv.field_size_limit(MAX_FIELD_CHARS)
         with args.corpus.open(newline="", encoding="utf-8") as stream:
             reader = csv.DictReader(stream)
             if reader.fieldnames is None or set(reader.fieldnames) != FIELDS or len(reader.fieldnames) != len(FIELDS):
                 raise ValueError("CSV columns must match exact required schema")
             report = evaluate(reader, policy)
-    except (ValueError, OSError, UnicodeError, json.JSONDecodeError) as exc:
+    except (ValueError, OSError, UnicodeError, json.JSONDecodeError, csv.Error) as exc:
         report = {"status": "FAIL", "failures": [str(exc)]}
     try:
         write_private_report(args.out, report)
