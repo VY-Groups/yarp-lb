@@ -138,15 +138,18 @@ groups:
         annotations:
           summary: "GSLB could not persist agent report replay state"
           description: "The DNS node rejected persistence of agent report state; inspect storage availability and filesystem permissions."
+      # OTLP-to-Prometheus metric translation uses the collector scrape job;
+      # direct gateway scrapes use gatewaycore-gateway. Cover both without
+      # changing alert severity or the approved loss thresholds.
       - alert: YarpDroppedLogs
-        expr: increase(yarp_logging_dropped_total{job="gatewaycore-gateway"}[5m]) > 0
+        expr: increase(yarp_logging_dropped_total{job=~"gatewaycore-gateway|otel-collector"}[5m]) > 0
         for: 1m
         labels: {severity: critical}
       - alert: YarpHighPriorityLogsDropped
-        expr: increase(yarp_logging_dropped_high_priority_total{job="gatewaycore-gateway"}[5m]) > 0
+        expr: increase(yarp_logging_dropped_high_priority_total{job=~"gatewaycore-gateway|otel-collector"}[5m]) > 0
         for: 0m
         labels: {severity: critical}
       - alert: YarpLogWriterError
-        expr: increase(yarp_logging_write_errors_total{job="gatewaycore-gateway"}[5m]) > 0
+        expr: increase(yarp_logging_write_errors_total{job=~"gatewaycore-gateway|otel-collector"}[5m]) > 0
         for: 1m
         labels: {severity: critical}
