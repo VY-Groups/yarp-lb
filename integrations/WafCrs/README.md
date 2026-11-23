@@ -145,6 +145,9 @@ supplies `WAF_OPERATOR_CORPUS=/private/path/corpus.json` to the existing
 same pinned CRS image to blocking mode; it never changes anomaly thresholds,
 sends requests to public networks or repeats a potentially non-idempotent POST.
 The HTTP target is hard-coded to `127.0.0.1:18888` with redirects disabled.
+Bodyless GET requests carry no Content-Type or Content-Length; POST requests
+retain the declared media type and exact UTF-8 body. This avoids fabricating
+request metadata that CRS would itself reject.
 The source JSON is preflight-checked as a single-link regular file and
 read through a no-follow opened descriptor where supported; linked aliases,
 nonregular inputs, oversized data and path-to-open inode substitution fail
