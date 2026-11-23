@@ -44,6 +44,27 @@ class EvidenceTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "not the current main"):
                 module.collect("example/repo", "a" * 40, "fake")
 
+    def test_main_advancing_during_collection_fails_closed(self):
+        main_reads = 0
+        def fake(path, token):
+            nonlocal main_reads
+            if "/git/ref/heads/main" in path:
+                main_reads += 1
+                return {"object": {"sha": ("a" if main_reads == 1 else "b") * 40}}
+            if "/actions/runs?" in path:
+                return {"workflow_runs": [{
+                    "id": 1, "head_sha": "a" * 40, "head_branch": "main",
+                    "event": "push", "status": "completed", "conclusion": "success"
+                }]}
+            return {"jobs": [{
+                "id": 7, "status": "completed", "conclusion": "success",
+                "steps": []
+            }]}
+        with patch.object(module, "get_json", side_effect=fake):
+            with self.assertRaisesRegex(ValueError, "changed during"):
+                module.collect("example/repo", "a" * 40, "fake")
+        self.assertEqual(main_reads, 2)
+
     def test_malformed_api_collection_rejected(self):
         with patch.object(module, "get_json", return_value={"workflow_runs": [None]}):
             with self.assertRaisesRegex(ValueError, "Malformed"):
