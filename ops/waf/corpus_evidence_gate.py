@@ -28,10 +28,10 @@ V3_LIMITS = {"max_fp", "max_fn", "max_fp_rate", "max_fn_rate",
              "min_benign", "min_malicious"}
 V3_POLICY_KEYS = {"schemaVersion", "mode", "routes", "approvedRulesetSha256",
                   "corpusManifestSha256", "gatewaySha", "platform"}
-HEX64 = re.compile(r"[A-F0-9]{64}\\Z".replace("\\\\Z", "\\Z"))
-HEX40 = re.compile(r"[A-Fa-f0-9]{40}\\Z".replace("\\\\Z", "\\Z"))
-CANONICAL_ROUTE = re.compile(r"/(?:[A-Za-z0-9._~-]+(?:/[A-Za-z0-9._~-]+)*)?\\Z".replace("\\\\Z", "\\Z"))
-CASE_ID = re.compile(r"[A-Za-z0-9_.-]{1,128}\\Z".replace("\\\\Z", "\\Z"))
+HEX64 = re.compile(r"[A-F0-9]{64}\Z")
+HEX40 = re.compile(r"[A-Fa-f0-9]{40}\Z")
+CANONICAL_ROUTE = re.compile(r"/(?:[A-Za-z0-9._~-]+(?:/[A-Za-z0-9._~-]+)*)?\Z")
+CASE_ID = re.compile(r"[A-Za-z0-9_.-]{1,128}\Z")
 
 
 def evaluate(rows, policy):
