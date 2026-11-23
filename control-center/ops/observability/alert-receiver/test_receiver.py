@@ -194,6 +194,31 @@ class ReceiverTests(unittest.TestCase):
         finally:
             connection.close()
 
+    def test_valid_json_prefix_with_truncated_declared_body_is_rejected(self):
+        import http.client
+        import socket
+        payload = b'{"version":"4","alerts":[{"status":"firing","labels":{"alertname":"Truncated"}}]}'
+        connection = http.client.HTTPConnection(
+            "127.0.0.1", self.server.server_port, timeout=2)
+        try:
+            connection.putrequest("POST", "/alerts")
+            connection.putheader("Content-Type", "application/json")
+            connection.putheader("Content-Length", str(len(payload) + 10))
+            connection.endheaders()
+            connection.send(payload)
+            # EOF releases the buffered read before the declared length;
+            # even complete JSON must not be mistaken for full HTTP framing.
+            connection.sock.shutdown(socket.SHUT_WR)
+            response = connection.getresponse()
+            self.assertEqual(response.status, 400)
+            self.assertEqual(response.getheader("Connection"), "close")
+            self.assertEqual(json.loads(response.read()),
+                             {"error": "truncated_request_body"})
+            with urlopen(f"{self.base_url}/events", timeout=2) as evidence:
+                self.assertEqual(json.load(evidence)["count"], 0)
+        finally:
+            connection.close()
+
     def test_incomplete_webhook_body_times_out_and_closes_socket(self):
         import http.client
         import receiver
