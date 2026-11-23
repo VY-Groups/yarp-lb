@@ -65,6 +65,11 @@ def collect(repo, sha, token):
         if not isinstance(run_id, int) or run_id <= 0:
             raise ValueError("Invalid GitHub Actions run id")
         jobs = paged("/repos/" + encoded + "/actions/runs/" + str(run_id) + "/jobs", token)
+        # GitHub job IDs are provenance handles for retrieving exact failed
+        # logs. Missing/invalid IDs cannot be trusted as evidence, even when
+        # an API response otherwise claims all jobs succeeded.
+        if any(type(job.get("id")) is not int or job["id"] <= 0 for job in jobs):
+            raise ValueError("Invalid GitHub Actions job id")
         evidence.append({
             "run_id": run_id, "name": run.get("name"),
             "url": run.get("html_url"), "status": run.get("status"),
