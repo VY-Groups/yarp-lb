@@ -138,6 +138,10 @@ class DockerComposeProvider:
         if (parent.stat().st_uid not in (0, os.geteuid()) or
                 stat.S_IMODE(parent.stat().st_mode) & 0o022):
             raise ValueError("WAF Compose parent cannot be changed by untrusted users")
+        source_file = self.compose.stat()
+        if (source_file.st_uid not in (0, os.geteuid()) or
+                stat.S_IMODE(source_file.st_mode) & 0o022):
+            raise ValueError("WAF Compose source must not be writable by other identities")
         original = signatures._read_file(self.compose, limit=262144)
         u = urllib.parse.urlsplit(health_url)
         if (u.scheme != "http" or u.hostname != "127.0.0.1" or
