@@ -72,6 +72,8 @@ var app = builder.Build();
 if (otelOverheadMode)
 {
     var accessLogger = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("GatewayCore.AccessLog");
+    var telemetryAccessLogger = app.Services.GetRequiredService<ILoggerFactory>()
+        .CreateLogger("GatewayCore.TelemetryAccess");
     app.Use(async (ctx, next) =>
     {
         if (ctx.Request.Path.StartsWithSegments("/lab")) { await next(); return; }
@@ -86,9 +88,15 @@ if (otelOverheadMode)
                           routeCandidate.All(static c => char.IsAsciiLetterOrDigit(c) || c is '_' or '-')
                 ? routeCandidate : "unmatched";
             var elapsed = Stopwatch.GetElapsedTime(started).TotalMilliseconds;
+            var now = DateTimeOffset.UtcNow;
+            var durationMs = Math.Round(elapsed, 3);
             GatewayOpenTelemetry.LogAccess(accessLogger,
-                DateTimeOffset.UtcNow, clientAddress.Address?.ToString() ?? "unknown", clientAddress.Source,
-                ctx.Request.Method, routeId, ctx.Response.StatusCode, Math.Round(elapsed, 3));
+                now, clientAddress.Address?.ToString() ?? "unknown", clientAddress.Source,
+                ctx.Request.Method, routeId, ctx.Response.StatusCode, durationMs);
+            GatewayOpenTelemetry.LogTelemetryAccess(telemetryAccessLogger,
+                now, GatewayOpenTelemetry.BoundedTelemetryMethod(ctx.Request.Method),
+                GatewayOpenTelemetry.IsSafeTelemetryId(routeId) ? routeId : "_other",
+                ctx.Response.StatusCode, durationMs);
         }
     });
 }
