@@ -203,7 +203,14 @@ try
     var beforeRotationFiles = Directory.GetFiles(ring, "*.xml")
         .Select(Path.GetFileName).ToHashSet(StringComparer.Ordinal);
     var manager = overlapping.GetRequiredService<IKeyManager>();
-    manager.CreateNewKey(DateTimeOffset.UtcNow.AddMinutes(-1), DateTimeOffset.UtcNow.AddDays(30));
+    // Use a strictly newer activation than the existing active default.
+    // Backdating by a minute lets Data Protection prefer the older key;
+    // merely creating encrypted XML does not prove the new key serves data.
+    var activation = DateTimeOffset.UtcNow.AddSeconds(2);
+    manager.CreateNewKey(activation, DateTimeOffset.UtcNow.AddDays(30));
+    var untilActivation = activation - DateTimeOffset.UtcNow;
+    if (untilActivation > TimeSpan.Zero)
+        Thread.Sleep(untilActivation + TimeSpan.FromMilliseconds(350));
     var newestFiles = Directory.GetFiles(ring, "*.xml")
         .Where(path => !beforeRotationFiles.Contains(Path.GetFileName(path))).ToArray();
     Check(newestFiles.Length == 1,
