@@ -1,0 +1,43 @@
+name: Exact main push evidence verifier regression tests
+on:
+  pull_request:
+    paths:
+      - "ops/automation/verify_main_push_runs.py"
+      - "ops/automation/test_verify_main_push_runs.py"
+      - ".github/workflows/exact-main-push-evidence-tests.yml"
+  push:
+    branches: [main]
+    paths:
+      - "ops/automation/verify_main_push_runs.py"
+      - "ops/automation/test_verify_main_push_runs.py"
+      - ".github/workflows/exact-main-push-evidence-tests.yml"
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  evidence-contract:
+    name: Main push evidence contract (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2022]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Run offline fail-closed acceptance tests
+        run: python -m unittest discover -s ops/automation -p test_verify_main_push_runs.py -v
+      - name: Reject missing required workflow CLI argument
+        shell: python
+        run: |
+          import subprocess
+          import sys
+          script = "ops/automation/verify_main_push_runs.py"
+          result = subprocess.run([sys.executable, script, "--repo", "example/repository",
+                                   "--sha", "a" * 40], capture_output=True, text=True)
+          if result.returncode != 2 or "--required" not in result.stderr:
+              raise SystemExit("missing required-workflow CLI parameter must be rejected")
