@@ -153,11 +153,16 @@ class OperatorCorpusTests(unittest.TestCase):
 
     def test_report_is_owner_only_and_atomic_even_under_permissive_umask(self):
         output = Path(self.temp.name) / "private-report.json"
-        with patch.object(os, "umask", wraps=os.umask) as mocked_umask:
-            # No need to change global umask: open(..., 0o600) may only
-            # reduce permissions regardless of the user's process umask.
+        if os.name == "posix":
+            # Exercise a genuinely permissive umask, not just the default
+            # CI runner setting; restore it immediately after the write.
+            original_umask = os.umask(0)
+            try:
+                waf.write_private_report({"cases": [{"id": "private-id"}]}, output)
+            finally:
+                os.umask(original_umask)
+        else:
             waf.write_private_report({"cases": [{"id": "private-id"}]}, output)
-            self.assertEqual(mocked_umask.call_count, 0)
         if os.name == "posix":
             self.assertEqual(stat.S_IMODE(output.stat().st_mode), 0o600)
         self.assertEqual(json.loads(output.read_text())["cases"][0]["id"], "private-id")
