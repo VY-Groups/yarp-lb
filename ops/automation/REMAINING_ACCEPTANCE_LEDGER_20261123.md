@@ -1,6 +1,6 @@
 # GatewayCore remaining acceptance ledger — 2026-11-23
 
-This ledger is a reproducible **unverified-gates** checklist, not a certification. Baseline refreshed from GitHub on 2026-11-23: `main` at `b1ca004828c6daeb3d1c513e74d845e97c68a4c5`; open software issues #34, #48, #50, #51 and separate physical #36. This is a point-in-time snapshot, not an assertion of future branch or issue states. Refresh all states, exact-head CI and reviews before applying this checklist. No source issue is complete merely because a related PR merged.
+This ledger is a reproducible **unverified-gates** checklist, not a certification. Baseline refreshed from GitHub on 2026-11-23: `main` at `540c95e00cb91d401eb97dc922efec78de54f394`; open software issues #34, #48, #50, #51 and separate physical #36. This is a point-in-time snapshot, not an assertion of future branch or issue states. Refresh all states, exact-head CI and reviews before applying this checklist. No source issue is complete merely because a related PR merged.
 
 ## Evidence contract (applies to every issue)
 
