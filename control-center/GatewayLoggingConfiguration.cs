@@ -18,6 +18,14 @@ public static class GatewayLoggingConfiguration
         // remain at Information. YARP's own request/response diagnostics are
         // redundant at that level and allocate formatted strings for every
         // forwarded request; keep actionable YARP warnings and errors.
+        // A separate, IP-free record exists only for the outbound OTLP
+        // provider. Writing that record to the local console *as well as*
+        // the original GatewayCore.AccessLog duplicates every INFO request
+        // and formats an extra line in the forwarding hot path.
+        // Filter only this console provider: the OpenTelemetryLoggerProvider
+        // continues to receive the sanitized event independently.
+        logging.AddFilter<NonBlockingConsoleLoggerProvider>(
+            "GatewayCore.TelemetryAccess", LogLevel.None);
         logging.AddFilter<NonBlockingConsoleLoggerProvider>(
             "Yarp.ReverseProxy", LogLevel.Warning);
         // The gateway emits its own timestamped GatewayCore.AccessLog entry for
