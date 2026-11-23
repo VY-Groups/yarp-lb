@@ -424,3 +424,44 @@ tests:
       - eval_time: 3m
         alertname: GatewayAuditOutboxDeliveryFault
         exp_alerts: []
+
+  # The worker has stopped progressing even though its last-known fault
+  # status is healthy and the OTLP exporter still answers.
+  - interval: 1m
+    input_series:
+      - series: 'gateway_audit_outbox_enabled{job="otel-collector",instance="otel-collector:8889",service_instance_id="gateway-node-a"}'
+        values: '1 1 1 1 1'
+      - series: 'gateway_audit_outbox_last_update_unixtime{job="otel-collector",instance="otel-collector:8889",service_instance_id="gateway-node-a"}'
+        values: '0 0 0 0 0'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: GatewayAuditOutboxWorkerStale
+        exp_alerts:
+          - exp_labels: {job: otel-collector, instance: "otel-collector:8889", service_instance_id: gateway-node-a, severity: critical}
+            exp_annotations:
+              summary: "GatewayCore durable audit outbox worker status is stale"
+              description: "Configured audit worker on gateway-node-a has not published a new status for over 90 seconds. Last-known healthy queue state is not delivery proof. Verify worker health, protected outbox API and signed remote receipts."
+              runbook: "control-center/docs/EXTERNAL_AUDIT_INTENT.md"
+  # Heartbeat refreshed every minute under a healthy worker.
+  - interval: 1m
+    input_series:
+      - series: 'gateway_audit_outbox_enabled{job="otel-collector",instance="otel-collector:8889",service_instance_id="gateway-node-a"}'
+        values: '1 1 1 1 1'
+      - series: 'gateway_audit_outbox_last_update_unixtime{job="otel-collector",instance="otel-collector:8889",service_instance_id="gateway-node-a"}'
+        values: '0 60 120 180 240'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: GatewayAuditOutboxWorkerStale
+        exp_alerts: []
+  # An intentionally unconfigured durable outbox is NOT an operational
+  # success, but must not raise a false configured-worker stall alert.
+  - interval: 1m
+    input_series:
+      - series: 'gateway_audit_outbox_enabled{job="otel-collector",instance="otel-collector:8889",service_instance_id="gateway-node-a"}'
+        values: '0 0 0 0 0'
+      - series: 'gateway_audit_outbox_last_update_unixtime{job="otel-collector",instance="otel-collector:8889",service_instance_id="gateway-node-a"}'
+        values: '0 0 0 0 0'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: GatewayAuditOutboxWorkerStale
+        exp_alerts: []
