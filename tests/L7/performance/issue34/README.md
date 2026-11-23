@@ -39,3 +39,42 @@ observed stack is not necessarily an allocation stack. Keep raw `.nettrace`
 files for reviewer correlation with GC/allocation events and the paired
 allocation report. A green conversion neither proves lower bytes/request nor
 substitutes for Windows parity, correctness, or physical load acceptance.
+
+## Source-IP affinity pooled candidate selection (issue #34)
+
+The shipping `SourceIpHash` policy previously used LINQ `Where(...).ToArray()`,
+`Select(...).ToArray()` for destination references, IDs and weights **on each
+request**. The candidate instead snapshots eligible destinations once into
+rented arrays, hashes only the exact populated prefix, and returns all pooled
+arrays in `finally`. Reference arrays are cleared before pool reuse, including
+when the client has no address or an invalid destination weight throws. The
+configured weight range, hashing input, deterministic tie breaking, drain
+exclusion and no-client/no-eligible behavior are unchanged.
+
+The pure `LoadBalancingCore.PickRendezvousIndex` retains the strict public
+equal-length overload and adds an explicit bounded prefix overload for pooled
+arrays whose backing capacities differ. A deterministic Unicode/long-ID
+parity corpus verifies 2,000 results against the original algorithm; negative
+cases reject invalid prefix counts and active invalid weights without reading
+stale pool entries. The existing real L7 test already exercises SourceIpHash
+selection and failover on Windows/Ubuntu.
+
+In addition to the existing three matched WeightedRandom/OTLP profiling
+rounds, the PR's CI runs a **second** three-pair `SourceIpHash` workload with
+OTLP disabled on the **exact same baseline/candidate SHAs**, 75 VUs,
+45-second per-phase duration, identical payloads and connection reuse. This
+is the relevant measured policy for the changed hot path. The artifact
+`artifacts/issue34/source-affinity/paired-report.json` includes the
+allocation delta and 95% paired uncertainty interval; raw bounded
+`.nettrace`, converted nonempty Speedscope samples, GC/pause, working set,
+p95/p99 and RPS remain reviewable. Failures/missing artifacts fail CI.
+
+This lab uses loopback clients, whose source affinity may concentrate traffic
+on one backend; the direct-origin synthetic 70/30 mixture therefore **is not
+an exact backend-selection match**. A paired baseline/candidate comparison
+can help isolate policy changes but does not certify site traffic,
+multi-source-IP distribution, entire-gateway performance or production safety.
+A confidence interval crossing zero **does not prove** a savings. Windows
+profiling, streaming and non-idempotent POST characterization, signed
+capacity tests and physical 60-minute 750 Mbps acceptance remain independent
+gates. Do not close #34 from this optimization alone.
