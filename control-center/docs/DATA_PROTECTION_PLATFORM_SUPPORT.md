@@ -13,11 +13,32 @@ runtime bundle.
 
 | Host / feature | Current implementation | CI or artifact evidence | Support boundary |
 | --- | --- | --- | --- |
-| Windows Server 2022 | ASP.NET Data Protection XML is stored under `%ProgramData%\GatewayCoreYarp\ControlPlane\data-protection-keys`, protected with Windows DPAPI LocalMachine scope, and access-controlled for the current process identity, SYSTEM and local Administrators. Startup rejects inherited or broadly accessible product/state/key directories and existing key files; it does not rewrite an existing unsafe ACL or key ring. Backend mTLS lookup uses `LocalMachine\My` by certificate thumbprint. Isolated traffic/management listeners load PFX files from paths. | `windows-2022` build and DPAPI acceptance inspect protected XML and key-file ACLs, reopen approved persisted keys, decrypt pre-restart data, reject tampered wrapped material, and prove existing unsafe ACLs are rejected without mutation. | Windows Service hosting and installation are not implemented or qualified. `INSTALL.ps1` is an offline source-staging installer for an existing Windows Server/.NET 10 host, not a service installer. An installation created before explicit ACL enforcement may fail startup until an independently reviewed offline ACL migration is performed; this release does not migrate it. CI does not qualify production service identity, host reboot, or recovery. DPAPI LocalMachine data is host-bound; copying its key-ring directory to another server is not a recovery method. |
+| Windows Server 2022 | ASP.NET Data Protection XML is stored under `%ProgramData%\GatewayCoreYarp\ControlPlane\data-protection-keys`, protected with Windows DPAPI LocalMachine scope, and access-controlled for the current process identity, SYSTEM and local Administrators. Startup rejects inherited or broadly accessible product/state/key directories and existing key files; it does not rewrite an existing unsafe ACL or key ring. Backend mTLS lookup uses `LocalMachine\My` by certificate thumbprint. Isolated traffic/management listeners load PFX files from paths. | `windows-2022` build and DPAPI acceptance inspect protected XML and key-file ACLs, reopen approved persisted keys, decrypt pre-restart data, reject tampered wrapped material, and prove existing unsafe ACLs are rejected without mutation. | Windows Service lifetime is registered when running under the Windows Service Control Manager (SCM); registration/installation and real service-account behavior are not yet qualified. `INSTALL.ps1` is an offline source-staging installer for an existing Windows Server/.NET 10 host, not a service installer. An installation created before explicit ACL enforcement may fail startup until an independently reviewed offline ACL migration is performed; this release does not migrate it. CI does not qualify production service identity, host reboot, or recovery. DPAPI LocalMachine data is host-bound; copying its key-ring directory to another server is not a recovery method. |
 | Ubuntu 24.04 | Linux Data Protection keys are persisted below `$YARP_CONTROL_PLANE_DIR/data-protection-keys` and RSA-certificate-wrapped. State and secret files require owner-only permissions. Isolated HTTPS listeners load path-based PFX files with protected password files. | `ubuntu-24.04` build, filesystem/key-wrapping tests, certificate-overlap tests, real Control Center process restart/cookie acceptance, and a temporary systemd service start/restart using the shipped unit template run in Actions. The service test uses an isolated runner account and disposable paths. | CI exercises a template-derived temporary unit, not a production installation. Production provisioning, service identity/ACLs, host reboot, backup/recovery, and a separate physical host remain unverified. The template is not a complete installer or secret-provisioning procedure. |
 | RHEL-family Linux | No RHEL-specific build or Data Protection qualification is recorded. Linux source paths use .NET file APIs and an RSA PFX, but portability is not qualification. | None. | **Not qualified for deployment.** Do not infer RHEL support from Ubuntu or .NET portability. Test the exact RHEL release, .NET 10 runtime, OpenSSL/crypto provider, service identity, filesystem, certificate handling, and systemd lifecycle first. |
 | HTTP load-balancing policy behavior | The application exposes YARP `RoundRobin`, `PowerOfTwoChoices`, `LeastRequests`, `Random`, and `FirstAlphabetical`, plus GatewayCore `WeightedRandom`, `SourceIpHash`, and `PrimaryBackup`. These are HTTP destination policies, not OS-specific behavior. | Selected policies and failure behavior have Windows and Ubuntu L7 Actions acceptance. | The list does not certify every policy, protocol, or capacity on every host OS. It does not add L4, DNS/GSLB, or WAF support to the Control Center process. |
 | Product containers | The repository has Docker-based CI/acceptance fixtures for selected integrations. | Disposable test containers only. | No production GatewayCore container image, entrypoint, key-volume lifecycle, or container-host support matrix is published. Do not deploy an acceptance image as a product image. |
+
+## Windows Service host lifetime (development support only)
+
+The .NET 10 shipping Control Center registers the Windows SCM lifetime only
+when its process actually runs as a Windows Service. Normal interactive
+console runs and GitHub hosted non-service smoke tests retain the existing
+startup and shutdown behavior. The registration does not install a service,
+provision an identity, create a firewall rule, select listener IPs, elevate
+permissions, or modify the Windows DPAPI LocalMachine key scope. The
+`Microsoft.Extensions.Hosting.WindowsServices` package must be present in
+an offline package feed for any offline source restore.
+
+An authorized deployment must separately provision a least-privileged
+service identity and lock down the existing ProgramData state, key ring,
+certificate private-key access, management listener, and executable paths.
+Windows DPAPI LocalMachine encrypted XML is host-bound and cannot be restored
+to another gateway by copying the key ring. This software change does not
+establish service installation, stop/restart/reboot, identity rotation,
+backup/DR, or Windows Service physical qualification. Track those under the
+remaining #48 acceptance and real host #36 evidence; do not mark Windows
+Service installation supported solely because an SCM lifetime is registered.
 
 ## HTTP protocol and optional-engine support boundary
 
