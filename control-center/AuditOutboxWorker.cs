@@ -12,6 +12,10 @@ internal sealed class AuditOutboxWorker(DurableAuditOutbox outbox, ILogger<Audit
                 for (int i = 0; i < 16 && !stoppingToken.IsCancellationRequested; i++)
                     if (!await outbox.DeliverOneAsync(stoppingToken)) break;
                 var status = outbox.Status();
+                // Publish cached, identity-free audit export state to OTLP.
+                // The exporter reads only integer gauges, never outbox files.
+                GatewayOpenTelemetry.ReportAuditOutboxStatus(
+                    enabled: true, status.Pending, status.StorageFault, status.DeliveryBlocked);
                 bool blocked = status.StorageFault || status.DeliveryBlocked;
                 if (blocked && !previouslyBlocked)
                     logger.LogWarning("External audit delivery blocked; inspect authenticated audit delivery status");
