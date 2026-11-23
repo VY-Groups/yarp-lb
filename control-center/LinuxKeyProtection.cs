@@ -199,9 +199,24 @@ public static class LinuxKeyProtection
                         (isRevocation && reader.LocalName == "encryptedSecret"))
                         throw new InvalidOperationException(
                             "Existing Linux key-ring XML contains unexpected key material");
-                    if (isKey && reader.LocalName == "encryptedSecret" &&
-                        reader.NamespaceURI == protectionNamespace)
+                    if (isKey && reader.LocalName == "encryptedSecret")
+                    {
+                        // A foreign namespace may hide extra secret material
+                        // alongside the approved certificate-wrapped element.
+                        if (reader.NamespaceURI != protectionNamespace)
+                            throw new InvalidOperationException(
+                                "Linux key-ring XML contains a foreign encryptedSecret element");
+                        var decryptor = reader.GetAttribute("decryptorType");
+                        var assemblyQualified = decryptor?.Split(
+                            ',', StringSplitOptions.TrimEntries);
+                        if (assemblyQualified is null || assemblyQualified.Length < 2 ||
+                            assemblyQualified[0] !=
+                                "Microsoft.AspNetCore.DataProtection.XmlEncryption.EncryptedXmlDecryptor" ||
+                            assemblyQualified[1] != "Microsoft.AspNetCore.DataProtection")
+                            throw new InvalidOperationException(
+                                "Linux key-ring XML is not from the approved certificate decryptor");
                         encryptedSecretCount++;
+                    }
                 }
                 if (isKey && encryptedSecretCount != 1)
                     throw new InvalidOperationException(
