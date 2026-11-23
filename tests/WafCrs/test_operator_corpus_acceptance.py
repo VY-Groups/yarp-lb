@@ -40,8 +40,10 @@ def corpus():
 class LocalWaf(BaseHTTPRequestHandler):
     # Unit-test audit fixtures only; real ModSecurity is exercised by verify.sh.
     observed = []
+    request_headers = []
 
     def handle_case(self):
+        self.request_headers.append((self.command, dict(self.headers.items())))
         self.observed.append((self.path, self.headers.get("X-GatewayCore-Corpus-Run"),
                               self.headers.get("X-GatewayCore-Corpus-Case")))
         length = int(self.headers.get("Content-Length", "0"))
@@ -379,6 +381,12 @@ class OperatorCorpusTests(unittest.TestCase):
             self.assertFalse(unverified["passesZeroFalsePositiveNegativeGate"])
             good = waf.run_cases(expected, factory, fake_audit)
             self.assertTrue(good["passesZeroFalsePositiveNegativeGate"])
+            for method, headers in LocalWaf.request_headers:
+                if method == "GET":
+                    self.assertNotIn("Content-Type", headers)
+                    self.assertNotIn("Content-Length", headers)
+                else:
+                    self.assertIn("Content-Type", headers)
             self.assertEqual(
                 {"TP": 2, "TN": 2, "FP": 0, "FN": 0, "ERROR": 0},
                 good["counts"])
