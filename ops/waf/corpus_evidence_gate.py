@@ -189,31 +189,46 @@ def evaluate(rows, policy):
 
 
 def write_private_report(path, report):
-    """Write local, operator-owned evidence via a fresh 0600 temporary inode.
+    """Create a non-overwriting 0600 operator report beneath a private directory.
 
-    Never follow a predictable temporary symlink or publish route identifiers
-    to stdout. Parent-directory permissions remain the operator's duty.
+    The report contains per-route labels. A permissive output directory or
+    replace-overwrite could leak evidence or erase a previous acceptance run.
     """
-    path.parent.mkdir(parents=True, exist_ok=True)
+    path = pathlib.Path(path)
+    if not path.is_absolute() or path.name in ("", ".", ".."):
+        raise ValueError("private WAF report needs an absolute output filename")
+    parent = path.parent
+    parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if parent.is_symlink() or parent.resolve(strict=True) != parent:
+        raise ValueError("private WAF report path cannot traverse a symlink")
+    directory = parent.stat()
+    if (not stat.S_ISDIR(directory.st_mode) or
+            (os.name == "posix" and
+             (directory.st_uid != os.geteuid() or
+              stat.S_IMODE(directory.st_mode) & 0o077))):
+        raise ValueError("private WAF report directory must be owner-only")
     temporary = path.with_name(path.name + ".tmp")
-    if path.is_symlink():
-        raise ValueError("private WAF evidence report destination is a symlink")
+    if path.is_symlink() or path.exists():
+        raise ValueError("private WAF evidence report must use a new destination")
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
     fd = os.open(temporary, flags, 0o600)
-    created = True
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             json.dump(report, handle, indent=2, sort_keys=True)
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
-        if path.is_symlink():
-            raise ValueError("private WAF evidence destination became a symlink")
-        os.replace(temporary, path)
-        created = False
+        # Exclusive hard-link promotion fails if another writer created the
+        # destination; unlike os.replace, it never overwrites prior evidence.
+        os.link(temporary, path, follow_symlinks=False)
+        if os.name == "posix":
+            directory_fd = os.open(parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
     finally:
-        if created:
-            temporary.unlink(missing_ok=True)
+        temporary.unlink(missing_ok=True)
 
 
 def main():
