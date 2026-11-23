@@ -84,7 +84,12 @@ public static class LinuxKeyProtection
         var passwordPath = SecretPath(passwordFileEnv);
         byte[] ReadSecret(string file, string purpose, int limit)
         {
-            try { return PrivateKeyFileSecurity.ReadPrivateFileBytes(file, purpose, limit); }
+            // Wrapper PFX and its separate password must each be independently
+            // provisioned private files. A second hardlink can alias the
+            // same secret inode outside the protected provisioning path;
+            // validate the opened handle's link count before reading bytes.
+            try { return PrivateKeyFileSecurity.ReadPrivateFileBytes(
+                file, purpose, limit, requireSingleLink: true); }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException)
             { throw new InvalidOperationException("Unsafe or unavailable Linux Data Protection secret", ex); }
         }
