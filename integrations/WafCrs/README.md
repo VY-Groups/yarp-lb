@@ -101,6 +101,14 @@ supplies `WAF_OPERATOR_CORPUS=/private/path/corpus.json` to the existing
 same pinned CRS image to blocking mode; it never changes anomaly thresholds,
 sends requests to public networks or repeats a potentially non-idempotent POST.
 The HTTP target is hard-coded to `127.0.0.1:18888` with redirects disabled.
+The source JSON is preflight-checked as a single-link regular file and
+read through a no-follow opened descriptor where supported; linked aliases,
+nonregular inputs, oversized data and path-to-open inode substitution fail
+closed before any network request. On Windows this is not a guarantee
+against a concurrently privileged attacker replacing path components.
+The operator must custody the trusted private parent directory. This does
+not authenticate case ground truth or certify production WAF rules.
+
 The fixture stays in its private original path and is not added to this
 repository, written into the artifacts directory or echoed in log output.
 

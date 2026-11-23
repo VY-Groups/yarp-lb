@@ -200,6 +200,38 @@ class OperatorCorpusTests(unittest.TestCase):
         self.assertFalse(destination.exists())
         self.assertFalse(temporary.exists())
 
+
+    def test_private_corpus_input_rejects_symlink_and_hardlink(self):
+        self.path.write_text(json.dumps(corpus()), encoding="utf-8")
+        alias = Path(self.temp.name) / "untrusted-alias.json"
+        try:
+            alias.symlink_to(self.path)
+        except (OSError, NotImplementedError):
+            self.skipTest("symlink unavailable on CI runner")
+        with self.assertRaises((OSError, ValueError)):
+            waf.load_corpus(alias)
+        alias.unlink()
+        try:
+            os.link(self.path, alias)
+        except (OSError, NotImplementedError):
+            self.skipTest("hardlink unavailable on CI runner")
+        for candidate in (alias, self.path):
+            with self.subTest(candidate=candidate.name):
+                with self.assertRaises(ValueError):
+                    waf.load_corpus(candidate)
+        alias.unlink()
+        self.assertEqual(len(waf.load_corpus(self.path)), 4)
+
+    def test_private_corpus_input_rejects_nonregular_and_oversized(self):
+        with self.assertRaises(ValueError):
+            waf.load_corpus(Path(self.temp.name))
+        with self.path.open("wb") as output:
+            output.truncate(waf.MAX_INPUT + 1)
+        with self.assertRaises(ValueError):
+            waf.load_corpus(self.path)
+        self.path.write_text(json.dumps(corpus()), encoding="utf-8")
+        self.assertEqual(len(waf.load_corpus(self.path)), 4)
+
     def test_schema_and_privacy(self):
         cases = self.load(corpus())
         self.assertEqual(4, len(cases))
