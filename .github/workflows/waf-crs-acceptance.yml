@@ -36,6 +36,11 @@ jobs:
             artifacts/waf-crs/benchmark-detection.json
             artifacts/waf-crs/benchmark-restored.json
             artifacts/waf-crs/benchmark-summary.json
+            artifacts/waf-crs/resource-direct.json
+            artifacts/waf-crs/resource-proxy-only.json
+            artifacts/waf-crs/resource-blocking.json
+            artifacts/waf-crs/resource-detection.json
+            artifacts/waf-crs/resource-restored.json
             artifacts/waf-crs/blocking-corpus-report.json
             artifacts/waf-crs/detection-corpus-report.json
             artifacts/waf-crs/waf-image-id.txt
