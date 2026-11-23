@@ -227,8 +227,10 @@ def transaction(provider, target, revision, receipt_file, policy_sha256):
     if before["mode"] == target:
         raise ValueError("already active: refuse replaying approved WAF policy")
     prior_image = before["imageId"]
+    print("WAF_ROLLOUT_STAGE=baseline_verified_image", file=sys.stderr, flush=True)
     provider.image_and_config(target)
     provider.smoke(before["mode"])
+    print("WAF_ROLLOUT_STAGE=baseline_http_passed", file=sys.stderr, flush=True)
     recorded_at = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
     evidence = {
         "schemaVersion": 1, "scope": "single-node-external-waf-mode-transaction",
@@ -238,19 +240,24 @@ def transaction(provider, target, revision, receipt_file, policy_sha256):
         "trustedRevisionFloorAdvanced": False, "fleetAtomic": False
     }
     try:
+        print("WAF_ROLLOUT_STAGE=apply_target", file=sys.stderr, flush=True)
         provider.apply(target)
         after = provider.inspect()
         if after["imageId"] != prior_image or after["mode"] != target:
             raise ValueError("WAF switched image or rejected approved engine mode")
+        print("WAF_ROLLOUT_STAGE=target_runtime_verified", file=sys.stderr, flush=True)
         provider.smoke(target)
+        print("WAF_ROLLOUT_STAGE=target_http_passed", file=sys.stderr, flush=True)
         # A successful mode change without a durable audit receipt is NOT
         # accepted: the receipt write belongs inside the rollback boundary.
         receipt(receipt_file, {
             **evidence, "result": "applied", "rollbackVerified": None,
             "sameImageVerified": True
         })
+        print("WAF_ROLLOUT_STAGE=receipt_committed", file=sys.stderr, flush=True)
         return "applied"
     except Exception:
+        print("WAF_ROLLOUT_STAGE=rollback_attempt", file=sys.stderr, flush=True)
         rolled_back = False
         try:
             provider.apply(before["mode"])
@@ -270,6 +277,7 @@ def transaction(provider, target, revision, receipt_file, policy_sha256):
             })
         except (OSError, ValueError):
             raise ValueError("rollout not accepted; audit receipt unavailable") from None
+        print("WAF_ROLLOUT_STAGE=rollback_recorded", file=sys.stderr, flush=True)
         raise ValueError("WAF rollout unsuccessful; inspect private receipt") from None
 
 def main(argv=None):
