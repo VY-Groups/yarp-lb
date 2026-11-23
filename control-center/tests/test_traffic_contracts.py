@@ -43,11 +43,35 @@ call = re.search(
     r'GatewayOpenTelemetry\.LogAccess\(accessLogger,\s*'
     r'timestampUtc,\s*clientAddress\.Address\?\.ToString\(\)\s*\?\?\s*"unknown",\s*'
     r'clientAddress\.Source,\s*ctx\.Request\.Method,\s*routeId,\s*ctx\.Response\.StatusCode,\s*'
-    r'Math\.Round\(elapsed\s*\*\s*1000\.0\s*/\s*System\.Diagnostics\.Stopwatch\.Frequency,\s*3\)\);',
-    code)
-assert call is not None, 'typed access log must use only the reviewed bounded fields'
+    r'durationMs\);', code)
+assert call is not None, 'local typed access log must preserve its reviewed source and fields'
 assert 'Request.Path' not in call.group(0) and 'Request.Query' not in call.group(0)
 assert 'Request.Headers' not in call.group(0)
+
+# Remote OTLP must use a different *strictly IP-free* log category. Neither
+# a forwarded address nor an untrusted HTTP method can cross the exporter.
+telemetry_template = (
+    'GATEWAY_TELEMETRY_ACCESS timestampUtc={TimestampUtc:o} method={Method} '
+    'routeId={RouteId} statusCode={StatusCode} durationMs={DurationMs}'
+)
+telemetry_decl = re.search(
+    r'\[LoggerMessage\(EventId\s*=\s*1,\s*Level\s*=\s*LogLevel\.Information,\s*'
+    r'Message\s*=\s*"([^"]+)"\)\]\s*public static partial void LogTelemetryAccess\(',
+    telemetry)
+assert telemetry_decl is not None and telemetry_decl.group(1) == telemetry_template
+assert 'CreateLogger("GatewayCore.TelemetryAccess")' in code
+export_call = re.search(
+    r'GatewayOpenTelemetry\.LogTelemetryAccess\(telemetryAccessLogger,\s*'
+    r'timestampUtc,\s*GatewayOpenTelemetry\.BoundedTelemetryMethod\(ctx\.Request\.Method\),\s*'
+    r'GatewayOpenTelemetry\.IsSafeTelemetryId\(routeId\)\s*\?\s*routeId\s*:\s*"_other",\s*'
+    r'ctx\.Response\.StatusCode,\s*durationMs\);', code)
+assert export_call is not None, 'OTLP access summary must use bounded non-identifying fields'
+for forbidden in ('clientAddress', 'RemoteIpAddress', 'X-Forwarded-For', 'Request.Path',
+                  'Request.Query', 'Request.Headers', 'ClientIp'):
+    assert forbidden not in export_call.group(0), 'untrusted data must not enter OTLP'
+assert 'string.Equals(category, "GatewayCore.TelemetryAccess", StringComparison.Ordinal)' in telemetry
+assert 'string.Equals(category, "GatewayCore.AccessLog", StringComparison.Ordinal)' not in telemetry
+
 assert '/admin/api/reports/traffic.json' in code
 assert '/admin/api/reports/traffic.csv' in code
 assert 'duration_bucket_upper_seconds' in code
