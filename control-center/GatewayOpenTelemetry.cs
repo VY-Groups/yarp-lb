@@ -138,13 +138,7 @@ public static partial class GatewayOpenTelemetry
                     // Mark only the actual selected ASP.NET RouteEndpoint's
                     // configured pattern as an exportable template.
                     options.EnrichWithHttpResponse = (activity, response) =>
-                    {
-                        if (response.HttpContext.GetEndpoint() is RouteEndpoint endpoint &&
-                            endpoint.RoutePattern.RawText is { } trustedPattern)
-                            activity.SetCustomProperty(
-                                GatewayTelemetryPrivacyProcessor.TrustedRouteTemplateProperty,
-                                trustedPattern);
-                    };
+                        StampSelectedRouteTemplate(activity, response.HttpContext);
                     options.RecordException = false;
                 })
                 .AddOtlpExporter(exporter =>
@@ -185,6 +179,19 @@ public static partial class GatewayOpenTelemetry
                     reader.PeriodicExportingMetricReaderOptions.ExportTimeoutMilliseconds = 5000;
                 }));
         return true;
+    }
+
+    // Called only by our ASP.NET instrumentation response hook after route
+    // selection. Never derive the trusted template from Activity tags, a
+    // forwarded header or the current request URL. Internal for the
+    // endpoint-metadata acceptance fixture; this is not an HTTP/API surface.
+    internal static void StampSelectedRouteTemplate(Activity activity, HttpContext context)
+    {
+        if (context.GetEndpoint() is RouteEndpoint endpoint &&
+            endpoint.RoutePattern.RawText is { } trustedPattern)
+            activity.SetCustomProperty(
+                GatewayTelemetryPrivacyProcessor.TrustedRouteTemplateProperty,
+                trustedPattern);
     }
 
     public static Activity? StartProxyActivity(HttpContext context)
@@ -490,7 +497,7 @@ internal sealed class GatewayTelemetryPrivacyProcessor : BaseProcessor<Activity>
             {
                 if (!insideParameter || !parameterHasName) return false;
                 insideParameter = false;
-                 continue;
+                continue;
             }
             if (character == '?' && !insideParameter) return false;
             if (!char.IsAsciiLetterOrDigit(character) &&
