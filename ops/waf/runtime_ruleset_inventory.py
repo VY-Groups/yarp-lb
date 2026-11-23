@@ -91,6 +91,8 @@ def canonical_rule_digest(archive):
                     continue
                 if not entry.isfile() or entry.islnk() or entry.issym():
                     raise ValueError("linked or special rule archive entry")
+                if name.casefold().endswith(".conf") and not name.endswith(".conf"):
+                    raise ValueError("case-aliased CRS config extension")
                 if not name.endswith(".conf"):
                     # README/docs in the directory are not live CRS .conf.
                     continue
