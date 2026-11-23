@@ -5,6 +5,7 @@ This attests the observed rule-file subtree, NOT nginx/modsecurity include
 reachability, rule execution, approved source custody or tenant decisions.
 No request payload, credential, private policy or raw rule data is printed.
 """
+import argparse
 import hashlib
 import io
 import os
@@ -12,6 +13,7 @@ from pathlib import PurePosixPath
 import re
 import selectors
 import subprocess
+import sys
 import tarfile
 import time
 
@@ -126,3 +128,21 @@ def canonical_rule_digest(archive):
 
 def observe(container_id):
     return canonical_rule_digest(limited_docker_copy(container_id))
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--container", required=True,
+                        help="literal running Docker container hex ID, never a name")
+    args = parser.parse_args()
+    try:
+        digest = observe(args.container)
+    except (OSError, ValueError, TimeoutError, subprocess.SubprocessError):
+        print("FAIL: bounded running CRS rule inventory unavailable", file=sys.stderr)
+        return 1
+    print(digest)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
