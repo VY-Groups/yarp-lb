@@ -14,6 +14,7 @@ def fixture(nodes=("gateway-a", "gateway-b"), now=2000000000):
         "gateway_audit_outbox_storage_fault": 0,
         "gateway_audit_outbox_delivery_blocked": 0,
         "gateway_audit_outbox_last_update_unixtime": now,
+        "gateway_audit_outbox_last_update_unixtime": now,
     }
     return {name: {
         "status": "success",
@@ -63,12 +64,39 @@ class AuditMetricAcceptanceTests(unittest.TestCase):
             ("gateway_audit_outbox_pending", "4097"),
             ("gateway_audit_outbox_storage_fault", "1"),
             ("gateway_audit_outbox_delivery_blocked", "1"),
+            ("gateway_audit_outbox_last_update_unixtime", str(self.NOW - 91)),
+            ("gateway_audit_outbox_last_update_unixtime", str(self.NOW + 31)),
+            ("gateway_audit_outbox_last_update_unixtime", "0"),
         ):
             with self.subTest(metric=name, bad=bad):
                 p = self.valid()
                 p[name]["data"]["result"][1]["value"][1] = bad
                 with self.assertRaises(ValueError):
                     verify(p, ["gateway-a", "gateway-b"], now=self.NOW)
+
+    def test_worker_staleness_is_independent_of_prometheus_scrape_freshness(self):
+        # A fresh Prometheus sample is not evidence that the 2s audit
+        # worker made progress; its cached Unix timestamp is authoritative.
+        p = self.valid()
+        worker = p["gateway_audit_outbox_last_update_unixtime"]["data"]["result"][0]
+        worker["value"] = [self.NOW, str(self.NOW - 91)]
+        with self.assertRaises(ValueError):
+            verify(p, ["gateway-a", "gateway-b"], now=self.NOW)
+        worker["value"] = [self.NOW, str(self.NOW - 90)]
+        self.assertEqual(verify(p, ["gateway-a", "gateway-b"], now=self.NOW), 2)
+        worker["value"] = [self.NOW - 181, str(self.NOW)]
+        with self.assertRaises(ValueError):
+            verify(p, ["gateway-a", "gateway-b"], now=self.NOW)
+
+    def test_missing_heartbeat_cannot_be_hidden_by_healthy_state_gauges(self):
+        p = self.valid()
+        del p["gateway_audit_outbox_last_update_unixtime"]
+        with self.assertRaises(ValueError):
+            verify(p, ["gateway-a", "gateway-b"], now=self.NOW)
+        p = self.valid()
+        p["gateway_audit_outbox_last_update_unixtime"]["data"]["result"].pop()
+        with self.assertRaises(ValueError):
+            verify(p, ["gateway-a", "gateway-b"], now=self.NOW)
 
     def test_untrusted_labels_and_unhealthy_samples_fail_closed(self):
         for scenario in ("private-label", "route-label", "destination-label",
