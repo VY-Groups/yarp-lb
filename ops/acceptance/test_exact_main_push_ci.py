@@ -18,11 +18,11 @@ class EvidenceTests(unittest.TestCase):
             if "/actions/runs?" in path:
                 return {"workflow_runs": [
                     {"id": 1, "head_sha": "a" * 40, "head_branch": "main",
-                     "event": "push", "status": "completed", "conclusion": "success"},
+                     "event": "push", "run_attempt": 1, "status": "completed", "conclusion": "success"},
                     {"id": 2, "head_sha": "a" * 40, "head_branch": "feature",
-                     "event": "push"},
+                     "event": "push", "run_attempt": 1},
                     {"id": 3, "head_sha": "b" * 40, "head_branch": "main",
-                     "event": "push"}]}
+                     "event": "push", "run_attempt": 1}]}
             return {"jobs": [{"id": 9, "status": "completed",
                               "conclusion": "failure",
                               "steps": [{"name": "Compile", "number": 4,
@@ -54,7 +54,7 @@ class EvidenceTests(unittest.TestCase):
             if "/actions/runs?" in path:
                 return {"workflow_runs": [{
                     "id": 1, "head_sha": "a" * 40, "head_branch": "main",
-                    "event": "push", "status": "completed", "conclusion": "success"
+                    "event": "push", "run_attempt": 1, "status": "completed", "conclusion": "success"
                 }]}
             return {"jobs": [{
                 "id": 7, "status": "completed", "conclusion": "success",
@@ -75,7 +75,7 @@ class EvidenceTests(unittest.TestCase):
             if "/git/ref/heads/main" in path:
                 return {"object": {"sha": "a" * 40}}
             return {"workflow_runs": [{"id": -1, "head_sha": "a" * 40,
-                                      "head_branch": "main", "event": "push"}]}
+                                      "head_branch": "main", "event": "push", "run_attempt": 1}]}
         with patch.object(module, "get_json", side_effect=fake):
             with self.assertRaisesRegex(ValueError, "Invalid GitHub Actions run id"):
                 module.collect("example/repo", "a" * 40, "fake")
@@ -87,7 +87,7 @@ class EvidenceTests(unittest.TestCase):
                     return {"object": {"sha": "a" * 40}}
                 if "/actions/runs?" in path:
                     return {"workflow_runs": [{"id": 1, "head_sha": "a" * 40,
-                                               "head_branch": "main", "event": "push",
+                                               "head_branch": "main", "event": "push", "run_attempt": 1,
                                                "status": "completed", "conclusion": "success"}]}
                 return {"jobs": [{"id": invalid, "status": "completed",
                                   "conclusion": "success", "steps": []}]}
@@ -96,13 +96,55 @@ class EvidenceTests(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError, "Invalid GitHub Actions job id"):
                         module.collect("example/repo", "a" * 40, "fake")
 
+    def test_run_attempt_provenance_required(self):
+        for bad_attempt in (None, 0, -1, True, "2"):
+            def fake(path, token):
+                if "/git/ref/heads/main" in path:
+                    return {"object": {"sha": "a" * 40}}
+                return {"workflow_runs": [{"id": 8, "head_sha": "a" * 40,
+                                          "head_branch": "main", "event": "push",
+                                          "run_attempt": bad_attempt}]}
+            with self.subTest(value=bad_attempt):
+                with patch.object(module, "get_json", side_effect=fake):
+                    with self.assertRaisesRegex(ValueError, "Invalid GitHub Actions run attempt"):
+                        module.collect("example/repo", "a" * 40, "fake")
+
+    def test_collected_run_attempt_is_emitted(self):
+        def fake(path, token):
+            if "/git/ref/heads/main" in path:
+                return {"object": {"sha": "a" * 40}}
+            if "/actions/runs?" in path:
+                return {"workflow_runs": [{"id": 8, "head_sha": "a" * 40,
+                                           "head_branch": "main", "event": "push",
+                                           "run_attempt": 3, "status": "completed",
+                                           "conclusion": "success"}]}
+            return {"jobs": [{"id": 9, "status": "completed",
+                              "conclusion": "success", "steps": []}]}
+        with patch.object(module, "get_json", side_effect=fake):
+            rows = module.collect("example/repo", "a" * 40, "fake")
+        self.assertEqual(rows[0]["run_attempt"], 3)
+        self.assertEqual(module.classify_runs(rows), "PASS")
+
+    def test_failed_incomplete_and_pass_verdicts(self):
+        success_job = {"status": "completed", "conclusion": "success"}
+        completed = {"status": "completed", "conclusion": "success",
+                     "jobs": [success_job]}
+        self.assertEqual(module.classify_runs([]), "INCOMPLETE")
+        self.assertEqual(module.classify_runs([completed]), "PASS")
+        self.assertEqual(module.classify_runs([{**completed,
+            "jobs": [{"status": "in_progress", "conclusion": None}]}]), "INCOMPLETE")
+        self.assertEqual(module.classify_runs([{**completed,
+            "jobs": [{"status": "completed", "conclusion": "failure"}]}]), "FAIL")
+        self.assertEqual(module.classify_runs([{**completed,
+            "conclusion": "cancelled"}]), "FAIL")
+
     def test_pending_job_is_not_a_success(self):
         def fake(path, token):
             if "/git/ref/heads/main" in path:
                 return {"object": {"sha": "a" * 40}}
             if "/actions/runs?" in path:
                 return {"workflow_runs": [{"id": 1, "head_sha": "a" * 40,
-                                            "head_branch": "main", "event": "push",
+                                            "head_branch": "main", "event": "push", "run_attempt": 1,
                                             "status": "completed", "conclusion": "success"}]}
             return {"jobs": [{"id": 7, "status": "in_progress", "conclusion": None}]}
         with patch.object(module, "get_json", side_effect=fake):
