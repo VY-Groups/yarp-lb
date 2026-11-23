@@ -18,7 +18,7 @@ public static class WindowsFleetKeyProtection
     private static readonly Regex ThumbprintPattern = new(
         @"\A[0-9A-Fa-f]{40}\z", RegexOptions.CultureInvariant | RegexOptions.Compiled);
 
-    public static bool TryConfigure(IDataProtectionBuilder builder)
+    public static bool TryConfigure(IDataProtectionBuilder builder, string? encryptedKeyDirectory = null)
     {
         if (!OperatingSystem.IsWindows())
             throw new PlatformNotSupportedException("Windows fleet certificate mode requires Windows");
@@ -36,6 +36,10 @@ public static class WindowsFleetKeyProtection
             throw new InvalidOperationException(
                 "Windows fleet previous wrapping identity must differ from the current certificate");
 
+        // A local DPAPI-wrapped XML key from a legacy install CANNOT be
+        // carried to a different Windows node. Reject a mixed ring before
+        // creating an apparently portable fleet provider.
+        RejectLegacyOrUnwrappedKeyRing(encryptedKeyDirectory);
         var active = LoadPinnedMachineCertificate(current);
         X509Certificate2? prior = previous is null
             ? null : LoadPinnedMachineCertificate(previous);
@@ -46,6 +50,36 @@ public static class WindowsFleetKeyProtection
         if (prior is not null)
             builder.UnprotectKeysWithAnyCertificate(prior);
         return true;
+    }
+
+
+    private static void RejectLegacyOrUnwrappedKeyRing(string? directory)
+    {
+        if (string.IsNullOrWhiteSpace(directory) || !Path.IsPathFullyQualified(directory) ||
+            !Directory.Exists(directory) ||
+            (File.GetAttributes(directory) & FileAttributes.ReparsePoint) != 0)
+            throw new InvalidOperationException(
+                "Windows fleet mode requires an existing protected absolute key-ring directory");
+        foreach (var keyXml in Directory.EnumerateFiles(directory, "*.xml",
+                     SearchOption.TopDirectoryOnly))
+        {
+            var info = new FileInfo(keyXml);
+            if (info.Length <= 0 || info.Length > 131072 ||
+                (info.Attributes & FileAttributes.ReparsePoint) != 0)
+                throw new InvalidOperationException(
+                    "Windows fleet key XML is linked, empty or oversized");
+            var xml = File.ReadAllText(keyXml);
+            if (xml.Contains("DpapiXmlDecryptor", StringComparison.OrdinalIgnoreCase) ||
+                xml.Contains("<masterKey", StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException(
+                    "Existing machine-bound or unwrapped keys need an approved offline migration");
+            // Revocation XML has no descriptor. Everything else imported as a
+            // key must already carry encrypted secret material.
+            if (!xml.Contains("encryptedSecret", StringComparison.Ordinal) &&
+                !xml.Contains("<revocation", StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException(
+                    "Windows fleet mode refuses an existing unverified key XML");
+        }
     }
 
     private static string ValidateThumbprint(string? raw, string name)
