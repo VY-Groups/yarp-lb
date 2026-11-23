@@ -1,6 +1,6 @@
 # GatewayCore #50 — site telemetry acceptance evidence
 
-This is an operator evidence procedure, **not** a claim of production acceptance. Run only after independent software review, on an authorized isolated environment. Do not copy bearer tokens, customer labels, IP addresses or unredacted traces into GitHub. See [OTEL_EXPORT.md](../control-center/docs/OTEL_EXPORT.md) for signal contracts and [#36](https://github.com/VY-Groups/yarp-lb/issues/36) for the consolidated physical gate.
+This is an operator evidence procedure, **not** a claim of production acceptance. Run only after independent software review, on an authorized isolated environment. Do not copy bearer tokens, customer labels, IP addresses or unredacted traces into GitHub. See [OTEL_EXPORT.md](OTEL_EXPORT.md) for signal contracts and issue #36 for the consolidated physical gate.
 
 ## Preconditions and immutable test identity
 
