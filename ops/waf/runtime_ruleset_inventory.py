@@ -85,8 +85,13 @@ def canonical_rule_digest(archive):
                 name = entry.name.removeprefix("./").rstrip("/")
                 parts = PurePosixPath(name).parts
                 if (".." in parts or "." in parts or not parts or
-                        parts[0] != "rules"):
-                    raise ValueError("unexpected rule archive member")
+                        parts[0] != "rules" or
+                        name != "/".join(parts) or
+                        not name.isascii() or
+                        any(ord(char) < 33 or ord(char) > 126 for char in name)):
+                    # PurePosixPath normalizes 'rules//x' and 'rules/./x';
+                    # reject both instead of hashing alternate spellings.
+                    raise ValueError("unexpected or ambiguous rule archive member")
                 if entry.isdir():
                     continue
                 if not entry.isfile() or entry.islnk() or entry.issym():
