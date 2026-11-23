@@ -133,6 +133,50 @@ class EvidenceGateTests(unittest.TestCase):
             self.assertEqual(sentinel.read_text(), "unchanged")
             self.assertTrue(alias.is_symlink())
 
+    def test_report_creation_is_private_and_never_overwrites_prior_run(self):
+        if os.name != "posix":
+            self.skipTest("POSIX owner-only directory enforcement")
+        with tempfile.TemporaryDirectory(prefix="waf-report-custody-") as scratch:
+            root = pathlib.Path(scratch)
+            private = root / "private-results"
+            report = private / "revision-1.json"
+            gate.write_private_report(report, {"status": "PASS", "cases": 2})
+            self.assertEqual(stat.S_IMODE(private.stat().st_mode), 0o700)
+            self.assertEqual(stat.S_IMODE(report.stat().st_mode), 0o600)
+            original = report.read_bytes()
+            with self.assertRaisesRegex(ValueError, "new destination"):
+                gate.write_private_report(report, {"status": "FAIL"})
+            self.assertEqual(report.read_bytes(), original)
+            self.assertFalse((private / "revision-1.json.tmp").exists())
+
+            # Existing group-readable parents are never silently accepted.
+            public = root / "permissive"
+            public.mkdir(mode=0o755)
+            public.chmod(0o755)
+            with self.assertRaisesRegex(ValueError, "owner-only"):
+                gate.write_private_report(public / "unsafe.json", {"status": "PASS"})
+            self.assertFalse((public / "unsafe.json").exists())
+
+    def test_report_symlinked_parent_and_final_component_fail_closed(self):
+        if os.name != "posix":
+            self.skipTest("POSIX symlink custody checks")
+        with tempfile.TemporaryDirectory(prefix="waf-report-alias-") as scratch:
+            root = pathlib.Path(scratch)
+            private = root / "trusted"
+            private.mkdir(mode=0o700)
+            alias = root / "aliased"
+            alias.symlink_to(private, target_is_directory=True)
+            with self.assertRaisesRegex(ValueError, "symlink"):
+                gate.write_private_report(alias / "cannot-write.json", {"status": "PASS"})
+            self.assertFalse((private / "cannot-write.json").exists())
+            sentinel = private / "sentinel.json"
+            sentinel.write_text("do-not-touch", encoding="utf-8")
+            linked = private / "report.json"
+            linked.symlink_to(sentinel)
+            with self.assertRaisesRegex(ValueError, "new destination"):
+                gate.write_private_report(linked, {"status": "FAIL"})
+            self.assertEqual(sentinel.read_text(encoding="utf-8"), "do-not-touch")
+
     def test_rejects_oversized_fields_and_excessive_case_count(self):
         too_long = row("x" * (gate.MAX_FIELD_CHARS + 1), "benign", "allow")
         with self.assertRaisesRegex(ValueError, "oversized"):
