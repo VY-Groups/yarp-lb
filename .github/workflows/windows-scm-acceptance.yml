@@ -1,0 +1,42 @@
+name: Windows SCM Data Protection restart acceptance
+on:
+  push:
+    branches: [main, "feature/**"]
+    paths:
+      - "control-center/Program.cs"
+      - "control-center/WindowsStateProtection.cs"
+      - "control-center/tests/WindowsServiceAcceptance/**"
+      - ".github/workflows/windows-scm-acceptance.yml"
+  pull_request:
+    paths:
+      - "control-center/Program.cs"
+      - "control-center/WindowsStateProtection.cs"
+      - "control-center/tests/WindowsServiceAcceptance/**"
+      - ".github/workflows/windows-scm-acceptance.yml"
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  disposable-scm:
+    name: Real Windows SCM + DPAPI cookie continuity
+    runs-on: windows-2022
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+      - name: Parse PowerShell SCM acceptance script
+        shell: powershell
+        run: |
+          $tokens = $null
+          $issues = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            "control-center/tests/WindowsServiceAcceptance/VERIFY-WINDOWS-SCM.ps1",
+            [ref]$tokens, [ref]$issues) | Out-Null
+          if ($issues.Count -gt 0) {
+            throw 'SCM acceptance PowerShell syntax rejected'
+          }
+      - name: Real disposable SCM process and DPAPI protected session restart
+        shell: powershell
+        run: .\control-center\tests\WindowsServiceAcceptance\VERIFY-WINDOWS-SCM.ps1

@@ -87,15 +87,18 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # The disposable Ubuntu GitHub image may advertise an unreachable
-          # Azure HTTP mirror ahead of its working official HTTPS fallback.
+          # Disposable GitHub runner images may advertise unreachable regional
+          # HTTP mirrors ahead of a working official Ubuntu HTTPS archive.
           # Prefer the already-configured official archive, retaining Ubuntu
           # signature checks and the mandatory HTTP/3 integration assertions.
           # Never edit production host repositories or accept unsigned APT data.
           if [[ -f /etc/apt/apt-mirrors.txt ]] &&
-             grep -Fq 'http://azure.archive.ubuntu.com/ubuntu' /etc/apt/apt-mirrors.txt &&
-             grep -Eq '^https://archive.ubuntu.com/ubuntu/?' /etc/apt/apt-mirrors.txt; then
-            sudo sed -i '\#^http://azure.archive.ubuntu.com/ubuntu#d' /etc/apt/apt-mirrors.txt
+             grep -Eq '^https://archive[.]ubuntu[.]com/ubuntu/?' /etc/apt/apt-mirrors.txt; then
+            # Azure and AWS regional HTTP mirrors can be unreachable while
+            # the official HTTPS fallback is healthy. Remove ONLY the
+            # regional/default Ubuntu HTTP archive entries from this runner.
+            sudo sed -i -E '/^http:\/\/([[:alnum:].-]+\.)?archive\.ubuntu\.com\/ubuntu\/?/d' \
+              /etc/apt/apt-mirrors.txt
           fi
           # Fail loudly on an unresponsive package mirror rather than
           # silently consuming the entire 25-minute application-test job.
