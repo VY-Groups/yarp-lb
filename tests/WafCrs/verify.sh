@@ -452,4 +452,9 @@ print('PASS: Docker confirms no backend HostIp/HostPort bindings')
 PY
 docker compose -f "$COMPOSE" images > "$DIR/images.txt"
 write_corpus_report 1
+# Real signed P-256 two-reviewer mode switch on the existing pinned Docker
+# CRS container. Ephemeral fixture signers/evidence stay outside artifacts.
+# Requires genuine container HTTP allow/block, after-activation inspection,
+# private audit receipts and rejection of tampered signed evidence.
+python3 tests/WafCrs/live_signed_rollout.py "$COMPOSE"
 echo "WAF_CRS_LAB_PASS"
