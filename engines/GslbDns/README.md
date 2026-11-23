@@ -188,6 +188,22 @@ included):
   and subsequent valid queries still work. This is a parser regression check,
   not fuzzing or a complete denial-of-service assessment.
 
+## DNSSEC signer fault behavior (standalone engine)
+
+When a configured zone's signing key becomes unavailable while answering a
+DNSSEC-requesting query, the engine returns a minimal **SERVFAIL** response
+containing the original question but **no partially signed or unsigned zone
+records**. This response preserves the request's RD and CD flags, but does not claim AD, AA, or DO, and does not echo EDNS
+options or sensitive data. UDP and TCP responses use the same fail-closed
+handler. A signer fault must not terminate the UDP receive loop or prevent
+valid out-of-zone queries from being processed.
+
+The GSLB acceptance suite injects a disposed signing identity for both
+transports, then verifies strict SERVFAIL framing, bounded amplification and
+continued handling of another valid query. This is a deterministic software
+fault test, **not** production DNSSEC key rollover, public delegation or
+multi-authority availability certification.
+
 ## Example test configuration
 
 ### Optional signed zone
@@ -752,8 +768,11 @@ The agent report ingress continues to enforce the same 8192-byte JSON limit thro
 Both UDP and TCP listeners drop malformed query headers before DNS record or
 health evaluation. Requests with QR=1, a non-QUERY opcode, response-only AA/TC/RA,
 reserved Z or nonzero query RCODE are rejected. Valid resolver query flags RD,
-AD and CD remain accepted. Windows/Linux GSLB acceptance exercises malformed
-header drops alongside the existing packet-shape, EDNS and amplification tests.
+AD and CD remain accepted. Both normal authoritative and REFUSED responses
+preserve the request's RD and CD bits, but **never mirror the client's AD bit**;
+DNSSEC signer-fault SERVFAIL follows the same RD/CD boundary. Live UDP/TCP
+and pure packet-builder tests cover all combinations of the valid flags, alongside
+malformed header drops, packet shape, EDNS and amplification checks.
 A successful lab result is not independent public recursive-resolver qualification.
 
 ### ECS response scope during health fallback

@@ -72,6 +72,48 @@ internal static class DnsWireProtocol
         bool tcp, IPAddress? resolverIp = null, AgentHealthReportStore? agentReports = null,
         AuthorityFenceStore? authorityFence = null)
     {
+        try
+        {
+            return BuildCore(query, zones, tcp, resolverIp, agentReports, authorityFence);
+        }
+        catch (Exception error) when (error is System.Security.Cryptography.CryptographicException
+            or ObjectDisposedException or InvalidOperationException)
+        {
+            // An unavailable DNSSEC signer must not abort the UDP receive loop
+            // or silently downgrade a signed response to unsigned NOERROR.
+            // No answer/authority/OPT data is reused from the failed build.
+            return SignerFailureServfail(query);
+        }
+    }
+
+    private static byte[]? SignerFailureServfail(ReadOnlySpan<byte> query)
+    {
+        // Called only after the strict query parser has reached a signer.
+        // Reconstruct just the question and a minimal failure header; never
+        // echo untrusted OPT options, health addresses or partial signatures.
+        if (query.Length is < 17 or > 4096) return null;
+        var pos = 12;
+        while (pos < query.Length && query[pos] != 0)
+        {
+            var labelLength = query[pos];
+            if (labelLength is < 1 or > 63 || pos + 1 + labelLength >= query.Length)
+                return null;
+            pos += 1 + labelLength;
+        }
+        if (pos + 5 > query.Length) return null;
+        var result = query[..(pos + 5)].ToArray();
+        var requestFlags = BinaryPrimitives.ReadUInt16BigEndian(query[2..]);
+        BinaryPrimitives.WriteUInt16BigEndian(result.AsSpan(2, 2),
+            (ushort)(0x8000 | (requestFlags & 0x0110) | 0x0002)); // QR, RD, CD, SERVFAIL; never AD
+        BinaryPrimitives.WriteUInt16BigEndian(result.AsSpan(4, 2), 1); // original question only
+        result.AsSpan(6, 6).Clear(); // no answer, authority or additional data
+        return result;
+    }
+
+    private static byte[]? BuildCore(ReadOnlySpan<byte> query, IReadOnlyDictionary<string, SiteGroup> zones,
+        bool tcp, IPAddress? resolverIp = null, AgentHealthReportStore? agentReports = null,
+        AuthorityFenceStore? authorityFence = null)
+    {
         if (query.Length is < 17 or > 4096) return null;
         var id = BinaryPrimitives.ReadUInt16BigEndian(query);
         var flags = BinaryPrimitives.ReadUInt16BigEndian(query[2..]);
@@ -562,7 +604,9 @@ internal static class DnsWireProtocol
         BinaryPrimitives.WriteUInt16BigEndian(reply.AsSpan(0, 2), id);
         BinaryPrimitives.WriteUInt16BigEndian(reply.AsSpan(2, 2),
             (ushort)(0x8000 | (authoritativeAnswer ? 0x0400 : 0) |
-                (truncated ? 0x0200 : 0) | (flags & 0x0100) | rcode));
+                // Preserve RD and CD from the validated request, but never copy
+                // client-provided AD into an authoritative response.
+                (truncated ? 0x0200 : 0) | (flags & 0x0110) | rcode));
         BinaryPrimitives.WriteUInt16BigEndian(reply.AsSpan(4, 2), 1);
         BinaryPrimitives.WriteUInt16BigEndian(reply.AsSpan(6, 2), (ushort)an);
         BinaryPrimitives.WriteUInt16BigEndian(reply.AsSpan(8, 2), (ushort)nsCount);
