@@ -235,6 +235,65 @@ try
         Set(LinuxDpRecoveryEvidence.PublicKeyEnv,trustedPublicPath);
         Set(LinuxDpRecoveryEvidence.MinimumRevisionEnv,"42");
         Set(LinuxDpRecoveryEvidence.RequireEvidenceEnv,"true");
+
+        // A restored backup must never be trusted to supply its own signing
+        // identity or checkpoint, even if the signature itself is valid.
+        // These files have safe 0600 modes but are inside restored state.
+        var untrustedManifest=Path.Combine(state,"recovery-attestation.json");
+        File.Copy(attestationPath,untrustedManifest);
+        File.SetUnixFileMode(untrustedManifest,PrivateFile);
+        Set(LinuxDpRecoveryEvidence.ManifestEnv,untrustedManifest);
+        Assert(Throws(()=>{using var _=Provider(state);}),
+            "signed recovery checkpoint inside restored state fails closed");
+        Set(LinuxDpRecoveryEvidence.ManifestEnv,attestationPath);
+
+        // A syntactically external path may point back into the restored
+        // snapshot through an intermediate Linux directory symlink. Verify
+        // that the physical containment check catches this path *before*
+        // any trusted input is read.
+        var linkedStateParent=Path.Combine(secrets,"aliased-restored-state");
+        Directory.CreateSymbolicLink(linkedStateParent,state);
+        Set(LinuxDpRecoveryEvidence.ManifestEnv,
+            Path.Combine(linkedStateParent,"recovery-attestation.json"));
+        Assert(Throws(()=>LinuxDpRecoveryEvidence.Verify(
+                   Path.Combine(state,"data-protection-keys"),
+                   Path.Combine(linkedStateParent,"recovery-attestation.json"),
+                   trustedPublicPath,42)),
+            "linked parent outside state cannot supply the recovered manifest");
+        Set(LinuxDpRecoveryEvidence.ManifestEnv,attestationPath);
+        Directory.Delete(linkedStateParent);
+        File.Delete(untrustedManifest);
+
+        var untrustedVerifier=Path.Combine(state,"recovery-verifier.pem");
+        File.Copy(trustedPublicPath,untrustedVerifier);
+        File.SetUnixFileMode(untrustedVerifier,PrivateFile);
+        Set(LinuxDpRecoveryEvidence.PublicKeyEnv,untrustedVerifier);
+        Assert(Throws(()=>{using var _=Provider(state);}),
+            "recovery trust anchor inside restored state fails closed");
+        Set(LinuxDpRecoveryEvidence.PublicKeyEnv,trustedPublicPath);
+        var linkedVerifier=Path.Combine(secrets,"linked-recovery-verifier.pem");
+        File.CreateSymbolicLink(linkedVerifier,untrustedVerifier);
+        Assert(Throws(()=>LinuxDpRecoveryEvidence.Verify(
+                   Path.Combine(state,"data-protection-keys"),
+                   attestationPath,linkedVerifier,42)),
+            "external verifier symlink into restored state is rejected");
+        File.Delete(linkedVerifier);
+        File.Delete(untrustedVerifier);
+
+        // Even if the key directory is presented under a symlinked state
+        // alias, the physical state root must be recognized as restored data.
+        var linkedStateRoot=Path.Combine(secrets,"alternate-state-root");
+        Directory.CreateSymbolicLink(linkedStateRoot,state);
+        var aliasManifest=Path.Combine(state,"alias-manifest.json");
+        File.Copy(attestationPath,aliasManifest);
+        File.SetUnixFileMode(aliasManifest,PrivateFile);
+        Assert(Throws(()=>LinuxDpRecoveryEvidence.Verify(
+                   Path.Combine(linkedStateRoot,"data-protection-keys"),
+                   aliasManifest,trustedPublicPath,42)),
+            "linked state-root alias cannot bypass restored authority boundary");
+        File.Delete(aliasManifest);
+        Directory.Delete(linkedStateRoot);
+
         using(var service=Provider(state))
             Assert(service.GetRequiredService<IDataProtectionProvider>()
                 .CreateProtector("session-probe").Unprotect(encrypted)=="sensitive-session-value-123",

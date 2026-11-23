@@ -141,7 +141,18 @@ independently provisioned inputs on every start:
   minimum revision
 
 If any input is missing, malformed, stale, tampered or signed by the wrong
-identity, startup fails before Data Protection imports the ring. The requirement
+identity, startup fails before Data Protection imports the ring.
+The manifest and trusted public verifier must also be **outside the complete**
+`YARP_CONTROL_PLANE_DIR` state tree (not just outside
+`data-protection-keys`). A state backup cannot be accepted as its own
+independent attestation authority. The Linux startup gate compares both operator-supplied paths and resolved
+physical Linux paths (including symbolic-link ancestors), and rejects these
+inputs even when they are owner-only `0600` and contain a valid signature.
+The existing handle-based no-follow file reader remains independently
+enforced; physical-path validation is an additional trust-boundary check.
+Provision the trusted checkpoint and verifier in separately access-controlled
+service-manager or recovery storage before enabling the gate; this change
+does not migrate, delete or rewrite existing files. The requirement
 variable accepts **exactly** `true` or `false`; invalid spelling is an
 error. Its default is unset, preserving existing standalone-host behavior and
 the previous explicitly configured recovery-attestation checks. Do not set
