@@ -983,3 +983,9 @@ The live backlog now has **14 open issues**, including P0 #36, #52 and #109 and 
 - **#50 / observability:** OTLP and Grafana CI integrations and safer span redaction are merged. A deployed monitoring/alert pipeline, retention and overhead comparison remain unverified.
 
 Production remains **NO-GO**. No annual 99.9% availability measurement exists; a GitHub-hosted runner, one-hour fixture test or DNS protocol matrix cannot substitute for a year-long service SLI or the required site release drills.
+
+## Continuation — GSLB branch review and deletion (2026-11-23)
+
+The remote branch named `gslb` was reviewed at `2811a63c03735f9e3825517e3bb094e65b3f0c71` against `main` at `50f7a55b37d4d77050973d983d60849e4d0fff5c`. The histories have no merge base; no PR used `gslb` as its head or base, and the branch was not protected. After the static review was recorded, the remote branch ref was deleted and verified absent. No branch content was merged into GatewayCore.
+
+The detailed engineering/security observations are in [GSLB_BRANCH_DEEP_REVIEW.md](control-center/docs/GSLB_BRANCH_DEEP_REVIEW.md), published in PR #437. The report is a static review only: the branch had no GitHub workflows at its tip and Go was unavailable locally, so no Go test result is claimed. DNSSEC key exposure/fail-open handling, ECS trust, API proxy trust and authoritative-DNS conformance findings remain documented as review findings, not fixes in GatewayCore.

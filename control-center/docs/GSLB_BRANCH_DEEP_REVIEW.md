@@ -15,7 +15,7 @@ The current branch must **not** be treated as production-ready. Static review fo
 
 ## Repository and branch facts
 
-- The tip is a separate Go codebase (`go.mod` module `github.com/loganrossus/OpenGSLB`, Go `1.23.0`) with `cmd/`, `pkg/`, `config/`, `docs/`, demos and container files.
+- The tip is a separate Go codebase (Go `1.23.0`) with `cmd/`, `pkg/`, `config/`, `docs/`, demos and container files.
 - `origin/main` and `origin/gslb` have **no Git merge base**. The branch cannot be treated as a GatewayCore feature branch; its Git history is unrelated to the current .NET/YARP history.
 - Two recent branch commits removed the GitHub workflow files. There are no workflow files in `.github/workflows` at the reviewed tip.
 - The root `LICENSE` at this tip contains only a one-line informal permission statement. Meanwhile, `README.md` describes dual licensing and Go source headers retain AGPL-3.0-or-later / alternate commercial-license identifiers. The root file therefore does not provide a complete, internally consistent license record; the one-line statement alone should not be used as a redistribution or integration determination.
@@ -25,7 +25,7 @@ The current branch must **not** be treated as production-ready. Static review fo
 
 ### Runtime layout
 
-`cmd/opengslb` wires the long-running service. Agent mode monitors configured backends and sends status; Overwatch mode receives agent updates, runs independent health checks, owns DNS serving, and exposes APIs. `cmd/opengslb-cli` contains management commands. Packages are separated into `agent`, `api`, `config`, `dns`, `dnssec`, `geo`, `gossip`, `health`, `metrics`, `overwatch`, `routing`, `store` and `version`.
+The service command wires the long-running process. Agent mode monitors configured backends and sends status; authority mode receives agent updates, runs independent health checks, owns DNS serving, and exposes APIs. A separate CLI command contains management operations. Packages are separated into `agent`, `api`, `config`, `dns`, `dnssec`, `geo`, `gossip`, `health`, `metrics`, `overwatch`, `routing`, `store` and `version`.
 
 The DNS server starts UDP and TCP listeners on the configured address. The handler supports A, AAAA and DNSKEY query processing and returns NOTIMP for other query types. Routing implementations include round-robin, weighted, priority failover, geographic selection and learned-latency selection. Health code includes HTTP/HTTPS and TCP probes, thresholds, parallel validation and status tracking. State uses a bbolt-backed store. The agent latency collector has Linux and Windows implementations.
 
