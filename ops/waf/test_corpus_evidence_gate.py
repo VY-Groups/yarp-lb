@@ -2,7 +2,9 @@
 import csv
 import importlib.util
 import json
+import os
 import pathlib
+import stat
 import subprocess
 import sys
 import tempfile
@@ -64,6 +66,69 @@ class EvidenceGateTests(unittest.TestCase):
         ):
             with self.subTest(policy_json=policy_json):
                 self.check_cli_fails_cleanly(policy_json)
+
+    def test_success_cli_redacts_route_identifiers_and_seals_private_report(self):
+        with tempfile.TemporaryDirectory(prefix="waf-evidence-private-") as scratch:
+            root = pathlib.Path(scratch)
+            private_route = "/customer-route-secret-canary"
+            policy_file, csv_file, output_file = (root / name for name in
+                ("policy.json", "cases.csv", "report.json"))
+            policy_file.write_text(json.dumps({"mode": "block", "routes": {
+                private_route: {"max_fp": 0, "max_fn": 0}
+            }}), encoding="utf-8")
+            with csv_file.open("w", newline="", encoding="utf-8") as stream:
+                writer = csv.DictWriter(stream, fieldnames=sorted(gate.FIELDS))
+                writer.writeheader()
+                writer.writerow(row("customer-benign-id", "benign", "allow",
+                                    route=private_route))
+                writer.writerow(row("customer-attack-id", "malicious", "block",
+                                    route=private_route))
+            p = subprocess.run(
+                [sys.executable, str(pathlib.Path(gate.__file__)), "--corpus",
+                 str(csv_file), "--policy", str(policy_file), "--out", str(output_file)],
+                capture_output=True, text=True, timeout=10, check=False)
+            self.assertEqual(p.returncode, 0)
+            self.assertEqual(json.loads(p.stdout), {"status": "PASS", "cases": 2})
+            self.assertNotIn("customer-", p.stdout + p.stderr)
+            private = json.loads(output_file.read_text(encoding="utf-8"))
+            self.assertIn(private_route, private["routes"])
+            if os.name == "posix":
+                self.assertEqual(stat.S_IMODE(output_file.stat().st_mode), 0o600)
+            self.assertFalse(output_file.with_name(output_file.name + ".tmp").exists())
+
+    def test_cli_refuses_symlink_report_and_preexisting_temp_alias(self):
+        if os.name != "posix":
+            self.skipTest("POSIX local report and symlink permissions test")
+        with tempfile.TemporaryDirectory(prefix="waf-evidence-symlink-") as scratch:
+            root = pathlib.Path(scratch)
+            policy_file, csv_file, out_file = (root / name for name in
+                ("policy.json", "cases.csv", "report.json"))
+            policy_file.write_text(json.dumps(POLICY), encoding="utf-8")
+            with csv_file.open("w", newline="", encoding="utf-8") as stream:
+                writer = csv.DictWriter(stream, fieldnames=sorted(gate.FIELDS))
+                writer.writeheader()
+                writer.writerow(row("benign", "benign", "allow"))
+                writer.writerow(row("attack", "malicious", "block"))
+            sentinel = root / "do-not-overwrite"
+            sentinel.write_text("unchanged", encoding="utf-8")
+            command = [sys.executable, str(pathlib.Path(gate.__file__)),
+                       "--corpus", str(csv_file), "--policy", str(policy_file),
+                       "--out", str(out_file)]
+            out_file.symlink_to(sentinel)
+            response = subprocess.run(command, capture_output=True, text=True,
+                                      timeout=10, check=False)
+            self.assertEqual(response.returncode, 2)
+            self.assertNotIn("Traceback", response.stdout + response.stderr)
+            self.assertEqual(sentinel.read_text(), "unchanged")
+            out_file.unlink()
+            alias = out_file.with_name(out_file.name + ".tmp")
+            alias.symlink_to(sentinel)
+            response = subprocess.run(command, capture_output=True, text=True,
+                                      timeout=10, check=False)
+            self.assertEqual(response.returncode, 2)
+            self.assertNotIn("Traceback", response.stdout + response.stderr)
+            self.assertEqual(sentinel.read_text(), "unchanged")
+            self.assertTrue(alias.is_symlink())
 
     def test_clean_corpus(self):
         report = gate.evaluate([row("benign", "benign", "allow"),
