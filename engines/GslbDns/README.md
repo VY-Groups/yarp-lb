@@ -188,6 +188,22 @@ included):
   and subsequent valid queries still work. This is a parser regression check,
   not fuzzing or a complete denial-of-service assessment.
 
+## DNSSEC signer fault behavior (standalone engine)
+
+When a configured zone's signing key becomes unavailable while answering a
+DNSSEC-requesting query, the engine returns a minimal **SERVFAIL** response
+containing the original question but **no partially signed or unsigned zone
+records**. This response does not claim AD, AA, or DO, and does not echo EDNS
+options or sensitive data. UDP and TCP responses use the same fail-closed
+handler. A signer fault must not terminate the UDP receive loop or prevent
+valid out-of-zone queries from being processed.
+
+The GSLB acceptance suite injects a disposed signing identity for both
+transports, then verifies strict SERVFAIL framing, bounded amplification and
+continued handling of another valid query. This is a deterministic software
+fault test, **not** production DNSSEC key rollover, public delegation or
+multi-authority availability certification.
+
 ## Example test configuration
 
 ### Optional signed zone
