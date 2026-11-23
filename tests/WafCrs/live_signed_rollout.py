@@ -20,15 +20,13 @@ sys.path.insert(0, str(ROOT / "ops" / "waf"))
 import rollout_controller as rollout
 import verify_signed_policy as signed
 
-FAKE_RULESET_OBSERVATION = "A" * 64
-
 
 def command(*args, input=None):
     return subprocess.run(args, input=input, capture_output=True,
                           check=True).stdout
 
 
-def approve(root, mode, revision, shadow):
+def approve(root, mode, revision, shadow, observed_sha256):
     now = dt.datetime.now(dt.timezone.utc)
     utc = lambda t: t.strftime("%Y-%m-%dT%H:%M:%SZ")
     policy_dir = root / ("policy-" + str(revision))
@@ -45,7 +43,7 @@ def approve(root, mode, revision, shadow):
         evidence_hash = None
     data = {
         "schemaVersion": 1, "revision": revision, "mode": mode,
-        "rulesetSha256": FAKE_RULESET_OBSERVATION,
+        "rulesetSha256": observed_sha256,
         "shadowEvidenceSha256": evidence_hash,
         "issuedAtUtc": utc(now - dt.timedelta(minutes=2)),
         "expiresAtUtc": utc(now + dt.timedelta(days=1)), "exceptions": []
@@ -93,6 +91,7 @@ def main(compose_path):
     provider = rollout.DockerComposeProvider(compose, image,
                                              "http://127.0.0.1:18888/")
     verify_mode(provider, "block")
+    actual_rules = provider.observed_rule_digest()
     old_umask = os.umask(0o077)
     try:
         with tempfile.TemporaryDirectory(prefix="gatewaycore-waf-signed-ci-") as temp:
@@ -105,7 +104,8 @@ def main(compose_path):
                               encoding="utf-8")
             for mode, revision in (("detect", 7), ("block", 8)):
                 policy, approvals, reviewers, floor = approve(
-                    root, mode, revision, shadow if mode == "block" else None)
+                    root, mode, revision,
+                    shadow if mode == "block" else None, actual_rules)
                 report = receipts / ("revision-" + str(revision) + ".json")
                 args = [
                     "--policy", str(policy),
@@ -114,7 +114,7 @@ def main(compose_path):
                     "--reviewer-key", reviewers[0],
                     "--reviewer-key", reviewers[1],
                     "--minimum-revision-file", str(floor),
-                    "--observed-ruleset-sha256", FAKE_RULESET_OBSERVATION,
+                    "--observed-ruleset-sha256", actual_rules,
                     "--compose", str(compose), "--image", image,
                     "--health-url", "http://127.0.0.1:18888/",
                     "--receipt", str(report),
@@ -140,6 +140,29 @@ def main(compose_path):
             shadow.write_text('{"scope":"tampered"}', encoding="utf-8")
             if rollout.main(args + ["--execute"]) == 0:
                 raise AssertionError("tampered signed shadow evidence accepted")
+            verify_mode(provider, "block")
+            # These signatures are valid but approve a DIFFERENT rule-file
+            # tree. Production admission must reject the signed lie even
+            # when a caller supplies the same false 'observed' digest.
+            bad, bad_approvals, bad_reviewers, bad_floor = approve(
+                root, "block", 9, shadow, "B" * 64)
+            wrong = [
+                "--policy", str(bad), "--approval", str(bad_approvals[0]),
+                "--approval", str(bad_approvals[1]),
+                "--reviewer-key", bad_reviewers[0],
+                "--reviewer-key", bad_reviewers[1],
+                "--minimum-revision-file", str(bad_floor),
+                "--observed-ruleset-sha256", "B" * 64,
+                "--shadow-evidence-file", str(shadow),
+                "--compose", str(compose), "--image", image,
+                "--health-url", "http://127.0.0.1:18888/",
+                "--receipt", str(receipts / "revision-9.json"),
+                "--confirm-revision", "9"
+            ]
+            if rollout.main(wrong + ["--execute"]) == 0:
+                raise AssertionError("cryptographically signed false CRS inventory accepted")
+            if (receipts / "revision-9.json").exists():
+                raise AssertionError("invalid CRS fingerprint mutated a rollout receipt")
             verify_mode(provider, "block")
             print("PASS: real Docker WAF signed detect/block, image and private receipt"
                   " acceptance; tampered evidence rejected", flush=True)
