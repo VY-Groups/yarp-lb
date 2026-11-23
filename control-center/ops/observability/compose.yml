@@ -45,6 +45,7 @@ services:
     volumes:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ../prometheus/gateway-alerts.yml:/etc/prometheus/gateway-alerts.yml:ro
+      - ./collector-required-alerts.yml:/etc/prometheus/collector-required-alerts.yml:ro
       - ./alert-delivery-test.yml:/etc/prometheus/alert-delivery-test.yml:ro
     depends_on: [otel-collector, alertmanager]
     networks: [observability]

@@ -54,6 +54,13 @@ jobs:
             -v "$PWD/control-center/ops/prometheus:/etc/prometheus:ro" \
             --entrypoint promtool prom/prometheus:v3.14.0 \
             test rules /etc/prometheus/alert-tests.yml
+          # Reference-stack-only inventory rule. Its negative fixture must
+          # fire when the whole otel-collector scrape job is missing, not
+          # merely when an existing target reports up=0.
+          docker run --rm \
+            -v "$PWD/control-center/ops/observability:/etc/observability:ro" \
+            --entrypoint promtool prom/prometheus:v3.14.0 \
+            test rules /etc/observability/collector-required-alert-tests.yml
       - name: Start isolated observability stack
         shell: bash
         run: docker compose -f control-center/ops/observability/compose.yml up -d --build
