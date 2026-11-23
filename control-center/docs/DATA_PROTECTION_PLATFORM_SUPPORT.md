@@ -169,6 +169,17 @@ physical Linux paths (including symbolic-link ancestors), and rejects these
 inputs even when they are owner-only `0600` and contain a valid signature.
 The existing handle-based no-follow file reader remains independently
 enforced; physical-path validation is an additional trust-boundary check.
+The externally provisioned manifest and trust-key files must additionally
+have **exactly one hard link** each. A distinct pathname/realpath does not
+establish independent authority if a hard link aliases the same inode inside
+the restored backup. The Linux reader verifies the open handle's statx
+link count together with ownership and permissions, rejecting any
+multiply-linked authority file before accepting its signature. Ubuntu CI
+creates actual same-inode hardlinks from both trust inputs into disposable
+restored state and verifies startup fails closed without changing key bytes.
+The single-link condition is a defense-in-depth trust-boundary check, not
+a replacement for independently controlled storage, key custody,
+revision floors or physical DR approval.
 Provision the trusted checkpoint and verifier in separately access-controlled
 service-manager or recovery storage before enabling the gate; this change
 does not migrate, delete or rewrite existing files. The requirement

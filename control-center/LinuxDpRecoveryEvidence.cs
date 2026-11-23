@@ -87,6 +87,9 @@ public static class LinuxDpRecoveryEvidence
         // realpath resolves every existing ancestor before testing the trust
         // boundary. The no-follow private-file reader still rejects such
         // aliases and validates the opened file's ownership and permissions.
+        // Independently supplied trust inputs also require a single inode
+        // link; a hard link can alias restored-state files without changing
+        // either path's realpath representation.
         var physicalStateRoot = ResolveLinuxPhysicalPath(stateRoot);
         if (IsInsideDirectory(stateRoot, manifestPath) ||
             IsInsideDirectory(stateRoot, publicKeyPath) ||
@@ -100,9 +103,11 @@ public static class LinuxDpRecoveryEvidence
         try
         {
             manifestBytes = PrivateKeyFileSecurity.ReadPrivateFileBytes(
-                manifestPath, "Signed Linux DP recovery checkpoint", 16_384);
+                manifestPath, "Signed Linux DP recovery checkpoint", 16_384,
+                requireSingleLink: true);
             publicKeyBytes = PrivateKeyFileSecurity.ReadPrivateFileBytes(
-                publicKeyPath, "Trusted Linux DP recovery verification key", 16_384);
+                publicKeyPath, "Trusted Linux DP recovery verification key", 16_384,
+                requireSingleLink: true);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException)
         {
