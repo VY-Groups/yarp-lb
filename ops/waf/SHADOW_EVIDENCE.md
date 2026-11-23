@@ -68,6 +68,19 @@ Never attach the corpus/report or ModSecurity raw audit logs to public
 GitHub issues or CI artifacts. The dedicated workflow tests *synthetic*
 fixtures only and runs no customer evidence.
 
+## Private input-file integrity for the alternate JSON matrix gate
+
+`ops/waf/validate_corpus_matrix.py` accepts only one regular, single-link
+input inode for each policy/corpus JSON file. On POSIX the loader rejects
+symlink and hardlink aliases, verifies the opened file matches the checked
+inode, and limits the read to 16 MiB. A replaced, nonregular or oversized
+input fails closed. Path permissions and custody of the trusted private
+parent directory remain the operator's responsibility. Windows preflight
+does not establish an atomic no-follow guarantee against a concurrent
+privileged filesystem adversary; real Windows host qualification remains
+open. Neither this check nor the report processor authenticates WAF rule
+verdicts or grants production approval.
+
 This is a correctness and privacy test for the report processor, **not**
 production WAF governance, signed rollback, real-rule evidence integrity,
 representative false-positive/false-negative acceptance, Windows/Linux
