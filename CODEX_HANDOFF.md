@@ -5,10 +5,57 @@
 The owner intends GatewayCore to be **proprietary** and to postpone commercial licensing/activation development until software issues close. The .NET NSEC3 functionality follows RFC 5155. Earlier repository revisions included project-wide AGPL text; review that history before making distribution claims. See `README.md`, `PROJECT_LICENSE_STATUS.md`, and `AGENTS.md`; older snapshots below are historical, not the owner's current direction.
 
 
+## Verified continuation — current GitHub state (checked 2026-11-23 06:15 UTC)
+
+This section is the time-bounded live snapshot. Recheck GitHub before each
+merge, issue closure, or release decision. The dated sections below are
+historical records, not current issue/PR inventories.
+
+- Current `main`: `ae5c416da3130d6e719235b68291d4ec40de68c1`.
+  Merged changes include PR #432 (IP-free OTLP access summaries; merge
+  `2e88f844ef9add69cfe435e6c4532a1ea00cfb8c`), #433 (DNSSEC signer
+  fail-closed responses; `dd2f2493f42a6a966ca20af62d9ca885ad0e3417`),
+  #434 (SourceIpHash allocation; `cea2407ff6e03ddc883f1c90f30dd97b9761a056`),
+  #435 (empty trusted-proxy fast path; `7359a9778628effb8f63844a730c9bd6a3fd9031`),
+  #436 (WAF response framing; `03976ae023f412adcbf3b8b125bb6ce4fdf1548a`),
+  #438 (exact-main CI evidence verifier; `c1e39071489f2c0c913bac31adbb9aada85b103b`),
+  and #439 (incomplete WAF 403 evidence; this current `main`).
+- Post-merge checks for `ae5c416` at the time checked: repository-neutral
+  branding and WAF traffic acceptance **passed**; CodeQL Advanced and L7
+  traffic acceptance were **running**. Do not claim all post-merge CI passed
+  until those two runs finish successfully.
+- Current open software issues: #48 (platform key persistence/recovery),
+  #50 (operational observability), and #51 (WAF policy, coverage and traffic
+  acceptance). #36 remains the physical acceptance/release gate. This is the
+  current four-issue inventory; older sections mentioning #34, #52, #109 or
+  14 open issues are historical snapshots only.
+- PR #437 is an open documentation PR containing this handoff update and
+  `GSLB_BRANCH_DEEP_REVIEW.md`. Its current head is
+  `d2d1d438e8bf7a5229b030aee4170ba3e8badcd4`; its 39 triggered checks
+  passed. Independent review requested correction of the stale continuation
+  snapshot. This replacement addresses that finding; new independent review
+  is still required before merge.
+- PR #440 (console-writer exception recovery, #50) is open at
+  `da497f398695952d342e00dab19a3cb3d1f46e9c`. No checks had been reported
+  for its branch at the time checked, and no independent review is recorded.
+- PR #435's exact-head paired full-gateway SourceIpHash profile passed. The
+  measured delta was `-0.17 B/request`, with a 95% confidence interval
+  `-2.371 to +2.031 B/request`; the interval includes zero, so a material
+  whole-gateway allocation improvement was **not established**. Do not claim
+  otherwise or close #34 based on this sample.
+- The deleted `gslb` branch review is a static historical analysis only.
+  The report describes observations at the recorded branch/main SHAs; it is
+  not GatewayCore implementation, test evidence, or production acceptance.
+- **Production remains NO-GO.** No annual 99.9% availability measurement,
+  physical release drill, verified release artifact, or offline upgrade and
+  rollback acceptance is established by these software PRs. Keep physical
+  acceptance under #36.
+
+
 ## Continuation snapshot — security review and release status (2026-11-21)
 
-This is the latest verified continuation state; older same-day snapshots below
-are historical when their branch, issue, or CI state differs.
+This 2026-11-21 section is a historical snapshot. Use the dated 2026-11-23
+checkpoint above for newer integration status, then verify GitHub live.
 
 - `main` is `06f3d73c480b0e4da4150f0a0e39f3cffcb35eaa`, including PRs #321,
   #323–#332. PR #327's Windows/Linux account-key, ACME and ten-run HA checks,
@@ -972,7 +1019,7 @@ PR #118 is also merged (merge commit `b7f8c0e0ddcfeb82b684aecce7eb92eb46a94fc2`)
 
 PR #108 is **closed without merge**, head observed as `931c8dfe4032271c8a9ae8e5b2dae1a14ef87a2c`; do not cite its observed-latency change as present in `main` unless separately reimplemented and merged.
 
-### Current issue and production boundaries
+### Historical issue and production boundaries (2026-11-21 snapshot)
 
 The live backlog now has **14 open issues**, including P0 #36, #52 and #109 and P1 #100/#101/#50. #39 and #61 were closed as `NOT_PLANNED` because they are explicitly future/post-v1 and outside this release's scope; this is not feature completion. Merged PRs above complete component increments only; they do not satisfy whole-issue acceptance. Do not close the remaining issues without matching evidence in their current acceptance criteria.
 
@@ -983,3 +1030,9 @@ The live backlog now has **14 open issues**, including P0 #36, #52 and #109 and 
 - **#50 / observability:** OTLP and Grafana CI integrations and safer span redaction are merged. A deployed monitoring/alert pipeline, retention and overhead comparison remain unverified.
 
 Production remains **NO-GO**. No annual 99.9% availability measurement exists; a GitHub-hosted runner, one-hour fixture test or DNS protocol matrix cannot substitute for a year-long service SLI or the required site release drills.
+
+## Continuation — GSLB branch review and deletion (2026-11-23)
+
+The remote branch named `gslb` was reviewed at `2811a63c03735f9e3825517e3bb094e65b3f0c71` against `main` at `50f7a55b37d4d77050973d983d60849e4d0fff5c`. The histories have no merge base; no PR used `gslb` as its head or base, and the branch was not protected. After the static review was recorded, the remote branch ref was deleted and verified absent. No branch content was merged into GatewayCore.
+
+The detailed engineering/security observations are in [GSLB_BRANCH_DEEP_REVIEW.md](control-center/docs/GSLB_BRANCH_DEEP_REVIEW.md), published in PR #437. The report is a static review only: the branch had no GitHub workflows at its tip and Go was unavailable locally, so no Go test result is claimed. DNSSEC key exposure/fail-open handling, ECS trust, API proxy trust and authoritative-DNS conformance findings remain documented as review findings, not fixes in GatewayCore.
