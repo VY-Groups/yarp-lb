@@ -86,7 +86,8 @@ internal sealed class DurableAuditOutbox : IDisposable
         // following Linux path components. Prevent read-time replacement
         // between a prior symlink check and the FileStream.Open call.
         var bytes = PrivateKeyFileSecurity.ReadPrivateFileBytes(
-            path, "Durable external audit queued event", MaxEntryBytes);
+            path, "Durable external audit queued event", MaxEntryBytes,
+            requireSingleLink: OperatingSystem.IsLinux());
         try
         {
             var row = JsonSerializer.Deserialize<ExternalAuditIntent.QueuedEvent>(bytes)
