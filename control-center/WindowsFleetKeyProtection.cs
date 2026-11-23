@@ -2,6 +2,7 @@ using System.Runtime.Versioning;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Text.RegularExpressions;
+using System.Xml;
 using Microsoft.AspNetCore.DataProtection;
 
 /// <summary>
@@ -55,30 +56,99 @@ public static class WindowsFleetKeyProtection
 
     private static void RejectLegacyOrUnwrappedKeyRing(string? directory)
     {
+        const string protectionNamespace = "http://schemas.asp.net/2015/03/dataProtection";
+        const int maximumXmlFiles = 512;
+        const int maximumXmlBytes = 131072;
         if (string.IsNullOrWhiteSpace(directory) || !Path.IsPathFullyQualified(directory) ||
             !Directory.Exists(directory) ||
             (File.GetAttributes(directory) & FileAttributes.ReparsePoint) != 0)
             throw new InvalidOperationException(
                 "Windows fleet mode requires an existing protected absolute key-ring directory");
-        foreach (var keyXml in Directory.EnumerateFiles(directory, "*.xml",
-                     SearchOption.TopDirectoryOnly))
+
+        var inventory = Directory.EnumerateFiles(directory, "*.xml", SearchOption.TopDirectoryOnly)
+            .Take(maximumXmlFiles + 1).ToArray();
+        if (inventory.Length > maximumXmlFiles)
+            throw new InvalidOperationException("Windows fleet key-ring XML inventory exceeds 512 entries");
+        var seenKeys = new HashSet<Guid>();
+        foreach (var keyXml in inventory)
         {
             var info = new FileInfo(keyXml);
-            if (info.Length <= 0 || info.Length > 131072 ||
+            if (info.Length <= 0 || info.Length > maximumXmlBytes ||
                 (info.Attributes & FileAttributes.ReparsePoint) != 0)
-                throw new InvalidOperationException(
-                    "Windows fleet key XML is linked, empty or oversized");
-            var xml = File.ReadAllText(keyXml);
-            if (xml.Contains("DpapiXmlDecryptor", StringComparison.OrdinalIgnoreCase) ||
-                xml.Contains("<masterKey", StringComparison.OrdinalIgnoreCase))
-                throw new InvalidOperationException(
-                    "Existing machine-bound or unwrapped keys need an approved offline migration");
-            // Revocation XML has no descriptor. Everything else imported as a
-            // key must already carry encrypted secret material.
-            if (!xml.Contains("encryptedSecret", StringComparison.Ordinal) &&
-                !xml.Contains("<revocation", StringComparison.OrdinalIgnoreCase))
-                throw new InvalidOperationException(
-                    "Windows fleet mode refuses an existing unverified key XML");
+                throw new InvalidOperationException("Windows fleet key XML is linked, empty or oversized");
+            byte[] bytes;
+            using (var file = File.OpenRead(keyXml))
+            {
+                if (file.Length <= 0 || file.Length > maximumXmlBytes)
+                    throw new InvalidOperationException("Windows fleet key XML changed size");
+                bytes = new byte[checked((int)file.Length)];
+                file.ReadExactly(bytes);
+                if (file.ReadByte() != -1)
+                    throw new InvalidOperationException("Windows fleet key XML grew during inspection");
+            }
+            try
+            {
+                if ((File.GetAttributes(keyXml) & FileAttributes.ReparsePoint) != 0)
+                    throw new InvalidOperationException("Windows fleet key XML became a link");
+                using var stream = new MemoryStream(bytes, writable: false);
+                using var reader = XmlReader.Create(stream, new XmlReaderSettings
+                {
+                    DtdProcessing = DtdProcessing.Prohibit,
+                    XmlResolver = null,
+                    MaxCharactersInDocument = maximumXmlBytes
+                });
+                if (reader.MoveToContent() != XmlNodeType.Element)
+                    throw new InvalidOperationException("Windows fleet key XML has no root element");
+                var isKey = reader.LocalName == "key" && reader.NamespaceURI.Length == 0;
+                var isRevocation = reader.LocalName == "revocation" && reader.NamespaceURI.Length == 0;
+                if (!isKey && !isRevocation)
+                    throw new InvalidOperationException("Windows fleet key XML has an unexpected root");
+                if (isKey)
+                {
+                    var id = reader.GetAttribute("id");
+                    if (!Guid.TryParseExact(id, "D", out var keyId) ||
+                        !string.Equals(Path.GetFileName(keyXml),
+                            "key-" + keyId.ToString("D") + ".xml",
+                            StringComparison.OrdinalIgnoreCase) ||
+                        !seenKeys.Add(keyId))
+                        throw new InvalidOperationException(
+                            "Windows fleet key XML identity mismatch or duplicate");
+                }
+                var wrappedSecrets = 0;
+                while (reader.Read())
+                {
+                    if (reader.NodeType != XmlNodeType.Element) continue;
+                    if (reader.LocalName == "masterKey" ||
+                        (isRevocation && reader.LocalName == "encryptedSecret"))
+                        throw new InvalidOperationException(
+                            "Windows fleet key XML contains unexpected key material");
+                    if (isKey && reader.LocalName == "encryptedSecret" &&
+                        reader.NamespaceURI == protectionNamespace)
+                    {
+                        // A substring check accepts unapproved lookalike
+                        // types and assemblies. Only the framework's exact
+                        // certificate XML decryptor and assembly identity
+                        // may be imported from a staged fleet key ring.
+                        var decryptor = reader.GetAttribute("decryptorType");
+                        var assemblyQualified = decryptor?.Split(
+                            ',', StringSplitOptions.TrimEntries);
+                        if (assemblyQualified is null || assemblyQualified.Length < 2 ||
+                            assemblyQualified[0] !=
+                                "Microsoft.AspNetCore.DataProtection.XmlEncryption.EncryptedXmlDecryptor" ||
+                            assemblyQualified[1] != "Microsoft.AspNetCore.DataProtection")
+                            throw new InvalidOperationException(
+                                "Windows fleet key XML is not from the approved certificate decryptor");
+                        wrappedSecrets++;
+                    }
+                }
+                if (isKey && wrappedSecrets != 1)
+                    throw new InvalidOperationException(
+                        "Windows fleet key XML requires exactly one certificate-wrapped secret");
+            }
+            finally
+            {
+                CryptographicOperations.ZeroMemory(bytes);
+            }
         }
     }
 
