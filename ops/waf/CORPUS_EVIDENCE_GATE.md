@@ -50,6 +50,18 @@ The report is stored as a restricted local file. Public stdout shows only PASS/F
 
 **Acceptance boundary:** These are operator-supplied inputs, so PASS cannot itself prove genuine native audit records, independently approved rule hashes, corpus labels, image provenance, signed exception rendering, production rollback, customer FP/FN rates or gateway performance. Preserve the signed source evidence externally; require real Windows/Linux integrated route tests, measured p99/CPU/GC/allocations, and separately accepted thresholds. The observed 500 Mbps peak and required headroom are production **#36** physical environment targets, not results of this CSV evaluator. #51 stays open for those software requirements and #36 stays open for real-site qualification.
 
+## Input-file safety limits
+
+The authoritative checker reads only regular UTF-8 evidence inputs, refusing
+symlinked leaves, FIFOs/devices and files that change identity or size during
+reading. The JSON policy is limited to **1 MiB** and the CSV to **128 MiB**
+before parsing, independently of the existing 100,000-case and 4,096-character
+field limits. Oversized evidence fails with a private FAIL report; split or
+normalize an authorized dataset only with independently reviewed provenance.
+These are resource-safety bounds, **not** revisions to approved FP/FN rates,
+sample minimums, throughput or p99 gates. A bounded read is not cryptographic
+proof of file custody or protection from a privileged concurrent writer.
+
 ## Version 2 compatibility
 
 Existing v2 accepted columns are case_id,route,expected,observed,would_block,mode,severity, and the v2 policy retains per-route max_fp/max_fn absolute counts. The checker deliberately does not reinterpret detect-only rule evaluations as HTTP enforcement. Version 3 is additive, explicit and stricter, and never silently downgrades to v2 when v3-only columns or limits are missing.
