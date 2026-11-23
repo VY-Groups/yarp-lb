@@ -136,7 +136,10 @@ try
         Directory.CreateDirectory(empty);
         WindowsFleetKeyProtection.TryConfigure(baseline, empty);
     }
-    catch (InvalidOperationException) { signingOnlyRejected = true; }
+    catch (InvalidOperationException ex)
+    {
+        signingOnlyRejected = ex.Message.Contains("keyEncipherment", StringComparison.Ordinal);
+    }
     Check(signingOnlyRejected, "signing-only private key cannot wrap fleet DP data");
 
     Environment.SetEnvironmentVariable(Current, t1);
@@ -196,15 +199,68 @@ try
     using var overlapping = Build("gateway-two");
     Check(CanRead(overlapping, token),
         "rotated certificate retains original cookie using explicitly pinned previous identity");
+    var ring = Path.Combine(root, "gateway-two");
+    var beforeRotationFiles = Directory.GetFiles(ring, "*.xml")
+        .Select(Path.GetFileName).ToHashSet(StringComparer.Ordinal);
     var manager = overlapping.GetRequiredService<IKeyManager>();
     manager.CreateNewKey(DateTimeOffset.UtcNow.AddMinutes(-1), DateTimeOffset.UtcNow.AddDays(30));
-    var latest = overlapping.GetRequiredService<IDataProtectionProvider>()
+    var newestFiles = Directory.GetFiles(ring, "*.xml")
+        .Where(path => !beforeRotationFiles.Contains(Path.GetFileName(path))).ToArray();
+    Check(newestFiles.Length == 1,
+        "explicit rotation writes exactly one new encrypted Data Protection XML key");
+    var newestXml = File.ReadAllText(newestFiles[0]);
+    Check(newestXml.Contains("<encryptedSecret", StringComparison.Ordinal) &&
+          !newestXml.Contains("<masterKey", StringComparison.Ordinal),
+        "rotated Windows fleet key remains encrypted at rest");
+    // ASP.NET Core emits the recipient X.509 certificate in encryptedKey
+    // XML. Require the NEW certificate (t2), never the retired t1.
+    var newRecipientBytes = Convert.ToBase64String(rotated.RawData);
+    var oldRecipientBytes = Convert.ToBase64String(active.RawData);
+    Check(newestXml.Contains(newRecipientBytes, StringComparison.Ordinal) &&
+          !newestXml.Contains(oldRecipientBytes, StringComparison.Ordinal),
+        "new rotated XML is bound to the current RSA recipient t2 rather than t1");
+
+    // A FRESH provider is needed: the original provider may cache an
+    // active key chosen before CreateNewKey was called.
+    using var freshWriter = Build("gateway-two");
+    var latest = freshWriter.GetRequiredService<IDataProtectionProvider>()
         .CreateProtector("gatewaycore-windows-fleet-cookie-v1")
         .Protect("portable-cookie");
-    Check(CanRead(overlapping, latest),
-        "new certificate can protect and recover a session after forced key rotation");
-    Check(Directory.GetFiles(Path.Combine(root, "gateway-two"), "*.xml").Length > 1,
-        "rotation persisted multiple encrypted key XML revisions");
+    Check(CanRead(freshWriter, latest),
+        "fresh writer protects with a new key after explicit rotation");
+
+    var recipientDir = Path.Combine(root, "gateway-three");
+    Directory.CreateDirectory(recipientDir);
+    File.Copy(newestFiles[0], Path.Combine(recipientDir, Path.GetFileName(newestFiles[0])));
+    // Remove old RSA identity from the machine store to approximate an
+    // isolated recipient that ONLY possesses the current t2 key. Existing
+    // providers remain disposable; this does not qualify real hosts.
+    using (var machineStore = new X509Store(StoreName.My, StoreLocation.LocalMachine))
+    {
+        machineStore.Open(OpenFlags.ReadWrite);
+        machineStore.Remove(active);
+        try
+        {
+            Environment.SetEnvironmentVariable(Current, t2);
+            Environment.SetEnvironmentVariable(Previous, null);
+            using var freshRecipient = Build("gateway-three");
+            Check(CanRead(freshRecipient, latest),
+                "new cookie works on a fresh recipient with only current t2 certificate");
+            Check(!CanRead(freshRecipient, token),
+                "old cookie cannot be used by t2-only recipient without old key XML");
+        }
+        finally
+        {
+            machineStore.Add(active);
+        }
+    }
+    Environment.SetEnvironmentVariable(Current, t2);
+    Environment.SetEnvironmentVariable(Previous, t1);
+    using var overlapReader = Build("gateway-two");
+    Check(CanRead(overlapReader, token) && CanRead(overlapReader, latest),
+        "staged rotation overlap accepts both old and new cookies");
+    Check(Directory.GetFiles(ring, "*.xml").Length > 1,
+        "rotation persisted old and new encrypted key XML revisions");
     Console.WriteLine("WINDOWS FLEET CERTIFICATE DATA PROTECTION SOFTWARE ACCEPTANCE PASSED");
 }
 finally
