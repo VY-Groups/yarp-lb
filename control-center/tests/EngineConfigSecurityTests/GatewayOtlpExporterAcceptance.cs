@@ -22,6 +22,8 @@ public static class GatewayOtlpExporterAcceptance
     {
         var values = new ConcurrentDictionary<string, (int Value, int Tags)>(
             StringComparer.Ordinal);
+        var heartbeat = new ConcurrentDictionary<string, (long Value, int Tags)>(
+            StringComparer.Ordinal);
         using var listener = new MeterListener();
         listener.InstrumentPublished = (instrument, current) =>
         {
@@ -31,6 +33,8 @@ public static class GatewayOtlpExporterAcceptance
         };
         listener.SetMeasurementEventCallback<int>((instrument, value, tags, _) =>
             values[instrument.Name] = (value, tags.Length));
+        listener.SetMeasurementEventCallback<long>((instrument, value, tags, _) =>
+            heartbeat[instrument.Name] = (value, tags.Length));
         listener.Start();
 
         GatewayOpenTelemetry.ReportAuditOutboxStatus(
@@ -49,14 +53,21 @@ public static class GatewayOtlpExporterAcceptance
                 throw new Exception("Identity-free audit status gauge missing or incorrect: " + name);
         }
 
+        if (!heartbeat.TryGetValue("gateway.audit.outbox.last_update_unixtime", out var last) ||
+            last.Tags != 0 ||
+            Math.Abs(DateTimeOffset.UtcNow.ToUnixTimeSeconds() - last.Value) > 5)
+            throw new Exception("Audit worker heartbeat timestamp was not recorded as label-free Unix seconds");
+
         GatewayOpenTelemetry.ReportAuditOutboxStatus(
             enabled: false, pending: 4096, storageFault: true, deliveryBlocked: true);
         values.Clear();
         listener.RecordObservableInstruments();
         if (values.Count != 4 || values.Any(item =>
-                item.Value.Value != 0 || item.Value.Tags != 0))
+                item.Value.Value != 0 || item.Value.Tags != 0) ||
+            !heartbeat.TryGetValue("gateway.audit.outbox.last_update_unixtime", out var disabledTime) ||
+            disabledTime.Tags != 0 || disabledTime.Value < last.Value)
             throw new Exception("Disabled external audit outbox exported nonzero status or dynamic labels");
-        Console.WriteLine("PASS: OTLP audit outbox status has exactly four fixed, identity-free gauges");
+        Console.WriteLine("PASS: OTLP audit outbox status has four identity-free state gauges and one last-update heartbeat");
     }
 
     public static Task RunWithoutCollectorAsync()
@@ -366,7 +377,8 @@ public static class GatewayOtlpExporterAcceptance
                          "gateway.destination.id", "target_a", "gateway.proxy.local_rejections",
                          "gateway.proxy.rejection.reason",
                          "gateway.audit.outbox.enabled", "gateway.audit.outbox.pending",
-                         "gateway.audit.outbox.storage_fault", "gateway.audit.outbox.delivery_blocked"
+                         "gateway.audit.outbox.storage_fault", "gateway.audit.outbox.delivery_blocked",
+                         "gateway.audit.outbox.last_update_unixtime"
                      })
                 if (!metricPayload.Contains(expected, StringComparison.Ordinal))
                     throw new Exception($"Expected bounded proxy metric was absent: {expected}");

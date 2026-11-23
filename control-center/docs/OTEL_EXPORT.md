@@ -22,15 +22,17 @@ The `gateway.configuration.reload_notifications` counter increments when the eff
 
 ## Durable external audit delivery state (opt-in)
 
-When OTLP is configured, the `GatewayCore.ControlCenter` meter exports four
+When OTLP is configured, the `GatewayCore.ControlCenter` meter exports five
 **label-free** observable gauges: `gateway.audit.outbox.enabled` (0/1),
 `gateway.audit.outbox.pending` (0..4096, or -1 when unreadable),
 `gateway.audit.outbox.storage_fault` (0/1), and
-`gateway.audit.outbox.delivery_blocked` (0/1). No event IDs, actor names,
+`gateway.audit.outbox.delivery_blocked` (0/1), and
+`gateway.audit.outbox.last_update_unixtime` (UTC epoch seconds). No event IDs, actor names,
 request paths, outbox file contents, intent data, signatures, URLs or
 credentials are exported. The existing `AuditOutboxWorker` refreshes a
-cached status after each bounded delivery pass (2-second schedule); OTLP
-measurement callbacks merely read four integers and never enumerate files,
+cached status after each bounded delivery pass (2-second schedule), including
+a timestamp of the **last completed status update**. OTLP measurement
+callbacks merely read five integers and never enumerate files,
 block the proxy request path or contact the audit collector.
 
 The gauges are seeded during application startup. **enabled=0 does not
@@ -41,7 +43,15 @@ delivery_blocked=1 indicates the authenticated transport was unsuccessful.
 Gauges are a weakly consistent operational snapshot, **not** immutable
 audit records or proof that a particular remote event was received.
 The protected `/admin/api/audit/delivery` endpoint remains the detailed
-admin-only status source. CI validates all gauge values and zero labels
+admin-only status source.
+A configured worker can stop updating while the cached fault flags still read
+zero. `GatewayAuditOutboxWorkerStale` now alerts after the
+`last_update_unixtime` timestamp becomes more than 90 seconds old for a
+configured outbox, with a further one-minute confirmation. A disabled outbox
+does not raise a false worker-stale alert, but **is not proof of successful
+delivery**. This heartbeat requires a functioning scrape and collector; their
+separate availability and missing-target alerts remain required. A stale
+worker status is not a remote collector receipt. CI validates all gauge values and zero labels
 through a .NET `MeterListener`, validates actual OTLP metric names
 through the disposable wire-collector capture, and queries Prometheus after
 Collector translation to verify all four audit outbox gauges and expected
