@@ -200,7 +200,7 @@ def read_native_audit(started_at):
         # request headers or bodies in a workflow artifact or stdout.
         with tempfile.TemporaryFile(mode="w+b") as output:
             completed = subprocess.run(command, cwd=lab, stdout=output,
-                                       stderr=subprocess.DEVNULL, timeout=20,
+                                       stderr=subprocess.STDOUT, timeout=20,
                                        check=False)
             if completed.returncode != 0 or output.tell() > native_audit.MAX_AUDIT_BYTES:
                 raise ValueError("private native WAF audit unavailable or oversized")
@@ -288,6 +288,7 @@ def run_cases(cases, connection_factory=None, audit_reader=None):
     matched = native_crs_blocks(audit_reader(started_at), run_id,
                                 {case["id"] for case in cases})
     for row in rows:
+        row["nativeBlockVerified"] = row["id"] in matched
         if row["result"] in ("TP", "FP") and row["id"] not in matched:
             row["result"] = "ERROR"
         elif row["status"] == 200 and row["id"] in matched:
