@@ -137,6 +137,18 @@ the exact synthetic origin marker is FN; unexpected status/timeout/connection
 errors fail separately. No retries, redirects, external targets or automatic
 relaxation of CRS rules are permitted.
 
+The optional **local private operator-corpus report** is now written using
+exclusive owner-only `0600` file creation (on POSIX), `fsync`, and an
+atomic rename. A pre-existing symlink at the destination or a stale
+`.tmp` path is refused rather than followed/overwritten; a failed rename
+cleans up only the freshly created temporary report. No raw request or
+response bytes are included, but operator-defined case/route IDs still
+make the output private. The operator must choose a trusted, access-controlled
+destination directory; the application does **not** take ownership of
+arbitrary parent directories or publish this report as a CI artifact.
+This is a local filesystem privacy guarantee, **not** enterprise WAF
+policy governance or proof of deployed customer traffic filtering.
+
 The output `artifacts/waf-crs/operator-corpus-report.json` contains only
 case **identifiers**, pseudonymous route IDs, test-specified severity,
 ground-truth class, HTTP status and TP/TN/FP/FN/ERROR counts. It omits

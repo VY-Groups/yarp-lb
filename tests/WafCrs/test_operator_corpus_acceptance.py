@@ -5,10 +5,13 @@ import http.client
 from email.message import Message
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import os
 from pathlib import Path
+import stat
 import tempfile
 import threading
 import unittest
+from unittest.mock import patch
 
 import operator_corpus_acceptance as waf
 
@@ -147,6 +150,55 @@ class OperatorCorpusTests(unittest.TestCase):
     def load(self, data):
         self.path.write_text(json.dumps(data), encoding="utf-8")
         return waf.load_corpus(self.path)
+
+    def test_report_is_owner_only_and_atomic_even_under_permissive_umask(self):
+        output = Path(self.temp.name) / "private-report.json"
+        if os.name == "posix":
+            # Exercise a genuinely permissive umask, not just the default
+            # CI runner setting; restore it immediately after the write.
+            original_umask = os.umask(0)
+            try:
+                waf.write_private_report({"cases": [{"id": "private-id"}]}, output)
+            finally:
+                os.umask(original_umask)
+        else:
+            waf.write_private_report({"cases": [{"id": "private-id"}]}, output)
+        if os.name == "posix":
+            self.assertEqual(stat.S_IMODE(output.stat().st_mode), 0o600)
+        self.assertEqual(json.loads(output.read_text())["cases"][0]["id"], "private-id")
+        self.assertFalse(output.with_name(output.name + ".tmp").exists())
+        waf.write_private_report({"cases": []}, output)
+        if os.name == "posix":
+            self.assertEqual(stat.S_IMODE(output.stat().st_mode), 0o600)
+        self.assertEqual(json.loads(output.read_text())["cases"], [])
+
+    def test_report_symlink_and_predictable_temp_alias_fail_closed(self):
+        destination = Path(self.temp.name) / "operator-report.json"
+        sentinel = Path(self.temp.name) / "sensitive-sentinel.txt"
+        sentinel.write_text("do-not-overwrite", encoding="utf-8")
+        try:
+            destination.symlink_to(sentinel)
+        except OSError as error:
+            self.skipTest("symlink creation not supported on test host: " + type(error).__name__)
+        with self.assertRaises(ValueError):
+            waf.write_private_report({"cases": []}, destination)
+        self.assertEqual(sentinel.read_text(), "do-not-overwrite")
+        destination.unlink()
+        temporary = destination.with_name(destination.name + ".tmp")
+        temporary.symlink_to(sentinel)
+        with self.assertRaises(FileExistsError):
+            waf.write_private_report({"cases": []}, destination)
+        self.assertEqual(sentinel.read_text(), "do-not-overwrite")
+        self.assertTrue(temporary.is_symlink())
+
+    def test_write_error_removes_only_new_private_temp(self):
+        destination = Path(self.temp.name) / "operator-report.json"
+        temporary = destination.with_name(destination.name + ".tmp")
+        with patch.object(waf.os, "replace", side_effect=OSError("simulated rename error")):
+            with self.assertRaises(OSError):
+                waf.write_private_report({"cases": [{"id": "private-id"}]}, destination)
+        self.assertFalse(destination.exists())
+        self.assertFalse(temporary.exists())
 
     def test_schema_and_privacy(self):
         cases = self.load(corpus())
