@@ -13,6 +13,7 @@ def fixture(nodes=("gateway-a", "gateway-b"), now=2000000000):
         "gateway_audit_outbox_pending": 0,
         "gateway_audit_outbox_storage_fault": 0,
         "gateway_audit_outbox_delivery_blocked": 0,
+        "gateway_audit_outbox_last_update_unixtime": now,
     }
     return {name: {
         "status": "success",
@@ -100,6 +101,22 @@ class AuditMetricAcceptanceTests(unittest.TestCase):
                     p[METRICS[2]]["data"]["result"] = []
                 with self.assertRaises(ValueError):
                     verify(p, ["gateway-a", "gateway-b"], now=self.NOW)
+
+    def test_stale_or_future_worker_heartbeat_rejected_and_boundary_accepted(self):
+        name = "gateway_audit_outbox_last_update_unixtime"
+        p = self.valid()
+        p[name]["data"]["result"][0]["value"][1] = str(self.NOW - 91)
+        with self.assertRaises(ValueError):
+            verify(p, ["gateway-a", "gateway-b"], now=self.NOW)
+
+        p = self.valid()
+        p[name]["data"]["result"][0]["value"][1] = str(self.NOW - 90)
+        self.assertEqual(verify(p, ["gateway-a", "gateway-b"], now=self.NOW), 2)
+
+        p = self.valid()
+        p[name]["data"]["result"][0]["value"][1] = str(self.NOW + 31)
+        with self.assertRaises(ValueError):
+            verify(p, ["gateway-a", "gateway-b"], now=self.NOW)
 
     def test_duplicate_expected_nodes_and_bad_urls_are_rejected(self):
         with self.assertRaises(ValueError):
