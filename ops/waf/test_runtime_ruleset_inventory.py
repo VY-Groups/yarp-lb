@@ -58,6 +58,13 @@ class ObservedRuleInventoryTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             observed.canonical_rule_digest(tarball(
                 FILES, extra=[("rules/../escape.conf", b"bad")]))
+        for alias in ("rules//REQUEST-933-WEIRD.conf",
+                      "rules/./REQUEST-933-WEIRD.conf",
+                      "rules/REQUÊST-933-WEIRD.conf"):
+            with self.subTest(alias=alias), self.assertRaisesRegex(
+                    ValueError, "ambiguous"):
+                observed.canonical_rule_digest(
+                    tarball(FILES, extra=[(alias, b"SecRule bad\n")]))
 
     def test_duplicate_and_case_aliases_fail(self):
         first = next(iter(FILES))
