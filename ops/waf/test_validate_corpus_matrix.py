@@ -97,6 +97,45 @@ class MatrixTests(unittest.TestCase):
             self.assertEqual(target.read_text(encoding="utf-8"), "DO_NOT_REPLACE")
             self.assertFalse((Path(directory) / "matrix.json").exists())
 
+
+    def test_bounded_reader_accepts_regular_json(self):
+        with tempfile.TemporaryDirectory() as directory:
+            file = Path(directory) / "evidence.json"
+            file.write_text('{"route":{"severity":1}}', encoding="utf-8")
+            self.assertEqual(module._read_bounded_json(file)["route"]["severity"], 1)
+
+    def test_private_input_rejects_symlink_alias(self):
+        with tempfile.TemporaryDirectory() as directory:
+            regular = Path(directory) / "private.json"
+            regular.write_text('{"ok":true}', encoding="utf-8")
+            alias = Path(directory) / "alias.json"
+            try:
+                alias.symlink_to(regular)
+            except (OSError, NotImplementedError):
+                self.skipTest("symlink creation unavailable on runner")
+            with self.assertRaises((ValueError, OSError)):
+                module._read_bounded_json(alias)
+            self.assertEqual(regular.read_text(encoding="utf-8"), '{"ok":true}')
+
+    def test_private_input_rejects_second_hardlink(self):
+        with tempfile.TemporaryDirectory() as directory:
+            regular = Path(directory) / "private.json"
+            regular.write_text('{"ok":true}', encoding="utf-8")
+            alias = Path(directory) / "alias.json"
+            try:
+                os.link(regular, alias)
+            except (OSError, NotImplementedError):
+                self.skipTest("hardlink creation unavailable on runner")
+            for candidate in (regular, alias):
+                with self.subTest(file=candidate.name):
+                    with self.assertRaises(ValueError):
+                        module._read_bounded_json(candidate)
+
+    def test_private_input_rejects_directory_without_blocking(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaises(ValueError):
+                module._read_bounded_json(Path(directory))
+
     def test_clean_pass(self):
         result = module.evaluate(self.cases, self.policy)
         self.assertTrue(result["pass"])
