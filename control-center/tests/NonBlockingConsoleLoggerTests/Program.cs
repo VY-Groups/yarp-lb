@@ -72,6 +72,29 @@ using(var priority = new NonBlockingConsoleLoggerProvider(lowWriter,capacity:32,
         "priority reserve does not discard the ERROR");
     lowHold.Set();
 }
+// Exercise recoverable failures from a service-hosted writer. The consumer
+// must survive every exception, count each lost record and still deliver the
+// next warning without blocking the request/logging thread.
+using (var recoveringOutput = new FaultThenRecoverWriter())
+using (var recoveringProvider = new NonBlockingConsoleLoggerProvider(
+    recoveringOutput, capacity: 16, maxLineChars: 256))
+{
+    var recoveringLog = recoveringProvider.CreateLogger("writer-recovery");
+    for (var i = 0; i < 5; i++)
+        recoveringLog.LogWarning("recoverable writer fault fixture {Index}", i);
+    recoveringLog.LogError("critical log after writer recovery");
+    Must(SpinWait.SpinUntil(
+            () => recoveringProvider.WriteErrors == 4 &&
+                  recoveringProvider.WrittenMessages == 2,
+            TimeSpan.FromSeconds(5)),
+        "bounded writer survives IO, disposal, permission and invalid-state failures");
+    Must(recoveringOutput.SuccessfulWrites == 2 &&
+         recoveringOutput.ErrorRecords == 1 &&
+         recoveringProvider.EnqueuedMessages == 6 &&
+         recoveringProvider.DroppedMessages == 0 &&
+         recoveringProvider.WriteErrors == 4,
+        "warnings and post-recovery ERROR are delivered with exact lost-output accounting");
+}
 Console.WriteLine("PRODUCT BOUNDED CONSOLE LOGGING ACCEPTANCE PASSED");
 
 sealed class BlockedWriter : TextWriter
@@ -88,5 +111,31 @@ sealed class BlockedWriter : TextWriter
         entered.Set();
         release.Wait();
         Interlocked.Increment(ref lines);
+    }
+}
+
+sealed class FaultThenRecoverWriter : TextWriter
+{
+    private int attempts;
+    private int successful;
+    private int errorRecords;
+    public override Encoding Encoding => Encoding.UTF8;
+    public int SuccessfulWrites => Volatile.Read(ref successful);
+    public int ErrorRecords => Volatile.Read(ref errorRecords);
+    public override void WriteLine(string? value)
+    {
+        var attempt = Interlocked.Increment(ref attempts);
+        switch (attempt)
+        {
+            case 1: throw new IOException("simulated broken pipe");
+            case 2: throw new ObjectDisposedException("simulated writer disposal");
+            case 3: throw new UnauthorizedAccessException("simulated writer permission failure");
+            case 4: throw new InvalidOperationException("simulated writer invalid state");
+            default:
+                if (value is not null && value.Contains(" Error ", StringComparison.Ordinal))
+                    Interlocked.Increment(ref errorRecords);
+                Interlocked.Increment(ref successful);
+                break;
+        }
     }
 }

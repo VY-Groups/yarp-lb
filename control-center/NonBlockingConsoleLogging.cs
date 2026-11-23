@@ -108,6 +108,12 @@ public sealed class NonBlockingConsoleLoggerProvider : ILoggerProvider, ISupport
             }
             catch (IOException) { Interlocked.Increment(ref writeErrors); }
             catch (ObjectDisposedException) { Interlocked.Increment(ref writeErrors); }
+            // Some service-hosted TextWriter implementations report broken
+            // stdout as a permission or invalid-state failure instead of
+            // IOException. Keep the bounded consumer alive and count each
+            // lost record; never recurse through ILogger from this worker.
+            catch (UnauthorizedAccessException) { Interlocked.Increment(ref writeErrors); }
+            catch (InvalidOperationException) { Interlocked.Increment(ref writeErrors); }
             // Do not log failures back through ILogger (would recurse).
         }
     }

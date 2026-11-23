@@ -18,6 +18,26 @@ OTEL_EXPORTER_OTLP_HEADERS=Authorization=Bearer%20<short-lived-token>
 
 Export uses the SDK's bounded batch queue and background worker; request handling does not synchronously wait for collector delivery. When the queue is full or the collector is unavailable, telemetry may be dropped. The proxy path continues serving traffic. Metrics export every 15 seconds with a five-second timeout. Trace batch limits use the OpenTelemetry SDK defaults for the pinned package version. The exporter includes the bounded console writer's total/low/high priority drop and write-error counters from the `GatewayCoreYarp.Logging` meter.
 
+## Bounded console writer recovery and loss evidence
+
+The background console output writer counts failed output records in
+`yarp_logging_write_errors`. Broken pipes, disposed writers, permission
+failures and invalid-state failures do **not** terminate the bounded queue
+consumer. If a subsequent write is possible, the consumer resumes normally
+without blocking the gateway request path or recursively logging an error.
+`yarp_logging_dropped_high_priority` and
+`yarp_logging_dropped_low_priority` separately count admission drops at
+the queue boundary; output failures are counted under write errors rather
+than misreported as queue drops. Alert on nonzero write errors and on any
+high-priority drops. This lossy logger is **not** durable audit delivery.
+
+The Windows/Ubuntu `NonBlockingConsoleLoggerTests` injects four distinct
+output failures then verifies one later warning succeeds, all losses are
+accounted for, and no admission drop is invented. This proves only the
+background writer's local recovery contract; it does not substitute for
+collector delivery, production monitoring or immutable audit acceptance
+under #50.
+
 ## Data and privacy contract
 
 - Request and proxy spans use W3C trace context. Proxy spans can carry bounded route, cluster, and destination IDs that match `[A-Za-z0-9_-]{1,80}`. ASP.NET server span names are normalized from the HTTP method and router-provided route template; unmatched requests use a method-only name so raw paths and identifiers are not exported through the span name.
