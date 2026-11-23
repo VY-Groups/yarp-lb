@@ -97,6 +97,7 @@ trap teardown EXIT
 # manifest. Fail before starting containers if it expires or broadens.
 python3 -m unittest discover -s tests/WafCrs -p 'test_exception_policy.py' -v
 python3 -m unittest discover -s tests/WafCrs -p 'test_operator_corpus_acceptance.py' -v
+python3 -m unittest discover -s tests/WafCrs -p 'test_benchmark_contract.py' -v
 python3 tests/WafCrs/exception_policy.py --validate
 docker compose -f "$COMPOSE" config --quiet
 WAF_MODE=On docker compose -f "$COMPOSE" up --detach
