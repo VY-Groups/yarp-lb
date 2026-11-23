@@ -143,8 +143,40 @@ try
         Check(!await queue.DeliverOneAsync(CancellationToken.None) && File.Exists(persisted) &&
               queue.Status() is { Pending: 1, DeliveryBlocked: true }, "collector outage never deletes queued audit event");
     }
+    // An external hard link points at the same inode as a private queued
+    // audit event while bypassing both path traversal and symlink checks.
+    // Reject that alias on Linux before loading the event into a new spool.
+    if (OperatingSystem.IsLinux())
+    {
+        var outsideAlias = Path.Combine(Path.GetTempPath(),
+            "gateway-audit-alias-" + Guid.NewGuid().ToString("N"));
+        var start = new System.Diagnostics.ProcessStartInfo("ln")
+        {
+            UseShellExecute = false,
+            RedirectStandardError = true
+        };
+        start.ArgumentList.Add("--");
+        start.ArgumentList.Add(persisted);
+        start.ArgumentList.Add(outsideAlias);
+        using (var ln = System.Diagnostics.Process.Start(start)
+            ?? throw new Exception("FAIL: hardlink test could not launch ln"))
+        {
+            if (!ln.WaitForExit(5000) || ln.ExitCode != 0)
+                throw new Exception("FAIL: hardlink test could not create audit inode alias");
+        }
+        try
+        {
+            var deniedAlias = false;
+            try { using var _ = new DurableAuditOutbox(outboxRoot.FullName, transport); }
+            catch (InvalidDataException) { deniedAlias = true; }
+            Check(deniedAlias && File.Exists(persisted),
+                "Linux audit spool fails closed on a hardlinked authenticated event");
+        }
+        finally { File.Delete(outsideAlias); }
+    }
     using (var queue = new DurableAuditOutbox(outboxRoot.FullName, transport))
-        Check(queue.Status().Pending == 1, "audit queue survives process disposal and re-open");
+        Check(queue.Status().Pending == 1,
+            "audit queue survives disposal and re-opens after removing a hardlink alias");
     var raw = File.ReadAllText(persisted);
     File.WriteAllText(persisted, raw.Replace("operator", "changed") + "invalid");
     bool rejected = false;

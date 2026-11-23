@@ -112,6 +112,25 @@ WORM/retention attestation, cross-process anti-rollback or a solution to
 compromise of the service identity. The external collector and operation
 receipt requirements remain mandatory.
 
+### Linux queued-event hardlink isolation (#50)
+
+Each persisted `*.event` file in the protected external audit outbox is
+read using the existing bounded, no-follow, owner-only file reader. On Linux,
+the open-handle `statx` validation also requires a **single filesystem
+hard link**. A queued audit record may contain bounded actor and operation
+metadata even when its HMAC remains valid: a second hardlink in a different
+directory is still the same underlying inode, so pathname/symlink checks
+alone do not establish private spool isolation. An aliased event causes
+startup to fail closed, with no automatic deletion, migration or overwrite.
+CI creates an actual Linux hardlink to a queued authenticated event *outside*
+its private spool, confirms that reopening is refused, then removes the
+alias and confirms the original event is still pending and readable.
+
+This is a local file custody and confidentiality guard. It does not
+guarantee immutable remote retention, remove risk from a compromised service
+identity or replace a securely configured external audit collector and
+physical site acceptance.
+
 ### Durable correlated resource PREPARED gate (#38)
 
 When the external collector and durable outbox are configured, the common
