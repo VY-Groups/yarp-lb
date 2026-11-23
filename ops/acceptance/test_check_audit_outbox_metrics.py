@@ -14,7 +14,6 @@ def fixture(nodes=("gateway-a", "gateway-b"), now=2000000000):
         "gateway_audit_outbox_storage_fault": 0,
         "gateway_audit_outbox_delivery_blocked": 0,
         "gateway_audit_outbox_last_update_unixtime": now,
-        "gateway_audit_outbox_last_update_unixtime": now,
     }
     return {name: {
         "status": "success",
