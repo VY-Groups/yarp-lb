@@ -131,7 +131,26 @@ and automated disaster recovery are also absent.
 | Backup and restore | Back up the full protected state plus every key/certificate/password required to decrypt it. Restrict, encrypt, version, and audit backups. Restore in isolation first, run cookie and state integrity checks, then use the existing reviewed rollout/rollback process. | No automated backup, restore validation, immutable audit integration, or tested customer recovery runbook. Windows DPAPI state is machine-bound. |
 | Linux wrapping-certificate rotation | Set the replacement as current and the previous certificate as old; keep both available while any persisted XML key requires the old certificate. Restart one isolated instance and verify old-cookie unprotect plus new-key persistence before rollout. | Certificate-overlap source/CI tests exist. Production operator rotation, XML rewrap, fleet coordination, and a safe certificate-removal criterion are not qualified. |
 | Key loss or tamper | Fail closed; do not generate a replacement ring over the old state and claim sessions were recovered. Revoke affected sessions and restore from a verified compatible backup if available. | Linux tamper rejection is tested. Windows/Linux service recovery after lost or corrupted key material is not accepted on representative hosts. |
-| Move between hosts | Do not copy Windows DPAPI keys to another machine. Linux requires the matching wrapping private certificate and same application/purpose configuration; host-level state and anti-rollback controls still need independent review. | Cross-host key-ring migration and multi-node cookie continuity are unsupported. |
+| Move between hosts | Do not copy Windows DPAPI keys to another machine. Linux requires the matching wrapping private certificate and same application/purpose configuration; host-level state and anti-rollback controls still need independent review. | Disposable Ubuntu CI now verifies two **distinct encrypted key-ring directories** share old/new test-cookie continuity only when the correct approved RSA wrapper and application purpose are available, and reject the original session with a wrong wrapper. Real cross-host key-ring migration, secure distribution and coordinated zero-downtime fleet rollout remain unqualified. |
+
+### Independent Linux key-ring continuity fixture (#48)
+
+The Linux Data Protection integration test now copies **only encrypted key
+XML** into a separate owner-only state directory, retains the explicitly
+approved RSA wrapping certificate and fixed application/purpose identity,
+and confirms old session ciphertext decrypts on the replica and new
+replica ciphertext decrypts on the original. A different wrapping certificate
+fails the old-cookie decrypt, and restoring the correct certificate succeeds.
+There is no silent replacement of the old ring and no plaintext import. The
+fixture uses two directories on **one disposable CI host**, not two
+independently administered machines, and does not prove secure key exchange,
+real service identity isolation, time/rotation convergence, checkpoint replay
+fencing or customer-host disaster recovery. In particular, the
+[GatewayCore GSLB engineering security review](GSLB_BRANCH_DEEP_REVIEW.md)
+warns against unauthenticated "newest wins" signing-state synchronization;
+fleet DP key transport and accepted revisions must remain authenticated and
+operator controlled. These tests are a narrow cryptographic compatibility
+proof only; deployment acceptance remains #36.
 
 The Linux process test starts the real Control Center in Production mode,
 inspects persisted key XML for certificate wrapping, creates an authenticated
