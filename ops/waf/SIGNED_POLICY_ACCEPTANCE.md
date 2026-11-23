@@ -111,7 +111,7 @@ python3 ops/waf/runtime_ruleset_inventory.py --container "$container_id"
 ```
 
 The fixed canonical domain `GatewayCore.WAF.ObservedCRSRuleFiles.v1` hashes
-the sorted exact relative path and content bytes of single-link regular
+the sorted exact relative path and content bytes of regular, nonlinked tar
 `/etc/modsecurity.d/owasp-crs/rules/*.conf`. Archive size, individual
 files, total bytes, path aliasing, ambiguous duplicate names and the
 presence of 930/941/942 CRS families are all fail-closed. The policy
