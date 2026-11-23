@@ -63,11 +63,14 @@ class ObservedRuleInventoryTests(unittest.TestCase):
         first = next(iter(FILES))
         with self.assertRaisesRegex(ValueError, "duplicate"):
             observed.canonical_rule_digest(tarball(
-                FILES, extra=[(first.upper().replace("RULES", "rules"),
+                FILES, extra=[(first.replace("REQUEST-", "request-", 1),
                                b"shadow-content")]))
         with self.assertRaisesRegex(ValueError, "duplicate"):
             observed.canonical_rule_digest(tarball(
                 FILES, extra=[(first, b"replacement")]))
+        with self.assertRaisesRegex(ValueError, "case-aliased"):
+            observed.canonical_rule_digest(tarball(
+                FILES, extra=[(first.upper().replace("RULES", "rules"), b"shadow")]))
 
     def test_oversized_or_invalid_archive_is_not_a_valid_fingerprint(self):
         for raw in (b"", b"invalid tar", b"x" * (observed.MAX_ARCHIVE + 1)):
