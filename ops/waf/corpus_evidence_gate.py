@@ -19,13 +19,15 @@ SEVERITIES = {"low", "medium", "high", "critical"}
 
 
 def evaluate(rows, policy):
-    if set(policy) != {"mode", "routes"} or policy["mode"] not in MODES:
-        raise ValueError("policy must contain only mode and routes")
-    if not isinstance(policy["routes"], dict) or not policy["routes"]:
+    if type(policy) is not dict or set(policy) != {"mode", "routes"} or \
+            type(policy["mode"]) is not str or policy["mode"] not in MODES:
+        raise ValueError("policy must be an object with valid mode and routes")
+    if type(policy["routes"]) is not dict or not policy["routes"]:
         raise ValueError("policy routes must be a nonempty object")
     for route, limits in policy["routes"].items():
-        if not isinstance(route, str) or not route or set(limits) != {"max_fp", "max_fn"}:
-            raise ValueError("each route needs explicit max_fp and max_fn")
+        if not isinstance(route, str) or not route or \
+                type(limits) is not dict or set(limits) != {"max_fp", "max_fn"}:
+            raise ValueError("each route needs an object with max_fp and max_fn")
         if any(type(limits[k]) is not int or limits[k] < 0 for k in ("max_fp", "max_fn")):
             raise ValueError("limits must be nonnegative integers")
     stats = defaultdict(lambda: {"tp": 0, "tn": 0, "fp": 0, "fn": 0})
@@ -72,7 +74,21 @@ def main():
     parser.add_argument("--out", required=True, type=pathlib.Path)
     args = parser.parse_args()
     try:
-        policy = json.loads(args.policy.read_text(encoding="utf-8"))
+        # Duplicate keys can silently replace precommitted WAF thresholds
+        # under Python's default JSON decoder. Reject duplicates rather than
+        # letting the last value redefine the approved route policy.
+        def strict_object(pairs):
+            result = {}
+            for key, value in pairs:
+                if key in result:
+                    raise ValueError("duplicate WAF policy JSON property")
+                result[key] = value
+            return result
+
+        policy = json.loads(args.policy.read_text(encoding="utf-8"),
+                            object_pairs_hook=strict_object,
+                            parse_constant=lambda _: (_ for _ in ()).throw(
+                                ValueError("non-JSON policy numeric constant")))
         with args.corpus.open(newline="", encoding="utf-8") as stream:
             reader = csv.DictReader(stream)
             if reader.fieldnames is None or set(reader.fieldnames) != FIELDS or len(reader.fieldnames) != len(FIELDS):
