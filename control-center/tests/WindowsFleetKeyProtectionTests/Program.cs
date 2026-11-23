@@ -158,6 +158,29 @@ try
     catch (InvalidOperationException) { plaintextRejected = true; }
     Check(plaintextRejected, "Windows fleet refuses unwrapped existing key material");
 
+    // String searches used to accept a comment containing "encryptedSecret"
+    // and missed a namespace-qualified plaintext masterKey. Inspect XML nodes.
+    var disguised = Path.Combine(root, "disguised-existing-ring");
+    Directory.CreateDirectory(disguised);
+    var disguisedId = Guid.NewGuid().ToString("D");
+    var disguisedFile = Path.Combine(disguised, "key-" + disguisedId + ".xml");
+    foreach (var (xmlText, label) in new (string Xml, string Label)[]
+    {
+        ("<key id=\"" + disguisedId + "\"><!-- encryptedSecret --><descriptor/></key>",
+         "comment cannot impersonate a wrapped key"),
+        ("<key id=\"" + disguisedId + "\"><x:masterKey xmlns:x=\"urn:untrusted\">plaintext-test-only</x:masterKey>" +
+         "<encryptedSecret xmlns=\"http://schemas.asp.net/2015/03/dataProtection\"" +
+         " decryptorType=\"EncryptedXmlDecryptor\"/></key>",
+         "namespace-qualified plaintext master key is refused")
+    })
+    {
+        File.WriteAllText(disguisedFile, xmlText);
+        var rejected = false;
+        try { WindowsFleetKeyProtection.TryConfigure(baseline, disguised); }
+        catch (InvalidOperationException) { rejected = true; }
+        Check(rejected, label);
+    }
+
     using var first = Build("gateway-one");
     var protect = first.GetRequiredService<IDataProtectionProvider>()
         .CreateProtector("gatewaycore-windows-fleet-cookie-v1");
@@ -167,6 +190,15 @@ try
         File.ReadAllText(path).Contains("<encryptedSecret", StringComparison.Ordinal) &&
         !File.ReadAllText(path).Contains("<masterKey", StringComparison.Ordinal)),
         "Windows fleet persisted Data Protection keys are certificate-wrapped at rest");
+    // A copied XML file with a second filename cannot impersonate another key.
+    var duplicateAlias = Path.Combine(root, "gateway-one",
+        "key-" + Guid.NewGuid().ToString("D") + ".xml");
+    File.Copy(xml[0], duplicateAlias);
+    var aliasIdentityRejected = false;
+    try { WindowsFleetKeyProtection.TryConfigure(baseline, Path.Combine(root, "gateway-one")); }
+    catch (InvalidOperationException) { aliasIdentityRejected = true; }
+    Check(aliasIdentityRejected, "duplicated key XML under another GUID filename is refused");
+    File.Delete(duplicateAlias);
     CopyKeys("gateway-one", "gateway-two");
     using var second = Build("gateway-two");
     Check(CanRead(second, token), "second isolated Windows gateway reads approved portable cookie");
