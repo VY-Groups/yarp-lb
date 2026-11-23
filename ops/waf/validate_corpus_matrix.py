@@ -8,6 +8,7 @@ import argparse
 import json
 import math
 import os
+import stat
 import sys
 from collections import defaultdict
 from pathlib import Path
@@ -36,10 +37,35 @@ def _reject_duplicate_json_keys(pairs):
 
 
 def _read_bounded_json(path):
-    if path.stat().st_size > MAX_INPUT_BYTES:
-        raise ValueError("WAF evidence input exceeds 16 MiB")
-    with path.open("rb") as stream:
-        raw = stream.read(MAX_INPUT_BYTES + 1)
+    """Read only one stable, regular evidence inode (never a linked alias).
+
+    An opened-descriptor size/read check protects against input growth and a
+    race where a path is swapped after its initial lstat. On POSIX O_NOFOLLOW
+    rejects a symlink substituted at open; the inode check also detects a
+    replacement between lstat and open. Windows additionally uses a best-
+    effort path preflight, not an OS-wide concurrent-attacker guarantee.
+    """
+    before = path.lstat()
+    if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+        raise ValueError("WAF input must be a single-link regular file")
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    # FIFOs must never block the validator while opening; fstat will reject
+    # all nonregular objects before attempting any read.
+    flags |= getattr(os, "O_NONBLOCK", 0)
+    fd = os.open(path, flags)
+    try:
+        current = os.fstat(fd)
+        if (not stat.S_ISREG(current.st_mode) or current.st_nlink != 1 or
+                (before.st_dev, before.st_ino) != (current.st_dev, current.st_ino)):
+            raise ValueError("WAF input changed or is not a single-link regular file")
+        if current.st_size > MAX_INPUT_BYTES:
+            raise ValueError("WAF evidence input exceeds 16 MiB")
+        with os.fdopen(fd, "rb") as stream:
+            fd = -1
+            raw = stream.read(MAX_INPUT_BYTES + 1)
+    finally:
+        if fd >= 0:
+            os.close(fd)
     if len(raw) > MAX_INPUT_BYTES:
         raise ValueError("WAF evidence input exceeds 16 MiB")
     return json.loads(raw.decode("utf-8"), object_pairs_hook=_reject_duplicate_json_keys)
