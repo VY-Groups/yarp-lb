@@ -9,6 +9,30 @@ internal static class GatewayClientAddressTests
         Check(untrusted.Address!.ToString() == "198.51.100.8" && untrusted.Source == "socket",
             "untrusted X-Forwarded-For is ignored");
 
+        // In the normal no-trusted-proxies configuration, repeated peer
+        // resolution should not allocate a byte[] and hex string per request.
+        // Force real address comparisons to prevent a dead-code benchmark.
+        var peer = IPAddress.Parse("198.51.100.8");
+        var noTrustedProxy = GatewayClientAddress.ParseTrustedProxyAddresses(null);
+        for (var i = 0; i < 10_000; i++)
+        {
+            var warm = GatewayClientAddress.ForAccessLog(peer, "203.0.113.4", noTrustedProxy);
+            if (!ReferenceEquals(warm.Address, peer) || warm.Source != "socket")
+                throw new Exception("Untrusted client address resolution changed");
+        }
+        GC.Collect(); GC.WaitForPendingFinalizers(); GC.Collect();
+        var beforeAlloc = GC.GetAllocatedBytesForCurrentThread();
+        for (var i = 0; i < 100_000; i++)
+        {
+            var resolved = GatewayClientAddress.ForAccessLog(peer, "203.0.113.4", noTrustedProxy);
+            if (!ReferenceEquals(resolved.Address, peer) || resolved.Source != "socket")
+                throw new Exception("Unexpected client resolution during allocation test");
+        }
+        var allocated = GC.GetAllocatedBytesForCurrentThread() - beforeAlloc;
+        Console.WriteLine($"UNTRUSTED_PEER_RESOLUTION_ALLOCATIONS bytes={allocated} calls=100000");
+        Check(allocated <= 100_000,
+            "no trusted proxies: client resolution allocates <=1 byte/call after warmup");
+
         var trustedProxies = GatewayClientAddress.ParseTrustedProxyAddresses("10.0.0.5, 2001:db8::5");
         var trusted = GatewayClientAddress.ForAccessLog(
             IPAddress.Parse("10.0.0.5"), "203.0.113.4", trustedProxies);
