@@ -77,6 +77,24 @@ jobs:
             --dotnet-trace "$RUNNER_TEMP/dotnet-tools/dotnet-trace" \
             --rounds 3 --vus 75 --duration 45s --warmup 10s \
             --trace-seconds 25 --payload-bytes 0
+      - name: Convert bounded allocation traces to reviewable Speedscope stacks
+        if: steps.paired_profile.outcome == 'success'
+        shell: bash
+        run: |
+          set -euo pipefail
+          for revision in before after; do
+            trace="artifacts/issue34/traces/${revision}-gc-verbose.nettrace"
+            base="${trace%.nettrace}"
+            test -s "$trace"
+            "$RUNNER_TEMP/dotnet-tools/dotnet-trace" convert "$trace" \
+              --format Speedscope --output "$base"
+            result="${base}.speedscope.json"
+            test -s "$result"
+            python3 -m json.tool "$result" >/dev/null
+          done
+          # Keep the original .nettrace archives: Speedscope conversion
+          # loses runtime event details and is a review aid, not independent
+          # attribution of allocations/request.
       - name: Add paired measurement summary
         if: always()
         run: |
@@ -103,7 +121,9 @@ jobs:
           if [[ ! -s artifacts/issue34/paired-report.json || \
                 ! -s artifacts/issue34/trace-index.json || \
                 ! -s artifacts/issue34/traces/before-gc-verbose.nettrace || \
-                ! -s artifacts/issue34/traces/after-gc-verbose.nettrace ]]; then
+                ! -s artifacts/issue34/traces/after-gc-verbose.nettrace || \
+                ! -s artifacts/issue34/traces/before-gc-verbose.speedscope.json || \
+                ! -s artifacts/issue34/traces/after-gc-verbose.speedscope.json ]]; then
             echo "## Issue 34 profile incomplete: report or required trace is missing." >> "$GITHUB_STEP_SUMMARY"
             exit 1
           fi
