@@ -120,6 +120,23 @@ def verified_origin_response(method, content_type, body_size, response_type, pay
             and record["contentType"] == content_type)
 
 
+def verified_response_framing(headers, payload):
+    """Reject ambiguous or incomplete declared HTTP response framing.
+
+    Real WAF and origin responses may be chunked without Content-Length.
+    When a length is present, it must be unique and match all received bytes.
+    """
+    lengths = headers.get_all("Content-Length", [])
+    if len(lengths) > 1 or (lengths and headers.get("Transfer-Encoding") is not None):
+        return False
+    if not lengths:
+        return True
+    length = lengths[0]
+    if not length.isascii() or not length.isdecimal() or len(length) > 10:
+        return False
+    return int(length) == len(payload)
+
+
 def run_cases(cases, connection_factory=None):
     if connection_factory is None:
         connection_factory = lambda: http.client.HTTPConnection(
@@ -140,7 +157,7 @@ def run_cases(cases, connection_factory=None):
             response = connection.getresponse()
             status = response.status
             payload = response.read(4097)
-            marker = verified_origin_response(
+            marker = verified_response_framing(response.headers, payload) and verified_origin_response(
                 case["method"], case["contentType"], len(body),
                 response.getheader("Content-Type", ""), payload)
         except (OSError, TimeoutError, http.client.HTTPException):
