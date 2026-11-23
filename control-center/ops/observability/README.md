@@ -45,3 +45,23 @@ The production deployment must explicitly configure its scrape job labels
 and route receiver credentials, then prove a real high-priority warning/error
 loss and writer fault reach its paging destination. This disposable stack
 does not establish that operational acceptance and #50 remains open.
+
+## Collector-down alert gate
+
+Prometheus now raises `GatewayOtelCollectorScrapeFailed` when a configured
+`otel-collector` scrape target reports `up == 0` continuously for one
+minute. The alert is critical and uses the existing alert routing rules.
+The real pinned-Prometheus `promtool` unit test verifies both a failing
+collector scrape and a healthy negative control.
+
+This is a **missing-evidence** detection rule informed by the
+[GatewayCore GSLB engineering security review](../../docs/GSLB_BRANCH_DEEP_REVIEW.md):
+collector silence must not be misinterpreted as healthy proxy operation.
+It does not change proxy availability, sampling, backpressure or existing
+alert thresholds. When the Collector job is **not configured at all**,
+Prometheus does not create `up` for that job, and this rule alone cannot
+detect that inventory omission. The operator must independently verify
+that every opted-in production node and its required Collector are in
+the monitoring inventory, that protected alert delivery is live, and
+that offline/retention evidence is preserved. This lab is not physical
+production acceptance; #50/#36 remaining gates are unchanged.
