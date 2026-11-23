@@ -176,6 +176,31 @@ public static class GatewayOtlpExporterAcceptance
                 unmatchedActivity.SetTag("client.address", "203.0.113.78");
             }
 
+            // A literal-looking http.route is not necessarily a safe
+            // framework route pattern. A middleware/instrumentation upgrade
+            // could fill it with the actual URL path and a customer ID.
+            // Verify BOTH the OTLP tag and ASP.NET span name are redacted.
+            using (var literalRoute = aspNetSource.StartActivity(
+                       "GET /users/route-literal-customer-canary", ActivityKind.Server))
+            {
+                if (literalRoute is null)
+                    throw new Exception("Literal ASP.NET route privacy fixture was not sampled");
+                literalRoute.SetTag("http.request.method", "GET");
+                literalRoute.SetTag("http.route", "/users/route-literal-customer-canary");
+                literalRoute.SetTag("url.path", "/users/route-literal-customer-canary");
+            }
+            // Even a string with braces is not a usable route template if
+            // the parameter is empty. Reject it rather than exporting an
+            // untrusted attribute as a supposedly stable path pattern.
+            using (var emptyParameter = aspNetSource.StartActivity(
+                       "GET /orders/invalid-empty-parameter-canary", ActivityKind.Server))
+            {
+                if (emptyParameter is null)
+                    throw new Exception("Malformed ASP.NET route privacy fixture was not sampled");
+                emptyParameter.SetTag("http.request.method", "GET");
+                emptyParameter.SetTag("http.route", "/orders/{}/invalid-empty-parameter-canary");
+            }
+
             var response = new Microsoft.AspNetCore.Http.DefaultHttpContext();
             response.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
             GatewayOpenTelemetry.RecordProxyResult(response, 12.5,
@@ -239,7 +264,8 @@ public static class GatewayOtlpExporterAcceptance
                          "203.0.113.99", "203.0.113.77", "otlp-secret-canary",
                          "203.0.113.78", "customer-id-otlp-secret", "unmatched-id-otlp-secret",
                          "second-secret-canary", "/private", "otlp-custom-header-canary",
-                         "otlp-header-array-canary", "otlp-enrichment-canary"
+                         "otlp-header-array-canary", "otlp-enrichment-canary",
+                         "route-literal-customer-canary", "invalid-empty-parameter-canary"
                      })
                 if (tracePayload.Contains(sensitive, StringComparison.Ordinal))
                     throw new Exception($"Sensitive value was present in OTLP trace export: {sensitive}");
