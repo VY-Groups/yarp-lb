@@ -78,8 +78,12 @@ GitHub artifact, an installer or an ordinary UNC share.
 The dedicated Windows Server 2022 CI checks use **disposable machine-store
 certificate fixtures** and two isolated local key-ring directories to
 verify encrypted XML, cookie portability with an approved shared certificate,
-wrong-certificate rejection, rotation overlap and invalid-configuration
-failure. The pre-existing Windows SCM CI separately proves the real service
+rejection when the recipient has no approved certificate available,
+rotation overlap and invalid-configuration failure. ASP.NET may discover
+previously installed wrapping certificates on the **same** LocalMachine
+store even when a different current thumbprint is configured; one-host CI
+cannot prove separate-host isolation. Do not co-host unrelated tenants or
+share wrapping-key ACLs between identities. The pre-existing Windows SCM CI separately proves the real service
 restart/cookie-continuity path under default LocalMachine DPAPI. Combining
 those two CI PASS signals is NOT a substitute for two physically independent
 Windows service identities, real certificate ACLs, authenticated fleet
