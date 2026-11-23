@@ -159,7 +159,16 @@ public static class GatewayOtlpExporterAcceptance
             {
                 if (aspNetActivity is null) throw new Exception("ASP.NET HTTP span was not subscribed by the OTel pipeline");
                 aspNetActivity.SetTag("http.request.method", "GET");
-                aspNetActivity.SetTag("http.route", "/orders/{orderId}");
+                // Poison the Activity tag with a syntactically balanced
+                // but client-derived path. The actual selected ASP.NET
+                // endpoint metadata, never this tag, is the trusted source.
+                aspNetActivity.SetTag("http.route", "/users/{untrusted-brace-canary}");
+                var selectedContext = new DefaultHttpContext();
+                selectedContext.SetEndpoint(new Microsoft.AspNetCore.Routing.RouteEndpoint(
+                    _ => Task.CompletedTask,
+                    Microsoft.AspNetCore.Routing.Patterns.RoutePatternFactory.Parse("/orders/{orderId}"),
+                    0, new EndpointMetadataCollection(), "trusted route fixture"));
+                GatewayOpenTelemetry.StampSelectedRouteTemplate(aspNetActivity, selectedContext);
                 aspNetActivity.SetTag("http.target", "/orders/customer-id-otlp-secret?token=otlp-secret-canary");
                 aspNetActivity.SetTag("url.path", "/orders/customer-id-otlp-secret");
                 aspNetActivity.SetTag("url.query", "token=otlp-secret-canary");
@@ -189,9 +198,19 @@ public static class GatewayOtlpExporterAcceptance
                 literalRoute.SetTag("http.route", "/users/route-literal-customer-canary");
                 literalRoute.SetTag("url.path", "/users/route-literal-customer-canary");
             }
-            // Even a string with braces is not a usable route template if
-            // the parameter is empty. Reject it rather than exporting an
-            // untrusted attribute as a supposedly stable path pattern.
+            // The route-tag shape alone is not authentication. Even a
+            // well-formed brace-wrapped customer path must fail without a
+            // marker from the actual selected RouteEndpoint metadata.
+            using (var forgedRoute = aspNetSource.StartActivity(
+                       "GET /users/brace-wrapped-user-canary", ActivityKind.Server))
+            {
+                if (forgedRoute is null)
+                    throw new Exception("Forged route privacy fixture was not sampled");
+                forgedRoute.SetTag("http.request.method", "GET");
+                forgedRoute.SetTag("http.route", "/users/{brace-wrapped-user-canary}");
+            }
+            // An empty brace parameter is also invalid even when a component
+            // attempts to pass it as a route-template-looking attribute.
             using (var emptyParameter = aspNetSource.StartActivity(
                        "GET /orders/invalid-empty-parameter-canary", ActivityKind.Server))
             {
@@ -265,7 +284,8 @@ public static class GatewayOtlpExporterAcceptance
                          "203.0.113.78", "customer-id-otlp-secret", "unmatched-id-otlp-secret",
                          "second-secret-canary", "/private", "otlp-custom-header-canary",
                          "otlp-header-array-canary", "otlp-enrichment-canary",
-                         "route-literal-customer-canary", "invalid-empty-parameter-canary"
+                         "route-literal-customer-canary", "invalid-empty-parameter-canary",
+                         "untrusted-brace-canary", "brace-wrapped-user-canary"
                      })
                 if (tracePayload.Contains(sensitive, StringComparison.Ordinal))
                     throw new Exception($"Sensitive value was present in OTLP trace export: {sensitive}");
