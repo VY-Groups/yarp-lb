@@ -166,3 +166,16 @@ groups:
         expr: increase(yarp_logging_write_errors_total{job=~"gatewaycore-gateway|otel-collector"}[5m]) > 0
         for: 1m
         labels: {severity: critical}
+      - alert: GatewayAuditOutboxDeliveryFault
+        # These identity-free gauges are OTLP-exported by the durable audit
+        # worker. Never interpret an unconfigured audit outbox as healthy
+        # delivery; inventory and actual signed remote receipts need their
+        # own operational acceptance checks.
+        expr: (gateway_audit_outbox_storage_fault{job="otel-collector"} == 1) or (gateway_audit_outbox_delivery_blocked{job="otel-collector"} == 1) or (gateway_audit_outbox_pending{job="otel-collector"} < 0)
+        for: 1m
+        labels: {severity: critical}
+        annotations:
+          summary: "GatewayCore durable audit outbox cannot deliver or inspect pending events"
+          description: "External authenticated audit outbox on {{ $labels.service_instance_id }} reports blocked delivery, persistent storage fault or an unreadable pending count. Verify the admin-only audit delivery status and collector receipts before clearing the incident."
+          runbook: "control-center/docs/EXTERNAL_AUDIT_INTENT.md"
+
