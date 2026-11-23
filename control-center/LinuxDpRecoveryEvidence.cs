@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -78,9 +79,19 @@ public static class LinuxDpRecoveryEvidence
         // be provisioned outside the entire Control Plane state root, not
         // merely outside the data-protection-keys subdirectory.
         var stateRoot = Path.GetDirectoryName(Path.GetFullPath(keyRingDirectory));
-        if (string.IsNullOrWhiteSpace(stateRoot) ||
-            IsInsideDirectory(stateRoot, manifestPath) ||
-            IsInsideDirectory(stateRoot, publicKeyPath))
+        if (string.IsNullOrWhiteSpace(stateRoot))
+            throw new InvalidOperationException("Linux DP recovery state root is missing");
+
+        // Compare both the operator-supplied spellings and their physical
+        // destinations. GetFullPath does NOT resolve symbolic link aliases;
+        // realpath resolves every existing ancestor before testing the trust
+        // boundary. The no-follow private-file reader still rejects such
+        // aliases and validates the opened file's ownership and permissions.
+        var physicalStateRoot = ResolveLinuxPhysicalPath(stateRoot);
+        if (IsInsideDirectory(stateRoot, manifestPath) ||
+            IsInsideDirectory(stateRoot, publicKeyPath) ||
+            IsInsideDirectory(physicalStateRoot, ResolveLinuxPhysicalPath(manifestPath)) ||
+            IsInsideDirectory(physicalStateRoot, ResolveLinuxPhysicalPath(publicKeyPath)))
             throw new InvalidOperationException(
                 "Linux DP recovery trust and checkpoint must be outside restored state");
 
@@ -234,6 +245,32 @@ public static class LinuxDpRecoveryEvidence
         return Encoding.ASCII.GetBytes(SignatureDomain +
             revision.ToString(CultureInfo.InvariantCulture) + "\n" +
             inventorySha256 + "\n");
+    }
+
+    // POSIX realpath resolves symlinks in every directory component. The
+    // underlying no-follow reader remains authoritative for file access:
+    // this canonicalization only establishes the independent path boundary.
+    [DllImport("libc", EntryPoint = "realpath", SetLastError = true, CharSet = CharSet.Ansi)]
+    private static extern IntPtr RealPathUnix(string path, IntPtr resolved);
+
+    [DllImport("libc", EntryPoint = "free")]
+    private static extern void FreeUnix(IntPtr pointer);
+
+    private static string ResolveLinuxPhysicalPath(string path)
+    {
+        var pointer = RealPathUnix(path, IntPtr.Zero);
+        if (pointer == IntPtr.Zero)
+            throw new InvalidOperationException(
+                "Cannot resolve Linux DP recovery evidence physical path");
+        try
+        {
+            var result = Marshal.PtrToStringUTF8(pointer);
+            if (string.IsNullOrWhiteSpace(result) || !Path.IsPathFullyQualified(result))
+                throw new InvalidOperationException(
+                    "Unusable Linux DP recovery physical path");
+            return result;
+        }
+        finally { FreeUnix(pointer); }
     }
 
     private static bool IsInsideDirectory(string rootDirectory, string candidatePath)
