@@ -1,5 +1,11 @@
 # Disposable GitHub-hosted Windows SCM integration only.
 # Refuses real machines, existing services, and existing ProgramData state.
+# LocalService is a disposable restricted service identity; LocalSystem remains default.
+[CmdletBinding()]
+param(
+    [ValidateSet('LocalSystem', 'LocalService')]
+    [string]$Identity = 'LocalSystem'
+)
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
@@ -18,7 +24,11 @@ if ($null -ne (Get-Service -Name $name -ErrorAction SilentlyContinue) -or
     throw 'REFUSED: pre-existing service or gateway state may not be touched'
 }
 $root = Join-Path $env:RUNNER_TEMP ('gatewaycore-scm-' + [guid]::NewGuid().ToString('N'))
-$published = Join-Path $root 'published'
+$published = if ($Identity -eq 'LocalService') {
+    Join-Path $product 'scm-ci-bin'
+} else {
+    Join-Path $root 'published'
+}
 $createdService = $false
 $rootProject = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..\..')).Path
 $project = Join-Path $rootProject 'control-center\GatewayCoreYarp.csproj'
@@ -26,6 +36,35 @@ $sample = Join-Path $rootProject 'control-center\appsettings.TEST.sample.json'
 $port = Get-Random -Minimum 22500 -Maximum 32500
 $baseUrl = 'http://127.0.0.1:' + $port
 try {
+    if ($Identity -eq 'LocalService') {
+        # A low-privilege service cannot create the ProgramData product
+        # root. The disposable runner administrator pre-provisions it with
+        # no inherited allow rules and only this service SID, SYSTEM/Admins.
+        New-Item -ItemType Directory -Path $product -Force | Out-Null
+        $secured = [Security.AccessControl.DirectorySecurity]::new()
+        $secured.SetAccessRuleProtection($true, $false)
+        foreach ($principalSid in @(
+            [Security.Principal.SecurityIdentifier]::new(
+                [Security.Principal.WellKnownSidType]::LocalServiceSid, $null),
+            [Security.Principal.SecurityIdentifier]::new(
+                [Security.Principal.WellKnownSidType]::LocalSystemSid, $null),
+            [Security.Principal.SecurityIdentifier]::new(
+                [Security.Principal.WellKnownSidType]::BuiltinAdministratorsSid, $null)
+        )) {
+            $rule = [Security.AccessControl.FileSystemAccessRule]::new(
+                $principalSid,
+                [Security.AccessControl.FileSystemRights]::FullControl,
+                ([Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
+                 [Security.AccessControl.InheritanceFlags]::ObjectInherit),
+                [Security.AccessControl.PropagationFlags]::None,
+                [Security.AccessControl.AccessControlType]::Allow)
+            $secured.AddAccessRule($rule)
+        }
+        [IO.DirectoryInfo]::new($product).SetAccessControl($secured)
+        if (-not (Get-Acl -LiteralPath $product).AreAccessRulesProtected) {
+            throw 'Pre-provisioned LocalService product ACL inherited permissions'
+        }
+    }
     New-Item -ItemType Directory -Path $published -Force | Out-Null
     & dotnet publish $project --configuration Release --framework net10.0 -p:UseAppHost=true --output $published
     if ($LASTEXITCODE -ne 0) { throw 'Disposable .NET publish failed' }
@@ -42,12 +81,22 @@ try {
     if (Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue) {
         throw 'Allocated disposable loopback port already in use'
     }
-    # LocalSystem is the existing SCM/ACL baseline, NOT a customer account test.
-    New-Service -Name $name -BinaryPathName ('"{0}"' -f $exe) -DisplayName 'GatewayCore Disposable SCM CI' -StartupType Manual | Out-Null
+    if ($Identity -eq 'LocalService') {
+        # No user passwords or secrets: built-in NT AUTHORITY LocalService,
+        # with only the specifically granted private product ACL.
+        & sc.exe create $name binPath= ('"{0}"' -f $exe) start= demand obj= 'NT AUTHORITY\LocalService' | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            throw 'Disposable LocalService SCM create failed'
+        }
+    } else {
+        # Shipping DPAPI/SCM baseline remains LocalSystem by default.
+        New-Service -Name $name -BinaryPathName ('"{0}"' -f $exe) -DisplayName 'GatewayCore Disposable SCM CI' -StartupType Manual | Out-Null
+    }
     $createdService = $true
     $service = Get-CimInstance Win32_Service -Filter "Name='$name'"
-    if ($null -eq $service -or $service.StartName -ne 'LocalSystem') {
-        throw 'Disposable service must use expected LocalSystem identity'
+    $expected = if ($Identity -eq 'LocalService') { 'NT AUTHORITY\LocalService' } else { 'LocalSystem' }
+    if ($null -eq $service -or $service.StartName -ne $expected) {
+        throw 'Disposable service must run under selected exact Windows SCM identity'
     }
     function Wait-Health {
         for ($i = 0; $i -lt 100; $i++) {
@@ -67,7 +116,7 @@ try {
     if (-not (Get-Acl -LiteralPath $stateRoot).AreAccessRulesProtected) {
         throw 'SCM state directory inherited broad ACL permissions'
     }
-    Write-Output 'PASS: real Windows SCM service reached loopback gateway health'
+    Write-Output ('PASS: real Windows SCM service (' + $Identity + ') reached loopback gateway health')
     $cookieSession = New-Object Microsoft.PowerShell.Commands.WebRequestSession
     $bootstrapBody = @{username='ci_scm_admin';password='Disposable-Windows-SCM-CI-Secret-4096!';email='scm-admin@example.invalid'} | ConvertTo-Json -Compress
     $bootstrap = Invoke-WebRequest -Uri ($baseUrl + '/admin/api/bootstrap') -UseBasicParsing -Method Post -WebSession $cookieSession -TimeoutSec 10 -ContentType 'application/json' -Body $bootstrapBody
@@ -98,7 +147,7 @@ try {
     if (-not $whoAfter.authenticated -or $whoAfter.username -ne 'ci_scm_admin') {
         throw 'SCM restart invalidated existing DPAPI-protected session'
     }
-    Write-Output 'PASS: real Windows SCM stop/restart preserved authenticated cookie'
+    Write-Output ('PASS: real Windows SCM (' + $Identity + ') stop/restart preserved authenticated cookie')
 } finally {
     if ($createdService) {
         try {
