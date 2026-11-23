@@ -70,12 +70,12 @@ void MakeHardLink(string existingFile, string additionalPath)
     File.SetUnixFileMode(secret,PrivateFile);
     return(pfx,secret);
 }
-ServiceProvider Provider(string statePath)
+ServiceProvider Provider(string statePath, string applicationName = "OnPremLinuxDpIntegration.v1")
 {
     var services=new ServiceCollection();
     var keys=Path.Combine(statePath,"data-protection-keys");
     var builder=services.AddDataProtection()
-        .SetApplicationName("OnPremLinuxDpIntegration.v1")
+        .SetApplicationName(applicationName)
         .PersistKeysToFileSystem(new DirectoryInfo(keys));
     LinuxKeyProtection.Configure(builder,statePath);
     return services.BuildServiceProvider();
@@ -210,6 +210,33 @@ try
             .CreateProtector("session-probe").Unprotect(replicaProtectedCookie) ==
             "replica-auth-session",
             "original node decrypts replica session with unchanged app/purpose identity");
+
+    // DP-13: even when two fleets mistakenly share the same encrypted key XML
+    // and wrapping certificate, the Data Protection application discriminator
+    // must prevent accepting another fleet's session. The purpose chain must
+    // independently reject a token from an unrelated authentication protocol.
+    using (var otherFleet = Provider(fleetReplicaState, "OnPremLinuxDpIntegration.other-fleet"))
+    {
+        var foreignProtector = otherFleet.GetRequiredService<IDataProtectionProvider>()
+            .CreateProtector("session-probe");
+        Assert(Throws(() => foreignProtector.Unprotect(encrypted)),
+            "DP-13 rejects cross-fleet session despite identical encrypted ring and RSA key");
+        var foreignCookie = foreignProtector.Protect("other-fleet-session");
+        using var originalFleet = Provider(state);
+        Assert(Throws(() => originalFleet.GetRequiredService<IDataProtectionProvider>()
+                .CreateProtector("session-probe").Unprotect(foreignCookie)),
+            "DP-13 rejects foreign-fleet session in both directions");
+    }
+    using (var sameFleet = Provider(fleetReplicaState))
+    {
+        Assert(Throws(() => sameFleet.GetRequiredService<IDataProtectionProvider>()
+                .CreateProtector("unrelated-authentication-purpose").Unprotect(encrypted)),
+            "DP-13 rejects unrelated authentication purpose with shared fleet key");
+        Assert(sameFleet.GetRequiredService<IDataProtectionProvider>()
+                .CreateProtector("session-probe").Unprotect(encrypted) ==
+                "sensitive-session-value-123",
+            "DP-13 rejection leaves authorized fleet session decryptable");
+    }
 
     // A different authorized RSA key is NOT automatically a decryption key
     // for a recovered ring. Do not silently generate replacement sessions or
