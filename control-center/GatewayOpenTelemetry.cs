@@ -132,6 +132,19 @@ public static partial class GatewayOpenTelemetry
                         SetBoundedId(activity, "gateway.route.id", proxy?.Route?.Config.RouteId);
                         SetBoundedId(activity, "gateway.cluster.id", proxy?.Cluster?.Config.ClusterId);
                     };
+                    // The value of an Activity's http.route tag alone is
+                    // untrusted: another middleware could put a raw client
+                    // path (including brace-wrapped text) in that attribute.
+                    // Mark only the actual selected ASP.NET RouteEndpoint's
+                    // configured pattern as an exportable template.
+                    options.EnrichWithHttpResponse = (activity, response) =>
+                    {
+                        if (response.HttpContext.GetEndpoint() is RouteEndpoint endpoint &&
+                            endpoint.RoutePattern.RawText is { } trustedPattern)
+                            activity.SetCustomProperty(
+                                GatewayTelemetryPrivacyProcessor.TrustedRouteTemplateProperty,
+                                trustedPattern);
+                    };
                     options.RecordException = false;
                 })
                 .AddOtlpExporter(exporter =>
@@ -362,6 +375,11 @@ internal sealed class GatewayTelemetryDimensionBudget
 /// <summary>Keep client identifiers, request paths and secrets out of OTLP spans.</summary>
 internal sealed class GatewayTelemetryPrivacyProcessor : BaseProcessor<Activity>
 {
+    // Activity.CustomProperty is local to the process and is never an OTLP
+    // attribute. Only our framework response enrichment (after endpoint
+    // selection) may use this to supply the selected router metadata.
+    internal const string TrustedRouteTemplateProperty =
+        "GatewayCore.AspNetCore.TrustedRouteTemplate";
     // Deny by default: instrumentation upgrades and custom enrichment may
     // introduce additional request headers, tenant identifiers or raw URLs.
     // Preserve only explicit, bounded operational attributes.
@@ -399,6 +417,13 @@ internal sealed class GatewayTelemetryPrivacyProcessor : BaseProcessor<Activity>
             if (rejectedKeys is not null)
                 ArrayPool<string>.Shared.Return(rejectedKeys, clearArray: true);
         }
+        // Inbound tags are always removed, regardless of their text shape.
+        // Reconstruct route identity only from ASP.NET's selected endpoint
+        // metadata, never from request-controlled Activity attributes.
+        if (string.Equals(data.Source.Name, "Microsoft.AspNetCore", StringComparison.Ordinal) &&
+            data.GetCustomProperty(TrustedRouteTemplateProperty) is string verifiedTemplate &&
+            IsSafeRouteTemplate(verifiedTemplate))
+            data.SetTag("http.route", verifiedTemplate);
         NormalizeAspNetCoreDisplayName(data);
         base.OnEnd(data);
     }
@@ -410,7 +435,7 @@ internal sealed class GatewayTelemetryPrivacyProcessor : BaseProcessor<Activity>
         "http.request.method" => value is string method && IsKnownMethod(method),
         "http.response.status_code" => value is int status && status is >= 100 and <= 599
             || value is long longStatus && longStatus is >= 100 and <= 599,
-        "http.route" => value is string route && IsSafeRouteTemplate(route),
+        "http.route" => false, // Provenance is checked after stripping every inbound tag.
         "url.scheme" => value is "http" or "https",
         "network.protocol.version" => value is "1.0" or "1.1" or "2" or "2.0" or "3" or "3.0",
         "error.type" => value is string error && error.Length is > 0 and <= 80 &&
@@ -445,14 +470,13 @@ internal sealed class GatewayTelemetryPrivacyProcessor : BaseProcessor<Activity>
     private static bool IsSafeRouteTemplate(string? route)
     {
         if (route is not { Length: > 0 and <= 256 } || route[0] != '/') return false;
-        // Literal request paths are not proof of a route template. A path
-        // like /users/alice123 uses only these safe ASCII characters but
-        // still contains a customer identifier. Fail closed unless the
-        // instrumented value contains a syntactically balanced parameter.
-        // Stable GatewayCore route IDs remain available independently.
+        // Shape checks limit the *configured endpoint* template; they do
+        // not establish provenance. The latter is enforced by an independent
+        // selected-RouteEndpoint marker populated by our response hook.
+        // Thus static server-configured paths remain usable without allowing
+        // raw paths supplied through an untrusted Activity tag.
         var insideParameter = false;
         var parameterHasName = false;
-        var hasParameter = false;
         foreach (var character in route)
         {
             if (character == '{')
@@ -466,8 +490,7 @@ internal sealed class GatewayTelemetryPrivacyProcessor : BaseProcessor<Activity>
             {
                 if (!insideParameter || !parameterHasName) return false;
                 insideParameter = false;
-                hasParameter = true;
-                continue;
+                 continue;
             }
             if (character == '?' && !insideParameter) return false;
             if (!char.IsAsciiLetterOrDigit(character) &&
@@ -476,6 +499,6 @@ internal sealed class GatewayTelemetryPrivacyProcessor : BaseProcessor<Activity>
             if (insideParameter && (char.IsAsciiLetterOrDigit(character) || character == '_'))
                 parameterHasName = true;
         }
-        return !insideParameter && hasParameter;
+        return !insideParameter;
     }
 }
