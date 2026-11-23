@@ -493,6 +493,26 @@ try
     File.CreateSymbolicLink(symlink,protectedFile);
     Assert(Throws(()=>{using var _=Provider(state);}), "symlinked persisted key XML is refused");
     File.Delete(symlink);
+    // A separately named hard link can alias the exact same encrypted key
+    // inode outside the private ring. Refuse both normal DP startup and
+    // signed recovery inventory hashing while the alias exists, even though
+    // the XML bytes remain encrypted and file modes are still owner-only.
+    var externalKeyAlias=Path.Combine(secrets,"outside-keyring-alias.xml");
+    MakeHardLink(protectedFile,externalKeyAlias);
+    try
+    {
+        Assert(Throws(()=>{using var _=Provider(state);}),
+            "hardlinked persisted DP key XML fails closed before framework import");
+        Assert(Throws(()=>LinuxDpRecoveryEvidence.ComputeInventoryDigest(
+            Path.Combine(state,"data-protection-keys"))),
+            "signed recovery digest refuses multiply-linked encrypted key XML");
+    }
+    finally { File.Delete(externalKeyAlias); }
+    using(var recovered=Provider(state))
+        Assert(recovered.GetRequiredService<IDataProtectionProvider>()
+            .CreateProtector("session-probe").Unprotect(encrypted) ==
+            "sensitive-session-value-123",
+            "removing external key-ring hardlink restores original cookie continuity");
     var protectedKeyBytesBefore=File.ReadAllBytes(protectedFile);
     var forgedRevocation=Path.Combine(Path.GetDirectoryName(protectedFile)!,"revocation-hostile.xml");
     const string forbiddenMasterKey="DISPOSABLE_TEST_PLAINTEXT_KEY_MATERIAL";
