@@ -4,6 +4,9 @@ global:
 
 rule_files:
   - /etc/prometheus/gateway-alerts.yml
+  # Required only in this opt-in reference stack; other gateways may not
+  # deploy an OTLP Collector and must not inherit this inventory alert.
+  - /etc/prometheus/collector-required-alerts.yml
   - /etc/prometheus/alert-delivery-test.yml
 
 alerting:
