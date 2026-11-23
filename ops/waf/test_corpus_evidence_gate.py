@@ -133,6 +133,37 @@ class EvidenceGateTests(unittest.TestCase):
             self.assertEqual(sentinel.read_text(), "unchanged")
             self.assertTrue(alias.is_symlink())
 
+    def test_rejects_oversized_fields_and_excessive_case_count(self):
+        too_long = row("x" * (gate.MAX_FIELD_CHARS + 1), "benign", "allow")
+        with self.assertRaisesRegex(ValueError, "oversized"):
+            gate.evaluate([too_long], POLICY)
+
+        # Use a lazy iterator to avoid allocating an oversized private corpus.
+        def excessive_rows():
+            for i in range(gate.MAX_CASES + 1):
+                yield row(str(i), "benign", "allow")
+        with self.assertRaisesRegex(ValueError, "bounded case count"):
+            gate.evaluate(excessive_rows(), POLICY)
+
+    def test_cli_rejects_oversized_csv_cell_without_traceback(self):
+        with tempfile.TemporaryDirectory(prefix="waf-evidence-bounded-") as scratch:
+            root = pathlib.Path(scratch)
+            policy_file, csv_file, out_file = (root / name for name in
+                ("policy.json", "cases.csv", "report.json"))
+            policy_file.write_text(json.dumps(POLICY), encoding="utf-8")
+            with csv_file.open("w", newline="", encoding="utf-8") as stream:
+                writer = csv.DictWriter(stream, fieldnames=sorted(gate.FIELDS))
+                writer.writeheader()
+                writer.writerow(row("x" * (gate.MAX_FIELD_CHARS + 1), "benign", "allow"))
+            result = subprocess.run(
+                [sys.executable, str(pathlib.Path(gate.__file__)),
+                 "--policy", str(policy_file), "--corpus", str(csv_file),
+                 "--out", str(out_file)],
+                capture_output=True, text=True, timeout=10, check=False)
+            self.assertEqual(result.returncode, 1)
+            self.assertNotIn("Traceback", result.stdout + result.stderr)
+            self.assertEqual(json.loads(out_file.read_text(encoding="utf-8"))["status"], "FAIL")
+
     def test_clean_corpus(self):
         report = gate.evaluate([row("benign", "benign", "allow"),
                                 row("attack", "malicious", "block")], POLICY)
