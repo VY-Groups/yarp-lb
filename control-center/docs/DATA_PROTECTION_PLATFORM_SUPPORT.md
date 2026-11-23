@@ -133,6 +133,25 @@ and automated disaster recovery are also absent.
 | Key loss or tamper | Fail closed; do not generate a replacement ring over the old state and claim sessions were recovered. Revoke affected sessions and restore from a verified compatible backup if available. | Linux tamper rejection is tested. Windows/Linux service recovery after lost or corrupted key material is not accepted on representative hosts. |
 | Move between hosts | Do not copy Windows DPAPI keys to another machine. Linux requires the matching wrapping private certificate and same application/purpose configuration; host-level state and anti-rollback controls still need independent review. | Disposable Ubuntu CI now verifies two **distinct encrypted key-ring directories** share old/new test-cookie continuity only when the correct approved RSA wrapper and application purpose are available, and reject the original session with a wrong wrapper. Real cross-host key-ring migration, secure distribution and coordinated zero-downtime fleet rollout remain unqualified. |
 
+### Linux wrapping-secret inode isolation (#48)
+
+The production Linux RSA wrapping-certificate PFX and its private password
+file are loaded with a no-follow, bounded, owner-only reader that now also
+requires an **exactly-one-link** inode count on the opened handle. Even
+when two paths have different realpaths, a hardlink is the same file and
+must not silently allow the operator-provisioned secret to be aliased
+outside its approved location. The existing protected XML key-ring and
+external signed recovery trust inputs retain their own separate
+single-link checks. CI creates real second hardlinks for the PFX and the
+password in disposable Linux storage, verifies that configuring Data
+Protection fails closed, unlinks the aliases and exercises the ordinary
+certificate-wrapped key-ring recovery happy path.
+
+The condition does not replace encrypted private key storage, external
+secret custody, certificate validity checks, site ACLs, approved key
+rotation or disaster-recovery tests; cross-host live acceptance remains
+issue #36.
+
 ### Independent Linux key-ring continuity fixture (#48)
 
 The Linux Data Protection integration test now copies **only encrypted key
