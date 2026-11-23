@@ -114,8 +114,12 @@ Console.WriteLine("PASS: published DNS targets reject RFC 5737/3849 and loopback
             // loop alive and requires no secret material in error responses.
             group.Dnssec!.Dispose();
             foreach (var transport in new[] { true, false })
+            foreach (var checkingDisabled in new[] { false, true })
             {
                 var request = DnsRequest(owner, 16, (byte)0);
+                // CD is the low-order 0x0010 DNS header flag. Preserve the
+                // client's choice without marking failed signatures as AD.
+                if (checkingDisabled) request[3] |= 0x10;
                 var failed = DnsWireProtocol.Build(request, zones, tcp: transport,
                     resolverIp: IPAddress.Loopback);
                 if (failed is null || (Dns16(failed, 2) & 15) != 2 ||
@@ -123,8 +127,9 @@ Console.WriteLine("PASS: published DNS targets reject RFC 5737/3849 and loopback
                     Dns16(failed, 8) != 0 || Dns16(failed, 10) != 0 ||
                     (Dns16(failed, 2) & 0x0020) != 0 ||
                     (Dns16(failed, 2) & 0x0400) != 0 ||
+                    ((Dns16(failed, 2) & 0x0010) != 0) != checkingDisabled ||
                     failed.Length > request.Length)
-                    throw new Exception("FAIL: DNSSEC signer fault must return bounded unsigned-data-free SERVFAIL");
+                    throw new Exception("FAIL: signer-fault SERVFAIL must preserve CD with no partial DNSSEC answers");
             }
             // Other queries still resolve through the same packet builder.
             var outside = DnsWireProtocol.Build(DnsRequest("unowned.unit.test", 1),
