@@ -13,6 +13,8 @@ spec.loader.exec_module(module)
 class EvidenceTests(unittest.TestCase):
     def test_exact_main_only_and_job_failure_retained(self):
         def fake(path, token):
+            if "/git/ref/heads/main" in path:
+                return {"object": {"sha": "a" * 40}}
             if "/actions/runs?" in path:
                 return {"workflow_runs": [
                     {"id": 1, "head_sha": "a" * 40, "head_branch": "main",
@@ -30,21 +32,37 @@ class EvidenceTests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["jobs"][0]["failed_steps"][0]["name"], "Compile")
 
+    def test_old_green_sha_is_not_current_main_acceptance(self):
+        with patch.object(module, "get_json", return_value={
+            "object": {"sha": "b" * 40}
+        }):
+            with self.assertRaisesRegex(ValueError, "not the current main"):
+                module.collect("example/repo", "a" * 40, "fake")
+
+    def test_missing_main_ref_fails_closed(self):
+        with patch.object(module, "get_json", return_value={}):
+            with self.assertRaisesRegex(ValueError, "not the current main"):
+                module.collect("example/repo", "a" * 40, "fake")
+
     def test_malformed_api_collection_rejected(self):
         with patch.object(module, "get_json", return_value={"workflow_runs": [None]}):
             with self.assertRaisesRegex(ValueError, "Malformed"):
                 module.paged("/repos/example/repo/actions/runs", "fake")
 
     def test_invalid_run_id_rejected_before_jobs_query(self):
-        with patch.object(module, "get_json", return_value={
-            "workflow_runs": [{"id": -1, "head_sha": "a" * 40,
-                               "head_branch": "main", "event": "push"}]
-        }):
+        def fake(path, token):
+            if "/git/ref/heads/main" in path:
+                return {"object": {"sha": "a" * 40}}
+            return {"workflow_runs": [{"id": -1, "head_sha": "a" * 40,
+                                      "head_branch": "main", "event": "push"}]}
+        with patch.object(module, "get_json", side_effect=fake):
             with self.assertRaisesRegex(ValueError, "Invalid GitHub Actions run id"):
                 module.collect("example/repo", "a" * 40, "fake")
 
     def test_pending_job_is_not_a_success(self):
         def fake(path, token):
+            if "/git/ref/heads/main" in path:
+                return {"object": {"sha": "a" * 40}}
             if "/actions/runs?" in path:
                 return {"workflow_runs": [{"id": 1, "head_sha": "a" * 40,
                                             "head_branch": "main", "event": "push",
