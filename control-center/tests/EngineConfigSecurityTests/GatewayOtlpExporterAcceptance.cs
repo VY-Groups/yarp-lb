@@ -6,6 +6,7 @@ using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
 using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -220,6 +221,13 @@ public static class GatewayOtlpExporterAcceptance
                 emptyParameter.SetTag("http.route", "/orders/{}/invalid-empty-parameter-canary");
             }
 
+            // Separate from the synthetic unit path above, this runs
+            // a real Kestrel + ASP.NET RouteEndpoint. Only the shipping
+            // OpenTelemetry EnrichWithHttpResponse callback can stamp the
+            // trusted route, and a live URL customer token must never reach
+            // the collector. A synthetic marker alone cannot prove that.
+            await RunSelectedAspNetRouteOverRealHttpAsync();
+
             var response = new Microsoft.AspNetCore.Http.DefaultHttpContext();
             response.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
             GatewayOpenTelemetry.RecordProxyResult(response, 12.5,
@@ -285,7 +293,8 @@ public static class GatewayOtlpExporterAcceptance
                          "second-secret-canary", "/private", "otlp-custom-header-canary",
                          "otlp-header-array-canary", "otlp-enrichment-canary",
                          "route-literal-customer-canary", "invalid-empty-parameter-canary",
-                         "untrusted-brace-canary", "brace-wrapped-user-canary"
+                         "untrusted-brace-canary", "brace-wrapped-user-canary",
+                         "live-route-customer-canary"
                      })
                 if (tracePayload.Contains(sensitive, StringComparison.Ordinal))
                     throw new Exception($"Sensitive value was present in OTLP trace export: {sensitive}");
@@ -293,7 +302,9 @@ public static class GatewayOtlpExporterAcceptance
                 if (!tracePayload.Contains(expected, StringComparison.Ordinal))
                     throw new Exception($"Expected bounded trace/resource attribute was absent: {expected}");
             if (!tracePayload.Contains("GET /orders/{orderId}", StringComparison.Ordinal))
-                throw new Exception("Safe ASP.NET route-template span name was not preserved");
+                throw new Exception("Selected-route metadata helper did not preserve a safe template");
+            if (!tracePayload.Contains("GET /verified-route/{opaqueId}", StringComparison.Ordinal))
+                throw new Exception("Real Kestrel ASP.NET RouteEndpoint was not exported with trusted router provenance");
             if (!tracePayload.Contains("HTTP GET", StringComparison.Ordinal))
                 throw new Exception("Unmatched ASP.NET span did not fall back to a method-only name");
 
@@ -390,6 +401,29 @@ public static class GatewayOtlpExporterAcceptance
             .LogWarning("Administrative audit marker {Secret}", "otlp-audit-secret-canary");
         factory.CreateLogger("Microsoft.Hosting.Lifetime")
             .LogWarning("Application diagnostic marker {Secret}", "otlp-application-secret-canary");
+    }
+
+    private static async Task RunSelectedAspNetRouteOverRealHttpAsync()
+    {
+        var builder = WebApplication.CreateBuilder(Array.Empty<string>());
+        builder.WebHost.UseUrls("http://127.0.0.1:0");
+        await using var app = builder.Build();
+        app.MapGet("/verified-route/{opaqueId}", () => Results.Text("ok"));
+        await app.StartAsync();
+        try
+        {
+            var localAddress = app.Urls.Single(url =>
+                url.StartsWith("http://127.0.0.1:", StringComparison.Ordinal));
+            using var client = new HttpClient(new HttpClientHandler { UseProxy = false })
+            { Timeout = TimeSpan.FromSeconds(5) };
+            using var response = await client.GetAsync(
+                localAddress.TrimEnd('/') + "/verified-route/live-route-customer-canary");
+            response.EnsureSuccessStatusCode();
+        }
+        finally
+        {
+            await app.StopAsync();
+        }
     }
 
     private static async Task VerifyPrometheusLoggingCountersAsync(string collectorEndpoint,
