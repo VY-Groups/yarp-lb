@@ -18,37 +18,48 @@ internal static class TrafficHttp3Acceptance
     internal static int SelectDualTransportPort(
         Func<(int Port, IDisposable Reservation)> reserveTcp,
         Func<int, IDisposable> reserveUdp,
-        int maxAttempts = 32)
+        int maxAttempts = 32,
+        Func<(int Port, IDisposable Reservation)>? reserveUdpCandidate = null,
+        Func<int, IDisposable>? reserveTcpAtPort = null)
     {
         ArgumentNullException.ThrowIfNull(reserveTcp);
         ArgumentNullException.ThrowIfNull(reserveUdp);
         if (maxAttempts < 1) throw new ArgumentOutOfRangeException(nameof(maxAttempts));
+        // An optional *paired* UDP-first route is required: a UDP ephemeral
+        // port can be outside a Windows UDP exclusion range even when every
+        // TCP-ephemeral candidate is denied for the UDP listener (WSAEACCES
+        // 10013). Alternating both OS allocators avoids silently skipping
+        // the real HTTP/3 acceptance or increasing its pass threshold.
+        if ((reserveUdpCandidate is null) != (reserveTcpAtPort is null))
+            throw new ArgumentException("UDP-first fallback requires both reservation callbacks");
 
         SocketException? lastFailure = null;
         for (var attempt = 0; attempt < maxAttempts; attempt++)
         {
+            var useUdpFirst = reserveUdpCandidate is not null && attempt % 2 == 0;
+            var acquireCandidate = useUdpFirst ? reserveUdpCandidate! : reserveTcp;
+            var acquireOther = useUdpFirst ? reserveTcpAtPort! : reserveUdp;
             try
             {
-                // Ask the TCP ephemeral allocator for a candidate first. On
-                // Windows a UDP-selected dynamic port can belong to an
-                // excluded/reserved TCP range, causing repeated WSAEACCES.
-                var (port, tcpReservation) = reserveTcp();
-                ArgumentNullException.ThrowIfNull(tcpReservation);
-                using (tcpReservation)
+                var (port, firstReservation) = acquireCandidate();
+                ArgumentNullException.ThrowIfNull(firstReservation);
+                using (firstReservation)
                 {
                     try
                     {
-                        using var udpReservation = reserveUdp(port);
-                        ArgumentNullException.ThrowIfNull(udpReservation);
+                        using var secondReservation = acquireOther(port);
+                        ArgumentNullException.ThrowIfNull(secondReservation);
                         return port;
                     }
-                    catch (SocketException ex) when (ex.SocketErrorCode is SocketError.AddressAlreadyInUse or SocketError.AccessDenied)
+                    catch (SocketException ex) when (ex.SocketErrorCode is
+                        SocketError.AddressAlreadyInUse or SocketError.AccessDenied)
                     {
                         lastFailure = ex;
                     }
                 }
             }
-            catch (SocketException ex) when (ex.SocketErrorCode is SocketError.AddressAlreadyInUse or SocketError.AccessDenied)
+            catch (SocketException ex) when (ex.SocketErrorCode is
+                SocketError.AddressAlreadyInUse or SocketError.AccessDenied)
             {
                 lastFailure = ex;
             }
@@ -120,25 +131,35 @@ internal static class TrafficHttp3Acceptance
 
         int GetAvailableDualTransportPort()
         {
-            return SelectDualTransportPort(() =>
+            static (int Port, IDisposable Reservation) ReserveCandidate(
+                SocketType socketType, ProtocolType protocol)
             {
-                var tcp = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+                var socket = new Socket(AddressFamily.InterNetwork, socketType, protocol);
                 try
                 {
-                    tcp.Bind(new IPEndPoint(IPAddress.Loopback, 0));
-                    return (((IPEndPoint)tcp.LocalEndPoint!).Port, tcp);
+                    socket.Bind(new IPEndPoint(IPAddress.Loopback, 0));
+                    return (((IPEndPoint)socket.LocalEndPoint!).Port, socket);
                 }
-                catch { tcp.Dispose(); throw; }
-            }, port =>
+                catch { socket.Dispose(); throw; }
+            }
+
+            static IDisposable ReserveAtPort(
+                SocketType socketType, ProtocolType protocol, int port)
             {
-                var udp = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+                var socket = new Socket(AddressFamily.InterNetwork, socketType, protocol);
                 try
                 {
-                    udp.Bind(new IPEndPoint(IPAddress.Loopback, port));
-                    return udp;
+                    socket.Bind(new IPEndPoint(IPAddress.Loopback, port));
+                    return socket;
                 }
-                catch { udp.Dispose(); throw; }
-            });
+                catch { socket.Dispose(); throw; }
+            }
+
+            return SelectDualTransportPort(
+                reserveTcp: () => ReserveCandidate(SocketType.Stream, ProtocolType.Tcp),
+                reserveUdp: port => ReserveAtPort(SocketType.Dgram, ProtocolType.Udp, port),
+                reserveUdpCandidate: () => ReserveCandidate(SocketType.Dgram, ProtocolType.Udp),
+                reserveTcpAtPort: port => ReserveAtPort(SocketType.Stream, ProtocolType.Tcp, port));
         }
 
         var key = OperatingSystem.IsWindows()
