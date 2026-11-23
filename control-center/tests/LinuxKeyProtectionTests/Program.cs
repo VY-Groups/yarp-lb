@@ -14,6 +14,33 @@ if (!OperatingSystem.IsLinux())
     Console.WriteLine("SKIP: Linux-specific filesystem/DAPI tests on non-Linux host");
     return;
 }
+// DP-09/DP-13: execute the real key-ring loader in a separate OS process.
+ // The disposable protected cookie travels over stdin, never argv or logs.
+if (args.Length > 0 && args[0] == "--verify-cookie")
+{
+    if (args.Length != 5) Environment.Exit(2);
+    try
+    {
+        Environment.SetEnvironmentVariable("YARP_CONTROL_PLANE_DIR", args[1]);
+        var childServices = new ServiceCollection();
+        var childBuilder = childServices.AddDataProtection()
+            .SetApplicationName(args[2])
+            .PersistKeysToFileSystem(new DirectoryInfo(
+                Path.Combine(args[1], "data-protection-keys")));
+        LinuxKeyProtection.Configure(childBuilder, args[1]);
+        using var childProvider = childServices.BuildServiceProvider();
+        var protectedCookie = Console.In.ReadLine()
+            ?? throw new InvalidOperationException("Missing disposable cookie");
+        var clear = childProvider.GetRequiredService<IDataProtectionProvider>()
+            .CreateProtector(args[3]).Unprotect(protectedCookie);
+        Environment.Exit(clear == args[4] ? 0 : 3);
+    }
+    catch (Exception)
+    {
+        // Do not print the cookie, decrypted value or sensitive paths.
+        Environment.Exit(3);
+    }
+}
 const UnixFileMode PrivateDir=UnixFileMode.UserRead|UnixFileMode.UserWrite|UnixFileMode.UserExecute;
 const UnixFileMode PrivateFile=UnixFileMode.UserRead|UnixFileMode.UserWrite;
 var root = Path.Combine(Path.GetTempPath(),"yarp-linux-dp-test-"+Guid.NewGuid().ToString("N"));
@@ -79,6 +106,33 @@ ServiceProvider Provider(string statePath, string applicationName = "OnPremLinux
         .PersistKeysToFileSystem(new DirectoryInfo(keys));
     LinuxKeyProtection.Configure(builder,statePath);
     return services.BuildServiceProvider();
+}
+// Return only the exit status. Disposable authentication material is sent via
+// stdin and is never placed in command-line arguments or diagnostic output.
+int VerifyInFreshProcess(string statePath, string applicationName,
+    string purpose, string protectedCookie, string expected)
+{
+    var assemblyPath = System.Reflection.Assembly.GetExecutingAssembly().Location;
+    var start = new System.Diagnostics.ProcessStartInfo("dotnet")
+    {
+        UseShellExecute = false,
+        RedirectStandardInput = true,
+        RedirectStandardOutput = true,
+        RedirectStandardError = true
+    };
+    foreach (var arg in new[] { assemblyPath, "--verify-cookie", statePath,
+        applicationName, purpose, expected })
+        start.ArgumentList.Add(arg);
+    using var child = System.Diagnostics.Process.Start(start)
+        ?? throw new Exception("FAIL: disposable child process could not start");
+    child.StandardInput.WriteLine(protectedCookie);
+    child.StandardInput.Close();
+    if (!child.WaitForExit(60000))
+    {
+        child.Kill(entireProcessTree: true);
+        throw new Exception("FAIL: disposable child process timed out");
+    }
+    return child.ExitCode;
 }
 static bool Throws(Action action)
 {
@@ -210,6 +264,27 @@ try
             .CreateProtector("session-probe").Unprotect(replicaProtectedCookie) ==
             "replica-auth-session",
             "original node decrypts replica session with unchanged app/purpose identity");
+
+    // Separate .NET processes must independently load the encrypted ring.
+    // A same-process DI-container check alone cannot prove restart/fleet
+    // continuity. This is a disposable multi-process software test, not a
+    // physical two-host acceptance.
+    Assert(VerifyInFreshProcess(fleetReplicaState,
+        "OnPremLinuxDpIntegration.v1", "session-probe", encrypted,
+        "sensitive-session-value-123") == 0,
+        "DP-09 replica process decrypts origin cookie using shared wrapped ring");
+    Assert(VerifyInFreshProcess(state,
+        "OnPremLinuxDpIntegration.v1", "session-probe", replicaProtectedCookie,
+        "replica-auth-session") == 0,
+        "DP-09 origin process decrypts replica cookie after independent restart");
+    Assert(VerifyInFreshProcess(fleetReplicaState,
+        "OnPremLinuxDpIntegration.other-fleet", "session-probe", encrypted,
+        "sensitive-session-value-123") != 0,
+        "DP-13 separate process rejects cookie with foreign fleet discriminator");
+    Assert(VerifyInFreshProcess(fleetReplicaState,
+        "OnPremLinuxDpIntegration.v1", "unrelated-authentication-purpose",
+        encrypted, "sensitive-session-value-123") != 0,
+        "DP-13 separate process rejects cookie with unrelated purpose");
 
     // DP-13: even when two fleets mistakenly share the same encrypted key XML
     // and wrapping certificate, the Data Protection application discriminator
