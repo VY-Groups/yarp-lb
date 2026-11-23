@@ -82,16 +82,18 @@ using (var recoveringProvider = new NonBlockingConsoleLoggerProvider(
     var recoveringLog = recoveringProvider.CreateLogger("writer-recovery");
     for (var i = 0; i < 5; i++)
         recoveringLog.LogWarning("recoverable writer fault fixture {Index}", i);
+    recoveringLog.LogError("critical log after writer recovery");
     Must(SpinWait.SpinUntil(
             () => recoveringProvider.WriteErrors == 4 &&
-                  recoveringProvider.WrittenMessages == 1,
+                  recoveringProvider.WrittenMessages == 2,
             TimeSpan.FromSeconds(5)),
         "bounded writer survives IO, disposal, permission and invalid-state failures");
-    Must(recoveringOutput.SuccessfulWrites == 1 &&
-         recoveringProvider.EnqueuedMessages == 5 &&
+    Must(recoveringOutput.SuccessfulWrites == 2 &&
+         recoveringOutput.ErrorRecords == 1 &&
+         recoveringProvider.EnqueuedMessages == 6 &&
          recoveringProvider.DroppedMessages == 0 &&
          recoveringProvider.WriteErrors == 4,
-        "each lost output record is accounted for without double-counting queue drops");
+        "warnings and post-recovery ERROR are delivered with exact lost-output accounting");
 }
 Console.WriteLine("PRODUCT BOUNDED CONSOLE LOGGING ACCEPTANCE PASSED");
 
@@ -116,8 +118,10 @@ sealed class FaultThenRecoverWriter : TextWriter
 {
     private int attempts;
     private int successful;
+    private int errorRecords;
     public override Encoding Encoding => Encoding.UTF8;
     public int SuccessfulWrites => Volatile.Read(ref successful);
+    public int ErrorRecords => Volatile.Read(ref errorRecords);
     public override void WriteLine(string? value)
     {
         var attempt = Interlocked.Increment(ref attempts);
@@ -127,7 +131,11 @@ sealed class FaultThenRecoverWriter : TextWriter
             case 2: throw new ObjectDisposedException("simulated writer disposal");
             case 3: throw new UnauthorizedAccessException("simulated writer permission failure");
             case 4: throw new InvalidOperationException("simulated writer invalid state");
-            default: Interlocked.Increment(ref successful); break;
+            default:
+                if (value is not null && value.Contains(" Error ", StringComparison.Ordinal))
+                    Interlocked.Increment(ref errorRecords);
+                Interlocked.Increment(ref successful);
+                break;
         }
     }
 }
