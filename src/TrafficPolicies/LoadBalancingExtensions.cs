@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Security.Cryptography;
 using Microsoft.AspNetCore.Http;
 using Yarp.ReverseProxy.LoadBalancing;
@@ -62,13 +63,48 @@ public sealed class SourceIpHashPolicy : ILoadBalancingPolicy
         IReadOnlyList<DestinationState> availableDestinations)
     {
         if (availableDestinations.Count == 0) return null;
-        var active = availableDestinations.Where(d => !TrafficLifecycle.IsDraining(d)).ToArray();
-        if (active.Length == 0) return null;
-        var address = context.Connection.RemoteIpAddress?.MapToIPv6().ToString();
-        if (string.IsNullOrWhiteSpace(address)) return null; // no identity, no affinity
-        var ids = active.Select(d => d.DestinationId).ToArray();
-        // Slow-start is excluded from source-affinity to avoid remapping existing clients.
-        var weights = active.Select(WeightedRandomPolicy.WeightOf).ToArray();
-        return active[LoadBalancingCore.PickRendezvousIndex(address, ids, weights)];
+        // Snapshot the eligible destinations exactly once. In particular, a
+        // concurrent drain transition must not change the membership halfway
+        // through hashing. Pool the backing arrays instead of materializing
+        // three LINQ/ToArray allocations for *every* affinity request.
+        var active = ArrayPool<DestinationState>.Shared.Rent(availableDestinations.Count);
+        try
+        {
+            var count = 0;
+            for (var i = 0; i < availableDestinations.Count; i++)
+            {
+                var candidate = availableDestinations[i];
+                if (!TrafficLifecycle.IsDraining(candidate)) active[count++] = candidate;
+            }
+            if (count == 0) return null;
+            var address = context.Connection.RemoteIpAddress?.MapToIPv6().ToString();
+            if (string.IsNullOrWhiteSpace(address)) return null; // no identity, no affinity
+
+            var ids = ArrayPool<string>.Shared.Rent(count);
+            var weights = ArrayPool<int>.Shared.Rent(count);
+            try
+            {
+                // Slow-start is intentionally excluded: do not remap clients
+                // during a backend's warmup. Keep the existing weight contract.
+                for (var i = 0; i < count; i++)
+                {
+                    ids[i] = active[i].DestinationId;
+                    weights[i] = WeightedRandomPolicy.WeightOf(active[i]);
+                }
+                var index = LoadBalancingCore.PickRendezvousIndex(address, ids, weights, count);
+                return index < 0 ? null : active[index];
+            }
+            finally
+            {
+                // Pool storage is shared across requests and tenants. Always
+                // clear all references, including on invalid metadata errors.
+                ArrayPool<string>.Shared.Return(ids, clearArray: true);
+                ArrayPool<int>.Shared.Return(weights, clearArray: true);
+            }
+        }
+        finally
+        {
+            ArrayPool<DestinationState>.Shared.Return(active, clearArray: true);
+        }
     }
 }
