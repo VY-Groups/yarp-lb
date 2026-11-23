@@ -132,7 +132,15 @@ actual customer fixtures and tenant consent before use. The runner requires
 bounded URI/body, GET or POST only, and a fixed allowlist of request media
 types. Missing, duplicate or extra JSON fields, invalid encodings, unsafe
 request targets, non-zero FP/FN allowances and oversized inputs fail before
-network activity. Any benign HTTP 403 is FP; any malicious HTTP 200 reaching
+network activity. The HTTP/1 request target must be strictly ASCII;
+international characters must be represented as UTF-8 percent-encoded URL
+bytes (for example `/search?q=caf%C3%A9`). A JSON string with an
+unpaired UTF-16 surrogate is refused as a private body before the HTTP
+client attempts UTF-8 encoding; no source character, path or body is
+reported in a Python traceback. Ordinary valid UTF-8 POST bodies remain
+supported. This is a preflight privacy/transport correctness guard, not
+an exception to CRS inspection or a relaxation of zero FP/FN acceptance.
+Any benign HTTP 403 is FP; any malicious HTTP 200 reaching
 the exact synthetic origin marker is FN; unexpected status/timeout/connection
 errors fail separately. No retries, redirects, external targets or automatic
 relaxation of CRS rules are permitted.

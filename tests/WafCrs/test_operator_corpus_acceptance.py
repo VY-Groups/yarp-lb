@@ -216,6 +216,8 @@ class OperatorCorpusTests(unittest.TestCase):
         changes = [
             {"path": "http://external.example/"}, {"path": "//external.example/"},
             {"path": "/\r\nx-header:bad"}, {"path": "/where\\isit"},
+            {"path": "/search/café"}, {"path": "/search/🐍"},
+            {"path": "/invalid-" + "\ud800"}, {"body": "\ud800"},
             {"body": "x" * (waf.MAX_BODY + 1)}, {"method": "DELETE"},
             {"contentType": "text/html"}, {"route": "../path"},
             {"id": "benign-query"}, {"id": "BENIGN-QUERY"},
@@ -226,6 +228,30 @@ class OperatorCorpusTests(unittest.TestCase):
             with self.subTest(mutation=list(mutation)):
                 with self.assertRaises(ValueError):
                     self.load(invalid)
+
+    def test_percent_encoded_unicode_target_and_utf8_body_stay_supported(self):
+        private = corpus()
+        # Raw UTF-8 in request target is unsafe; correctly escaped URI is fine.
+        private["cases"][1]["path"] = "/search?q=caf%C3%A9"
+        private["cases"][0]["body"] = '{"name":"café"}'
+        accepted = self.load(private)
+        self.assertEqual(accepted[1]["path"], "/search?q=caf%C3%A9")
+        self.assertEqual(accepted[0]["body"], '{"name":"café"}')
+
+    def test_invalid_private_unicode_diagnostic_is_redacted(self):
+        # JSON permits an unpaired surrogate which cannot be UTF-8 encoded.
+        # Fail in preflight with a bounded ValueError, not a traceback
+        # containing operator-provided request/body fragments.
+        private = corpus()
+        private["cases"][0]["body"] = "secret-canary-" + "\ud800"
+        with self.assertRaises(ValueError) as raised:
+            self.load(private)
+        self.assertNotIn("secret-canary", str(raised.exception))
+        private["cases"][0]["body"] = "{}"
+        private["cases"][0]["path"] = "/private-path-canary-" + "\ud800"
+        with self.assertRaises(ValueError) as raised:
+            self.load(private)
+        self.assertNotIn("private-path-canary", str(raised.exception))
 
     def test_response_framing_rejects_ambiguous_transfer_codings(self):
         def headers(*pairs):
