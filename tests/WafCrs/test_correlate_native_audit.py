@@ -8,8 +8,8 @@ import unittest
 import correlate_native_audit as gate
 
 
-def transcript(name, family, tx, prefixed=True, with_case=True):
-    marker = (f"X-GatewayCore-CI-Case: detection-{name}\n" if with_case else "")
+def transcript(name, family, tx, prefixed=True, with_case=True, phase="detection"):
+    marker = (f"X-GatewayCore-CI-Case: {phase}-{name}\n" if with_case else "")
     lines = [
         f"--{tx}-A--",
         "synthetic-native-WAF-test",
@@ -81,6 +81,37 @@ class NativeAuditCorrelationTests(unittest.TestCase):
             (root / "detection-sqli-status.txt").write_text("403", encoding="ascii")
             with self.assertRaises(ValueError):
                 gate.build_report(audit, root)
+
+    def test_blocking_http_requires_matching_native_crs_transaction(self):
+        names = gate.BLOCKING_CASE_FAMILIES
+        transcript_text = "".join(
+            transcript(name, family, "bbccdd" + str(i) + "ee", phase="blocking")
+            for i, (name, family) in enumerate(names.items(), 1))
+        self.assertEqual(gate.correlate(transcript_text, "blocking"), names)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            audit = root / "blocking.log"
+            audit.write_text(transcript_text, encoding="utf-8")
+            for name in names:
+                (root / (name + "-http-status.txt")).write_text("403\n", encoding="ascii")
+            report = gate.build_report(audit, root, "blocking")
+            self.assertEqual(set(report["attackClasses"]), set(names))
+            self.assertTrue(all(not case["forwarded"]
+                                for case in report["attackClasses"].values()))
+            (root / "xss-http-status.txt").write_text("200\n", encoding="ascii")
+            with self.assertRaisesRegex(ValueError, "disagrees"):
+                gate.build_report(audit, root, "blocking")
+            (root / "xss-http-status.txt").write_text("403\n", encoding="ascii")
+            audit.write_text(transcript_text.replace(
+                'Message: Warning. Pattern match detected [id "941100"]',
+                'Message: Warning. Pattern match detected [id "942100"]', 1),
+                encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "case-specific"):
+                gate.build_report(audit, root, "blocking")
+            audit.write_text(transcript_text + transcript(
+                "xss", "941", "11223344", phase="blocking"), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "case-specific"):
+                gate.build_report(audit, root, "blocking")
 
     def test_malformed_or_oversized_evidence_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
