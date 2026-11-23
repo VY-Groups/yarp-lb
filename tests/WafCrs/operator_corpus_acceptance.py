@@ -250,11 +250,17 @@ def run_cases(cases, connection_factory=None, audit_reader=None):
         try:
             body = case["body"].encode("utf-8")
             # No redirects, dynamic hostname, auth or arbitrary headers.
-            connection.request(case["method"], case["path"], body=body,
-                               headers={"Content-Type": case["contentType"],
-                                        "Connection": "close",
-                                        "X-GatewayCore-Corpus-Run": run_id,
-                                        "X-GatewayCore-Corpus-Case": case["id"]})
+            headers = {"Connection": "close",
+                       "X-GatewayCore-Corpus-Run": run_id,
+                       "X-GatewayCore-Corpus-Case": case["id"]}
+            # A bodyless GET has no representation media type. Adding
+            # Content-Type: text/plain here causes CRS 920420 to classify
+            # runner-generated metadata instead of the supplied request.
+            if case["method"] == "POST":
+                headers["Content-Type"] = case["contentType"]
+            connection.request(case["method"], case["path"],
+                               body=body if case["method"] == "POST" else None,
+                               headers=headers)
             response = connection.getresponse()
             status = response.status
             # A received HTTP status is not proof of a completed response.
