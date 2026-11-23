@@ -215,19 +215,29 @@ def transaction(provider, target, revision, receipt_file, policy_sha256):
     prior_image = before["imageId"]
     provider.image_and_config(target)
     provider.smoke(before["mode"])
-    after = None
-    rolled_back = None
-    status = "rejected"
+    recorded_at = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+    evidence = {
+        "schemaVersion": 1, "scope": "single-node-external-waf-mode-transaction",
+        "revision": revision, "policySha256": policy_sha256,
+        "previousMode": before["mode"], "requestedMode": target,
+        "completedAtUtc": recorded_at,
+        "trustedRevisionFloorAdvanced": False, "fleetAtomic": False
+    }
     try:
         provider.apply(target)
         after = provider.inspect()
         if after["imageId"] != prior_image or after["mode"] != target:
             raise ValueError("WAF switched image or rejected approved engine mode")
         provider.smoke(target)
-        status = "applied"
+        # A successful mode change without a durable audit receipt is NOT
+        # accepted: the receipt write belongs inside the rollback boundary.
+        receipt(receipt_file, {
+            **evidence, "result": "applied", "rollbackVerified": None,
+            "sameImageVerified": True
+        })
+        return "applied"
     except Exception:
-        # If the WAF became unhealthy, RESTORE the prior mode on the same
-        # original immutable image. Even a failed rollback is an incident.
+        rolled_back = False
         try:
             provider.apply(before["mode"])
             restored = provider.inspect()
@@ -236,22 +246,17 @@ def transaction(provider, target, revision, receipt_file, policy_sha256):
             provider.smoke(before["mode"])
             rolled_back = True
         except Exception:
-            rolled_back = False
-        status = "rolled_back" if rolled_back else "rollback_failed"
-    recorded_at = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
-    receipt(receipt_file, {
-        "schemaVersion": 1, "scope": "single-node-external-waf-mode-transaction",
-        "revision": revision, "policySha256": policy_sha256,
-        "previousMode": before["mode"], "requestedMode": target, "result": status,
-        "rollbackVerified": rolled_back, "completedAtUtc": recorded_at,
-        "sameImageVerified": status == "applied",
-        "trustedRevisionFloorAdvanced": False,
-        "fleetAtomic": False
-    })
-    if status != "applied":
-        raise ValueError("WAF mode rollout unsuccessful; inspect private receipt")
-    return status
-
+            # This is a critical local operator incident, not a success.
+            pass
+        try:
+            receipt(receipt_file, {
+                **evidence,
+                "result": "rolled_back" if rolled_back else "rollback_failed",
+                "rollbackVerified": rolled_back, "sameImageVerified": False
+            })
+        except (OSError, ValueError):
+            raise ValueError("rollout not accepted; audit receipt unavailable") from None
+        raise ValueError("WAF rollout unsuccessful; inspect private receipt") from None
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
