@@ -235,6 +235,19 @@ try
         .Protect("portable-cookie");
     Check(CanRead(freshWriter, latest),
         "fresh writer protects with a new key after explicit rotation");
+    // Verify the ACTUAL key GUID encoded into the cookie, not merely that
+    // a newly generated XML key exists. This catches provider-cache reuse.
+    var payload = Microsoft.AspNetCore.WebUtilities.WebEncoders.Base64UrlDecode(latest);
+    Check(payload.Length > 20 && payload.AsSpan(0, 4).SequenceEqual(
+              new byte[] { 0x09, 0xF0, 0xC9, 0xF0 }),
+        "new portable cookie has the expected ASP.NET DP key envelope");
+    var cookieKeyId = new Guid(payload.AsSpan(4, 16));
+    var newXmlKeyId = System.Xml.Linq.XDocument.Load(newestFiles[0])
+        .Root?.Attribute("id")?.Value;
+    Check(Guid.TryParse(newXmlKeyId, out var expectedKeyId) &&
+          cookieKeyId == expectedKeyId,
+        "new cookie is protected with the newly rotated t2-wrapped key ID");
+
 
     var recipientDir = Path.Combine(root, "gateway-three");
     Directory.CreateDirectory(recipientDir);
