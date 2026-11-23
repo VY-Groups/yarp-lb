@@ -26,6 +26,7 @@ import urllib.parse
 import urllib.request
 
 import verify_signed_policy as signatures
+import runtime_ruleset_inventory as runtime_rules
 
 OCI_IMAGE = re.compile(r"owasp/modsecurity-crs@sha256:[a-f0-9]{64}\Z")
 DOCKER_ID = re.compile(r"[a-f0-9]{12,64}\Z")
@@ -238,6 +239,17 @@ class DockerComposeProvider:
             raise ValueError("WAF container is not running")
         return {"mode": mode, "imageId": info["Image"]}
 
+    def observed_rule_digest(self):
+        # Bind the signed policy to the actual in-container CRS config bytes.
+        # The same running container must be present after the observation.
+        container_id = self.command("ps", "-q", "waf")
+        if not DOCKER_ID.fullmatch(container_id):
+            raise ValueError("running WAF not uniquely identified")
+        rule_hash = runtime_rules.observe(container_id)
+        if self.command("ps", "-q", "waf") != container_id:
+            raise ValueError("WAF changed during observed ruleset scan")
+        return rule_hash
+
     def apply(self, mode):
         self.image_and_config(mode)
         self.command("up", "--no-deps", "-d", "--force-recreate", "waf", mode=mode)
@@ -274,7 +286,8 @@ class DockerComposeProvider:
                 raise ValueError("WAF local observed HTTP mode acceptance failed")
 
 
-def transaction(provider, target, revision, receipt_file, policy_sha256):
+def transaction(provider, target, revision, receipt_file, policy_sha256,
+                expected_rule_digest):
     """Single-host signed mode switch with verified rollback and audit receipt."""
     if target not in MODES or type(revision) is not int or revision <= 0:
         raise ValueError("invalid approved WAF target")
@@ -284,6 +297,9 @@ def transaction(provider, target, revision, receipt_file, policy_sha256):
     if before["mode"] == target:
         raise ValueError("already active: refuse replaying approved WAF policy")
     prior_image = before["imageId"]
+    if (not signatures._digest(expected_rule_digest) or
+            provider.observed_rule_digest() != expected_rule_digest):
+        raise ValueError("approved CRS rule files differ from active container")
     print("WAF_ROLLOUT_STAGE=baseline_verified_image", file=sys.stderr, flush=True)
     provider.image_and_config(target)
     provider.smoke(before["mode"])
@@ -302,6 +318,8 @@ def transaction(provider, target, revision, receipt_file, policy_sha256):
         after = provider.inspect()
         if after["imageId"] != prior_image or after["mode"] != target:
             raise ValueError("WAF switched image or rejected approved engine mode")
+        if provider.observed_rule_digest() != expected_rule_digest:
+            raise ValueError("CRS rule files changed during approved activation")
         print("WAF_ROLLOUT_STAGE=target_runtime_verified", file=sys.stderr, flush=True)
         provider.smoke(target)
         print("WAF_ROLLOUT_STAGE=target_http_passed", file=sys.stderr, flush=True)
@@ -324,6 +342,8 @@ def transaction(provider, target, revision, receipt_file, policy_sha256):
             restored = provider.inspect()
             if restored != before:
                 raise ValueError("prior WAF image/mode not restored")
+            if provider.observed_rule_digest() != expected_rule_digest:
+                raise ValueError("prior WAF rule files not restored")
             provider.smoke(before["mode"])
             rolled_back = True
         except Exception:
@@ -383,9 +403,12 @@ def main(argv=None):
             live = provider.inspect()
             if live["imageId"] != provider.image_and_config(live["mode"]):
                 raise ValueError("running WAF image differs from reviewed pin")
+            if provider.observed_rule_digest() != args.observed_ruleset_sha256:
+                raise ValueError("actual CRS rule bytes do not match signed policy digest")
             if args.execute:
                 transaction(provider, target, rev, args.receipt,
-                            hashlib.sha256(policy_bytes).hexdigest().upper())
+                            hashlib.sha256(policy_bytes).hexdigest().upper(),
+                            args.observed_ruleset_sha256)
             else:
                 # READ ONLY: signed intent does not equal live activation.
                 print("PASS: signed WAF mode intent and live image preflight only")
