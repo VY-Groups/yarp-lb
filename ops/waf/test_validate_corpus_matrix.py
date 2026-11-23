@@ -2,6 +2,9 @@
 import importlib.util
 import unittest
 import tempfile
+import json
+import os
+import stat
 from pathlib import Path
 
 spec = importlib.util.spec_from_file_location("waf_matrix", Path(__file__).with_name("validate_corpus_matrix.py"))
@@ -52,6 +55,47 @@ class MatrixTests(unittest.TestCase):
                     path.write_text(raw, encoding="utf-8")
                     with self.assertRaisesRegex(ValueError, "duplicate JSON property"):
                         module._read_bounded_json(path)
+
+
+    @unittest.skipUnless(os.name == "posix", "0600 mode is a POSIX permission contract")
+    def test_private_report_atomically_replaces_broad_existing_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            report = Path(directory) / "matrix.json"
+            report.write_text("old-public-summary", encoding="utf-8")
+            os.chmod(report, 0o644)
+            expected = module.evaluate(self.cases, self.policy)
+            module.write_private_report(report, expected)
+            self.assertEqual(json.loads(report.read_text(encoding="utf-8")), expected)
+            self.assertEqual(stat.S_IMODE(report.stat().st_mode), 0o600)
+            self.assertFalse((Path(directory) / "matrix.json.tmp").exists())
+
+    def test_private_report_rejects_symlink_destination_without_touching_target(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "keep-private.txt"
+            target.write_text("DO_NOT_REPLACE", encoding="utf-8")
+            destination = Path(directory) / "matrix.json"
+            try:
+                destination.symlink_to(target)
+            except (OSError, NotImplementedError):
+                self.skipTest("symlinks unavailable on this test host")
+            with self.assertRaises(ValueError):
+                module.write_private_report(destination, module.evaluate(self.cases, self.policy))
+            self.assertEqual(target.read_text(encoding="utf-8"), "DO_NOT_REPLACE")
+
+    def test_private_report_rejects_existing_temporary_symlink(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "keep-private.txt"
+            target.write_text("DO_NOT_REPLACE", encoding="utf-8")
+            temporary = Path(directory) / "matrix.json.tmp"
+            try:
+                temporary.symlink_to(target)
+            except (OSError, NotImplementedError):
+                self.skipTest("symlinks unavailable on this test host")
+            with self.assertRaises((FileExistsError, OSError)):
+                module.write_private_report(Path(directory) / "matrix.json",
+                                            module.evaluate(self.cases, self.policy))
+            self.assertEqual(target.read_text(encoding="utf-8"), "DO_NOT_REPLACE")
+            self.assertFalse((Path(directory) / "matrix.json").exists())
 
     def test_clean_pass(self):
         result = module.evaluate(self.cases, self.policy)
