@@ -87,6 +87,16 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # The disposable Ubuntu GitHub image may advertise an unreachable
+          # Azure HTTP mirror ahead of its working official HTTPS fallback.
+          # Prefer the already-configured official archive, retaining Ubuntu
+          # signature checks and the mandatory HTTP/3 integration assertions.
+          # Never edit production host repositories or accept unsigned APT data.
+          if [[ -f /etc/apt/apt-mirrors.txt ]] &&
+             grep -Fq 'http://azure.archive.ubuntu.com/ubuntu' /etc/apt/apt-mirrors.txt &&
+             grep -Eq '^https://archive.ubuntu.com/ubuntu/?' /etc/apt/apt-mirrors.txt; then
+            sudo sed -i '\#^http://azure.archive.ubuntu.com/ubuntu#d' /etc/apt/apt-mirrors.txt
+          fi
           # Fail loudly on an unresponsive package mirror rather than
           # silently consuming the entire 25-minute application-test job.
           # HTTP/3 acceptance below remains mandatory; no skip or fallback.
