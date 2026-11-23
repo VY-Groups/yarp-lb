@@ -2,6 +2,7 @@
 """Deterministic acceptance tests for the optional private WAF corpus runner."""
 import copy
 import http.client
+from email.message import Message
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
@@ -55,6 +56,17 @@ class LocalWaf(BaseHTTPRequestHandler):
             self.send_response(200)
             payload = b'{"accepted":true,"contentType":"application/json","bytes":99999}'
             content_type = "application/json"
+        elif self.path.startswith("/unsupported-transfer"):
+            # An origin-like marker with a coding that http.client cannot
+            # decode must never qualify as verified backend evidence.
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Transfer-Encoding", "gzip")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(b"YARP-WAF-CI-BENIGN\\n".replace(b"\\n", b"\n"))
+            self.close_connection = True
+            return
         elif self.path.startswith("/mislength"):
             # A valid origin marker with an inaccurate HTTP length must never
             # qualify as proof that the complete private origin was reached.
@@ -130,6 +142,32 @@ class OperatorCorpusTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     self.load(invalid)
 
+    def test_response_framing_rejects_ambiguous_transfer_codings(self):
+        def headers(*pairs):
+            message = Message()
+            for name, value in pairs:
+                message.add_header(name, value)
+            return message
+
+        payload = b"YARP-WAF-CI-BENIGN\\n".replace(b"\\n", b"\n")
+        self.assertTrue(waf.verified_response_framing(
+            headers(("Content-Length"), str(len(payload))), payload))
+        self.assertTrue(waf.verified_response_framing(
+            headers(("Transfer-Encoding"), "chunked"), payload))
+        self.assertTrue(waf.verified_response_framing(
+            headers(("Transfer-Encoding"), "CHUNKED"), payload))
+        self.assertTrue(waf.verified_response_framing(headers(), payload))
+        for bad in (
+            (("Transfer-Encoding", "gzip"),),
+            (("Transfer-Encoding", "identity"),),
+            (("Transfer-Encoding", "gzip, chunked"),),
+            (("Transfer-Encoding", "chunked"), ("Transfer-Encoding", "chunked")),
+            (("Content-Length", str(len(payload))), ("Transfer-Encoding", "chunked")),
+            (("Content-Length", str(len(payload))), ("Content-Length", str(len(payload)))),
+        ):
+            with self.subTest(headers=bad):
+                self.assertFalse(waf.verified_response_framing(headers(*bad), payload))
+
     def test_no_redirect_or_payload_in_reports(self):
         server = ThreadingHTTPServer(("127.0.0.1", 0), LocalWaf)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -176,6 +214,13 @@ class OperatorCorpusTests(unittest.TestCase):
             truncated = waf.run_cases(regression, factory)
             self.assertEqual(1, truncated["counts"]["ERROR"])
             self.assertFalse(truncated["passesZeroFalsePositiveNegativeGate"])
+            # An unknown transfer coding cannot be accepted merely
+            # because the undecoded bytes equal the expected origin marker.
+            regression = copy.deepcopy(expected)
+            regression[1]["path"] = "/unsupported-transfer"
+            unsupported = waf.run_cases(regression, factory)
+            self.assertEqual(1, unsupported["counts"]["ERROR"])
+            self.assertFalse(unsupported["passesZeroFalsePositiveNegativeGate"])
             # A spoofed POST JSON acceptance with the wrong byte count
             # cannot qualify a benign upload as a reached origin.
             regression = copy.deepcopy(expected)
