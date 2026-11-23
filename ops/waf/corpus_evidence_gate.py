@@ -12,7 +12,9 @@ import pathlib
 import sys
 from collections import defaultdict
 
-FIELDS = {"case_id", "route", "expected", "observed", "mode", "severity"}
+# v2 requires a separate rule-evaluation decision: shadow mode should
+# allow traffic but may still report that it *would* have blocked it.
+FIELDS = {"case_id", "route", "expected", "observed", "would_block", "mode", "severity"}
 EXPECTED = {"benign", "malicious"}
 OBSERVED = {"allow", "block"}
 MODES = {"block", "detect"}
@@ -20,9 +22,10 @@ SEVERITIES = {"low", "medium", "high", "critical"}
 
 
 def evaluate(rows, policy):
-    if type(policy) is not dict or set(policy) != {"mode", "routes"} or \
+    if type(policy) is not dict or set(policy) != {"schemaVersion", "mode", "routes"} or \
+            type(policy["schemaVersion"]) is not int or policy["schemaVersion"] != 2 or \
             type(policy["mode"]) is not str or policy["mode"] not in MODES:
-        raise ValueError("policy must be an object with valid mode and routes")
+        raise ValueError("policy must be v2 with a valid mode and explicit routes")
     if type(policy["routes"]) is not dict or not policy["routes"]:
         raise ValueError("policy routes must be a nonempty object")
     for route, limits in policy["routes"].items():
@@ -45,13 +48,22 @@ def evaluate(rows, policy):
         if route not in policy["routes"]:
             raise ValueError(f"row {count}: unapproved route")
         if (row["expected"] not in EXPECTED or row["observed"] not in OBSERVED
-                or row["mode"] != policy["mode"] or row["severity"] not in SEVERITIES):
+                or row["would_block"] not in ("true", "false") or
+                row["mode"] != policy["mode"] or row["severity"] not in SEVERITIES):
             raise ValueError(f"row {count}: invalid classification or policy mode")
-        if row["mode"] == "detect" and row["observed"] == "block":
-            raise ValueError(f"row {count}: detection-only policy blocked traffic")
-        truth = row["expected"] == "malicious"
         blocked = row["observed"] == "block"
-        bucket = "tp" if truth and blocked else "fn" if truth else "fp" if blocked else "tn"
+        would_block = row["would_block"] == "true"
+        if row["mode"] == "detect" and blocked:
+            raise ValueError(f"row {count}: detection-only policy blocked traffic")
+        if row["mode"] == "block" and blocked != would_block:
+            raise ValueError(f"row {count}: enforcement disagrees with rule-evaluation evidence")
+        # In shadow/detect mode a malicious allowed request can still be a
+        # true positive if its policy decision says it *would* be blocked.
+        # Conflating the HTTP result with the rule outcome makes detect-only
+        # tests incorrectly report every malicious request as false-negative.
+        truth = row["expected"] == "malicious"
+        decision = would_block
+        bucket = "tp" if truth and decision else "fn" if truth else "fp" if decision else "tn"
         stats[route][bucket] += 1
     if not count or set(stats) != set(policy["routes"]):
         raise ValueError("empty corpus or untested approved route")
@@ -64,7 +76,8 @@ def evaluate(rows, policy):
             failures.append(f"{route}: false negatives exceed precommitted limit")
         if not (values["tp"] + values["fn"]) or not (values["tn"] + values["fp"]):
             failures.append(f"{route}: missing benign or malicious ground truth")
-    return {"status": "FAIL" if failures else "PASS", "cases": count,
+    return {"schemaVersion": 2, "mode": policy["mode"],
+            "status": "FAIL" if failures else "PASS", "cases": count,
             "routes": dict(sorted(stats.items())), "failures": failures}
 
 
