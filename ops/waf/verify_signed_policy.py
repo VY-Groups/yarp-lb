@@ -133,7 +133,8 @@ def validate_policy(doc, minimum_revision, observed_ruleset, observed_mode, now)
         if (not isinstance(path, str) or not 1 <= len(path) <= 256 or
                 not path.startswith("/") or path.startswith("//") or
                 not path.isascii() or
-                any(c in path for c in "*?#{\\}%") or
+                "//" in path or
+                any(c in path for c in "*?#{\\}%;:") or
                 any(ord(c) < 33 or ord(c) > 126 for c in path) or
                 any(piece in (".", "..") for piece in path.split("/"))):
             raise ValueError("exception must use literal exact route")
