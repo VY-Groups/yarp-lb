@@ -84,13 +84,25 @@ def load_corpus(filename):
         if case["method"] not in ("GET", "POST"):
             raise ValueError("only non-retried GET and POST are supported")
         uri = case["path"]
+        # http.client builds an ASCII HTTP/1 request line. Raw Unicode
+        # (or unpaired JSON-surrogate escapes) in the target can throw an
+        # uncaught UnicodeEncodeError with portions of the private payload
+        # in its diagnostic. Require a fully ASCII request target, and let
+        # the operator supply UTF-8 via percent-encoded URL bytes instead.
         if not uri.startswith("/") or uri.startswith("//") or \
-                len(uri) > 512 or "#" in uri or "\\" in uri or \
+                len(uri) > 512 or not uri.isascii() or \
+                "#" in uri or "\\" in uri or \
                 any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in uri):
             raise ValueError("unsafe local lab request target")
         if case["contentType"] not in ALLOWED_CONTENT_TYPES:
             raise ValueError("unapproved lab Content-Type")
-        body = case["body"].encode("utf-8")
+        try:
+            body = case["body"].encode("utf-8", "strict")
+        except UnicodeError as exc:
+            # An unpaired surrogate is legal JSON input but cannot be
+            # encoded as a real UTF-8 request body. Do not surface the
+            # offending case, body or Python's byte/character diagnostic.
+            raise ValueError("invalid UTF-8 private corpus body") from None
         if len(body) > MAX_BODY or (case["method"] == "GET" and body):
             raise ValueError("unbounded or invalid lab request body")
     if labels["benign"] < 2 or labels["malicious"] < 2:
