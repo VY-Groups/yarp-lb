@@ -127,6 +127,35 @@ representative Ubuntu and Windows Server machines. RHEL remains unqualified.
 Issue #48 remains open until the missing host lifecycle, recovery, rotation, and
 customer-host acceptance is completed.
 
+## Enforced signed-recovery startup mode (optional, #48)
+
+For a Linux node whose independently managed service policy requires a signed
+key-ring recovery checkpoint, set
+`YARP_LINUX_DP_REQUIRE_SIGNED_RECOVERY=true` **outside** the restored backup
+(e.g. in a protected service-manager environment). It requires all three
+independently provisioned inputs on every start:
+
+- `YARP_LINUX_DP_RECOVERY_MANIFEST_FILE`: signed exact ciphertext inventory
+- `YARP_LINUX_DP_RECOVERY_TRUST_PUBLIC_KEY_FILE`: trusted public verifier
+- `YARP_LINUX_DP_RECOVERY_MINIMUM_REVISION`: independently stored monotonic
+  minimum revision
+
+If any input is missing, malformed, stale, tampered or signed by the wrong
+identity, startup fails before Data Protection imports the ring. The requirement
+variable accepts **exactly** `true` or `false`; invalid spelling is an
+error. Its default is unset, preserving existing standalone-host behavior and
+the previous explicitly configured recovery-attestation checks. Do not set
+this recovery mode on an uninitialized empty ring without first provisioning
+a signed checkpoint.
+
+This is an **opt-in startup enforcement control**, not fleet DR completion:
+if an operator can remove the externally managed requirement setting they
+can also disable this mandatory gate. Deploy its environment and revision
+floor under independent OS/service-manager access control, protect the signing
+private key and prove fail-closed restart/tamper/recovery on the real hosts.
+There is still no coordinated multi-node key-ring distributor, automatic
+restore or production disaster-recovery certification.
+
 ## Linux secret path hardening
 
 Wrapping PFX files (up to 1 MiB), password files (up to 4 KiB) and startup key-ring XML inspection now use the shared no-follow file reader. It validates ownership, declared object type and permissions on opened handles, traverses each ancestor without following symlinks, rejects unsafe writable ancestors, bounds input, detects size changes and clears temporary PFX/password byte arrays. Linux state/key directories also validate their ancestor chain. Protected parents and service ownership remain required throughout operation; framework-managed key-ring reads/writes are not replaced by this startup inspection, and this is not a complete defense against a compromised service identity. Existing tests are extended for secret ancestor links, writable parents and oversized password files. No key-ring migration, cross-host key sharing or anti-rollback is implied.

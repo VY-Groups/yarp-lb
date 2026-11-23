@@ -58,6 +58,10 @@ jobs:
           path: artifacts/ha/
           retention-days: 14
           if-no-files-found: warn
+          # Rerunning one failed matrix job must replace its previous (possibly
+          # red) evidence. Otherwise download-artifact may select stale attempt
+          # data while the latest matrix job itself is green.
+          overwrite: true
   all-ten:
     name: Require all 10 Windows HA runs and their evidence
     needs: repeat

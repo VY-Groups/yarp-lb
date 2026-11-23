@@ -19,6 +19,9 @@ public static class LinuxDpRecoveryEvidence
     public const string ManifestEnv = "YARP_LINUX_DP_RECOVERY_MANIFEST_FILE";
     public const string PublicKeyEnv = "YARP_LINUX_DP_RECOVERY_TRUST_PUBLIC_KEY_FILE";
     public const string MinimumRevisionEnv = "YARP_LINUX_DP_RECOVERY_MINIMUM_REVISION";
+    // Provision this from the protected service manager, not from a restored
+    // backup. Strictly require a signed inventory on a recovery-fenced node.
+    public const string RequireEvidenceEnv = "YARP_LINUX_DP_REQUIRE_SIGNED_RECOVERY";
     private const int MaximumXmlFiles = 512;
     private const int MaximumXmlBytes = 1024 * 1024;
     private const string InventoryDomain = "GatewayCore.LinuxDP.Inventory.v1\n";
@@ -29,8 +32,17 @@ public static class LinuxDpRecoveryEvidence
         var manifestPath = Environment.GetEnvironmentVariable(ManifestEnv);
         var trustPath = Environment.GetEnvironmentVariable(PublicKeyEnv);
         var revisionText = Environment.GetEnvironmentVariable(MinimumRevisionEnv);
+        var requirement = Environment.GetEnvironmentVariable(RequireEvidenceEnv);
+        if (requirement is not null && requirement is not ("true" or "false"))
+            throw new InvalidOperationException(
+                "Linux DP signed-recovery requirement must be exactly true or false");
         if (manifestPath is null && trustPath is null && revisionText is null)
-            return; // No implicit restore attestation is claimed by default.
+        {
+            if (requirement == "true")
+                throw new InvalidOperationException(
+                    "Mandatory Linux DP recovery attestation missing");
+            return; // Standalone non-recovery mode remains backward compatible.
+        }
 
         if (string.IsNullOrWhiteSpace(manifestPath) ||
             string.IsNullOrWhiteSpace(trustPath) ||
