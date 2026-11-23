@@ -1,6 +1,6 @@
 # GatewayCore #48 — Key continuity and recovery acceptance worksheet
 
-Status: **NOT ACCEPTED**. This is an executable evidence protocol, not proof that any scenario passed. The canonical requirements remain in [#48](https://github.com/VY-Groups/yarp-lb/issues/48); site-only steps are recorded in [#36](https://github.com/VY-Groups/yarp-lb/issues/36). Keep production NO-GO until all applicable gates are independently accepted.
+Status: **NOT ACCEPTED**. This is an executable evidence protocol, not proof that any scenario passed. The canonical requirements remain in issue #48; site-only steps are recorded in issue #36. Keep production NO-GO until all applicable gates are independently accepted.
 
 ## Scope and invariant
 
