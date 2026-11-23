@@ -34,7 +34,7 @@ def row(name, truth, observed, *, route="/api", mode="block",
             "observed": observed, "would_block": str(decision).lower(),
             "mode": mode, "severity": "high",
             "audit_sha256": audit or hashlib.sha256(
-                (route + ":" + name).encode("ascii")).hexdigest().upper()}
+                (route + ":" + name).encode("utf-8")).hexdigest().upper()}
 
 
 class CorpusV3Tests(unittest.TestCase):
