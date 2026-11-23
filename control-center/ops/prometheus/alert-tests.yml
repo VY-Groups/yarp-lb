@@ -341,3 +341,26 @@ tests:
       - eval_time: 4m
         alertname: YarpLogWriterError
         exp_alerts: []
+
+  # Fail closed on an explicitly configured Collector scrape failure.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="otel-collector",instance="otel-collector:8889"}'
+        values: '0 0 0 0 0'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: GatewayOtelCollectorScrapeFailed
+        exp_alerts:
+          - exp_labels: {job: otel-collector, instance: "otel-collector:8889", severity: critical}
+            exp_annotations:
+              summary: "GatewayCore OTLP Collector scrape has failed"
+              description: "Prometheus cannot scrape Collector otel-collector:8889. Exported traces, access summaries and loss counters may be unavailable; verify the collector, exporter and independent audit path."
+              runbook: "control-center/docs/OTEL_EXPORT.md"
+  - interval: 1m
+    input_series:
+      - series: 'up{job="otel-collector",instance="otel-collector:8889"}'
+        values: '1 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: GatewayOtelCollectorScrapeFailed
+        exp_alerts: []
