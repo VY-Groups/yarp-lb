@@ -27,10 +27,13 @@ def verified_origin(index, headers, payload):
     if len(payload) > 4096:
         return False
     lengths = headers.get_all("Content-Length", [])
-    encoding = headers.get("Transfer-Encoding")
-    if len(lengths) > 1 or (lengths and encoding):
+    encodings = headers.get_all("Transfer-Encoding", [])
+    # Reject duplicate and combined transfer codings, not just the first
+    # header value. http.client decodes only a single ordinary chunked
+    # response; ambiguous framing must not count as benchmark success.
+    if len(lengths) > 1 or len(encodings) > 1 or (lengths and encodings):
         return False
-    if encoding is not None and encoding.lower() != "chunked":
+    if encodings and encodings[0].strip().lower() != "chunked":
         return False
     if lengths:
         declared = lengths[0]
@@ -69,7 +72,9 @@ def request(index, host, port):
         body = response.read(4097)
         if response.status != 200:
             return None, f"http-{response.status}"
-        if not verified_origin(index, response.headers, body):
+        # A bounded read that stops before EOF cannot prove a complete
+        # origin reply, even if its prefix resembles the expected fixture.
+        if not response.isclosed() or len(body) > 4096 or not verified_origin(index, response.headers, body):
             return None, "invalid-origin-evidence"
         return (time.perf_counter() - started) * 1000, None
     except (OSError, http.client.HTTPException, ValueError) as error:
