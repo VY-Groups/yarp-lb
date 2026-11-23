@@ -11,6 +11,26 @@ bash tests/WafCrs/verify.sh
 
 It binds 127.0.0.1:18888 and creates a Docker-private backend network. It captures container logs and removes temporary containers and the network.
 
+### Spoofed forwarded-client identity regression (#51)
+
+The isolated CRS lab now tests the same synthetic XSS, SQL injection and
+path-traversal attacks with caller-supplied `X-Forwarded-For`,
+`X-Real-IP` and RFC 7239 `Forwarded` headers claiming the loopback
+address. Each must still receive HTTP 403; it also tests that those spoofed
+headers cannot expand the narrowly scoped lab PKIX content-type exception to
+another route. The malicious outcomes enter the same redacted, per-route and
+ground-truth-severity blocking-corpus report. These cases apply the
+*untrusted proxy identity* lesson from
+[the GatewayCore GSLB branch security review](../../control-center/docs/GSLB_BRANCH_DEEP_REVIEW.md);
+no source from that separate runtime is used.
+
+This is only a negative regression against a disposable upstream WAF.
+A physical ingress/WAF/API deployment must independently prove that
+forwarded identities are honored only from configured immediate peers,
+management endpoints remain privately authenticated, and no origin or
+configuration API can be reached around the WAF. The test does not claim
+to implement proxy authentication or certify production #51 acceptance.
+
 ## Production gaps
 
 This pinned image snapshot is **lab-only**. Production still requires a maintained image-update cadence with reviewed immutable digests and security updates, HTTPS/TLS and backend trust, inbound protection placement, bypass prevention, anomaly tuning and application-specific exclusions, rule governance, false-positive and performance tests, privacy-safe audit retention, DDoS protection and external load balancing. Blocking one XSS signature is not a comprehensive WAF/security compliance assertion. Control-center WAF provisioning is **not** integrated; mark capability as partial external integration only.
