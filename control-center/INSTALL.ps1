@@ -58,6 +58,13 @@ try {
         $projectText = $projectText.Replace('</ItemGroup>', '  <PackageReference Include="System.DirectoryServices.Protocols" Version="10.0.15" />' + [Environment]::NewLine + '  </ItemGroup>')
         Set-Content -Path $projectFile -Value $projectText -Encoding UTF8
     }
+    # The source Program.cs uses the SCM-aware lifetime extension. Preserve
+    # existing local package references but add its pinned offline dependency
+    # when staging into an older target project.
+    if ($projectText -notmatch 'Microsoft.Extensions.Hosting.WindowsServices') {
+        if ($projectText -notmatch '</ItemGroup>') { throw 'Unable to locate project package references' }
+        $projectText = $projectText.Replace('</ItemGroup>', '  <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" Version="10.0.15" />' + [Environment]::NewLine + '  </ItemGroup>')
+    }
     # Align assembly/package metadata with the only public development version: 0.1.
     if ($projectText -match '<Version>[^<]*</Version>') {
         $projectText = [regex]::Replace($projectText, '<Version>[^<]*</Version>', '<Version>0.1</Version>')
@@ -71,7 +78,7 @@ try {
             $feed = 'C:\YARP-Packages'
             if (-not (Test-Path -LiteralPath $feed)) { throw "Offline NuGet source missing: $feed" }
             & dotnet restore --source $feed --ignore-failed-sources
-            if ($LASTEXITCODE -ne 0) { throw "Offline restore failed. Put System.DirectoryServices.Protocols.10.0.15.nupkg in $feed" }
+            if ($LASTEXITCODE -ne 0) { throw "Offline restore failed. Stage all pinned project dependencies, including Microsoft.Extensions.Hosting.WindowsServices.10.0.15.nupkg, in $feed" }
             & dotnet build --no-restore
             if ($LASTEXITCODE -ne 0) { throw "Compilation failed (exit $LASTEXITCODE)." }
         }
