@@ -45,6 +45,26 @@ through the disposable wire-collector capture. Production sites must still
 verify retained immutable receipts, two-host continuity, alert routing and
 disaster recovery; those are outstanding #50/#36 acceptance gates.
 
+## Inbound W3C trace-context integration acceptance
+
+The real loopback Kestrel acceptance sends a syntactically valid W3C
+`traceparent` with fresh random trace/span identifiers to a selected
+ASP.NET `RouteEndpoint`. The request handler verifies that
+`Activity.Current` has the **same trace ID and parent span ID** under
+W3C semantics. The loopback OTLP receiver then verifies the exact
+16-byte remote trace ID occurs in the actual serialized trace export,
+while the customer-path canary is excluded and the configured
+parameterized endpoint pattern remains. This is an actual HTTP +
+instrumentation + exported-protobuf regression, not merely a synthetic
+Activity ID assertion.
+
+The fixture only covers incoming HTTP/1.1 on disposable loopback Kestrel.
+It does not prove HTTP/2, external mTLS ingress, a YARP-to-upstream
+W3C forwarding hop, multi-node sampling continuity, collector durability,
+or physical Windows/Linux latency and resource overhead. Those are
+separate #50/#36 acceptance gates; no trace headers or request data
+are added to the exported metric label set.
+
 ## Bounded console writer recovery and loss evidence
 
 The background console output writer counts failed output records in
