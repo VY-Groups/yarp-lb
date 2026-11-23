@@ -177,6 +177,29 @@ class EvidenceGateTests(unittest.TestCase):
                 gate.write_private_report(linked, {"status": "FAIL"})
             self.assertEqual(sentinel.read_text(encoding="utf-8"), "do-not-touch")
 
+    def test_nested_ancestor_symlink_rejected_without_following(self):
+        if os.name != "posix":
+            self.skipTest("POSIX descriptor-relative no-follow acceptance")
+        with tempfile.TemporaryDirectory(prefix="waf-input-nested-") as scratch:
+            root = pathlib.Path(scratch)
+            trusted = root / "trusted"
+            (trusted / "sub").mkdir(parents=True)
+            evidence = trusted / "sub" / "policy.json"
+            evidence.write_text(json.dumps(POLICY), encoding="utf-8")
+            self.assertEqual(
+                json.loads(gate.read_bounded_utf8(evidence, gate.MAX_POLICY_BYTES)),
+                POLICY)
+            alias = root / "alias"
+            alias.symlink_to(trusted, target_is_directory=True)
+            with self.assertRaisesRegex(ValueError, "symlink"):
+                gate.read_bounded_utf8(alias / "sub" / "policy.json",
+                                       gate.MAX_POLICY_BYTES)
+            # A symlink below an ordinary parent must fail as well.
+            nested = trusted / "linked"
+            nested.symlink_to(trusted / "sub", target_is_directory=True)
+            with self.assertRaisesRegex(ValueError, "symlink"):
+                gate.read_bounded_utf8(nested / "policy.json", gate.MAX_POLICY_BYTES)
+
     def test_rejects_oversized_fields_and_excessive_case_count(self):
         too_long = row("x" * (gate.MAX_FIELD_CHARS + 1), "benign", "allow")
         with self.assertRaisesRegex(ValueError, "oversized"):
