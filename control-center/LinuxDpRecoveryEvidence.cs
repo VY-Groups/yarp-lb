@@ -73,6 +73,17 @@ public static class LinuxDpRecoveryEvidence
             !Path.IsPathFullyQualified(publicKeyPath))
             throw new InvalidOperationException("Invalid signed Linux DP recovery paths or minimum revision");
 
+        // A checkpoint or signer supplied by the backup being verified
+        // cannot establish independent recovery authority. Both inputs must
+        // be provisioned outside the entire Control Plane state root, not
+        // merely outside the data-protection-keys subdirectory.
+        var stateRoot = Path.GetDirectoryName(Path.GetFullPath(keyRingDirectory));
+        if (string.IsNullOrWhiteSpace(stateRoot) ||
+            IsInsideDirectory(stateRoot, manifestPath) ||
+            IsInsideDirectory(stateRoot, publicKeyPath))
+            throw new InvalidOperationException(
+                "Linux DP recovery trust and checkpoint must be outside restored state");
+
         byte[] manifestBytes;
         byte[] publicKeyBytes;
         try
@@ -223,6 +234,17 @@ public static class LinuxDpRecoveryEvidence
         return Encoding.ASCII.GetBytes(SignatureDomain +
             revision.ToString(CultureInfo.InvariantCulture) + "\n" +
             inventorySha256 + "\n");
+    }
+
+    private static bool IsInsideDirectory(string rootDirectory, string candidatePath)
+    {
+        var relative = Path.GetRelativePath(
+            Path.GetFullPath(rootDirectory), Path.GetFullPath(candidatePath));
+        // Prevent sibling prefix confusion (state vs state-old). A path
+        // beyond the root is not inside it, but "." and every descendant are.
+        return relative == "." ||
+            (!Path.IsPathRooted(relative) && relative != ".." &&
+             !relative.StartsWith("../", StringComparison.Ordinal));
     }
 
     private static bool IsCanonicalHexDigest(string? value) =>
