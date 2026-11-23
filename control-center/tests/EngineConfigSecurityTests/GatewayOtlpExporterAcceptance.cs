@@ -148,7 +148,7 @@ public static class GatewayOtlpExporterAcceptance
             EmitRestrictedLogs(provider);
             if (!tracerProvider.ForceFlush(10000) || !meterProvider.ForceFlush(10000) || !loggerProvider.ForceFlush(10000))
                 throw new Exception("Container OTLP exporters failed to flush before acceptance deadline");
-            await VerifyPrometheusLoggingCountersAsync(endpoint, loggingDropScenario);
+            await VerifyPrometheusMetricsAsync(endpoint, loggingDropScenario);
             Console.WriteLine("PASS: real OpenTelemetry Collector accepted traces, metrics and bounded audit export gauges via OTLP/HTTP");
         }
         finally
@@ -495,7 +495,7 @@ public static class GatewayOtlpExporterAcceptance
         }
     }
 
-    private static async Task VerifyPrometheusLoggingCountersAsync(string collectorEndpoint,
+    private static async Task VerifyPrometheusMetricsAsync(string collectorEndpoint,
         LoggingDropScenario scenario)
     {
         var collector = new Uri(collectorEndpoint, UriKind.Absolute);
