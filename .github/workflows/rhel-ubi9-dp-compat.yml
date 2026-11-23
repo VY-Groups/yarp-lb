@@ -29,6 +29,15 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+      - name: Build shipping Control Center for real RHEL-family startup smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          dotnet build control-center/GatewayCoreYarp.csproj --configuration Release
+          test -s control-center/bin/Release/net10.0/GatewayCoreYarp.dll
       - name: Run real encrypted key-ring and signed restore tests in UBI9 .NET 10 SDK
         shell: bash
         run: |
