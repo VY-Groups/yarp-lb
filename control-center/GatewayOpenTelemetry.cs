@@ -52,6 +52,26 @@ public static partial class GatewayOpenTelemetry
     private static readonly Counter<long> ProxyRequests = Meter.CreateCounter<long>("gateway.proxy.requests");
     private static readonly Histogram<double> ProxyDuration = Meter.CreateHistogram<double>("gateway.proxy.request.duration", "ms");
     private static readonly Counter<long> LocalProxyRejections = Meter.CreateCounter<long>("gateway.proxy.local_rejections");
+    // These four observable gauges have ZERO dynamic labels. Export only
+    // aggregate durable-audit outbox state, never actor, event ID, digest,
+    // destination URI or delivery credential. Read cached values rather than
+    // enumerating the outbox on the telemetry/exporter thread.
+    private static int _auditOutboxEnabled;
+    private static int _auditOutboxPending;
+    private static int _auditOutboxStorageFault;
+    private static int _auditOutboxDeliveryBlocked;
+    private static readonly ObservableGauge<int> AuditOutboxEnabled =
+        Meter.CreateObservableGauge("gateway.audit.outbox.enabled",
+            () => Volatile.Read(ref _auditOutboxEnabled));
+    private static readonly ObservableGauge<int> AuditOutboxPending =
+        Meter.CreateObservableGauge("gateway.audit.outbox.pending",
+            () => Volatile.Read(ref _auditOutboxPending));
+    private static readonly ObservableGauge<int> AuditOutboxStorageFault =
+        Meter.CreateObservableGauge("gateway.audit.outbox.storage_fault",
+            () => Volatile.Read(ref _auditOutboxStorageFault));
+    private static readonly ObservableGauge<int> AuditOutboxDeliveryBlocked =
+        Meter.CreateObservableGauge("gateway.audit.outbox.delivery_blocked",
+            () => Volatile.Read(ref _auditOutboxDeliveryBlocked));
     private static readonly GatewayTelemetryDimensionBudget DimensionBudget = new();
     private static readonly object LocalRejectionItemKey = new();
 
@@ -97,6 +117,24 @@ public static partial class GatewayOpenTelemetry
             }
             await next();
         });
+    }
+
+    // Called during startup and by the audit worker after each bounded
+    // delivery pass. A pending value of -1 means state is unreadable; do not
+    // report that as a healthy empty queue. This never reads storage on
+    // a request or OTLP exporter thread.
+    internal static void ReportAuditOutboxStatus(
+        bool enabled, int pending, bool storageFault, bool deliveryBlocked)
+    {
+        Interlocked.Exchange(ref _auditOutboxPending,
+            enabled ? Math.Clamp(pending, -1, 4096) : 0);
+        Interlocked.Exchange(ref _auditOutboxStorageFault,
+            enabled && storageFault ? 1 : 0);
+        Interlocked.Exchange(ref _auditOutboxDeliveryBlocked,
+            enabled && deliveryBlocked ? 1 : 0);
+        // Publish enabled last so consumers can distinguish opt-out from a
+        // configured queue, even if they see one intermediate snapshot.
+        Interlocked.Exchange(ref _auditOutboxEnabled, enabled ? 1 : 0);
     }
 
     public static bool Configure(IServiceCollection services, string? machineName = null)
