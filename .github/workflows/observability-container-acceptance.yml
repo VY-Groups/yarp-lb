@@ -47,7 +47,7 @@ jobs:
       - name: Start isolated observability stack
         shell: bash
         run: docker compose -f control-center/ops/observability/compose.yml up -d --build
-      - name: Export real spans, metrics and access logs to Collector, then verify Prometheus and Grafana
+      - name: Export real spans, metrics and sanitized access summaries to Collector, then verify Prometheus and Grafana
         shell: bash
         env:
           GATEWAY_OTLP_CONTAINER_ENDPOINT: http://127.0.0.1:4318
@@ -115,18 +115,21 @@ jobs:
           docker compose -f control-center/ops/observability/compose.yml logs --no-color otel-collector > "$RUNNER_TEMP/otel-collector-live.log"
           grep -q 'container_acceptance_route' "$RUNNER_TEMP/otel-collector-live.log"
           grep -q 'gateway.proxy.requests' "$RUNNER_TEMP/otel-collector-live.log"
-          grep -q 'GATEWAY_ACCESS' "$RUNNER_TEMP/otel-collector-live.log"
+          grep -q 'GATEWAY_TELEMETRY_ACCESS' "$RUNNER_TEMP/otel-collector-live.log"
           grep -q 'timestampUtc' "$RUNNER_TEMP/otel-collector-live.log"
-          grep -q '203.0.113.17' "$RUNNER_TEMP/otel-collector-live.log"
-          if grep -Eq 'otlp-secret-canary|Authorization|Cookie|/private' "$RUNNER_TEMP/otel-collector-live.log"; then
-            echo "Request URL, headers or secret value leaked to Collector output" >&2
+          grep -q 'route_acceptance' "$RUNNER_TEMP/otel-collector-live.log"
+          # No local access message or client/forwarded IP field is permitted
+          # in the independent Collector, even though local access logs retain
+          # these fields for restricted operations.
+          if grep -Eq 'GATEWAY_ACCESS|clientIp|clientIpSource|203\\.0\\.113\\.17|otlp-secret-canary|Authorization|Cookie|/private' "$RUNNER_TEMP/otel-collector-live.log"; then
+            echo "Local access/IP, request URL, header or secret leaked to Collector output" >&2
             exit 1
           fi
           if grep -Eq '203\.0\.113\.99|otlp-container-secret-canary|/private' "$RUNNER_TEMP/otel-collector-live.log"; then
             echo "Sensitive client or URL value leaked to Collector output" >&2
             exit 1
           fi
-          echo "PASS: Collector ingested redacted traces, metrics and structured access logs; Prometheus queried OTLP series; Grafana loaded provisioned dashboard"
+          echo "PASS: Collector ingested redacted traces, metrics and IP-free access summaries; Prometheus queried OTLP series; Grafana loaded provisioned dashboard"
           echo "PASS: Prometheus firing alert was delivered through Alertmanager to the isolated webhook receiver"
       - name: Upload Collector evidence
         if: always()
