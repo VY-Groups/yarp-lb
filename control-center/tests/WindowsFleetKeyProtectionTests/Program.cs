@@ -92,21 +92,8 @@ bool CanRead(ServiceProvider provider, string token)
     }
 }
 
-try
-{
-    Environment.SetEnvironmentVariable(Current, null);
-    Environment.SetEnvironmentVariable(Previous, null);
-    using (var unused = new ServiceCollection().AddDataProtection())
-    {
-        // This fixture is intentionally not used to activate a real DPAPI
-        // provider: the existing Windows SCM CI separately tests that path.
-    }
-}
-finally
-{
-    Environment.SetEnvironmentVariable(Current, null);
-    Environment.SetEnvironmentVariable(Previous, null);
-}
+Environment.SetEnvironmentVariable(Current, null);
+Environment.SetEnvironmentVariable(Previous, null);
 
 try
 {
