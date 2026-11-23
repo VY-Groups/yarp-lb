@@ -17,7 +17,7 @@ done
 rm -f "$DIR/benchmark-summary.json" "$DIR/waf-selected-image.txt"
 # Clear only this run's known synthetic result files; never count stale
 # evidence from an earlier invocation as a successful observation.
-for result in last-benign-status json-http-status xml-http-status large-json-http-status pkix-der-http-status benign-query-http-status unicode-query-http-status cookie-query-http-status xss-http-status sqli-http-status traversal-http-status; do
+for result in last-benign-status json-http-status xml-http-status large-json-http-status pkix-der-http-status benign-query-http-status unicode-query-http-status cookie-query-http-status xss-http-status sqli-http-status traversal-http-status spoofed-xss-http-status spoofed-sqli-http-status spoofed-traversal-http-status; do
   rm -f "$DIR/$result.txt"
 done
 rm -f "$DIR/blocking-corpus-report.json" "$DIR/detection-corpus-report.json" "$DIR/operator-corpus-report.json"
@@ -41,12 +41,16 @@ cases = (
     ("xss", "/", "malicious", "xss-http-status"),
     ("sqli", "/", "malicious", "sqli-http-status"),
     ("traversal", "/", "malicious", "traversal-http-status"),
+    ("spoofed-xss", "/", "malicious", "spoofed-xss-http-status"),
+    ("spoofed-sqli", "/", "malicious", "spoofed-sqli-http-status"),
+    ("spoofed-traversal", "/", "malicious", "spoofed-traversal-http-status"),
 )
 rows = []
 matrices = {}
 # Severity is the fixed fixture's ground truth; do not misrepresent it as
 # upstream CRS severity or inferred risk from an HTTP response.
-severity = {"xss": "high", "sqli": "high", "traversal": "high"}
+severity = {name: "high" for name in (
+    "xss", "sqli", "traversal", "spoofed-xss", "spoofed-sqli", "spoofed-traversal")}
 severity_matrices = {}
 for name, route, expected, file_name in cases:
     file = directory / (file_name + ".txt")
@@ -235,6 +239,31 @@ for entry in \
     echo "FAIL: $name expected CRS 403, received $code" >&2; exit 1
   fi
   echo "PASS: CRS blocks $name payload"
+done
+# A client-provided proxy address must never turn a malicious request
+# into a trusted/internal request or bypass the same CRS policy. This
+# cross-boundary regression follows the GatewayCore GSLB security-review
+# finding on spoofed forwarded-client identity; it imports no other source.
+# Use only fixed disposable payloads on the loopback lab listener.
+for entry in \
+  'spoofed-xss|q=<script>alert(1)</script>' \
+  "spoofed-sqli|id=1' UNION SELECT password FROM users--" \
+  "spoofed-traversal|file=../../../../etc/passwd"; do
+  name="${entry%%|*}"
+  payload="${entry#*|}"
+  status="$(curl --silent --show-error --max-time 8 --get \
+    -H 'X-Forwarded-For: 127.0.0.1' \
+    -H 'X-Real-IP: 127.0.0.1' \
+    -H 'Forwarded: for=127.0.0.1;proto=https' \
+    --data-urlencode "$payload" \
+    -o "$DIR/$name-response.txt" -w '%{http_code}' \
+    "http://127.0.0.1:18888/")"
+  printf '%s\n' "$status" > "$DIR/$name-http-status.txt"
+  if [[ "$status" != "403" ]]; then
+    echo "FAIL: malicious $name with spoofed forwarding headers escaped CRS blocking (HTTP $status)" >&2
+    exit 1
+  fi
+  echo "PASS: $name remains blocked with spoofed forwarded-client identity"
 done
 # Ordinary parameterized URLs must not be blocked by the generic CRS rules.
 benign_code="$(curl --silent --show-error --max-time 8 --get \
