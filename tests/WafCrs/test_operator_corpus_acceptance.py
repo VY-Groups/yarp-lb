@@ -55,6 +55,18 @@ class LocalWaf(BaseHTTPRequestHandler):
             self.send_response(200)
             payload = b'{"accepted":true,"contentType":"application/json","bytes":99999}'
             content_type = "application/json"
+        elif self.path.startswith("/mislength"):
+            # A valid origin marker with an inaccurate HTTP length must never
+            # qualify as proof that the complete private origin was reached.
+            self.send_response(200)
+            payload = b"YARP-WAF-CI-BENIGN\\n".replace(b"\\n", b"\n")
+            content_type = "text/plain; charset=utf-8"
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(payload) + 12))
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(payload)
+            return
         else:
             self.send_response(200)
             if self.command == "POST":
@@ -157,6 +169,13 @@ class OperatorCorpusTests(unittest.TestCase):
             spoof = waf.run_cases(regression, factory)
             self.assertEqual(1, spoof["counts"]["ERROR"])
             self.assertFalse(spoof["passesZeroFalsePositiveNegativeGate"])
+            # A real-looking origin response with more bytes declared than
+            # received must not be counted as benign successful forwarding.
+            regression = copy.deepcopy(expected)
+            regression[1]["path"] = "/mislength"
+            truncated = waf.run_cases(regression, factory)
+            self.assertEqual(1, truncated["counts"]["ERROR"])
+            self.assertFalse(truncated["passesZeroFalsePositiveNegativeGate"])
             # A spoofed POST JSON acceptance with the wrong byte count
             # cannot qualify a benign upload as a reached origin.
             regression = copy.deepcopy(expected)
