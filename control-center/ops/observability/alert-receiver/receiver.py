@@ -86,7 +86,15 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             self.connection.settimeout(READ_TIMEOUT_SECONDS)
-            document = json.loads(self.rfile.read(length), object_pairs_hook=reject_duplicate_keys)
+            body = self.rfile.read(length)
+            # BufferedReader.read(n) may return fewer than n bytes on EOF.
+            # A syntactically valid JSON prefix must never be accepted when
+            # the sender advertised a longer body and closed early.
+            if len(body) != length:
+                self.close_connection = True
+                self._write_json(400, {"error": "truncated_request_body"})
+                return
+            document = json.loads(body, object_pairs_hook=reject_duplicate_keys)
         except TimeoutError:
             # A sender that declares a body but never finishes it must not
             # retain a worker or permit late bytes to become a new request.
