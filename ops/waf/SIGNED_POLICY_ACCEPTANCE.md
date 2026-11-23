@@ -13,7 +13,7 @@ Provide one UTF-8 JSON policy with exactly these fields:
 - revision: positive monotonically increasing integer; must exceed a trusted
   minimum revision stored OUTSIDE the candidate policy directory
 - mode: detect or block
-- rulesetSha256: uppercase SHA-256 of frozen effective WAF ruleset
+- rulesetSha256: uppercase canonical SHA-256 of the observed CRS `.conf` file subtree described below; NOT a complete effective Nginx/ModSecurity include-graph attestation
 - shadowEvidenceSha256: null for detect, approved uppercase digest for block.
   A blocking-mode invocation MUST additionally supply --shadow-evidence-file
   pointing to the exact private evidence bytes. Their computed SHA-256 must
