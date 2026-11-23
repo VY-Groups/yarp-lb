@@ -135,6 +135,12 @@ class AuditMetricAcceptanceTests(unittest.TestCase):
         p[name]["data"]["result"][0]["value"][1] = str(self.NOW - 91)
         with self.assertRaises(ValueError):
             verify(p, ["gateway-a", "gateway-b"], now=self.NOW)
+        # An operator may approve a longer Prometheus scrape freshness
+        # budget, but this must NEVER relax the audit worker's independent
+        # 90-second last-update limit.
+        with self.assertRaises(ValueError):
+            verify(p, ["gateway-a", "gateway-b"], now=self.NOW,
+                   maximum_age=900)
 
         p = self.valid()
         p[name]["data"]["result"][0]["value"][1] = str(self.NOW - 90)
