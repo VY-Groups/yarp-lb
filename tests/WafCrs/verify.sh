@@ -440,6 +440,8 @@ cases = [
 ]
 report = acceptance.run_cases(cases)
 if report["counts"] != {"TP": 2, "TN": 2, "FP": 0, "FN": 0, "ERROR": 0}:
+    for row in report["cases"]:
+        print("SYNTHETIC_CORPUS_CHECK", row["id"], row["status"], row["result"], row["nativeBlockVerified"])
     raise SystemExit("FAIL: operator-runner synthetic native audit acceptance")
 print("PASS: operator runner binds real native CRS denials to unique run and case markers")
 PY
