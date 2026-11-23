@@ -10,6 +10,7 @@ import contextlib
 import datetime as dt
 import fcntl
 import hashlib
+import http.client
 import json
 import os
 from pathlib import Path
@@ -207,7 +208,11 @@ class DockerComposeProvider:
                         response.read(4096)
                 except urllib.error.HTTPError as error:
                     observed = error.code
-                except urllib.error.URLError:
+                except (urllib.error.URLError, OSError, http.client.HTTPException):
+                    # A just-recreated nginx/ModSecurity container may close
+                    # a synthetic idempotent GET during listener replacement.
+                    # Retry only bounded GET transport faults, never POST or
+                    # an actual HTTP result outside the required verdict.
                     observed = None
                 if observed == expected:
                     break
@@ -256,7 +261,10 @@ def transaction(provider, target, revision, receipt_file, policy_sha256):
         })
         print("WAF_ROLLOUT_STAGE=receipt_committed", file=sys.stderr, flush=True)
         return "applied"
-    except Exception:
+    except Exception as exc:
+        # Never disclose policy bytes, HTTP bodies, Docker logs or path values.
+        print("WAF_ROLLOUT_FAILURE_CLASS=" + type(exc).__name__,
+              file=sys.stderr, flush=True)
         print("WAF_ROLLOUT_STAGE=rollback_attempt", file=sys.stderr, flush=True)
         rolled_back = False
         try:
