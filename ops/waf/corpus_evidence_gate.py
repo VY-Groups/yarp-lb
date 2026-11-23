@@ -6,11 +6,13 @@ This does not generate traffic or replace real Windows/Linux WAF acceptance.
 """
 import argparse
 import csv
+import io
 import json
 import os
 import pathlib
 import math
 import re
+import stat
 import sys
 from collections import defaultdict
 
@@ -23,6 +25,8 @@ MODES = {"block", "detect"}
 SEVERITIES = {"low", "medium", "high", "critical"}
 MAX_CASES = 100_000
 MAX_FIELD_CHARS = 4096
+MAX_POLICY_BYTES = 1024 * 1024
+MAX_CORPUS_BYTES = 128 * 1024 * 1024
 V3_FIELDS = FIELDS | {"audit_sha256"}
 V3_LIMITS = {"max_fp", "max_fn", "max_fp_rate", "max_fn_rate",
              "min_benign", "min_malicious"}
@@ -32,6 +36,38 @@ HEX64 = re.compile(r"[A-F0-9]{64}\Z")
 HEX40 = re.compile(r"[A-Fa-f0-9]{40}\Z")
 CANONICAL_ROUTE = re.compile(r"/(?:[A-Za-z0-9._~-]+(?:/[A-Za-z0-9._~-]+)*)?\Z")
 CASE_ID = re.compile(r"[A-Za-z0-9_.-]{1,128}\Z")
+
+
+def read_bounded_utf8(path, limit):
+    """Read one regular, unlinked-by-symlink evidence file under a byte cap.
+
+    An input can be untrusted even when an operator selects its path. Reject
+    FIFOs/devices and changing or oversized files before CSV/JSON parsing.
+    This bounds parser memory; signed evidence custody is a separate gate.
+    """
+    path = pathlib.Path(path)
+    if path.is_symlink():
+        raise ValueError("WAF evidence input cannot be a symlink")
+    flags = (os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) |
+             getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0))
+    fd = os.open(path, flags)
+    with os.fdopen(fd, "rb") as handle:
+        before = os.fstat(handle.fileno())
+        if not stat.S_ISREG(before.st_mode) or before.st_size > limit:
+            raise ValueError("WAF evidence input is not a bounded regular file")
+        data = handle.read(limit + 1)
+        after = os.fstat(handle.fileno())
+        if (len(data) > limit or len(data) != before.st_size or
+                before.st_size != after.st_size or
+                before.st_mtime_ns != after.st_mtime_ns):
+            raise ValueError("WAF evidence input exceeds cap or changed during read")
+        # Ensure the pathname was not swapped while the descriptor was open.
+        if path.is_symlink():
+            raise ValueError("WAF evidence input changed to a symlink")
+        current = path.stat()
+        if (current.st_dev, current.st_ino) != (before.st_dev, before.st_ino):
+            raise ValueError("WAF evidence input changed identity during read")
+    return data.decode("utf-8", "strict")
 
 
 def evaluate(rows, policy):
@@ -198,12 +234,12 @@ def main():
                 result[key] = value
             return result
 
-        policy = json.loads(args.policy.read_text(encoding="utf-8"),
+        policy = json.loads(read_bounded_utf8(args.policy, MAX_POLICY_BYTES),
                             object_pairs_hook=strict_object,
                             parse_constant=lambda _: (_ for _ in ()).throw(
                                 ValueError("non-JSON policy numeric constant")))
         csv.field_size_limit(MAX_FIELD_CHARS)
-        with args.corpus.open(newline="", encoding="utf-8") as stream:
+        with io.StringIO(read_bounded_utf8(args.corpus, MAX_CORPUS_BYTES), newline="") as stream:
             reader = csv.DictReader(stream)
             version = policy.get("schemaVersion") if type(policy) is dict else None
             if type(version) is not int or version not in (2, 3):
