@@ -112,6 +112,9 @@ class SignedPolicyTests(unittest.TestCase):
             self.check()
         self.min_file.write_text("6\n")
         for change in ({"path": "/*"}, {"path": "/../admin"},
+                       {"path": "/api//admin"}, {"path": "/api;role=admin"},
+                       {"path": "/api/admin;jsessionid=deadbeef"},
+                       {"path": "/api/:route"},
                        {"expiresAtUtc": "2027-01-01T00:00:00Z"},
                        {"owner": "any*"}, {"httpMethod": "ANY"}):
             before = dict(self.policy["exceptions"][0])
