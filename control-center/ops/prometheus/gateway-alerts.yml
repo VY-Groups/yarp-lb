@@ -178,4 +178,14 @@ groups:
           summary: "GatewayCore durable audit outbox cannot deliver or inspect pending events"
           description: "External authenticated audit outbox on {{ $labels.service_instance_id }} reports blocked delivery, persistent storage fault or an unreadable pending count. Verify the admin-only audit delivery status and collector receipts before clearing the incident."
           runbook: "control-center/docs/EXTERNAL_AUDIT_INTENT.md"
-
+      - alert: GatewayAuditOutboxWorkerStale
+        # An enabled audit worker may terminate while last-known fault
+        # gauges remain zero. The timestamp changes ONLY when the worker
+        # completes a status pass, not when Prometheus scrapes it.
+        expr: (gateway_audit_outbox_enabled{job="otel-collector"} == 1) and on(job,instance,service_instance_id) (time() - gateway_audit_outbox_last_update_unixtime{job="otel-collector"} > 90)
+        for: 1m
+        labels: {severity: critical}
+        annotations:
+          summary: "GatewayCore durable audit outbox worker status is stale"
+          description: "Configured audit worker on {{ $labels.service_instance_id }} has not published a new status for over 90 seconds. Last-known healthy queue state is not delivery proof. Verify worker health, protected outbox API and signed remote receipts."
+          runbook: "control-center/docs/EXTERNAL_AUDIT_INTENT.md"
