@@ -40,3 +40,26 @@ jobs:
       - name: Real disposable SCM process and DPAPI protected session restart
         shell: powershell
         run: .\control-center\tests\WindowsServiceAcceptance\VERIFY-WINDOWS-SCM.ps1
+  localservice-scm:
+    name: Real Windows LocalService SCM + protected DPAPI restart
+    runs-on: windows-2022
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+      - name: Parse restricted Windows SCM acceptance script
+        shell: powershell
+        run: |
+          $tokens = $null
+          $issues = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            "control-center/tests/WindowsServiceAcceptance/VERIFY-WINDOWS-SCM.ps1",
+            [ref]$tokens, [ref]$issues) | Out-Null
+          if ($issues.Count -gt 0) {
+            throw 'Restricted SCM acceptance PowerShell syntax rejected'
+          }
+      - name: Actual disposable LocalService state ACL and DPAPI cookie restart
+        shell: powershell
+        run: .\control-center\tests\WindowsServiceAcceptance\VERIFY-WINDOWS-SCM.ps1 -Identity LocalService
