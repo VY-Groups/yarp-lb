@@ -122,6 +122,33 @@ class SignedPolicyTests(unittest.TestCase):
             gate.verify(self.policy_file, self.approvals, duplicate_keys,
                         self.min_file, RULESET, "detect", NOW)
 
+    def test_same_ec_key_with_different_pem_format_is_not_second_reviewer(self):
+        # Both approval identities sign using the SAME EC private key, while
+        # their public key files contain different textual line wraps. A raw
+        # PEM hash would miss this; canonical SPKI equality must reject it.
+        original = self.keys["reviewerA"].read_text(encoding="ascii")
+        encoded = "".join(line for line in original.splitlines()
+                          if not line.startswith("-----"))
+        alternate = ("-----BEGIN PUBLIC KEY-----\n" +
+                     "\n".join(encoded[i:i+32] for i in range(0, len(encoded), 32)) +
+                     "\n-----END PUBLIC KEY-----\n")
+        second = self.trust_dir / "alias-pem-format.pub"
+        second.write_text(alternate, encoding="ascii")
+        reviewer_b = self.approvals[1]
+        record = json.loads(reviewer_b.read_text(encoding="utf-8"))
+        same_signer = subprocess.run(
+            ["openssl", "dgst", "-sha256", "-sign",
+             str(self.private["reviewerA"])],
+            input=gate._approval_payload(record["policySha256"],
+                                          "reviewerB", record["signedAtUtc"]),
+            check=True, capture_output=True)
+        record["signatureBase64"] = base64.b64encode(same_signer.stdout).decode("ascii")
+        reviewer_b.write_text(json.dumps(record), encoding="utf-8")
+        aliased = {**self.keys, "reviewerB": second}
+        with self.assertRaisesRegex(ValueError, "share a signing key"):
+            gate.verify(self.policy_file, self.approvals, aliased,
+                        self.min_file, RULESET, "detect", NOW)
+
     def test_invalid_signature_fails(self):
         path = self.approvals[0]
         doc = json.loads(path.read_text())
