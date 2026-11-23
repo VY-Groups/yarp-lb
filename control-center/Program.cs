@@ -286,6 +286,8 @@ if (peerSyncSettings is not null)
 }
 var app = builder.Build();
 var accessLogger = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("GatewayCore.AccessLog");
+var telemetryAccessLogger = app.Services.GetRequiredService<ILoggerFactory>()
+    .CreateLogger("GatewayCore.TelemetryAccess");
 var trustedAccessLogProxies = GatewayClientAddress.ParseTrustedProxyAddresses(
     Environment.GetEnvironmentVariable("GATEWAY_TRUSTED_PROXY_IPS"));
 var peerStateJournal = app.Services.GetService<PeerStateJournal>();
@@ -488,10 +490,16 @@ app.Use(async (ctx, next) =>
         var routeCandidate = ctx.Features.Get<IReverseProxyFeature>()?.Route?.Config.RouteId;
         var routeId = routeCandidate is not null && ValidId(routeCandidate) ? routeCandidate : "unmatched";
         var timestampUtc = DateTimeOffset.UtcNow;
+        var durationMs = Math.Round(elapsed * 1000.0 /
+            System.Diagnostics.Stopwatch.Frequency, 3);
         GatewayOpenTelemetry.LogAccess(accessLogger,
             timestampUtc, clientAddress.Address?.ToString() ?? "unknown", clientAddress.Source,
-            ctx.Request.Method, routeId, ctx.Response.StatusCode,
-            Math.Round(elapsed * 1000.0 / System.Diagnostics.Stopwatch.Frequency, 3));
+            ctx.Request.Method, routeId, ctx.Response.StatusCode, durationMs);
+        // Only bounded, non-identifying fields cross the OTLP exporter.
+        GatewayOpenTelemetry.LogTelemetryAccess(telemetryAccessLogger,
+            timestampUtc, GatewayOpenTelemetry.BoundedTelemetryMethod(ctx.Request.Method),
+            GatewayOpenTelemetry.IsSafeTelemetryId(routeId) ? routeId : "_other",
+            ctx.Response.StatusCode, durationMs);
     }
 });
 var destinationTelemetry = new DestinationTelemetry();
