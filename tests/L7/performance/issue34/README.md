@@ -23,3 +23,19 @@ of freedom, the CI uses a conservative critical value rather than a narrower
 normal approximation. Negative unit fixtures ensure corrupt summaries cannot
 be mistaken for a measured optimization. This protects benchmark evidence but
 **does not itself reduce the gateway's bytes allocated per request**.
+
+## Reviewable Speedscope stacks (PR #429)
+
+The paired workflow additionally converts each bounded baseline and candidate
+`.nettrace` to a Speedscope JSON file using the pinned `dotnet-trace`
+version. `verify_speedscope.py` rejects a missing/oversized file, invalid
+frame references, and structurally valid JSON with no sampled stack or
+evented-open observations. Its negative tests run in the existing deterministic
+profile unit-test step; CI requires both nonempty validated stack files.
+
+This is an **evidence integrity check**, not automatic object-allocation
+attribution. Speedscope conversion can discard runtime metadata, and an
+observed stack is not necessarily an allocation stack. Keep raw `.nettrace`
+files for reviewer correlation with GC/allocation events and the paired
+allocation report. A green conversion neither proves lower bytes/request nor
+substitutes for Windows parity, correctness, or physical load acceptance.
