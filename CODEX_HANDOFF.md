@@ -5,62 +5,57 @@
 The owner intends GatewayCore to be **proprietary** and to postpone commercial licensing/activation development until software issues close. The .NET NSEC3 functionality follows RFC 5155. Earlier repository revisions included project-wide AGPL text; review that history before making distribution claims. See `README.md`, `PROJECT_LICENSE_STATUS.md`, and `AGENTS.md`; older snapshots below are historical, not the owner's current direction.
 
 
-## Verified continuation — independent PR integration and evidence (2026-11-23)
+## Verified continuation — PR integration, CI, and active software gates (2026-11-23)
 
-This section supersedes older snapshots below; **verify current GitHub heads and
-checks again before every merge or release decision**.
+This is the latest **time-bounded** repository snapshot in this handoff. Before
+any merge, issue closure or release, refresh the live GitHub head and its
+exact-head checks. Older dated sections below are historical records, not live
+issue/PR inventories.
 
-- Last verified `main`: `03976ae023f412adcbf3b8b125bb6ce4fdf1548a`.
-  PR #434 (SourceIpHash pooled destination candidates) merged as
-  `cea2407ff6e03ddc883f1c90f30dd97b9761a056` after independently approved
-  exact-head tests. PR #436 (WAF corpus response framing) merged as
-  `03976ae023f412adcbf3b8b125bb6ce4fdf1548a` after independent approval.
-  The earlier `main` push for #434 had one **cancelled** L7 workflow because
-  the branch advanced; do not represent combined post-merge push CI as fully
-  accepted. Use the exact-main verifier before final software release.
-- PR #435 source-address access logging avoids per-request peer IP hex
-  allocations with an empty trusted-proxy allowlist. The original PR head
-  `4ffba9cd86731f28bdbd19ca41ff7cd5c7fa2b86` had 16/16 CI success and
-  measured −72.212 bytes/request (paired 95% CI −74.127..−70.297). Merging
-  #434 caused a conflict in the profile workflow/README. Updated merge head
-  `cbcdb68b6d44a759b97081098ebeb6124acff447` now combines the two
-  profiling paths and retains the original source/test changes; this **new
-  head** requires all exact-head CI and a **new independent reviewer approval**
-  before merge. Do not add isolated benchmark deltas to claim whole-gateway
-  production savings.
-- PR #432 latest head `a2e47e8f427abec38a5c5ff4f58c7fa21ea24afe`
-  passed 18/18 triggered CI workflows, including the redacted OTLP Collector
-  and three-pair allocation profile: candidate-minus-baseline −7.974
-  bytes/request (95% CI −12.045..−3.903) with active OTLP. A prior head had
-  a measured +847.222 bytes/request regression; its local duplicate-export
-  formatting was removed. The historical CHANGES_REQUESTED review still
-  requires **fresh independent approval**.
-- PR #433 latest head `f278a323172ab6feac5d8a4508a647482d24a9d3`
-  passed 4/4 triggered CI checks. It fails closed on DNSSEC signer faults
-  and preserves RD/CD across normal, REFUSED and signer-failure replies, with
-  UDP/TCP acceptance. Historical review blockers require **fresh approval**.
-- PR #438 updated head `090eb36f519513103e8e0347452c9cc7db9c3f65`
-  addresses three inline independent review defects: branch-qualified
-  `main` push evidence, mandatory nonblank required-workflow gate and neutral
-  usage text. A Windows+Ubuntu offline regression workflow was added; the
-  resulting tests, branding and workflow lint were green. Do not merge without
-  the remaining exact-head checks and fresh independent approval; the
-  earlier CHANGES_REQUESTED has not been waived.
-- PR #437 records the engineering/security review of the **deleted**
-  standalone `gslb` branch; its independent Go history and source were
-  **not merged or copied** into the .NET product. The report is a risk/architecture
-  review only. Its CI was 13/13 successful at head `4f49209243aaa4351534ca62c241a6e7bc68fca5`.
-  It remains a review/documentation PR, not a production GSLB acceptance.
-- Current open issues #34 (allocations), #48 (key persistence/recovery),
-  #50 (OTLP operations), #51 (WAF lifecycle/coverage), and #36 (physical
-  capacity and gateway HA) remain separate. **Production NO-GO**. No release
-  artifact/offline upgrade/rollback or 750-Mbps single-node 60-minute physical
-  acceptance has been verified by these merges.
+- Verified `main`: `c1e39071489f2c0c913bac31adbb9aada85b103b`.
+  PRs #432 (redacted OTLP access export), #433 (DNSSEC signer fail-closed),
+  #434 (SourceIpHash allocation), #436 (WAF response framing) and #438
+  (exact-main push-evidence verifier) are **merged**. Earlier provisional
+  statements that these five PRs await approval or merge are superseded.
+- For `main` at `c1e3907`, repository-neutral branding and exact-main verifier
+  regression workflows were successful when last checked. CodeQL and L7
+  workflows were still running; **do not** report complete merged-main CI
+  acceptance or infer a production-ready release from partial checks.
+- PR #435 (untrusted access-log peer allocations) is open at updated head
+  `cbcdb68b6d44a759b97081098ebeb6124acff447`, cleanly mergeable.
+  Its four-file change preserves #434 performance workflow integration.
+  Exact-head checks were **42/43 successful**, with `paired-profile`
+  still in progress. An updated-head independent code review was approved
+  (GitHub review 6016729388); merge remains blocked until all required
+  checks complete successfully. The isolated allocation improvement does
+  not establish #34's historical whole-gateway/physical performance targets.
+- PR #437 is this historical static GSLB branch review and handoff. It
+  received an independent **CHANGES_REQUESTED** review (6016742784) for the
+  previously stale live integration snapshot; this section addresses that
+  finding but requires a new review. No separately reviewed code from the
+  deleted standalone branch was imported into the .NET product, and static
+  observations do not establish live GSLB acceptance.
+- PR #439 is open at head `1706ca458b44d6a4d8fb0ae5d96b3eafcc5e1620`.
+  It tightens #51 private WAF corpus acceptance: incomplete, unsupported,
+  or not-fully-consumed HTTP 403 responses are `ERROR`, never verified
+  blocking evidence. Three negative loopback regressions cover truncated,
+  unsupported-transfer, and oversized chunked 403 responses. Exact-head
+  CI and separate review are required before merge; #51 is not complete.
+- Latest queried **open issues**: #48 (Linux/Windows Data Protection lifecycle),
+  #50 (secure production observability), #51 (WAF production policy and
+  real-traffic acceptance), and #36 (physical production test). #34 does
+  not appear in this open-issue inventory; historical acceptance evidence
+  must not be conflated with live performance certification.
+- **Production NO-GO.** No final verified release artifacts, offline upgrade
+  and rollback proof, or 60-minute physical 750-Mbps single-node capacity
+  acceptance was established by these incremental PRs. Keep physical gates
+  under #36. Never downgrade numerical security, performance or review gates
+  merely to close the issue backlog.
 
 ## Continuation snapshot — security review and release status (2026-11-21)
 
-This is the latest verified continuation state; older same-day snapshots below
-are historical when their branch, issue, or CI state differs.
+This 2026-11-21 section is a historical snapshot. Use the dated 2026-11-23
+checkpoint above for newer integration status, then verify GitHub live.
 
 - `main` is `06f3d73c480b0e4da4150f0a0e39f3cffcb35eaa`, including PRs #321,
   #323–#332. PR #327's Windows/Linux account-key, ACME and ten-run HA checks,
