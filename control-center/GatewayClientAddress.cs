@@ -25,7 +25,12 @@ public static class GatewayClientAddress
     {
         if (socketPeer is null) return (null, "unknown");
         var peer = Normalize(socketPeer);
-        if (!trustedProxyAddresses.Contains(Key(peer))) return (peer, "socket");
+        // With no trusted ingress peers configured (the secure default), a
+        // forwarded address can never be accepted. Do not materialize a new
+        // GetAddressBytes array + hex string for an impossible set lookup on
+        // every gateway request. Keep the exact trusted-peer validation path.
+        if (trustedProxyAddresses.Count == 0 || !trustedProxyAddresses.Contains(Key(peer)))
+            return (peer, "socket");
         if (string.IsNullOrWhiteSpace(forwardedFor) || forwardedFor.Length > 64 ||
             forwardedFor.Contains(',') || !IPAddress.TryParse(forwardedFor.Trim(), out var forwarded) ||
             !IsUnscoped(forwarded) ||

@@ -8,6 +8,8 @@ on:
       - "tests/L7/performance/**"
       - "src/TrafficPolicies/**"
       - "control-center/GatewayOpenTelemetry.cs"
+      - "control-center/GatewayClientAddress.cs"
+      - "control-center/tests/LoadBalancingCoreTests/GatewayClientAddressTests.cs"
       - "control-center/GatewayLoggingConfiguration.cs"
       - "control-center/NonBlockingConsoleLogging.cs"
   workflow_dispatch:

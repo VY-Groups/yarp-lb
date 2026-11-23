@@ -78,3 +78,29 @@ A confidence interval crossing zero **does not prove** a savings. Windows
 profiling, streaming and non-idempotent POST characterization, signed
 capacity tests and physical 60-minute 750 Mbps acceptance remain independent
 gates. Do not close #34 from this optimization alone.
+
+## Default untrusted access-log peer fast path
+
+In the shipping Control Center the configured `GATEWAY_TRUSTED_PROXY_IPS`
+is parsed once at startup. When that allowlist is empty, a request cannot
+have a trusted forwarded address: `GatewayClientAddress.ForAccessLog`
+therefore returns the existing socket peer immediately instead of creating
+a new `IPAddress.GetAddressBytes()` array and hex-string lookup key on
+every request. This is an allocation optimization, **not** new trust:
+forwarded-for stays ignored by default; the nonempty explicit trusted-proxy
+branch, its exact-IP matching and its invalid-header rejection are unchanged.
+
+`GatewayClientAddressTests` uses 100,000 warmed calls, validates the
+original socket-peer identity/source on each iteration, and gates isolated
+helper allocations at <=1 B/call. Existing IPv4-mapped, trusted, untrusted,
+invalid forwarding-chain and unsafe-proxy-config tests remain in place.
+
+The #34 paired-profile workflow triggers on changes to this helper and
+retains its three alternating Ubuntu before/after gateway-lab runs and
+GC allocation traces. That loopback test fixture intentionally allocates
+an empty HashSet per request while the shipping gateway reuses its parsed
+allowlist, so the result must not be represented as a complete production
+allocation model. The paired 95% CI must establish a meaningful savings
+before attributing a whole-proxy improvement. This optimization does not
+alter safety, retry, forwarding or TLS behavior; Windows/Ubuntu
+characterization and physical capacity still require independent evidence.
