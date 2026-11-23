@@ -121,7 +121,18 @@ jobs:
           # No local access message or client/forwarded IP field is permitted
           # in the independent Collector, even though local access logs retain
           # these fields for restricted operations.
-          if grep -Eq 'GATEWAY_ACCESS|clientIp|clientIpSource|203\\.0\\.113\\.17|otlp-secret-canary|Authorization|Cookie|/private' "$RUNNER_TEMP/otel-collector-live.log"; then
+          # Verify the canary pattern itself so an over-escaped expression
+          # cannot silently make privacy checks pass on leaked IPv4 addresses.
+          private_pattern='GATEWAY_ACCESS|clientIp|clientIpSource|203\.0\.113\.17|otlp-secret-canary|Authorization|Cookie|/private'
+          if ! printf '%s\n' '203.0.113.17' | grep -Eq "$private_pattern"; then
+            echo "FAIL: OTLP sensitive-data matcher cannot detect dotted IPv4" >&2
+            exit 1
+          fi
+          if printf '%s\n' '203x0x113x17' | grep -Eq "$private_pattern"; then
+            echo "FAIL: OTLP sensitive-data matcher accepts spoofed IPv4 separators" >&2
+            exit 1
+          fi
+          if grep -Eq "$private_pattern" "$RUNNER_TEMP/otel-collector-live.log"; then
             echo "Local access/IP, request URL, header or secret leaked to Collector output" >&2
             exit 1
           fi
