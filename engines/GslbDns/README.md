@@ -768,8 +768,11 @@ The agent report ingress continues to enforce the same 8192-byte JSON limit thro
 Both UDP and TCP listeners drop malformed query headers before DNS record or
 health evaluation. Requests with QR=1, a non-QUERY opcode, response-only AA/TC/RA,
 reserved Z or nonzero query RCODE are rejected. Valid resolver query flags RD,
-AD and CD remain accepted. Windows/Linux GSLB acceptance exercises malformed
-header drops alongside the existing packet-shape, EDNS and amplification tests.
+AD and CD remain accepted. Both normal authoritative and REFUSED responses
+preserve the request's RD and CD bits, but **never mirror the client's AD bit**;
+DNSSEC signer-fault SERVFAIL follows the same RD/CD boundary. Live UDP/TCP
+and pure packet-builder tests cover all combinations of the valid flags, alongside
+malformed header drops, packet shape, EDNS and amplification checks.
 A successful lab result is not independent public recursive-resolver qualification.
 
 ### ECS response scope during health fallback
