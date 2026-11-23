@@ -18,11 +18,12 @@ METRICS = (
     "gateway_audit_outbox_pending",
     "gateway_audit_outbox_storage_fault",
     "gateway_audit_outbox_delivery_blocked",
+    "gateway_audit_outbox_last_update_unixtime",
 )
 # A label-free OTLP instrument may still have a bounded standard
 # resource identity and Prometheus scrape labels. Enumerate those explicitly;
 # arbitrary route, cluster, destination or user-provided dimensions are NOT
-# acceptable on these four audit outbox gauges, even without obvious PII.
+# acceptable on these five audit outbox gauges, even without obvious PII.
 ALLOWED_LABELS = frozenset((
     "__name__", "job", "instance", "service_instance_id", "service_name",
     "service_version", "service_namespace", "telemetry_sdk_name",
@@ -117,7 +118,9 @@ def verify(payloads, expected_nodes, now=None, maximum_age=180):
                 raise ValueError(name + ": stale or future sample")
             if ((name == "gateway_audit_outbox_enabled" and value != 1) or
                 (name == "gateway_audit_outbox_pending" and not 0 <= value <= 4096) or
-                (name.endswith(("storage_fault", "delivery_blocked")) and value != 0)):
+                (name.endswith(("storage_fault", "delivery_blocked")) and value != 0) or
+                (name == "gateway_audit_outbox_last_update_unixtime" and
+                 (value > now + 30 or now - value > 90))):
                 raise ValueError(name + ": unhealthy or disabled audit state")
             found.add(node)
         if found != expected:
