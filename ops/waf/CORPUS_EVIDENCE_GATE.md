@@ -1,26 +1,49 @@
 # WAF per-route corpus evidence gate (issue #51)
 
-This is a **post-run evidence checker**, not a WAF, a traffic generator, or proof of production readiness. Collect genuine request/response decisions using an approved, version-pinned ruleset and an independently labelled benign/malicious corpus. Keep request bodies, IPs, tokens and customer data out of this CSV and GitHub.
+This is a **post-run consistency checker**, not a traffic generator, WAF, authenticated collector or proof of production readiness. Its inputs are **operator-supplied** and must be independently collected, retained and approved outside the repository. Never upload private request bodies, IPs, tokens, raw audit logs or customer secrets to GitHub.
 
-CSV header must be exactly `route,case_id,expected,observed,mode`. Every case ID must be unique within its route; `expected` is `benign` or `malicious`, `observed` is `allowed` or `blocked`, and `mode` must be `block`. A request returning a blocking response without a confirmed WAF decision must not be recorded as a true positive. Detect-only results need separate shadow-mode reporting and **cannot** be passed as enforced blocking.
+## Independent approved route manifest
 
-Example (synthetic only):
+The required --route-manifest file is an independently held JSON record; it must **not** be derived from the submitted results CSV. Exact schema (all hashes below are synthetic placeholders, NOT verified production evidence):
 
-```csv
-route,case_id,expected,observed,mode
-/api/demo,benign-json-1,benign,allowed,block
-/api/demo,sql-injection-1,malicious,blocked,block
-```
+    {
+      "schemaVersion": 1,
+      "approvedRulesetSha256": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "corpusManifestSha256": "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+      "gatewaySha": "cccccccccccccccccccccccccccccccccccccccc",
+      "platform": "linux",
+      "evidenceBinding": "native-waf-audit-per-request",
+      "routes": ["/api/demo"]
+    }
 
-Before running, record the approved FP/FN limits, minimum per-route corpus sizes, pinned ruleset hash, corpus manifest hash, gateway SHA, OS, exact config, evidence collection method and operator. Then execute:
+The schema is exact, with duplicate keys/route aliases rejected. Every approved route MUST appear and no unapproved route may appear; a missing /admin route cannot silently pass when /api passes. Canonical routes are literal ASCII absolute paths with no repeated separator, dot segment, encoded alias, query, fragment or route parameter. Record the independent reviewer, approval timestamp, OS, installed ruleset/config, ground-truth corpus source and threshold governance outside this file. The checker does NOT verify signatures on that external approval.
 
-```sh
-python3 -m unittest discover -s ops/waf -p 'test_assess_corpus_evidence.py' -v
-python3 ops/waf/assess_corpus_evidence.py evidence.csv \
-  --max-fp-rate 0 --max-fn-rate 0 --min-benign 1 --min-malicious 1 \
-  > confusion-matrix.json
-```
+## Evidence CSV
 
-The zero rates and one-case minimum above are **illustrative**, not approved production thresholds. Do not lower an agreed gate to obtain a pass. Exit 0 means all routes meet the supplied gate, exit 1 means at least one route fails, exit 2 means invalid/missing evidence. The JSON contains TP/TN/FP/FN and per-route FP/FN rates, but no case payloads. Empty, duplicate, shadow-only, malformed, or insufficient per-route evidence fails closed.
+The header must be exactly:
 
-This gate does **not** replace pinned-policy ownership/expiry/rollback tests, evasion and protocol corpora, direct/proxy/WAF matched-concurrency load with p95/p99/CPU/allocations, incident telemetry, or Windows/Linux deployment and real-site acceptance. Record those separately under #51 and #36. Never mark #51 complete from this checker alone.
+    route,case_id,expected,observed,mode,waf_action,audit_sha256
+
+The expected column is independent ground truth benign or malicious; observed is client-side allowed or blocked; mode must be block. The waf_action must be pass or block, obtained from the native WAF audit record bound to **this particular request**, and must agree with observed. A backend HTTP 403 or connectivity failure **cannot** be treated as a WAF true positive. The audit_sha256 is the 64-character uppercase SHA-256 digest of the independently preserved case-specific native audit record; a missing/reused digest fails closed, but its mere presence does **not** cryptographically authenticate that record or the ground-truth label.
+
+Synthetic two-case example, **not** real evidence:
+
+    route,case_id,expected,observed,mode,waf_action,audit_sha256
+    /api/demo,benign-json-1,benign,allowed,block,pass,AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    /api/demo,sql-injection-1,malicious,blocked,block,block,BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB
+
+Collect the genuine HTTP result, WAF action, unique native-audit transaction and independently labeled ground truth together. Verify the audit hash from the separately retained original audit using an independently reviewed procedure; do not fabricate values or reuse an unrelated WAF event. All data files must be regular, single-linked files under a private operator directory. The tool rejects symbolic/hard links, oversized data, invalid columns, duplicate evidence identities, malformed routes, absent approved routes and detect-only entries. It does not export native audit content or case IDs; its JSON report includes only per-route counts, rates, and submitted input digests.
+
+## Run an approved acceptance check
+
+Use absolute local paths and preapproved FP/FN limits and minimum per-route sample sizes (the numbers below are **illustrative**, not approved enterprise thresholds):
+
+    python3 -m unittest discover -s ops/waf -p 'test_assess_corpus_evidence.py' -v
+    python3 ops/waf/assess_corpus_evidence.py /private/waf/evidence.csv \
+      --route-manifest /private/waf/approved-routes.json \
+      --max-fp-rate 0 --max-fn-rate 0 --min-benign 1 --min-malicious 1 \
+      > /private/waf/confusion-matrix.json
+
+Exit 0 means the supplied, internally consistent corpus met the supplied per-route limits; exit 1 means a measured route failed; exit 2 means invalid/missing/ambiguous evidence. **Exit 0 is not a trusted production acceptance** unless the external ruleset pin, real WAF verdict provenance, route inventory, corpus manifest, threshold approval, independent audit evidence and collection chain of custody have also been verified. Record all those and the exact gateway commit, Windows/Linux build and operating system.
+
+This checker cannot substitute for signed exception rendering, approved WAF ruleset deployment/rollback, real multi-node HA, OWASP evasions and protocol-specific testing, representative customer false positives/negatives or integrated gateway capacity testing with 500 Mbps observed peak plus approved headroom and real p95/p99/CPU/GC/allocations. Those remain under #51, with real physical-environment acceptance under #36. **Do not close #51 or claim production GO solely from this test.**
