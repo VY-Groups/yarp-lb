@@ -7,6 +7,7 @@ No thresholds are invented: the reviewer must provide explicit route/severity li
 import argparse
 import json
 import math
+import os
 import sys
 from collections import defaultdict
 from pathlib import Path
@@ -108,6 +109,37 @@ def evaluate(corpus, policy):
     return {"pass": bool(passed), "matrix": results}
 
 
+
+def write_private_report(path, result):
+    """Atomically publish bounded WAF summary under an operator-owned output directory.
+
+    On POSIX, the replacement inode is 0600 regardless of umask or prior
+    report permissions. Reject symlink destinations and existing predictable
+    temporary paths. Operators must provision a trusted private parent
+    directory; Windows ACL qualification remains separate.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.is_symlink():
+        raise ValueError("unsafe WAF report destination")
+    temporary = path.with_name(path.name + ".tmp")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(temporary, flags, 0o600)
+    published = False
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump(result, stream, indent=2, sort_keys=True)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        if path.is_symlink():
+            raise ValueError("unsafe WAF report destination")
+        os.replace(temporary, path)
+        published = True
+    finally:
+        if not published:
+            temporary.unlink(missing_ok=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--corpus", type=Path, required=True)
@@ -117,10 +149,11 @@ def main():
     try:
         result = evaluate(_read_bounded_json(args.corpus),
                           _read_bounded_json(args.policy))
-        args.out.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        write_private_report(args.out, result)
         return 0 if result["pass"] else 1
-    except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
-        print(f"WAF corpus evidence invalid: {exc}", file=sys.stderr)
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        # Paths and operator-specific fields must never leak into CI/stdout.
+        print("FAIL: WAF matrix validation or private report write failed", file=sys.stderr)
         return 2
 
 
