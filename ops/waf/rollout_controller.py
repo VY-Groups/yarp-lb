@@ -6,6 +6,7 @@ Does NOT implement a distributed two-host transaction, exception rendering,
 authenticated external audit collector or production fleet key custody.
 """
 import argparse
+import atexit
 import contextlib
 import datetime as dt
 import fcntl
@@ -18,6 +19,7 @@ import re
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -122,25 +124,61 @@ class DockerComposeProvider:
         self.compose = Path(compose)
         self.image = image
         self.runner = runner
+        self._snapshot = None
         if (not self.compose.is_absolute() or self.compose.is_symlink() or
-                not self.compose.is_file() or self.compose.stat().st_size > 262144 or
+                not self.compose.is_file() or
                 not OCI_IMAGE.fullmatch(image)):
             raise ValueError("private pinned WAF Compose contract required")
+        # The source file is a local operator-controlled executable document.
+        # Refuse symbolic path ancestors and group/other-writable directories,
+        # not just a symlink at the final component.
+        if self.compose.resolve(strict=True) != self.compose:
+            raise ValueError("WAF Compose path must not traverse aliases")
+        parent = self.compose.parent
+        if (parent.stat().st_uid not in (0, os.geteuid()) or
+                stat.S_IMODE(parent.stat().st_mode) & 0o022):
+            raise ValueError("WAF Compose parent cannot be changed by untrusted users")
+        original = signatures._read_file(self.compose, limit=262144)
         u = urllib.parse.urlsplit(health_url)
         if (u.scheme != "http" or u.hostname != "127.0.0.1" or
                 u.username is not None or u.password is not None or
                 u.query or u.fragment or not u.port or u.path not in ("", "/")):
             raise ValueError("WAF local health endpoint must be literal HTTP loopback")
         self.health = "http://127.0.0.1:" + str(u.port) + "/"
+        self.health_port = str(u.port)
+        # Materialize an owner-only immutable-by-other-identities snapshot
+        # of the bytes that were inspected. Every Docker Compose command
+        # refers to this snapshot, while --project-directory keeps existing
+        # relative volume paths and compose project names unchanged.
+        self._snapshot = tempfile.TemporaryDirectory(prefix="gatewaycore-waf-approved-")
+        atexit.register(self._snapshot.cleanup)
+        self.frozen_compose = Path(self._snapshot.name) / "compose.yml"
+        fd = os.open(self.frozen_compose,
+                     os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        try:
+            with os.fdopen(fd, "wb") as stream:
+                stream.write(original)
+                stream.flush()
+                os.fsync(stream.fileno())
+        except Exception:
+            self._snapshot.cleanup()
+            raise
+        self.frozen_sha256 = hashlib.sha256(original).digest()
 
     def command(self, *args, mode=None):
+        # Even a same-UID accidental rewrite of the private snapshot must
+        # not silently change the executed Compose deployment after approval.
+        if hashlib.sha256(signatures._read_file(
+                self.frozen_compose, limit=262144)).digest() != self.frozen_sha256:
+            raise ValueError("validated Compose snapshot changed")
         env = os.environ.copy()
         if mode is not None:
             if mode not in MODES:
                 raise ValueError("invalid WAF mode")
             env["WAF_MODE"] = MODES[mode]
-        return self.runner(["docker", "compose", "-f", str(self.compose), *args],
-                           env=env)
+        return self.runner(["docker", "compose", "--project-directory",
+                            str(self.compose.parent), "-f",
+                            str(self.frozen_compose), *args], env=env)
 
     def image_and_config(self, mode):
         config = strict_json(self.command("config", "--format", "json", mode=mode))
@@ -154,6 +192,16 @@ class DockerComposeProvider:
                                   service.get("network_mode") == "host"):
                 raise ValueError("origin or secondary service may bypass protected WAF")
         waf = services["waf"]
+        # A public or wildcard WAF listener would permit requests that
+        # bypass the protected GatewayCore traffic path. The ONLY accepted
+        # host publish is the exact loopback port used for smoke probes.
+        ports = waf.get("ports")
+        if (not isinstance(ports, list) or len(ports) != 1 or
+                type(ports[0]) is not dict or
+                ports[0].get("host_ip") != "127.0.0.1" or
+                str(ports[0].get("published")) != self.health_port or
+                ports[0].get("protocol", "tcp") != "tcp"):
+            raise ValueError("WAF host publish must be exact IPv4 loopback only")
         if (waf.get("image") != self.image or waf.get("privileged") or
                 waf.get("network_mode") == "host" or
                 waf.get("environment", {}).get("MODSEC_RULE_ENGINE") != MODES[mode]):
