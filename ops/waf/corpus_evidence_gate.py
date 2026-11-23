@@ -9,6 +9,8 @@ import csv
 import json
 import os
 import pathlib
+import math
+import re
 import sys
 from collections import defaultdict
 
@@ -21,23 +23,58 @@ MODES = {"block", "detect"}
 SEVERITIES = {"low", "medium", "high", "critical"}
 MAX_CASES = 100_000
 MAX_FIELD_CHARS = 4096
+V3_FIELDS = FIELDS | {"audit_sha256"}
+V3_LIMITS = {"max_fp", "max_fn", "max_fp_rate", "max_fn_rate",
+             "min_benign", "min_malicious"}
+V3_POLICY_KEYS = {"schemaVersion", "mode", "routes", "approvedRulesetSha256",
+                  "corpusManifestSha256", "gatewaySha", "platform"}
+HEX64 = re.compile(r"[A-F0-9]{64}\\Z".replace("\\\\Z", "\\Z"))
+HEX40 = re.compile(r"[A-Fa-f0-9]{40}\\Z".replace("\\\\Z", "\\Z"))
+CANONICAL_ROUTE = re.compile(r"/(?:[A-Za-z0-9._~-]+(?:/[A-Za-z0-9._~-]+)*)?\\Z".replace("\\\\Z", "\\Z"))
+CASE_ID = re.compile(r"[A-Za-z0-9_.-]{1,128}\\Z".replace("\\\\Z", "\\Z"))
 
 
 def evaluate(rows, policy):
-    if type(policy) is not dict or set(policy) != {"schemaVersion", "mode", "routes"} or \
-            type(policy["schemaVersion"]) is not int or policy["schemaVersion"] != 2 or \
-            type(policy["mode"]) is not str or policy["mode"] not in MODES:
-        raise ValueError("policy must be v2 with a valid mode and explicit routes")
+    if type(policy) is not dict or type(policy.get("schemaVersion")) is not int:
+        raise ValueError("expected preapproved WAF policy v2 or v3")
+    version = policy["schemaVersion"]
+    keys = {"schemaVersion", "mode", "routes"} if version == 2 else V3_POLICY_KEYS
+    if (version not in (2, 3) or set(policy) != keys or
+            type(policy["mode"]) is not str or policy["mode"] not in MODES):
+        raise ValueError("policy must match the explicit approved version and mode")
+    if version == 3:
+        if (type(policy["approvedRulesetSha256"]) is not str or
+                not HEX64.fullmatch(policy["approvedRulesetSha256"]) or
+                type(policy["corpusManifestSha256"]) is not str or
+                not HEX64.fullmatch(policy["corpusManifestSha256"]) or
+                type(policy["gatewaySha"]) is not str or
+                not HEX40.fullmatch(policy["gatewaySha"]) or
+                policy["platform"] not in ("windows", "linux")):
+            raise ValueError("v3 policy requires pinned ruleset, corpus, gateway and platform")
     if type(policy["routes"]) is not dict or not policy["routes"]:
         raise ValueError("policy routes must be a nonempty object")
     for route, limits in policy["routes"].items():
-        if not isinstance(route, str) or not route or \
-                type(limits) is not dict or set(limits) != {"max_fp", "max_fn"}:
-            raise ValueError("each route needs an object with max_fp and max_fn")
+        required_limits = {"max_fp", "max_fn"} if version == 2 else V3_LIMITS
+        if (not isinstance(route, str) or not route or
+                type(limits) is not dict or set(limits) != required_limits):
+            raise ValueError("each route needs complete preapproved count/rate limits")
+        if version == 3 and (not CANONICAL_ROUTE.fullmatch(route) or
+                any(segment in (".", "..") for segment in route.split("/")) or
+                len(route) > 256):
+            raise ValueError("v3 route is ambiguous or noncanonical")
         if any(type(limits[k]) is not int or limits[k] < 0 for k in ("max_fp", "max_fn")):
-            raise ValueError("limits must be nonnegative integers")
+            raise ValueError("count limits must be nonnegative integers")
+        if version == 3:
+            if (any(type(limits[k]) not in (int, float) or
+                    not math.isfinite(limits[k]) or not 0 <= limits[k] <= 1
+                    for k in ("max_fp_rate", "max_fn_rate")) or
+                    any(type(limits[k]) is not int or limits[k] < 1 or
+                        limits[k] > MAX_CASES
+                        for k in ("min_benign", "min_malicious"))):
+                raise ValueError("v3 preapproved route rates or minimum sizes invalid")
     stats = defaultdict(lambda: {"tp": 0, "tn": 0, "fp": 0, "fn": 0})
     seen = set()
+    seen_native_audits = set()
     count = 0
     for row in rows:
         count += 1
@@ -45,12 +82,20 @@ def evaluate(rows, policy):
             raise ValueError("corpus exceeds bounded case count")
         if any(type(v) is not str or len(v) > MAX_FIELD_CHARS for v in row.values()):
             raise ValueError(f"row {count}: oversized or invalid field")
-        if set(row) != FIELDS or any(not isinstance(v, str) for v in row.values()):
+        expected_fields = FIELDS if version == 2 else V3_FIELDS
+        if set(row) != expected_fields or any(not isinstance(v, str) for v in row.values()):
             raise ValueError(f"row {count}: invalid columns")
         case_id, route = row["case_id"], row["route"]
         if not case_id or case_id in seen:
             raise ValueError(f"row {count}: duplicate or empty case_id")
         seen.add(case_id)
+        if version == 3:
+            if not CASE_ID.fullmatch(case_id):
+                raise ValueError(f"row {count}: noncanonical case identity")
+            audit_hash = row["audit_sha256"]
+            if not HEX64.fullmatch(audit_hash) or audit_hash in seen_native_audits:
+                raise ValueError(f"row {count}: missing or reused native WAF audit digest")
+            seen_native_audits.add(audit_hash)
         if route not in policy["routes"]:
             raise ValueError(f"row {count}: unapproved route")
         if (row["expected"] not in EXPECTED or row["observed"] not in OBSERVED
@@ -74,17 +119,37 @@ def evaluate(rows, policy):
     if not count or set(stats) != set(policy["routes"]):
         raise ValueError("empty corpus or untested approved route")
     failures = []
+    measured_rates = {}
     for route in sorted(stats):
         values = stats[route]
         if values["fp"] > policy["routes"][route]["max_fp"]:
             failures.append(f"{route}: false positives exceed precommitted limit")
         if values["fn"] > policy["routes"][route]["max_fn"]:
             failures.append(f"{route}: false negatives exceed precommitted limit")
-        if not (values["tp"] + values["fn"]) or not (values["tn"] + values["fp"]):
+        benign = values["tn"] + values["fp"]
+        malicious = values["tp"] + values["fn"]
+        if not malicious or not benign:
             failures.append(f"{route}: missing benign or malicious ground truth")
-    return {"schemaVersion": 2, "mode": policy["mode"],
-            "status": "FAIL" if failures else "PASS", "cases": count,
-            "routes": dict(sorted(stats.items())), "failures": failures}
+        if version == 3:
+            limits = policy["routes"][route]
+            fp_rate = values["fp"] / benign if benign else None
+            fn_rate = values["fn"] / malicious if malicious else None
+            measured_rates[route] = {"fp_rate": fp_rate, "fn_rate": fn_rate,
+                                     "benign": benign, "malicious": malicious}
+            if benign < limits["min_benign"] or malicious < limits["min_malicious"]:
+                failures.append(f"{route}: insufficient preapproved corpus size")
+            if (fp_rate is None or fp_rate > limits["max_fp_rate"] or
+                    fn_rate is None or fn_rate > limits["max_fn_rate"]):
+                failures.append(f"{route}: preapproved FP/FN rate exceeded")
+    report = {"schemaVersion": version, "mode": policy["mode"],
+              "status": "FAIL" if failures else "PASS", "cases": count,
+              "routes": dict(sorted(stats.items())), "failures": failures}
+    if version == 3:
+        report["rates"] = measured_rates
+        report["pinnedEvidence"] = {
+            key: policy[key] for key in
+            ("approvedRulesetSha256", "corpusManifestSha256", "gatewaySha", "platform")}
+    return report
 
 
 def write_private_report(path, report):
@@ -140,8 +205,10 @@ def main():
         csv.field_size_limit(MAX_FIELD_CHARS)
         with args.corpus.open(newline="", encoding="utf-8") as stream:
             reader = csv.DictReader(stream)
-            if reader.fieldnames is None or set(reader.fieldnames) != FIELDS or len(reader.fieldnames) != len(FIELDS):
-                raise ValueError("CSV columns must match exact required schema")
+            expected = FIELDS if policy["schemaVersion"] == 2 else V3_FIELDS
+            if (reader.fieldnames is None or set(reader.fieldnames) != expected or
+                    len(reader.fieldnames) != len(expected)):
+                raise ValueError("CSV columns must match exact versioned schema")
             report = evaluate(reader, policy)
     except (ValueError, OSError, UnicodeError, json.JSONDecodeError, csv.Error) as exc:
         report = {"status": "FAIL", "failures": [str(exc)]}
