@@ -5,12 +5,25 @@ import threading
 
 MAX_BODY_BYTES = 1_048_576
 MAX_EVENTS = 100
+READ_TIMEOUT_SECONDS = 5  # Disposable receiver: bound incomplete webhook bodies.
+
+
+def reject_duplicate_keys(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON property")
+        result[key] = value
+    return result
 
 
 class Receiver(ThreadingHTTPServer):
     daemon_threads = True
-    events = []
-    events_lock = threading.Lock()
+    def __init__(self, server_address, handler_class):
+        super().__init__(server_address, handler_class)
+        # Never share delivery evidence across independently started receivers.
+        self.events = []
+        self.events_lock = threading.Lock()
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -26,6 +39,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        if self.close_connection:
+            self.send_header("Connection", "close")
         self.end_headers()
         self.wfile.write(body)
 
@@ -42,21 +57,43 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         if self.path != "/alerts":
+            # Unknown POST paths may carry unread bodies: never reuse the socket.
+            self.close_connection = True
             self._write_json(404, {"error": "not_found"})
             return
         if self.headers.get_content_type() != "application/json":
+            self.close_connection = True
             self._write_json(415, {"error": "unsupported_media_type"})
             return
-        try:
-            length = int(self.headers.get("Content-Length", "-1"))
-        except ValueError:
-            length = -1
+        # Reject ambiguous framing before reading a persistent HTTP/1.1 socket.
+        # The disposable receiver accepts fixed-length JSON only, never chunks.
+        if self.headers.get("Transfer-Encoding") is not None or len(self.headers.get_all("Content-Length", [])) != 1:
+            self.close_connection = True
+            self._write_json(400, {"error": "ambiguous_request_framing"})
+            return
+        # Accept only canonical decimal framing. Python int() also accepts
+        # signs, whitespace and Unicode digits, which are ambiguous to peers.
+        raw_length = self.headers.get("Content-Length", "")
+        if (not raw_length or len(raw_length) > 7 or
+                not raw_length.isascii() or not raw_length.isdecimal()):
+            self.close_connection = True
+            self._write_json(400, {"error": "ambiguous_request_framing"})
+            return
+        length = int(raw_length)
         if length < 1 or length > MAX_BODY_BYTES:
+            self.close_connection = True
             self._write_json(413, {"error": "invalid_body_size"})
             return
         try:
-            document = json.loads(self.rfile.read(length))
-        except (json.JSONDecodeError, UnicodeDecodeError):
+            self.connection.settimeout(READ_TIMEOUT_SECONDS)
+            document = json.loads(self.rfile.read(length), object_pairs_hook=reject_duplicate_keys)
+        except TimeoutError:
+            # A sender that declares a body but never finishes it must not
+            # retain a worker or permit late bytes to become a new request.
+            self.close_connection = True
+            self._write_json(408, {"error": "request_body_timeout"})
+            return
+        except (ValueError, UnicodeDecodeError):
             self._write_json(400, {"error": "invalid_json"})
             return
         if not isinstance(document, dict):
@@ -70,13 +107,23 @@ class Handler(BaseHTTPRequestHandler):
                for alert in alerts):
             self._write_json(400, {"error": "invalid_alert"})
             return
+        # Retain only bounded delivery evidence. Labels, annotations and URLs
+        # can contain credentials or private topology; never echo them at /events.
+        safe_alerts = []
+        for alert in alerts:
+            labels = alert.get("labels")
+            name = labels.get("alertname") if isinstance(labels, dict) else None
+            safe_name = (name if isinstance(name, str) and 0 < len(name) <= 128
+                         and all(ch.isascii() and (ch.isalnum() or ch in "_:-") for ch in name)
+                         else "redacted")
+            safe_alerts.append({"status": alert["status"], "alertname": safe_name})
         with self.server.events_lock:
-            self.server.events.append(document)
+            self.server.events.append({"version": "4", "alerts": safe_alerts})
             del self.server.events[:-MAX_EVENTS]
         self._write_json(200, {"accepted": True})
 
 
 if __name__ == "__main__":
-    ThreadingHTTPServer.allow_reuse_address = True
+    Receiver.allow_reuse_address = True
     Receiver(("0.0.0.0", 8080), Handler).serve_forever()
 
