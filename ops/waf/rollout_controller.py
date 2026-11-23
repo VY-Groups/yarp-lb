@@ -17,6 +17,7 @@ import re
 import stat
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -189,22 +190,30 @@ class DockerComposeProvider:
         self.command("up", "--no-deps", "-d", "--force-recreate", "waf", mode=mode)
 
     def smoke(self, mode):
-        # Sends fixed synthetic GET requests only; no customer data or tokens.
-        # There are no retries of POST or nonidempotent requests.
+        # Fixed synthetic idempotent GETs only, never POST or customer data.
+        # Bound retries allow a newly-created WAF container to start, but
+        # never turn repeated failures into an acceptance success.
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         cases = [(self.health, 200),
                  (self.health + "?q=%3Cscript%3Ealert%281%29%3C%2Fscript%3E",
                   403 if mode == "block" else 200)]
         for url, expected in cases:
-            status = 0
-            try:
-                with opener.open(urllib.request.Request(url, method="GET"),
-                                 timeout=5) as response:
-                    status = response.status
-                    response.read(4096)
-            except urllib.error.HTTPError as error:
-                status = error.code
-            if status != expected:
+            observed = None
+            for attempt in range(15):
+                try:
+                    with opener.open(urllib.request.Request(url, method="GET"),
+                                     timeout=3) as response:
+                        observed = response.status
+                        response.read(4096)
+                except urllib.error.HTTPError as error:
+                    observed = error.code
+                except urllib.error.URLError:
+                    observed = None
+                if observed == expected:
+                    break
+                if attempt != 14:
+                    time.sleep(0.4)
+            else:
                 raise ValueError("WAF local observed HTTP mode acceptance failed")
 
 
