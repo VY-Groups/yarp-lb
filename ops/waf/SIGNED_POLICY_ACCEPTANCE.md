@@ -101,11 +101,36 @@ exception list is deliberately **REJECTED** until there is a verified
 narrow-scope ModSecurity rendering/acceptance implementation; silently
 ignoring an approved exception or applying a global rule bypass is unsafe.
 
-The operator must separately establish the **actual effective ruleset
-digest** used for the required `--observed-ruleset-sha256` input. The
-controller DOES NOT independently derive this digest from the active
-ModSecurity rule files. That provenance gap still blocks production #51
-acceptance. A policy signed for the wrong rule set must not be activated.
+The operator must obtain the **canonical SHA-256 digest of the observed
+CRS `.conf` files inside the actual running WAF container**, NOT type a
+self-asserted or arbitrary hash. To get this bounded read-only inventory:
+
+```sh
+container_id="$(docker compose -f /private/waf/compose.yml ps -q waf)"
+python3 ops/waf/runtime_ruleset_inventory.py --container "$container_id"
+```
+
+The fixed canonical domain `GatewayCore.WAF.ObservedCRSRuleFiles.v1` hashes
+the sorted exact relative path and content bytes of single-link regular
+`/etc/modsecurity.d/owasp-crs/rules/*.conf`. Archive size, individual
+files, total bytes, path aliasing, ambiguous duplicate names and the
+presence of 930/941/942 CRS families are all fail-closed. The policy
+`rulesetSha256` MUST contain that exact uppercase SHA-256, and both
+detached P-256 reviewer signatures MUST cover those policy bytes.
+
+The controller independently re-observes the actual running container's
+rules before any activation, after a change, and during rollback, rejecting
+any mismatch with the signed digest. A caller repeating a fabricated
+`--observed-ruleset-sha256` cannot turn it into observed file evidence.
+CI proves this with cryptographically valid reviewers signing a false
+rule tree hash.
+
+**Limit:** File-byte observation is not cryptographic attestation of the
+runtime's **complete effective include graph**: an Nginx/modsecurity
+configuration could omit or override a file, inject a directive from
+another include path, or alter mounted files elsewhere. Separate signed
+effective-configuration, mounted exception and immutable image
+verification remains required for production #51 acceptance.
 
 The controller refuses an unpinned Compose WAF image, another published
 origin service, host network exposure, privileged WAF, unknown runtime engine
@@ -136,7 +161,7 @@ python3 ops/waf/rollout_controller.py \
   --reviewer-key reviewer-one=/secure/waf/reviewer-one.pem \
   --reviewer-key reviewer-two=/secure/waf/reviewer-two.pem \
   --minimum-revision-file /secure/waf/revision-floor.txt \
-  --observed-ruleset-sha256 REPLACE_WITH_VERIFIED_EFFECTIVE_RULESET_SHA256 \
+  --observed-ruleset-sha256 REPLACE_WITH_OBSERVED_CANONICAL_CRS_RULE_FILES_SHA256 \
   --shadow-evidence-file /private/waf/approved-shadow.json \
   --compose /private/waf/compose.yml \
   --image owasp/modsecurity-crs@sha256:REPLACE_WITH_PINNED_64_HEX_DIGEST \
@@ -147,7 +172,7 @@ python3 ops/waf/rollout_controller.py \
 ```
 
 **Unqualified and intentionally unsupported:** rendering signed exact-route
-exceptions, cryptographic attestation of active CRS rule files, active
+exceptions, cryptographic attestation of the full effective configuration/include graph, active
 distributed two-node canary/quorum/fencing, atomic cross-node rollback,
 automated independent trust-floor advancement, container TLS ingress,
 client identity, external immutable audit collection, private customer
