@@ -154,6 +154,67 @@ try
         Assert(dp.Unprotect(encrypted)=="sensitive-session-value-123",
             "session value decrypts across a new service provider using persisted key ring");
     }
+    // Two distinct private state roots simulate separate on-prem Linux
+    // instances. Provision only the same operator-approved wrapping identity
+    // and a byte-for-byte copy of encrypted XML; never create plaintext keys
+    // or claim these directories are separate physical machines.
+    var fleetReplicaState = Path.Combine(root, "fleet-replica-state");
+    Set("YARP_CONTROL_PLANE_DIR", fleetReplicaState);
+    Assert(LinuxKeyProtection.InitializeStateDirectory() == fleetReplicaState,
+        "independent fleet replica initializes a separate private key-ring root");
+    Set("YARP_CONTROL_PLANE_DIR", state);
+    var fleetReplicaKeys = Path.Combine(fleetReplicaState, "data-protection-keys");
+    foreach (var protectedKey in keyFiles)
+    {
+        var replicaKeyPath = Path.Combine(fleetReplicaKeys, Path.GetFileName(protectedKey));
+        File.Copy(protectedKey, replicaKeyPath, overwrite: false);
+        File.SetUnixFileMode(replicaKeyPath, PrivateFile);
+    }
+    Assert(Directory.GetFiles(fleetReplicaKeys, "key-*.xml").Length == keyFiles.Length &&
+        Directory.GetFiles(fleetReplicaKeys, "key-*.xml").All(path =>
+            File.ReadAllText(path).Contains("<encryptedSecret", StringComparison.Ordinal) &&
+            !File.ReadAllText(path).Contains("<masterKey", StringComparison.Ordinal)),
+        "replicated key-ring preserves only certificate-wrapped XML");
+    string replicaProtectedCookie;
+    using (var replica = Provider(fleetReplicaState))
+    {
+        var dp = replica.GetRequiredService<IDataProtectionProvider>()
+            .CreateProtector("session-probe");
+        Assert(dp.Unprotect(encrypted) == "sensitive-session-value-123",
+            "replica decrypts original session using approved shared wrapping identity");
+        replicaProtectedCookie = dp.Protect("replica-auth-session");
+    }
+    using (var origin = Provider(state))
+        Assert(origin.GetRequiredService<IDataProtectionProvider>()
+            .CreateProtector("session-probe").Unprotect(replicaProtectedCookie) ==
+            "replica-auth-session",
+            "original node decrypts replica session with unchanged app/purpose identity");
+
+    // A different authorized RSA key is NOT automatically a decryption key
+    // for a recovered ring. Do not silently generate replacement sessions or
+    // treat successful startup as successful restoration.
+    Set("YARP_LINUX_DP_CERT_PFX_PATH", second.Pfx);
+    Set("YARP_LINUX_DP_CERT_PASSWORD_FILE", second.PasswordFile);
+    try
+    {
+        Assert(Throws(() =>
+        {
+            using var replica = Provider(fleetReplicaState);
+            _ = replica.GetRequiredService<IDataProtectionProvider>()
+                .CreateProtector("session-probe").Unprotect(encrypted);
+        }), "replica rejects restored cookie without its original wrapping private key");
+    }
+    finally
+    {
+        Set("YARP_LINUX_DP_CERT_PFX_PATH", first.Pfx);
+        Set("YARP_LINUX_DP_CERT_PASSWORD_FILE", first.PasswordFile);
+    }
+    using (var replica = Provider(fleetReplicaState))
+        Assert(replica.GetRequiredService<IDataProtectionProvider>()
+            .CreateProtector("session-probe").Unprotect(encrypted) ==
+            "sensitive-session-value-123",
+            "restored wrapping identity recovers the original replica session");
+
     // Restored encrypted keys must retain their filename/GUID identity.
     // A second case-variant filename exercises the duplicate guard on Linux,
     // where both paths can coexist while passing the case-insensitive GUID check.
