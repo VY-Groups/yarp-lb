@@ -170,7 +170,11 @@ def run_cases(cases, connection_factory=None):
             # Partial bodies and unsupported framing must never count as
             # a successful WAF block, even when the status line says 403.
             payload = response.read(4097)
-            framing_ok = verified_response_framing(response.headers, payload)
+            # Bounded reads can stop before EOF for large or chunked 403
+            # bodies. Never accept a status line while unread response
+            # bytes remain, even if its headers claim valid framing.
+            framing_ok = (response.isclosed() and len(payload) <= 4096 and
+                          verified_response_framing(response.headers, payload))
             marker = framing_ok and verified_origin_response(
                 case["method"], case["contentType"], len(body),
                 response.getheader("Content-Type", ""), payload)
