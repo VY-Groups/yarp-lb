@@ -37,35 +37,71 @@ $port = Get-Random -Minimum 22500 -Maximum 32500
 $baseUrl = 'http://127.0.0.1:' + $port
 try {
     if ($Identity -eq 'LocalService') {
-        # A low-privilege service cannot create the ProgramData product
-        # root. The disposable runner administrator pre-provisions it with
-        # no inherited allow rules and only this service SID, SYSTEM/Admins.
-        New-Item -ItemType Directory -Path $product -Force | Out-Null
-        $secured = [Security.AccessControl.DirectorySecurity]::new()
-        $secured.SetAccessRuleProtection($true, $false)
-        foreach ($principalSid in @(
-            [Security.Principal.SecurityIdentifier]::new(
-                [Security.Principal.WellKnownSidType]::LocalServiceSid, $null),
-            [Security.Principal.SecurityIdentifier]::new(
-                [Security.Principal.WellKnownSidType]::LocalSystemSid, $null),
-            [Security.Principal.SecurityIdentifier]::new(
+        # The service must NEVER be able to modify its own executable:
+        # give LocalService read/execute at the product root and full
+        # control ONLY beneath its protected ControlPlane state directory.
+        # SYSTEM and Administrators retain full access for offline updates.
+        function Set-PrivateRunnerAcl([string]$directory, [bool]$allowStateWrite) {
+            $secured = [Security.AccessControl.DirectorySecurity]::new()
+            $secured.SetAccessRuleProtection($true, $false)
+            $local = [Security.Principal.SecurityIdentifier]::new(
+                [Security.Principal.WellKnownSidType]::LocalServiceSid, $null)
+            $system = [Security.Principal.SecurityIdentifier]::new(
+                [Security.Principal.WellKnownSidType]::LocalSystemSid, $null)
+            $admins = [Security.Principal.SecurityIdentifier]::new(
                 [Security.Principal.WellKnownSidType]::BuiltinAdministratorsSid, $null)
-        )) {
-            $rule = [Security.AccessControl.FileSystemAccessRule]::new(
-                $principalSid,
-                [Security.AccessControl.FileSystemRights]::FullControl,
-                ([Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
-                 [Security.AccessControl.InheritanceFlags]::ObjectInherit),
-                [Security.AccessControl.PropagationFlags]::None,
-                [Security.AccessControl.AccessControlType]::Allow)
-            $secured.AddAccessRule($rule)
+            foreach ($sid in @($local, $system, $admins)) {
+                $rights = if ($sid.Equals($local) -and -not $allowStateWrite) {
+                    [Security.AccessControl.FileSystemRights]::ReadAndExecute
+                } else {
+                    [Security.AccessControl.FileSystemRights]::FullControl
+                }
+                $rule = [Security.AccessControl.FileSystemAccessRule]::new(
+                    $sid, $rights,
+                    ([Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
+                     [Security.AccessControl.InheritanceFlags]::ObjectInherit),
+                    [Security.AccessControl.PropagationFlags]::None,
+                    [Security.AccessControl.AccessControlType]::Allow)
+                $secured.AddAccessRule($rule)
+            }
+            [IO.DirectoryInfo]::new($directory).SetAccessControl($secured)
+            if (-not (Get-Acl -LiteralPath $directory).AreAccessRulesProtected) {
+                throw 'Pre-provisioned runner ACL inherited unapproved permissions'
+            }
         }
-        [IO.DirectoryInfo]::new($product).SetAccessControl($secured)
-        if (-not (Get-Acl -LiteralPath $product).AreAccessRulesProtected) {
-            throw 'Pre-provisioned LocalService product ACL inherited permissions'
-        }
+        New-Item -ItemType Directory -Path $product -Force | Out-Null
+        Set-PrivateRunnerAcl $product $false
+        $preStagedState = Join-Path $product 'ControlPlane'
+        New-Item -ItemType Directory -Path $preStagedState -Force | Out-Null
+        Set-PrivateRunnerAcl $preStagedState $true
     }
     New-Item -ItemType Directory -Path $published -Force | Out-Null
+    if ($Identity -eq 'LocalService') {
+        # Fail if a future ACL change gives the service account write,
+        # deletion or takeover rights on the executable directory.
+        $localSid = [Security.Principal.SecurityIdentifier]::new(
+            [Security.Principal.WellKnownSidType]::LocalServiceSid, $null)
+        $forbidden = ([Security.AccessControl.FileSystemRights]::WriteData -bor
+                      [Security.AccessControl.FileSystemRights]::AppendData -bor
+                      [Security.AccessControl.FileSystemRights]::Delete -bor
+                      [Security.AccessControl.FileSystemRights]::ChangePermissions -bor
+                      [Security.AccessControl.FileSystemRights]::TakeOwnership)
+        $publishedAcl = (Get-Acl -LiteralPath $published).GetAccessRules(
+            $true, $true, [Security.Principal.SecurityIdentifier])
+        $localRules = @($publishedAcl | Where-Object {
+            $_.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and
+            $_.IdentityReference.Equals($localSid)
+        })
+        if ($localRules.Count -lt 1) {
+            throw 'Disposable LocalService cannot read published application'
+        }
+        foreach ($entry in $localRules) {
+            if (($entry.FileSystemRights -band $forbidden) -ne 0) {
+                throw 'Disposable LocalService has unapproved executable write rights'
+            }
+        }
+        Write-Output 'PASS: LocalService can execute but cannot replace its own CI executable'
+    }
     & dotnet publish $project --configuration Release --framework net10.0 -p:UseAppHost=true --output $published
     if ($LASTEXITCODE -ne 0) { throw 'Disposable .NET publish failed' }
     $exe = Join-Path $published 'GatewayCoreYarp.exe'
