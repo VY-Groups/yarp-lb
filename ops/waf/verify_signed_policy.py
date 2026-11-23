@@ -185,7 +185,7 @@ def _canonical_reviewer_key_digest(public_key):
 
 
 def verify(policy_path, approvals, reviewers, minimum_revision_path,
-           observed_ruleset, observed_mode, now=None):
+           observed_ruleset, observed_mode, now=None, shadow_evidence_path=None):
     now = now or dt.datetime.now(dt.timezone.utc)
     if (now.tzinfo is None or not _digest(observed_ruleset) or
             observed_mode not in ("detect", "block")):
@@ -203,8 +203,20 @@ def verify(policy_path, approvals, reviewers, minimum_revision_path,
         # supplying both the policy and its own revocation/verification floor.
         if Path(external).resolve(strict=True).is_relative_to(policy_root):
             raise ValueError("trust input cannot reside in policy tree")
-    revision = validate_policy(_json(policy_bytes), minimum,
+    policy_data = _json(policy_bytes)
+    revision = validate_policy(policy_data, minimum,
                                observed_ruleset, observed_mode, now)
+    # Blocking approval must bind the actual evidence bytes to the reviewed
+    # policy digest. A SHA-256-looking string alone is not site evidence.
+    if observed_mode == "block":
+        if shadow_evidence_path is None:
+            raise ValueError("blocking requires a supplied shadow evidence file")
+        observed_shadow = hashlib.sha256(
+            _read_file(shadow_evidence_path, limit=4 * 1024 * 1024)).hexdigest().upper()
+        if observed_shadow != policy_data["shadowEvidenceSha256"]:
+            raise ValueError("shadow evidence does not match reviewed digest")
+    elif shadow_evidence_path is not None:
+        raise ValueError("detect-only policy must not assert blocking evidence")
     policy_digest = hashlib.sha256(policy_bytes).hexdigest().upper()
     seen = set()
     seen_keys = set()
@@ -251,6 +263,8 @@ def main():
     parser.add_argument("--minimum-revision-file", type=Path, required=True)
     parser.add_argument("--observed-ruleset-sha256", required=True)
     parser.add_argument("--observed-mode", choices=("detect", "block"), required=True)
+    parser.add_argument("--shadow-evidence-file", type=Path,
+                        help="required for block: privately reviewed evidence bytes")
     args = parser.parse_args()
     try:
         keys = {}
@@ -261,7 +275,8 @@ def main():
                 raise ValueError("invalid trusted reviewer mapping")
             keys[who] = Path(path)
         rev = verify(args.policy, args.approval, keys, args.minimum_revision_file,
-                     args.observed_ruleset_sha256, args.observed_mode)
+                     args.observed_ruleset_sha256, args.observed_mode,
+                     shadow_evidence_path=args.shadow_evidence_file)
     except (ValueError, OSError, TypeError, UnicodeError, json.JSONDecodeError,
             subprocess.SubprocessError, RecursionError):
         # Never echo raw operator-supplied paths, signatures or policy content.
