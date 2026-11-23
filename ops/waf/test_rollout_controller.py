@@ -165,6 +165,68 @@ class RolloutSafetyTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "bypass"):
             provider.image_and_config("block")
 
+    def test_waf_port_must_be_exact_ipv4_loopback_with_no_public_alias(self):
+        manifest = Path(self.root.name) / "compose.yml"
+        manifest.write_text("services: {}", encoding="ascii")
+        image = "owasp/modsecurity-crs@sha256:" + "a" * 64
+        requested = [{"host_ip": "127.0.0.1", "published": "18888",
+                      "target": 8080, "protocol": "tcp"}]
+        def fake_runner(argv, env=None):
+            if argv[1] == "compose":
+                return json.dumps({"services": {
+                    "waf": {"image": image, "ports": requested,
+                            "environment": {"MODSEC_RULE_ENGINE": env["WAF_MODE"]}},
+                    "protected-app": {"ports": []}}})
+            return "sha256:" + "a" * 64
+        provider = subject.DockerComposeProvider(manifest, image,
+            "http://127.0.0.1:18888/", runner=fake_runner)
+        self.assertEqual(provider.image_and_config("block"), "sha256:"+"a"*64)
+        for value in ("0.0.0.0", "::", "::1", "127.0.0.2", "", None):
+            requested[0]["host_ip"] = value
+            with self.subTest(host_ip=value), self.assertRaisesRegex(ValueError, "loopback"):
+                provider.image_and_config("block")
+        requested[0]["host_ip"] = "127.0.0.1"
+        requested[0]["published"] = "18889"
+        with self.assertRaisesRegex(ValueError, "loopback"):
+            provider.image_and_config("block")
+        requested[0]["published"] = "18888"
+        requested[0]["protocol"] = "udp"
+        with self.assertRaisesRegex(ValueError, "loopback"):
+            provider.image_and_config("block")
+        requested[:] = []
+        with self.assertRaisesRegex(ValueError, "loopback"):
+            provider.image_and_config("block")
+
+    def test_compose_file_replacement_cannot_change_executed_snapshot(self):
+        manifest = Path(self.root.name) / "compose.yml"
+        manifest.write_text("services: {waf: {}}", encoding="ascii")
+        image = "owasp/modsecurity-crs@sha256:" + "a" * 64
+        calls = []
+        config = json.dumps({"services": {"waf": {
+            "image": image,
+            "ports": [{"host_ip": "127.0.0.1", "published": 18888}],
+            "environment": {"MODSEC_RULE_ENGINE": "On"}},
+            "protected-app": {}}})
+        def fake_runner(argv, env=None):
+            calls.append((argv, env))
+            if argv[1] == "compose":
+                return config
+            return "sha256:" + "a" * 64
+        provider = subject.DockerComposeProvider(manifest, image,
+                         "http://127.0.0.1:18888/", runner=fake_runner)
+        original = provider.frozen_compose.read_bytes()
+        self.assertEqual(provider.image_and_config("block"), "sha256:"+"a"*64)
+        manifest.write_text("services: {waf: {privileged: true}}", encoding="ascii")
+        provider.apply("block")
+        self.assertEqual(provider.frozen_compose.read_bytes(), original)
+        self.assertTrue(all(str(provider.frozen_compose) in call[0]
+                            for call in calls if call[0][1] == "compose"))
+        self.assertTrue(all(str(manifest.parent) in call[0]
+                            for call in calls if call[0][1] == "compose"))
+        provider.frozen_compose.write_bytes(b"unapproved")
+        with self.assertRaisesRegex(ValueError, "snapshot changed"):
+            provider.apply("block")
+
     def test_missing_receipt_after_apply_requires_rollback(self):
         gateway = FakeWaf()
         with mock.patch.object(subject, "receipt", side_effect=OSError("no storage")):
