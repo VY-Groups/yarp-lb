@@ -418,6 +418,31 @@ for entry in \
   [[ "$restored_code" == 403 ]] ||
     { echo "FAIL: restored CRS blocking failed for $name ($restored_code)" >&2; exit 1; }
 done
+# Exercise the operator runner against real native audit, using ONLY fixed
+# synthetic fixtures. This is not customer corpus or production-rate evidence.
+python3 - <<'PY'
+import sys
+from urllib.parse import urlencode
+sys.path.insert(0, "tests/WafCrs")
+import operator_corpus_acceptance as acceptance
+cases = [
+    {"id": "synthetic-benign-get", "route": "web", "method": "GET", "path": "/",
+     "expected": "benign", "severity": "none", "contentType": "text/plain", "body": ""},
+    {"id": "synthetic-benign-json", "route": "api", "method": "POST", "path": "/",
+     "expected": "benign", "severity": "none", "contentType": "application/json",
+     "body": '{"name":"ordinary"}'},
+    {"id": "synthetic-xss", "route": "web", "method": "GET",
+     "path": "/?" + urlencode({"q": "<script>alert(1)</script>"}),
+     "expected": "malicious", "severity": "high", "contentType": "text/plain", "body": ""},
+    {"id": "synthetic-sqli", "route": "web", "method": "GET",
+     "path": "/?" + urlencode({"id": "1' UNION SELECT password FROM users--"}),
+     "expected": "malicious", "severity": "critical", "contentType": "text/plain", "body": ""},
+]
+report = acceptance.run_cases(cases)
+if report["counts"] != {"TP": 2, "TN": 2, "FP": 0, "FN": 0, "ERROR": 0}:
+    raise SystemExit("FAIL: operator-runner synthetic native audit acceptance")
+print("PASS: operator runner binds real native CRS denials to unique run and case markers")
+PY
 # Customer/operator fixtures are never shipped with the repository and are
 # NEVER copied into the artifact directory. This is opt-in local acceptance,
 # using only the pinned 127.0.0.1:18888 disposable WAF port.
