@@ -304,3 +304,40 @@ tests:
             exp_annotations:
               summary: "GSLB could not persist agent report replay state"
               description: "The DNS node rejected persistence of agent report state; inspect storage availability and filesystem permissions."
+  # OTLP-exported loss metrics are scraped from the Collector, not the
+  # gatewaycore-gateway job. The same critical alerts must fire.
+  - interval: 1m
+    input_series:
+      - series: 'yarp_logging_dropped_total{job="otel-collector",instance="otel-collector:8889",service_instance_id="gateway-node-a"}'
+        values: '0 0 2 2 2 2 2'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: YarpDroppedLogs
+        exp_alerts:
+          - exp_labels: {job: otel-collector, instance: "otel-collector:8889", service_instance_id: gateway-node-a, severity: critical}
+  - interval: 1m
+    input_series:
+      - series: 'yarp_logging_dropped_high_priority_total{job="otel-collector",instance="otel-collector:8889",service_instance_id="gateway-node-a"}'
+        values: '0 0 1 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: YarpHighPriorityLogsDropped
+        exp_alerts:
+          - exp_labels: {job: otel-collector, instance: "otel-collector:8889", service_instance_id: gateway-node-a, severity: critical}
+  - interval: 1m
+    input_series:
+      - series: 'yarp_logging_write_errors_total{job="otel-collector",instance="otel-collector:8889",service_instance_id="gateway-node-a"}'
+        values: '0 0 1 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: YarpLogWriterError
+        exp_alerts:
+          - exp_labels: {job: otel-collector, instance: "otel-collector:8889", service_instance_id: gateway-node-a, severity: critical}
+  - interval: 1m
+    input_series:
+      - series: 'yarp_logging_write_errors_total{job="otel-collector",instance="otel-collector:8889",service_instance_id="gateway-node-a"}'
+        values: '0 0 0 0 0 0 0'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: YarpLogWriterError
+        exp_alerts: []
