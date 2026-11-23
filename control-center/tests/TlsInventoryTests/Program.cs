@@ -28,6 +28,48 @@ if (selectedDualTransportPort != 51003 || tcpReservationAttempts != 4 || udpRese
     throw new Exception("TCP-first dual-transport selection must retry reserved TCP and UDP candidates");
 Console.WriteLine("PASS: TCP-first dual TCP/UDP port selection retries reserved and occupied candidates");
 
+// Windows can reject every TCP-allocated ephemeral port when UDP has a
+// different excluded-port range. Try UDP allocator first and alternate,
+// without bypassing the real joint bind or loosening the QUIC requirement.
+var tcpFirstAttempts = 0;
+var udpFirstAttempts = 0;
+MemoryStream? successfulUdpReservation = null;
+var selectedFallbackPort = TrafficHttp3Acceptance.SelectDualTransportPort(
+    reserveTcp: () =>
+    {
+        tcpFirstAttempts++;
+        throw new SocketException((int)SocketError.AccessDenied);
+    },
+    reserveUdp: _ => throw new SocketException((int)SocketError.AccessDenied),
+    maxAttempts: 4,
+    reserveUdpCandidate: () =>
+    {
+        udpFirstAttempts++;
+        if (udpFirstAttempts == 1)
+            throw new SocketException((int)SocketError.AccessDenied);
+        successfulUdpReservation = new MemoryStream();
+        return (52001, successfulUdpReservation);
+    },
+    reserveTcpAtPort: _ => new MemoryStream());
+if (selectedFallbackPort != 52001 ||
+    tcpFirstAttempts != 1 || udpFirstAttempts != 2 ||
+    successfulUdpReservation is null || successfulUdpReservation.CanRead)
+    throw new Exception("UDP-first dual-transport fallback must retry both OS allocators and dispose reservations");
+
+var refusesUnpairedFallback = false;
+try
+{
+    _ = TrafficHttp3Acceptance.SelectDualTransportPort(
+        () => (52002, new MemoryStream()),
+        _ => new MemoryStream(),
+        reserveUdpCandidate: () => (52002, new MemoryStream()));
+}
+catch (ArgumentException) { refusesUnpairedFallback = true; }
+if (!refusesUnpairedFallback)
+    throw new Exception("Unpaired UDP-first callback must fail before any port reservation");
+
+Console.WriteLine("PASS: UDP-first cross-protocol fallback retries Windows reserved ports without skipping HTTP/3");
+
 var staging = "https://acme-staging-v02.api.letsencrypt.org/directory";
 var eligible = AcmeTargetPolicy.Validate(staging, "api.example.com", http01: true,
     publicChallengeEntrypointEnabled: true);
