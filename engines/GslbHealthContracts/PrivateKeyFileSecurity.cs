@@ -20,6 +20,7 @@ public static class PrivateKeyFileSecurity
     private const int LinuxFileExists = 17;
     private const uint LinuxDirectoryPrivateMode = 0x1C0; // 0700
     private const uint LinuxStatxMode = 0x0002;
+    private const uint LinuxStatxNlink = 0x0004;
     private const uint LinuxStatxUid = 0x0008;
     private const uint GenericRead = 0x80000000;
     private const uint ShareRead = 0x00000001;
@@ -71,7 +72,7 @@ public static class PrivateKeyFileSecurity
     /// Windows callers must separately enforce their required ACL policy.
     /// </summary>
     public static FileStream OpenPrivateFileRead(string? path, string purpose,
-        bool allowGroupOrOtherRead = false)
+        bool allowGroupOrOtherRead = false, bool requireSingleLink = false)
     {
         if (string.IsNullOrWhiteSpace(path) || !Path.IsPathFullyQualified(path))
             throw new InvalidDataException($"{purpose} path must be absolute");
@@ -89,7 +90,8 @@ public static class PrivateKeyFileSecurity
                 throw new InvalidDataException($"{purpose} must be a regular file, not a directory, device, or link");
             if (OperatingSystem.IsLinux())
                 ValidateLinuxOpenedObject(handle, purpose, isDirectory: false,
-                    allowGroupOrOtherRead: allowGroupOrOtherRead);
+                    allowGroupOrOtherRead: allowGroupOrOtherRead,
+                    requireSingleLink: requireSingleLink);
             var stream = new FileStream(handle, FileAccess.Read);
             handle = null;
             return stream;
@@ -99,11 +101,11 @@ public static class PrivateKeyFileSecurity
 
     /// <summary>Read bounded bytes from one validated, no-follow handle.</summary>
     public static byte[] ReadPrivateFileBytes(string? path, string purpose, int maximumBytes,
-        bool allowGroupOrOtherRead = false)
+        bool allowGroupOrOtherRead = false, bool requireSingleLink = false)
     {
         if (maximumBytes is < 1 or > 16 * 1024 * 1024)
             throw new ArgumentOutOfRangeException(nameof(maximumBytes));
-        using var stream = OpenPrivateFileRead(path, purpose, allowGroupOrOtherRead);
+        using var stream = OpenPrivateFileRead(path, purpose, allowGroupOrOtherRead, requireSingleLink);
         var length = stream.Length;
         if (!stream.CanSeek || length <= 0 || length > maximumBytes)
             throw new InvalidDataException($"{purpose} must be a regular file no larger than {maximumBytes} bytes");
@@ -357,9 +359,10 @@ public static class PrivateKeyFileSecurity
     }
 
     private static LinuxStatx ValidateLinuxOpenedObject(SafeFileHandle handle, string purpose,
-        bool isDirectory, bool allowGroupOrOtherRead = false)
+        bool isDirectory, bool allowGroupOrOtherRead = false, bool requireSingleLink = false)
     {
-        var requiredMask = LinuxStatxMode | LinuxStatxUid;
+        var requiredMask = LinuxStatxMode | LinuxStatxUid |
+            (requireSingleLink ? LinuxStatxNlink : 0u);
         if (StatxUnix(handle.DangerousGetHandle().ToInt32(), "", LinuxAtEmptyPath,
                 requiredMask, out var metadata) != 0 || (metadata.Mask & requiredMask) != requiredMask)
             throw new InvalidDataException($"Unable to verify {purpose} ownership and permissions",
@@ -371,6 +374,13 @@ public static class PrivateKeyFileSecurity
             throw new InvalidDataException($"{purpose} must be a regular file or expected directory");
         ValidateLinuxPathObject(metadata.OwnerUid, metadata.Mode, GetEffectiveUid(), isDirectory,
             purpose, allowGroupOrOtherRead);
+        // An external-looking recovery manifest or trust key may be the
+        // *same inode* as a file inside a restored backup via a hard link.
+        // Symlink/realpath checks cannot detect that alias. Only require
+        // a single link for independently provisioned recovery authority.
+        if (requireSingleLink && metadata.LinkCount != 1)
+            throw new InvalidDataException(
+                "Linux recovery authority file must have exactly one hard link");
         return metadata;
     }
 
@@ -458,6 +468,7 @@ public static class PrivateKeyFileSecurity
     private struct LinuxStatx
     {
         [FieldOffset(0)] public uint Mask;
+        [FieldOffset(16)] public uint LinkCount;
         [FieldOffset(20)] public uint OwnerUid;
         [FieldOffset(28)] public ushort Mode;
     }
