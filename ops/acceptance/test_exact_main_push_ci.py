@@ -59,6 +59,22 @@ class EvidenceTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "Invalid GitHub Actions run id"):
                 module.collect("example/repo", "a" * 40, "fake")
 
+    def test_invalid_job_id_never_counts_as_verified_evidence(self):
+        for invalid in (None, 0, -1, True, "9"):
+            def fake(path, token):
+                if "/git/ref/heads/main" in path:
+                    return {"object": {"sha": "a" * 40}}
+                if "/actions/runs?" in path:
+                    return {"workflow_runs": [{"id": 1, "head_sha": "a" * 40,
+                                               "head_branch": "main", "event": "push",
+                                               "status": "completed", "conclusion": "success"}]}
+                return {"jobs": [{"id": invalid, "status": "completed",
+                                  "conclusion": "success", "steps": []}]}
+            with self.subTest(invalid=invalid):
+                with patch.object(module, "get_json", side_effect=fake):
+                    with self.assertRaisesRegex(ValueError, "Invalid GitHub Actions job id"):
+                        module.collect("example/repo", "a" * 40, "fake")
+
     def test_pending_job_is_not_a_success(self):
         def fake(path, token):
             if "/git/ref/heads/main" in path:
