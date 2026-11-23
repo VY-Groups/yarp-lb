@@ -11,6 +11,28 @@ bash tests/WafCrs/verify.sh
 
 It binds 127.0.0.1:18888 and creates a Docker-private backend network. It captures container logs and removes temporary containers and the network.
 
+### Forwarded-header invariance fixture (disposable lab only, #51)
+
+The isolated CRS lab sends the same synthetic XSS, SQL injection,
+path-traversal and benign requests with caller-controlled
+`X-Forwarded-For`, `X-Real-IP` and RFC 7239 `Forwarded` headers claiming
+loopback. The malicious cases must still receive HTTP 403 and the benign
+case HTTP 200. It separately confirms the exact-route PKIX laboratory
+exclusion is not broadened by adding these headers. Outcomes appear only
+as redacted case identifiers/statuses in the fixed lab corpus report.
+
+**Scope boundary:** Neither the disposable WAF nor its isolated backend
+rewrites the client identity from those headers or authorizes requests based
+on an immediate-peer trust list. These probes therefore test **invariance
+when unused headers are present**, NOT whether a real trusted proxy
+configuration correctly rejects spoofed client identity. The
+[GatewayCore GSLB engineering review](../../control-center/docs/GSLB_BRANCH_DEEP_REVIEW.md)
+identified the latter as an independent, high-severity threat-model item;
+no code from the reviewed system is imported here. An actual ingress/WAF
+and management API deployment must separately test that only configured
+immediate peers can supply forwarded identity and that origin/API bypass
+is impossible. No production WAF security-goal completion is implied.
+
 ## Production gaps
 
 This pinned image snapshot is **lab-only**. Production still requires a maintained image-update cadence with reviewed immutable digests and security updates, HTTPS/TLS and backend trust, inbound protection placement, bypass prevention, anomaly tuning and application-specific exclusions, rule governance, false-positive and performance tests, privacy-safe audit retention, DDoS protection and external load balancing. Blocking one XSS signature is not a comprehensive WAF/security compliance assertion. Control-center WAF provisioning is **not** integrated; mark capability as partial external integration only.

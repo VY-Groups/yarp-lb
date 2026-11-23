@@ -17,7 +17,7 @@ done
 rm -f "$DIR/benchmark-summary.json" "$DIR/waf-selected-image.txt"
 # Clear only this run's known synthetic result files; never count stale
 # evidence from an earlier invocation as a successful observation.
-for result in last-benign-status json-http-status xml-http-status large-json-http-status pkix-der-http-status benign-query-http-status unicode-query-http-status cookie-query-http-status xss-http-status sqli-http-status traversal-http-status; do
+for result in last-benign-status json-http-status xml-http-status large-json-http-status pkix-der-http-status benign-query-http-status unicode-query-http-status cookie-query-http-status xss-http-status sqli-http-status traversal-http-status spoofed-xss-http-status spoofed-sqli-http-status spoofed-traversal-http-status spoofed-benign-query-http-status spoofed-outside-pkix-http-status; do
   rm -f "$DIR/$result.txt"
 done
 rm -f "$DIR/blocking-corpus-report.json" "$DIR/detection-corpus-report.json" "$DIR/operator-corpus-report.json"
@@ -41,12 +41,17 @@ cases = (
     ("xss", "/", "malicious", "xss-http-status"),
     ("sqli", "/", "malicious", "sqli-http-status"),
     ("traversal", "/", "malicious", "traversal-http-status"),
+    ("spoofed-benign-query", "/", "benign", "spoofed-benign-query-http-status"),
+    ("spoofed-xss", "/", "malicious", "spoofed-xss-http-status"),
+    ("spoofed-sqli", "/", "malicious", "spoofed-sqli-http-status"),
+    ("spoofed-traversal", "/", "malicious", "spoofed-traversal-http-status"),
 )
 rows = []
 matrices = {}
 # Severity is the fixed fixture's ground truth; do not misrepresent it as
 # upstream CRS severity or inferred risk from an HTTP response.
-severity = {"xss": "high", "sqli": "high", "traversal": "high"}
+severity = {name: "high" for name in (
+    "xss", "sqli", "traversal", "spoofed-xss", "spoofed-sqli", "spoofed-traversal")}
 severity_matrices = {}
 for name, route, expected, file_name in cases:
     file = directory / (file_name + ".txt")
@@ -212,6 +217,20 @@ printf '%s\n' "$outside_pkix_code" > "$DIR/outside-pkix-http-status.txt"
 [[ "$outside_pkix_code" == "403" ]] ||
   { echo "FAIL: PKIX content-type exception unexpectedly escaped its exact route" >&2; exit 1; }
 echo "PASS: PKIX exception applies only to the exact POST /acceptance route"
+# Claimed loopback identity must not grant the scoped PKIX exception on
+# any other route; only the actual request method/path/type may qualify.
+spoofed_pkix_code="$(curl --silent --show-error --max-time 8 -X POST \
+  -H 'Content-Type: application/pkix-cert' \
+  -H 'X-Forwarded-For: 127.0.0.1' \
+  -H 'X-Real-IP: 127.0.0.1' \
+  -H 'Forwarded: for=127.0.0.1;proto=https' \
+  --data-binary "@$DIR/benign-cert.der" \
+  -o "$DIR/spoofed-outside-pkix-response.txt" -w '%{http_code}' \
+  "http://127.0.0.1:18888/not-allowed")"
+printf '%s\n' "$spoofed_pkix_code" > "$DIR/spoofed-outside-pkix-http-status.txt"
+[[ "$spoofed_pkix_code" == "403" ]] ||
+  { echo "FAIL: forwarded-client spoof bypassed scoped PKIX exclusion" >&2; exit 1; }
+echo "PASS: scoped PKIX exception is unchanged by forwarded headers"
 xss_code="$(curl --silent --show-error --max-time 8 -o "$DIR/xss-response.txt" \
   -w '%{http_code}' --get --data-urlencode \
   'q=<script>alert(1)</script>' "http://127.0.0.1:18888/")"
@@ -236,6 +255,44 @@ for entry in \
   fi
   echo "PASS: CRS blocks $name payload"
 done
+# The disposable lab does not rewrite or authorize clients using forwarded
+# headers. These cases are *payload-response invariance* controls, not tests
+# of trusted-proxy identity or of a production WAF bypass. The separate
+# proxy-header spoofing risk is recorded in the GSLB engineering review.
+# Keep every probe on the fixed loopback lab listener.
+for entry in \
+  'spoofed-xss|q=<script>alert(1)</script>' \
+  "spoofed-sqli|id=1' UNION SELECT password FROM users--" \
+  "spoofed-traversal|file=../../../../etc/passwd"; do
+  name="${entry%%|*}"
+  payload="${entry#*|}"
+  status="$(curl --silent --show-error --max-time 8 --get \
+    -H 'X-Forwarded-For: 127.0.0.1' \
+    -H 'X-Real-IP: 127.0.0.1' \
+    -H 'Forwarded: for=127.0.0.1;proto=https' \
+    --data-urlencode "$payload" \
+    -o "$DIR/$name-response.txt" -w '%{http_code}' \
+    "http://127.0.0.1:18888/")"
+  printf '%s\n' "$status" > "$DIR/$name-http-status.txt"
+  if [[ "$status" != "403" ]]; then
+    echo "FAIL: malicious $name with spoofed forwarding headers escaped CRS blocking (HTTP $status)" >&2
+    exit 1
+  fi
+  echo "PASS: $name blocking is unchanged by untrusted forwarded headers"
+done
+# The same forwarded-header fixture on benign traffic must not create a
+# new false-positive when the lab ignores those identity headers.
+spoofed_benign_code="$(curl --silent --show-error --max-time 8 --get \
+  -H 'X-Forwarded-For: 127.0.0.1' \
+  -H 'X-Real-IP: 127.0.0.1' \
+  -H 'Forwarded: for=127.0.0.1;proto=https' \
+  --data-urlencode 'q=books-and-cats' \
+  -o "$DIR/spoofed-benign-query-response.txt" -w '%{http_code}' \
+  "http://127.0.0.1:18888/")"
+printf '%s\n' "$spoofed_benign_code" > "$DIR/spoofed-benign-query-http-status.txt"
+[[ "$spoofed_benign_code" == "200" ]] ||
+  { echo "FAIL: unexpected benign response under forwarded-header fixture (HTTP $spoofed_benign_code)" >&2; exit 1; }
+echo "PASS: benign behavior is unchanged by forwarded-header fixture"
 # Ordinary parameterized URLs must not be blocked by the generic CRS rules.
 benign_code="$(curl --silent --show-error --max-time 8 --get \
   --data-urlencode "q=books-and-cats" --data-urlencode "page=2" \
