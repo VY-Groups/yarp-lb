@@ -199,6 +199,26 @@ restored state and verifies startup fails closed without changing key bytes.
 The single-link condition is a defense-in-depth trust-boundary check, not
 a replacement for independently controlled storage, key custody,
 revision floors or physical DR approval.
+### Encrypted XML key-ring inode isolation
+
+All persisted Linux ASP.NET Data Protection `*.xml` key/revocation files
+must now have **exactly one hard link**, verified on the already opened Linux
+file descriptor via `statx`, during both normal startup import and the
+signed recovery inventory digest. A key XML file hardlinked into a second
+directory is the same inode, even if its filename, location and `realpath`
+look unrelated. The validator refuses that alias without deleting or
+rewrapping ciphertext. Ubuntu integration tests create a real hard link
+outside the private key directory; normal startup and recovery hashing
+reject it. Removing the alias restores old-cookie decryptability.
+
+**Backup/migration consequence:** do not create hardlink-based snapshots of
+live key-ring XML. Use independently protected **file copies** with approved
+custody, preserve original filename/GUID identity and `0600` permissions,
+and follow the independently signed recovery checkpoint procedure above.
+Existing shared-fleet distribution, cert rotation and real host failover
+still require separate acceptance. The hardlink rule is not protection
+against an attacker already controlling the service UID or its filesystem.
+
 Provision the trusted checkpoint and verifier in separately access-controlled
 service-manager or recovery storage before enabling the gate; this change
 does not migrate, delete or rewrite existing files. The requirement
