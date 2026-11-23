@@ -53,8 +53,9 @@ internal static class GatewayLogFilteringAcceptance
         // concurrent ToString and WriteLine can corrupt the builder on Linux.
         var output = new SynchronizedCaptureWriter();
         var (gateway, gatewayPort) = BuildGateway(output, backendAddress);
-        var accessLogger = gateway.Services.GetRequiredService<ILoggerFactory>()
-            .CreateLogger("GatewayCore.AccessLog");
+        var factory = gateway.Services.GetRequiredService<ILoggerFactory>();
+        var accessLogger = factory.CreateLogger("GatewayCore.AccessLog");
+        var exportedLogger = factory.CreateLogger("GatewayCore.TelemetryAccess");
         gateway.Use(async (context, next) =>
         {
             try { await next(); }
@@ -66,6 +67,8 @@ internal static class GatewayLogFilteringAcceptance
                 GatewayOpenTelemetry.LogAccess(accessLogger, DateTimeOffset.UtcNow,
                     clientAddress.Address?.ToString() ?? "unknown", clientAddress.Source,
                     context.Request.Method, "acceptance-route", context.Response.StatusCode, 12.5);
+                GatewayOpenTelemetry.LogTelemetryAccess(exportedLogger, DateTimeOffset.UtcNow,
+                    "GET", "acceptance-route", context.Response.StatusCode, 12.5);
             }
         });
         gateway.MapReverseProxy();
@@ -104,6 +107,9 @@ internal static class GatewayLogFilteringAcceptance
                  lines.Contains("clientIp=127.0.0.1", StringComparison.Ordinal) &&
                  lines.Contains("clientIpSource=socket method=GET routeId=acceptance-route statusCode=200 durationMs=12.5", StringComparison.Ordinal),
                 "timestamped client-IP access log remains enabled at Information");
+            Must(!lines.Contains("GATEWAY_TELEMETRY_ACCESS", StringComparison.Ordinal) &&
+                 !lines.Contains("GatewayCore.TelemetryAccess", StringComparison.Ordinal),
+                "export-only sanitized access log does not create a duplicate console record");
             Must(!lines.Contains("acceptance-info-filtered", StringComparison.Ordinal) &&
                  !lines.Contains("Information Yarp.ReverseProxy.Forwarder.HttpForwarder", StringComparison.Ordinal),
                 "YARP Information sentinel and per-request messages are filtered from the console sink");
