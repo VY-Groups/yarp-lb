@@ -7,13 +7,19 @@ retry a POST, or copy raw requests/responses into GitHub artifacts.
 """
 import argparse
 import collections
+from datetime import datetime, timezone
 import http.client
 import json
 import os
 from pathlib import Path
 import re
+import secrets
 import stat
+import subprocess
 import sys
+import tempfile
+
+import correlate_native_audit as native_audit
 
 MAX_INPUT = 512 * 1024
 MAX_CASES = 256
@@ -27,6 +33,10 @@ CASE_FIELDS = frozenset((
     "contentType", "body",
 ))
 SAFE_ID = re.compile(r"^[A-Za-z0-9_-]{1,48}\Z", re.ASCII)
+RUN_HEADER = re.compile(r"(?im)^X-GatewayCore-Corpus-Run:\s*([0-9a-f]{32})\s*$")
+CASE_HEADER = re.compile(r"(?im)^X-GatewayCore-Corpus-Case:\s*([A-Za-z0-9_-]{1,48})\s*$")
+CRS_RULE = re.compile(r'\[id "9[0-9]{5}"\]')
+DENIED_403 = re.compile(r"^ModSecurity: Access denied with code 403(?:\s|\()", re.IGNORECASE)
 
 
 def strict_pairs(pairs):
@@ -179,13 +189,61 @@ def verified_response_framing(headers, payload):
     return int(length) == len(payload)
 
 
-def run_cases(cases, connection_factory=None):
+def read_native_audit(started_at):
+    """Read bounded private native audit output from the fixed local lab."""
+    lab = Path(__file__).resolve().parents[2]
+    compose = lab / "integrations" / "WafCrs" / "compose.lab.yml"
+    command = ["docker", "compose", "-f", str(compose), "logs",
+               "--since", started_at, "--no-color", "waf"]
+    try:
+        # TemporaryFile is private and unlinked. Never put raw customer
+        # request headers or bodies in a workflow artifact or stdout.
+        with tempfile.TemporaryFile(mode="w+b") as output:
+            completed = subprocess.run(command, cwd=lab, stdout=output,
+                                       stderr=subprocess.STDOUT, timeout=20,
+                                       check=False)
+            if completed.returncode != 0 or output.tell() > native_audit.MAX_AUDIT_BYTES:
+                raise ValueError("private native WAF audit unavailable or oversized")
+            output.seek(0)
+            return output.read(native_audit.MAX_AUDIT_BYTES + 1).decode(
+                "utf-8", errors="replace")
+    except (OSError, subprocess.TimeoutExpired):
+        raise ValueError("private native WAF audit unavailable") from None
+
+
+def native_crs_blocks(text, run_id, allowed_cases):
+    """Bind each complete native B/H transaction to one tagged 403 decision."""
+    matched = set()
+    seen = set()
+    for transaction in native_audit.audit_transactions(text):
+        headers = "\n".join(transaction["B"])
+        runs = RUN_HEADER.findall(headers)
+        if run_id not in runs:
+            continue
+        cases = CASE_HEADER.findall(headers)
+        if len(runs) != 1 or len(cases) != 1 or cases[0] not in allowed_cases:
+            raise ValueError("ambiguous private WAF audit request identity")
+        case_id = cases[0]
+        if case_id in seen:
+            raise ValueError("duplicate private WAF audit transaction")
+        seen.add(case_id)
+        # A denial phrase echoed inside warning data is not an intervention.
+        # Require the real native message prefix and CRS ID on that line.
+        if any(DENIED_403.match(line) and CRS_RULE.search(line)
+               for line in transaction["H"]):
+            matched.add(case_id)
+    return matched
+
+
+def run_cases(cases, connection_factory=None, audit_reader=None):
     if connection_factory is None:
         connection_factory = lambda: http.client.HTTPConnection(
             "127.0.0.1", 18888, timeout=5)
+    if audit_reader is None:
+        audit_reader = read_native_audit
+    started_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    run_id = secrets.token_hex(16)
     rows = []
-    matrices = collections.defaultdict(lambda: collections.Counter(
-        {"TP": 0, "TN": 0, "FP": 0, "FN": 0, "ERROR": 0}))
     for case in cases:
         connection = connection_factory()
         status = None
@@ -194,9 +252,17 @@ def run_cases(cases, connection_factory=None):
         try:
             body = case["body"].encode("utf-8")
             # No redirects, dynamic hostname, auth or arbitrary headers.
-            connection.request(case["method"], case["path"], body=body,
-                               headers={"Content-Type": case["contentType"],
-                                        "Connection": "close"})
+            headers = {"Connection": "close",
+                       "X-GatewayCore-Corpus-Run": run_id,
+                       "X-GatewayCore-Corpus-Case": case["id"]}
+            # A bodyless GET has no representation media type. Adding
+            # Content-Type: text/plain here causes CRS 920420 to classify
+            # runner-generated metadata instead of the supplied request.
+            if case["method"] == "POST":
+                headers["Content-Type"] = case["contentType"]
+            connection.request(case["method"], case["path"],
+                               body=body if case["method"] == "POST" else None,
+                               headers=headers)
             response = connection.getresponse()
             status = response.status
             # A received HTTP status is not proof of a completed response.
@@ -221,10 +287,24 @@ def run_cases(cases, connection_factory=None):
             result = "FP" if case["expected"] == "benign" else "TP"
         else:
             result = "ERROR"
-        matrices[(case["route"], case["severity"])][result] += 1
         rows.append({"id": case["id"], "route": case["route"],
                      "severity": case["severity"], "expected": case["expected"],
                      "status": status, "result": result})
+    # An origin or intermediary can emit HTTP 403. Count it as a WAF
+    # verdict only when the same tagged request has one complete native
+    # ModSecurity transaction containing a CRS rule and denial decision.
+    matched = native_crs_blocks(audit_reader(started_at), run_id,
+                                {case["id"] for case in cases})
+    for row in rows:
+        row["nativeBlockVerified"] = row["id"] in matched
+        if row["result"] in ("TP", "FP") and row["id"] not in matched:
+            row["result"] = "ERROR"
+        elif row["status"] == 200 and row["id"] in matched:
+            row["result"] = "ERROR"
+    matrices = collections.defaultdict(lambda: collections.Counter(
+        {"TP": 0, "TN": 0, "FP": 0, "FN": 0, "ERROR": 0}))
+    for row in rows:
+        matrices[(row["route"], row["severity"])][row["result"]] += 1
     aggregate = collections.Counter(row["result"] for row in rows)
     by_route = [
         {"route": route, "severity": severity, "counts": dict(counts)}
@@ -286,7 +366,7 @@ def main(argv=None):
             print("FAIL: private corpus contains blocked benign, allowed malicious or failed requests",
                   file=sys.stderr)
             return 1
-        print("PASS: private corpus matched all ground-truth WAF decisions; no raw payloads exported")
+        print("PASS: private corpus matched ground truth with native CRS audit binding; no raw payloads exported")
         return 0
     except (ValueError, OSError) as exc:
         print("FAIL: invalid or inaccessible private operator WAF corpus", file=sys.stderr)

@@ -145,6 +145,9 @@ supplies `WAF_OPERATOR_CORPUS=/private/path/corpus.json` to the existing
 same pinned CRS image to blocking mode; it never changes anomaly thresholds,
 sends requests to public networks or repeats a potentially non-idempotent POST.
 The HTTP target is hard-coded to `127.0.0.1:18888` with redirects disabled.
+Bodyless GET requests carry no Content-Type or Content-Length; POST requests
+retain the declared media type and exact UTF-8 body. This avoids fabricating
+request metadata that CRS would itself reject.
 The source JSON is preflight-checked as a single-link regular file and
 read through a no-follow opened descriptor where supported; linked aliases,
 nonregular inputs, oversized data and path-to-open inode substitution fail
@@ -192,7 +195,9 @@ client attempts UTF-8 encoding; no source character, path or body is
 reported in a Python traceback. Ordinary valid UTF-8 POST bodies remain
 supported. This is a preflight privacy/transport correctness guard, not
 an exception to CRS inspection or a relaxation of zero FP/FN acceptance.
-Any benign HTTP 403 is FP; any malicious HTTP 200 reaching
+A complete HTTP 403 is FP/TP only when a unique, complete native ModSecurity
+transaction binds that case and a random run marker to a CRS rule and a 403
+denial. Missing or ambiguous audit evidence is ERROR. Any malicious HTTP 200 reaching
 the exact synthetic origin marker is FN; unexpected status/timeout/connection
 errors fail separately. No retries, redirects, external targets or automatic
 relaxation of CRS rules are permitted.
@@ -208,6 +213,13 @@ destination directory; the application does **not** take ownership of
 arbitrary parent directories or publish this report as a CI artifact.
 This is a local filesystem privacy guarantee, **not** enterprise WAF
 policy governance or proof of deployed customer traffic filtering.
+
+The runner collects both native container log streams into a private temporary
+file after the requests, under a 20-second command timeout and 8 MiB read cap.
+Raw logs are never printed or uploaded. CI exercises the same runner against
+real CRS with four fixed synthetic fixtures; it does not run customer data.
+The per-case `nativeBlockVerified` boolean reports the audit match without
+exposing rule details, transaction IDs, request markers or raw log records.
 
 The output `artifacts/waf-crs/operator-corpus-report.json` contains only
 case **identifiers**, pseudonymous route IDs, test-specified severity,
