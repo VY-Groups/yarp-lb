@@ -1,0 +1,36 @@
+name: Windows Data Protection shared fleet certificate acceptance
+on:
+  push:
+    branches: [main, "feature/**"]
+    paths:
+      - "control-center/Program.cs"
+      - "control-center/WindowsFleetKeyProtection.cs"
+      - "control-center/INSTALL.ps1"
+      - "control-center/tests/WindowsFleetKeyProtectionTests/**"
+      - ".github/workflows/windows-fleet-dp.yml"
+  pull_request:
+    paths:
+      - "control-center/Program.cs"
+      - "control-center/WindowsFleetKeyProtection.cs"
+      - "control-center/INSTALL.ps1"
+      - "control-center/tests/WindowsFleetKeyProtectionTests/**"
+      - ".github/workflows/windows-fleet-dp.yml"
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  portable-ring:
+    name: Windows RSA certificate protected fleet DP and rotation
+    runs-on: windows-2022
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+      - name: Real disposable Windows machine certificate store and two-state test
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          dotnet run --project control-center/tests/WindowsFleetKeyProtectionTests/WindowsFleetKeyProtectionTests.csproj --configuration Release
+          if ($LASTEXITCODE -ne 0) { throw 'Windows fleet certificate DP acceptance failed' }

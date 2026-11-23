@@ -108,7 +108,15 @@ var dataProtection = builder.Services.AddDataProtection()
     .SetApplicationName("GatewayCoreYarpControlCenter")
     .PersistKeysToFileSystem(new DirectoryInfo(keyDir));
 if (OperatingSystem.IsWindows())
-    dataProtection.ProtectKeysWithDpapi(protectToLocalMachine: true);
+{
+    // Preserve DPAPI LocalMachine for the standard local-node install.
+    // The explicitly selected single-tenant fleet mode wraps portable keys
+    // with a pinned, independently provisioned LocalMachine RSA certificate.
+    // An invalid fleet configuration fails startup; NEVER silently falls
+    // back to local DPAPI or unencrypted persistent key storage.
+    if (!WindowsFleetKeyProtection.TryConfigure(dataProtection, keyDir))
+        dataProtection.ProtectKeysWithDpapi(protectToLocalMachine: true);
+}
 else if (OperatingSystem.IsLinux() && !ec2Lab)
     LinuxKeyProtection.Configure(dataProtection, privateDir);
 else if (ec2Lab)

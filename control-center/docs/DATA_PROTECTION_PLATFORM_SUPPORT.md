@@ -40,6 +40,57 @@ backup/DR, or Windows Service physical qualification. Track those under the
 remaining #48 acceptance and real host #36 evidence; do not mark Windows
 Service installation supported solely because an SCM lifetime is registered.
 
+## Opt-in Windows certificate-protected shared-fleet keys (#48)
+
+The standard Windows install still uses DPAPI **LocalMachine** scope, which
+is encrypted at rest but **not portable between Windows hosts**. To enable a
+single-tenant gateway fleet with an independently provisioned common RSA
+wrapping identity, explicitly set:
+
+- `YARP_WINDOWS_DP_CERT_THUMBPRINT`: exact 40-hex SHA-1 certificate locator
+  for an RSA 3072+ private-key **encryption** leaf already installed in
+  `LocalMachine\My` on each authorized Windows serving node
+- `YARP_WINDOWS_DP_OLD_CERT_THUMBPRINT`: optional distinct previous
+  wrapping identity, needed during a carefully staged certificate rotation
+
+The thumbprint is an exact certificate *lookup* locator, not permission
+to use SHA-1 for TLS or document signing. The configuration uses
+`ProtectKeysWithCertificate` and, when requested, legacy
+`UnprotectKeysWithAnyCertificate`. It requires a non-CA certificate with
+keyEncipherment, an accessible RSA 3072+ private key, active validity
+(minimum one day remaining), and a successful OAEP-SHA256 round-trip using
+that key. Missing/ambiguous, expired, signing-only, incompatible, inaccessible
+or previous-only certificate settings **fail startup**. There is no silent
+fallback to host DPAPI or persistent plaintext when fleet mode was selected.
+
+The application-name/purpose separation remains fixed; no cross-tenant
+sharing is supported. This feature does not copy the encrypted key-ring XML,
+PFX/private keys or authentication cookies to other hosts. An authorized
+operator must independently set the private-key ACLs for each service
+identity, securely stage a common certificate under each node's protected
+machine store, and distribute authenticated encrypted XML through a fenced,
+integrity-checked backup/restore workflow. Existing DPAPI-protected XML
+**cannot simply be copied** into this fleet mode: migration requires a
+reviewed explicit cutover, cookie/session compatibility decision and
+rollback plan. Do not put certificate private material in source, a
+GitHub artifact, an installer or an ordinary UNC share.
+
+The dedicated Windows Server 2022 CI checks use **disposable machine-store
+certificate fixtures** and two isolated local key-ring directories to
+verify encrypted XML, cookie portability with an approved shared certificate,
+rejection when the recipient has no approved certificate available,
+rotation overlap and invalid-configuration failure. ASP.NET may discover
+previously installed wrapping certificates on the **same** LocalMachine
+store even when a different current thumbprint is configured; one-host CI
+cannot prove separate-host isolation. Do not co-host unrelated tenants or
+share wrapping-key ACLs between identities. The pre-existing Windows SCM CI separately proves the real service
+restart/cookie-continuity path under default LocalMachine DPAPI. Combining
+those two CI PASS signals is NOT a substitute for two physically independent
+Windows service identities, real certificate ACLs, authenticated fleet
+key transfer, SELinux/RHEL behavior, production Windows restart or host
+disaster recovery. #48 remains open for remaining software acceptance;
+#36 tracks actual two-host site acceptance.
+
 ## Offline Linux recovery checkpoint issuance (software-only)
 
 The standalone .NET 10 tool at
