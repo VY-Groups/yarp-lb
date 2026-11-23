@@ -205,7 +205,10 @@ def main():
         csv.field_size_limit(MAX_FIELD_CHARS)
         with args.corpus.open(newline="", encoding="utf-8") as stream:
             reader = csv.DictReader(stream)
-            expected = FIELDS if policy["schemaVersion"] == 2 else V3_FIELDS
+            version = policy.get("schemaVersion") if type(policy) is dict else None
+            if type(version) is not int or version not in (2, 3):
+                raise ValueError("invalid or missing WAF evidence policy version")
+            expected = FIELDS if version == 2 else V3_FIELDS
             if (reader.fieldnames is None or set(reader.fieldnames) != expected or
                     len(reader.fieldnames) != len(expected)):
                 raise ValueError("CSV columns must match exact versioned schema")
