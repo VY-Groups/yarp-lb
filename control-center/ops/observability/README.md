@@ -65,3 +65,28 @@ that every opted-in production node and its required Collector are in
 the monitoring inventory, that protected alert delivery is live, and
 that offline/retention evidence is preserved. This lab is not physical
 production acceptance; #50/#36 remaining gates are unchanged.
+
+## Required Collector target missing from the reference stack
+
+The **opt-in** Collector + Prometheus Docker reference stack loads
+`collector-required-alerts.yml` with
+`GatewayOtelCollectorTargetMissing`:
+`absent(up{job="otel-collector"})` for one minute is critical even if
+other gateway scrape jobs are healthy. This closes the missing-scrape-job
+inventory gap that `GatewayOtelCollectorScrapeFailed` (`up == 0` for an
+existing target) cannot detect. They are complementary alerts, not
+interchangeable signals. Real Prometheus `promtool test rules` fixtures
+verify the completely missing target, existing-down target and healthy
+Collector independently.
+
+**Scope is deliberately strict:** this inventory rule is wired **only**
+into `control-center/ops/observability/prometheus.yml`, which explicitly
+requires the Collector scrape job. Do not put it in the shared
+`control-center/ops/prometheus/gateway-alerts.yml` or deploy it on a
+gateway that intentionally has no OTLP exporter/Collector. A production
+site using this reference profile must retain the Collector job and
+review the alert receiver wiring and retention. This tests configured
+software policy, not deployed pager delivery or customer-site retention.
+The missing-evidence security principle is also documented in
+[the GatewayCore GSLB engineering review](../../docs/GSLB_BRANCH_DEEP_REVIEW.md).
+No source code from that reviewed separate runtime was imported.
