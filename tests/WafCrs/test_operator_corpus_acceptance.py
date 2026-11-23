@@ -38,7 +38,12 @@ def corpus():
 
 
 class LocalWaf(BaseHTTPRequestHandler):
+    # Unit-test audit fixtures only; real ModSecurity is exercised by verify.sh.
+    observed = []
+
     def handle_case(self):
+        self.observed.append((self.path, self.headers.get("X-GatewayCore-Corpus-Run"),
+                              self.headers.get("X-GatewayCore-Corpus-Case")))
         length = int(self.headers.get("Content-Length", "0"))
         if length > 0:
             self.rfile.read(length)
@@ -311,6 +316,41 @@ class OperatorCorpusTests(unittest.TestCase):
             with self.subTest(headers=bad):
                 self.assertFalse(waf.verified_response_framing(headers(*bad), payload))
 
+
+    def test_native_audit_requires_current_unique_complete_crs_denial(self):
+        run_id = "a" * 32
+        fixture = (
+            "--fixture1-A--\n--fixture1-B--\n"
+            f"X-GatewayCore-Corpus-Run: {run_id}\n"
+            "X-GatewayCore-Corpus-Case: malicious1\n"
+            '--fixture1-H--\nMessage: Access denied with code 403 [id "941100"]\n'
+            "--fixture1-Z--\n")
+        accepted = waf.native_crs_blocks(fixture, run_id, {"malicious1"})
+        self.assertEqual({"malicious1"}, accepted)
+        for invalid in (
+            fixture.replace(run_id, "b" * 32),
+            fixture.replace("--fixture1-Z--", ""),
+            fixture.replace('[id "941100"]', '[id "100001"]'),
+            fixture.replace("Access denied with code 403", "Warning only"),
+        ):
+            self.assertEqual(set(), waf.native_crs_blocks(invalid, run_id, {"malicious1"}))
+        for ambiguous in (
+            fixture + fixture,
+            fixture.replace("X-GatewayCore-Corpus-Case: malicious1",
+                            "X-GatewayCore-Corpus-Case: malicious1\nX-GatewayCore-Corpus-Case: malicious1"),
+            fixture.replace("X-GatewayCore-Corpus-Case: malicious1",
+                            "X-GatewayCore-Corpus-Case: unrequested"),
+            fixture.replace("Access denied with code 403", "Warning only") + fixture,
+        ):
+            with self.assertRaises(ValueError):
+                waf.native_crs_blocks(ambiguous, run_id, {"malicious1"})
+
+    def test_audit_reader_fails_closed_without_exposing_diagnostics(self):
+        with patch.object(waf.subprocess, "run", side_effect=OSError("private-secret")):
+            with self.assertRaises(ValueError) as raised:
+                waf.read_native_audit("2026-01-01T00:00:00Z")
+            self.assertNotIn("private-secret", str(raised.exception))
+
     def test_no_redirect_or_payload_in_reports(self):
         server = ThreadingHTTPServer(("127.0.0.1", 0), LocalWaf)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -318,8 +358,26 @@ class OperatorCorpusTests(unittest.TestCase):
         try:
             factory = lambda: http.client.HTTPConnection(
                 "127.0.0.1", server.server_port, timeout=2)
+            def fake_audit(_since):
+                transactions = []
+                for index, (path, run_id, case_id) in enumerate(LocalWaf.observed):
+                    if not path.startswith("/blocked"):
+                        continue
+                    txn = f"fixture{index:06d}"
+                    transactions.append(
+                        f"--{txn}-A--\n--{txn}-B--\n"
+                        f"X-GatewayCore-Corpus-Run: {run_id}\n"
+                        f"X-GatewayCore-Corpus-Case: {case_id}\n"
+                        f'--{txn}-H--\nMessage: Access denied with code 403 [id "941100"]\n'
+                        f"--{txn}-Z--\n")
+                return "".join(transactions)
+
             expected = self.load(corpus())
-            good = waf.run_cases(expected, factory)
+            unverified = waf.run_cases(expected, factory, lambda _since: "")
+            self.assertEqual(2, unverified["counts"]["ERROR"])
+            self.assertEqual(0, unverified["counts"]["TP"])
+            self.assertFalse(unverified["passesZeroFalsePositiveNegativeGate"])
+            good = waf.run_cases(expected, factory, fake_audit)
             self.assertTrue(good["passesZeroFalsePositiveNegativeGate"])
             self.assertEqual(
                 {"TP": 2, "TN": 2, "FP": 0, "FN": 0, "ERROR": 0},
@@ -331,37 +389,37 @@ class OperatorCorpusTests(unittest.TestCase):
             self.assertEqual(4, len(good["byRouteAndSeverity"]))
             regression = copy.deepcopy(expected)
             regression[2]["path"] = "/"
-            missing_detection = waf.run_cases(regression, factory)
+            missing_detection = waf.run_cases(regression, factory, fake_audit)
             self.assertEqual(1, missing_detection["counts"]["FN"])
             self.assertFalse(missing_detection["passesZeroFalsePositiveNegativeGate"])
             regression = copy.deepcopy(expected)
             regression[0]["path"] = "/blocked"
-            false_positive = waf.run_cases(regression, factory)
+            false_positive = waf.run_cases(regression, factory, fake_audit)
             self.assertEqual(1, false_positive["counts"]["FP"])
             regression = copy.deepcopy(expected)
             regression[0]["path"] = "/redirect"
-            redirect = waf.run_cases(regression, factory)
+            redirect = waf.run_cases(regression, factory, fake_audit)
             self.assertEqual(1, redirect["counts"]["ERROR"])
             self.assertFalse(redirect["passesZeroFalsePositiveNegativeGate"])
             # A response that merely contains the GET marker must NOT
             # masquerade as the bounded private origin's exact response.
             regression = copy.deepcopy(expected)
             regression[1]["path"] = "/spoof"
-            spoof = waf.run_cases(regression, factory)
+            spoof = waf.run_cases(regression, factory, fake_audit)
             self.assertEqual(1, spoof["counts"]["ERROR"])
             self.assertFalse(spoof["passesZeroFalsePositiveNegativeGate"])
             # A real-looking origin response with more bytes declared than
             # received must not be counted as benign successful forwarding.
             regression = copy.deepcopy(expected)
             regression[1]["path"] = "/mislength"
-            truncated = waf.run_cases(regression, factory)
+            truncated = waf.run_cases(regression, factory, fake_audit)
             self.assertEqual(1, truncated["counts"]["ERROR"])
             self.assertFalse(truncated["passesZeroFalsePositiveNegativeGate"])
             # A truncated 403 must not be counted as a successful attack
             # block after the response reader raises IncompleteRead.
             regression = copy.deepcopy(expected)
             regression[2]["path"] = "/incomplete-block"
-            incomplete_block = waf.run_cases(regression, factory)
+            incomplete_block = waf.run_cases(regression, factory, fake_audit)
             self.assertEqual(1, incomplete_block["counts"]["ERROR"])
             self.assertEqual(1, incomplete_block["counts"]["TP"])
             self.assertFalse(incomplete_block["passesZeroFalsePositiveNegativeGate"])
@@ -369,7 +427,7 @@ class OperatorCorpusTests(unittest.TestCase):
             # never proof that the WAF fully processed the request.
             regression = copy.deepcopy(expected)
             regression[2]["path"] = "/unsupported-block-transfer"
-            unsupported_block = waf.run_cases(regression, factory)
+            unsupported_block = waf.run_cases(regression, factory, fake_audit)
             self.assertEqual(1, unsupported_block["counts"]["ERROR"])
             self.assertEqual(1, unsupported_block["counts"]["TP"])
             self.assertFalse(unsupported_block["passesZeroFalsePositiveNegativeGate"])
@@ -377,7 +435,7 @@ class OperatorCorpusTests(unittest.TestCase):
             # the bounded read; unread bytes must invalidate the block.
             regression = copy.deepcopy(expected)
             regression[2]["path"] = "/oversized-block-chunked"
-            oversized_block = waf.run_cases(regression, factory)
+            oversized_block = waf.run_cases(regression, factory, fake_audit)
             self.assertEqual(1, oversized_block["counts"]["ERROR"])
             self.assertEqual(1, oversized_block["counts"]["TP"])
             self.assertFalse(oversized_block["passesZeroFalsePositiveNegativeGate"])
@@ -385,14 +443,14 @@ class OperatorCorpusTests(unittest.TestCase):
             # because the undecoded bytes equal the expected origin marker.
             regression = copy.deepcopy(expected)
             regression[1]["path"] = "/unsupported-transfer"
-            unsupported = waf.run_cases(regression, factory)
+            unsupported = waf.run_cases(regression, factory, fake_audit)
             self.assertEqual(1, unsupported["counts"]["ERROR"])
             self.assertFalse(unsupported["passesZeroFalsePositiveNegativeGate"])
             # A spoofed POST JSON acceptance with the wrong byte count
             # cannot qualify a benign upload as a reached origin.
             regression = copy.deepcopy(expected)
             regression[0]["path"] = "/bogus-json"
-            bogus = waf.run_cases(regression, factory)
+            bogus = waf.run_cases(regression, factory, fake_audit)
             self.assertEqual(1, bogus["counts"]["ERROR"])
             self.assertFalse(bogus["passesZeroFalsePositiveNegativeGate"])
         finally:
