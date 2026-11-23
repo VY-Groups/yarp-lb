@@ -14,7 +14,10 @@ Provide one UTF-8 JSON policy with exactly these fields:
   minimum revision stored OUTSIDE the candidate policy directory
 - mode: detect or block
 - rulesetSha256: uppercase SHA-256 of frozen effective WAF ruleset
-- shadowEvidenceSha256: null for detect, approved uppercase digest for block
+- shadowEvidenceSha256: null for detect, approved uppercase digest for block.
+  A blocking-mode invocation MUST additionally supply --shadow-evidence-file
+  pointing to the exact private evidence bytes. Their computed SHA-256 must
+  match this signed digest; an asserted digest string is never sufficient.
 - issuedAtUtc, expiresAtUtc: canonical UTC timestamps, max 45-day lifespan
 - exceptions: <=64 entries with exceptionId, owner, reason, routeId, httpMethod,
   path, contentType, ruleId, issuedAtUtc, expiresAtUtc. Each exception is bound
@@ -51,6 +54,11 @@ same-key double approval, changed policy, expired approvals or broad bypasses.
       --minimum-revision-file /secure/approval-root/current-revision \
       --observed-ruleset-sha256 REPLACE_WITH_REAL_UPPERCASE_SHA256 \
       --observed-mode detect
+
+For a blocking-mode proposal, use --observed-mode block and add
+--shadow-evidence-file /private/approved/shadow-evidence.json. A missing,
+swapped or mismatched file fails closed. This verifies file-to-approval digest
+binding, not independent provenance of any verdict inside the evidence file.
 
 The minimum revision and trust anchors must remain independently protected
 outside the restored candidate policy tree. Only absolute, single-link
