@@ -1,10 +1,10 @@
 # GatewayCore remaining acceptance ledger — 2026-11-23
 
-This ledger is a reproducible **unverified-gates** checklist, not a certification. Baseline inspected: `main` at `70d67a5f06bc3be92cd9ac4c8797d3d7cbb6bc45`. Canonical open issues returned by GitHub issue search: #34, #36, #48, #50, #51. Refresh all states, exact-head CI and reviews before applying this checklist. No source issue is complete merely because a related PR merged.
+This ledger is a reproducible **unverified-gates** checklist, not a certification. Baseline refreshed from GitHub on 2026-11-23: `main` at `b1ca004828c6daeb3d1c513e74d845e97c68a4c5`; open software issues #34, #48, #50, #51 and separate physical #36. This is a point-in-time snapshot, not an assertion of future branch or issue states. Refresh all states, exact-head CI and reviews before applying this checklist. No source issue is complete merely because a related PR merged.
 
 ## Evidence contract (applies to every issue)
 
-For every acceptance attempt record UTC start/end, OS/runtime and commit SHA, disposable configuration digest, exact invocation, exit status, raw stdout/stderr or artifact URL, expected vs actual counts, independent reviewer, and explicit PASS/FAIL. Redact identities, keys, topology, user data and customer payloads. Record failures and retest links; never edit thresholds after seeing results. No live environment actions are authorized by this document. Before integrating, verify the PR's **exact head** required Windows/Linux and security jobs and independent Codex review; inspect push-triggered workflows for the **merged main SHA** separately through `GET /repos/VY-Groups/yarp-lb/actions/runs?head_sha=<MAIN_SHA>&event=push&per_page=100` (paginate), then `GET /repos/VY-Groups/yarp-lb/actions/runs/<RUN_ID>/jobs?per_page=100` and failed job logs. PR-filtered workflow summaries do not prove main health.
+For every acceptance attempt record UTC start/end, OS/runtime and commit SHA, disposable configuration digest, exact invocation, exit status, raw stdout/stderr or artifact URL, expected vs actual counts, independent reviewer, and explicit PASS/FAIL. Redact identities, keys, topology, user data and customer payloads. Record failures and retest links; never edit thresholds after seeing results. No live environment actions are authorized by this document. Before integrating, verify the PR's **exact head** required Windows/Linux and security jobs and independent Codex review; inspect push-triggered workflows for the **merged main SHA** separately through `GET /repos/{owner}/{repo}/actions/runs?head_sha=<MAIN_SHA>&event=push&per_page=100` (paginate), then `GET /repos/{owner}/{repo}/actions/runs/<RUN_ID>/jobs?per_page=100` and failed job logs. PR-filtered workflow summaries do not prove main health.
 
 ## #34 — gateway allocations and safety
 
@@ -31,13 +31,13 @@ Confirm measured 500 **Mbps**, not MB/s. If the real peak is 500 Mbps and approv
 ## Canonical evidence index and physical handover details
 
 This ledger is the proposed single living checklist; related draft-only worksheets
-[#419](https://github.com/VY-Groups/yarp-lb/pull/419),
-[#420](https://github.com/VY-Groups/yarp-lb/pull/420),
-[#421](https://github.com/VY-Groups/yarp-lb/pull/421),
-[#422](https://github.com/VY-Groups/yarp-lb/pull/422),
-[#423](https://github.com/VY-Groups/yarp-lb/pull/423),
-[#424](https://github.com/VY-Groups/yarp-lb/pull/424), and
-[#425](https://github.com/VY-Groups/yarp-lb/pull/425) are reference
+[#419](PR #419),
+[#420](PR #420),
+[#421](PR #421),
+[#422](PR #422),
+[#423](PR #423),
+[#424](PR #424), and
+[#425](PR #425) are reference
 drafts, **not execution evidence**. Preserve their unique prerequisites here
 before marking any as superseded; never merge multiple conflicting checklists.
 
