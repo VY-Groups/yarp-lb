@@ -173,6 +173,17 @@ def _verify_signature(public_key, signature, signed_bytes):
         return result.returncode == 0
 
 
+def _canonical_reviewer_key_digest(public_key):
+    """Compare actual SPKI public key bytes, not mutable PEM whitespace."""
+    result = subprocess.run(
+        ["openssl", "pkey", "-pubin", "-inform", "PEM", "-outform", "DER"],
+        input=public_key, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        timeout=5, check=False)
+    if result.returncode != 0 or not 80 <= len(result.stdout) <= 512:
+        raise ValueError("invalid trusted reviewer SPKI")
+    return hashlib.sha256(result.stdout).digest()
+
+
 def verify(policy_path, approvals, reviewers, minimum_revision_path,
            observed_ruleset, observed_mode, now=None):
     now = now or dt.datetime.now(dt.timezone.utc)
@@ -210,7 +221,7 @@ def verify(policy_path, approvals, reviewers, minimum_revision_path,
         if signed < now - dt.timedelta(days=7) or signed > now + dt.timedelta(seconds=30):
             raise ValueError("approval time outside signed review window")
         key = _read_file(reviewers[who], limit=8192)
-        key_digest = hashlib.sha256(key).digest()
+        key_digest = _canonical_reviewer_key_digest(key)
         if key_digest in seen_keys:
             raise ValueError("reviewers share a signing key")
         seen_keys.add(key_digest)
