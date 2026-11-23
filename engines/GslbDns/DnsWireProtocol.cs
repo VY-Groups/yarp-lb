@@ -104,7 +104,7 @@ internal static class DnsWireProtocol
         var result = query[..(pos + 5)].ToArray();
         var requestFlags = BinaryPrimitives.ReadUInt16BigEndian(query[2..]);
         BinaryPrimitives.WriteUInt16BigEndian(result.AsSpan(2, 2),
-            (ushort)(0x8000 | (requestFlags & 0x0100) | 0x0002)); // QR, RD, SERVFAIL; never AD
+            (ushort)(0x8000 | (requestFlags & 0x0110) | 0x0002)); // QR, RD, CD, SERVFAIL; never AD
         BinaryPrimitives.WriteUInt16BigEndian(result.AsSpan(4, 2), 1); // original question only
         result.AsSpan(6, 6).Clear(); // no answer, authority or additional data
         return result;
