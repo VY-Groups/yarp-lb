@@ -60,6 +60,13 @@ public static partial class GatewayOpenTelemetry
     private static int _auditOutboxPending;
     private static int _auditOutboxStorageFault;
     private static int _auditOutboxDeliveryBlocked;
+    private static long _auditOutboxLastUpdateUnixTime;
+    // A stale worker must not leave previously healthy values looking fresh.
+    // Time comes from the last completed startup/worker status check, NOT
+    // from the periodic OTLP observer, which must remain lock-free.
+    private static readonly ObservableGauge<long> AuditOutboxLastUpdateUnixTime =
+        Meter.CreateObservableGauge("gateway.audit.outbox.last_update_unixtime",
+            () => Interlocked.Read(ref _auditOutboxLastUpdateUnixTime));
     private static readonly ObservableGauge<int> AuditOutboxEnabled =
         Meter.CreateObservableGauge("gateway.audit.outbox.enabled",
             () => Volatile.Read(ref _auditOutboxEnabled));
@@ -135,6 +142,8 @@ public static partial class GatewayOpenTelemetry
         // Publish enabled last so consumers can distinguish opt-out from a
         // configured queue, even if they see one intermediate snapshot.
         Interlocked.Exchange(ref _auditOutboxEnabled, enabled ? 1 : 0);
+        Interlocked.Exchange(ref _auditOutboxLastUpdateUnixTime,
+            DateTimeOffset.UtcNow.ToUnixTimeSeconds());
     }
 
     public static bool Configure(IServiceCollection services, string? machineName = null)
