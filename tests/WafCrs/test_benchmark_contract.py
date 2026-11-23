@@ -87,15 +87,15 @@ class BenchmarkOriginEvidence(unittest.TestCase):
         class Fixture(BaseHTTPRequestHandler):
             mode = "valid"
             def do_GET(self):
-                body = b"YARP-WAF-CI-BENIGN\\n".replace(b"\\n", b"\n")
+                body = b"YARP-WAF-CI-BENIGN\n"
                 self.send_response(200)
                 self.send_header("Content-Type", "text/plain; charset=utf-8")
                 if self.mode == "duplicate":
                     self.send_header("Transfer-Encoding", "chunked")
                     self.send_header("Transfer-Encoding", "chunked")
                     self.end_headers()
-                    self.wfile.write(("%X\\r\\n" % len(body)).encode("ascii"))
-                    self.wfile.write(body + b"\\r\\n0\\r\\n\\r\\n")
+                    self.wfile.write(("%X\r\n" % len(body)).encode("ascii"))
+                    self.wfile.write(body + b"\r\n0\r\n\r\n")
                 elif self.mode == "oversized":
                     large = body + b"x" * 5000
                     self.send_header("Content-Length", str(len(large)))
@@ -105,8 +105,8 @@ class BenchmarkOriginEvidence(unittest.TestCase):
                     self.send_header("Transfer-Encoding", "chunked")
                     self.send_header("Connection", "close")
                     self.end_headers()
-                    self.wfile.write(("%X\\r\\n" % len(body)).encode("ascii"))
-                    self.wfile.write(body + b"\\r\\n")
+                    self.wfile.write(("%X\r\n" % len(body)).encode("ascii"))
+                    self.wfile.write(body + b"\r\n")
                 else:
                     self.send_header("Content-Length", str(len(body)))
                     self.end_headers()
