@@ -73,6 +73,29 @@ remain in #36.
 
 For a repeatable lab use `bash tests/WafCrs/verify.sh`; its default is the reviewed upstream digest in `compose.lab.yml`. An explicit `WAF_IMAGE` override must also be an upstream repository digest. The script records the selected digest, pins every mode restart to it, and checks the actual image ID. Digest pinning does not establish trusted signature provenance or a reviewed production update process. The benchmark runs a separate disposable client on the private compose network, never publishing the backend. Each phase performs 120 alternating fixed GET and JSON POST requests at concurrency four, with a fresh HTTP/1 connection per request and no retry. All responses must match the expected backend marker/metadata; any transport, status or body error fails the phase. Artifacts include per-phase successful throughput and p50/p95/p99 from monotonic timings, only percentile values for complete runs. The five phases are direct origin, blocking CRS, detection-only CRS, nginx-only proxy (ModSecurity off, disposable lab only), and restored blocking mode; the restored phase independently requires a known XSS to be blocked again. This is a synthetic nginx comparison, not direct-vs-YARP-vs-WAF capacity or a representative customer workload. No latency/throughput production target is inferred or relaxed; CPU, memory, allocations, repeated sustained runs, production signed policy approval, rule exclusions and representative corpus acceptance remain open. Do not use the proxy-only mode on a deployed edge.
 
+## Native WAF container resource evidence (disposable lab)
+
+Each of the five matched 120-request, concurrency-four synthetic benchmark
+phases now records Docker Engine CPU-time and memory snapshots for the **same
+WAF container** immediately before and after the workload. The redacted,
+allowlisted `resource-{direct,proxy-only,blocking,detection,restored}.json`
+reports record WAF cumulative CPU seconds and CPU milliseconds per benchmark
+request, start/end observed container memory bytes, and matched request count.
+Docker CPU counter resets, switched containers, missing resource data,
+unbounded Docker stats, unmatched workloads and incomplete origin evidence
+fail closed. The detailed raw snapshots (including container identifiers)
+are excluded from CI uploads.
+
+**Measurement limitations:** These are two memory snapshots, **not peak
+memory**. Direct-origin mode measures the mostly idle WAF; the reported
+CPU time is only the WAF process container, not the origin, host or YARP
+data plane. The WAF container is nginx/ModSecurity, so managed .NET
+allocation bytes are explicitly null, not invented. This 120-request
+synthetic test is not a sustained 500 Mbps/750 Mbps capacity acceptance.
+A representative multi-host real-YARP path, CPU/GC/allocation telemetry,
+customer workload FP/FN, p95/p99 and production rollout still need
+separate #51 software and #36 physical evidence. No threshold is relaxed.
+
 ## Expanded harmless-traffic ground truth
 
 The disposable CI corpus now sends a real self-signed **public** X.509 DER certificate with `application/pkix-cert` through the WAF to the bounded, body-redacting acceptance backend. The corresponding private key is generated in a restricted temporary directory, removed on exit and **never** uploaded as an artifact. Ordinary Unicode query text and an opaque preference cookie are tested as additional benign requests. The synthetic corpus records each fixture's explicit ground-truth severity and confusion counts by route and severity; it does not infer a rule's actual CRS severity from HTTP status. Missing or unexpected results fail the blocking-corpus acceptance; there is no exception, automatic allowlisting or lowered blocking threshold. This small fixture set is not a production false-positive rate, a realistic signing-transaction workload or a WAF policy rollback certification.
