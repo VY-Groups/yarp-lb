@@ -105,6 +105,7 @@ trap teardown EXIT
 python3 -m unittest discover -s tests/WafCrs -p 'test_ci_evidence_contract.py' -v
 python3 -m unittest discover -s tests/WafCrs -p 'test_exception_policy.py' -v
 python3 -m unittest discover -s tests/WafCrs -p 'test_operator_corpus_acceptance.py' -v
+python3 -m unittest discover -s tests/WafCrs -p 'test_correlate_native_audit.py' -v
 python3 -m unittest discover -s tests/WafCrs -p 'test_benchmark_contract.py' -v
 python3 tests/WafCrs/exception_policy.py --validate
 docker compose -f "$COMPOSE" config --quiet
@@ -355,6 +356,7 @@ for entry in \
   payload="${rest%%|*}"
   family="${rest##*|}"
   observe_code="$(curl --silent --show-error --max-time 8 --get \
+    -H "X-GatewayCore-CI-Case: detection-$name" \
     --data-urlencode "$payload" -o "$DIR/detection-$name-response.txt" \
     -w '%{http_code}' "http://127.0.0.1:18888/")"
   printf '%s\n' "$observe_code" > "$DIR/detection-$name-status.txt"
@@ -364,26 +366,12 @@ for entry in \
     { echo "FAIL: detection-only $name did not reach the origin" >&2; exit 1; }
 done
 docker compose -f "$COMPOSE" logs --no-color waf > "$DIR/detection-only-audit.log" 2>&1
-# Record only rule-family observations and HTTP statuses, not the raw request
-# values; audit logs themselves stay in disposable CI artifacts.
-python3 - "$DIR" <<'PY'
-import json, pathlib, re, sys
-root = pathlib.Path(sys.argv[1])
-audit = (root / "detection-only-audit.log").read_text(encoding="utf-8", errors="replace")
-families = {"xss": "941", "sqli": "942", "traversal": "930"}
-results = {}
-for name, family in families.items():
-    observed = bool(re.search(r'\[id "' + family + r'[0-9]{3}"\]', audit))
-    status = (root / ("detection-" + name + "-status.txt")).read_text().strip()
-    results[name] = {"httpStatus": status, "crsFamily": family,
-                     "observed": observed, "forwarded": status == "200"}
-(root / "detection-corpus-report.json").write_text(
-    json.dumps({"schemaVersion": 1, "scope": "synthetic-detection-lab-only",
-                "attackClasses": results}, indent=2, sort_keys=True) + "\n",
-    encoding="utf-8")
-if not all(row["observed"] and row["forwarded"] for row in results.values()):
-    raise SystemExit("FAIL: detection-only corpus did not observe and forward every tested category")
-PY
+# Require the exact synthetic request marker and expected CRS family to be
+# present in the SAME complete ModSecurity native audit transaction. A global
+# grep across unrelated requests is not evidence of a case-specific verdict.
+# The raw native audit remains local to the disposable runner and is NEVER
+# uploaded; only case names and family IDs are exported.
+python3 tests/WafCrs/correlate_native_audit.py "$DIR" "$DIR/detection-only-audit.log"
 # A detection-only restart must exercise the same image as the blocking phase.
 observe_id="$(docker compose -f "$COMPOSE" ps --quiet waf)"
 [[ "$(docker inspect "$observe_id" --format '{{.Image}}')" == "$waf_image_id" ]] || { echo "FAIL: WAF image changed between modes" >&2; exit 1; }
