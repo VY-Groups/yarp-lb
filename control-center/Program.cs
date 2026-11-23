@@ -55,6 +55,11 @@ if (auditOutboxPath is not null && externalAuditIntent is null)
 using var auditOutbox = auditOutboxPath is null ? null : new DurableAuditOutbox(auditOutboxPath, externalAuditIntent!);
 var localAudit = new LocalAdminAudit(Path.Combine(privateDir, "admin-audit.jsonl"), auditOutbox);
 var builder = WebApplication.CreateBuilder(args);
+// The SCM lifetime is activated only for a real Windows Service process.
+// Interactive/CI console runs retain their prior lifetime and startup path.
+// Do not alter DPAPI LocalMachine protection or create/migrate state here.
+if (OperatingSystem.IsWindows())
+    builder.Services.AddWindowsService(options => options.ServiceName = "GatewayCoreYarp");
 if (auditOutbox is not null)
     builder.Services.AddHostedService(sp => new AuditOutboxWorker(auditOutbox, sp.GetRequiredService<ILogger<AuditOutboxWorker>>()));
 var otlpConfigured = GatewayOpenTelemetry.Configure(builder.Services);
