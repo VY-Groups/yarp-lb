@@ -17,7 +17,7 @@ done
 rm -f "$DIR/benchmark-summary.json" "$DIR/waf-selected-image.txt"
 # Clear only this run's known synthetic result files; never count stale
 # evidence from an earlier invocation as a successful observation.
-for result in last-benign-status json-http-status xml-http-status large-json-http-status pkix-der-http-status benign-query-http-status unicode-query-http-status cookie-query-http-status xss-http-status sqli-http-status traversal-http-status spoofed-xss-http-status spoofed-sqli-http-status spoofed-traversal-http-status; do
+for result in last-benign-status json-http-status xml-http-status large-json-http-status pkix-der-http-status benign-query-http-status unicode-query-http-status cookie-query-http-status xss-http-status sqli-http-status traversal-http-status spoofed-xss-http-status spoofed-sqli-http-status spoofed-traversal-http-status spoofed-outside-pkix-http-status; do
   rm -f "$DIR/$result.txt"
 done
 rm -f "$DIR/blocking-corpus-report.json" "$DIR/detection-corpus-report.json" "$DIR/operator-corpus-report.json"
@@ -216,6 +216,20 @@ printf '%s\n' "$outside_pkix_code" > "$DIR/outside-pkix-http-status.txt"
 [[ "$outside_pkix_code" == "403" ]] ||
   { echo "FAIL: PKIX content-type exception unexpectedly escaped its exact route" >&2; exit 1; }
 echo "PASS: PKIX exception applies only to the exact POST /acceptance route"
+# Claimed loopback identity must not grant the scoped PKIX exception on
+# any other route; only the actual request method/path/type may qualify.
+spoofed_pkix_code="$(curl --silent --show-error --max-time 8 -X POST \
+  -H 'Content-Type: application/pkix-cert' \
+  -H 'X-Forwarded-For: 127.0.0.1' \
+  -H 'X-Real-IP: 127.0.0.1' \
+  -H 'Forwarded: for=127.0.0.1;proto=https' \
+  --data-binary "@$DIR/benign-cert.der" \
+  -o "$DIR/spoofed-outside-pkix-response.txt" -w '%{http_code}' \
+  "http://127.0.0.1:18888/not-allowed")"
+printf '%s\n' "$spoofed_pkix_code" > "$DIR/spoofed-outside-pkix-http-status.txt"
+[[ "$spoofed_pkix_code" == "403" ]] ||
+  { echo "FAIL: forwarded-client spoof bypassed scoped PKIX exclusion" >&2; exit 1; }
+echo "PASS: scoped PKIX exception remains unavailable to a spoofed client"
 xss_code="$(curl --silent --show-error --max-time 8 -o "$DIR/xss-response.txt" \
   -w '%{http_code}' --get --data-urlencode \
   'q=<script>alert(1)</script>' "http://127.0.0.1:18888/")"
