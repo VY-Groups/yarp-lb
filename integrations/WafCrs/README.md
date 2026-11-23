@@ -212,3 +212,27 @@ large responses with unread bytes, truncated chunked framing, and a valid
 complete response. Benchmark results are still synthetic comparative
 diagnostics, **not** representative Windows/Linux YARP+CRS capacity or
 customer security acceptance. Issue #51 remains open.
+
+### CI artifact privacy allowlist (#51)
+
+The WAF GitHub Actions upload previously included the entire
+`artifacts/waf-crs/` directory. This directory can contain real ModSecurity
+audit logs and the optional operator-private corpus replay report. Raw CRS
+logs may include URLs, headers, cookies and request bodies, and even a
+redacted private-corpus report has operator-chosen case/route IDs that must
+not be published automatically.
+
+The workflow now uploads **only 12 explicitly named files**: five fixed
+synthetic phase benchmarks, the synthetic benchmark summary, fixed lab
+blocking/detection confusion matrices, WAF image identity/digest files and
+the loopback backend binding metadata. It never uploads `docker-compose.log`,
+`blocking-audit.log`, `detection-only-audit.log`,
+`operator-corpus-report.json`, raw response captures or certificates.
+Private reports and raw logs remain **local to the disposable runner** for
+authorized diagnosis; do not attach them to public GitHub issues, CI
+summaries or release artifacts. The WAF workflow runs
+`test_ci_evidence_contract.py` before Docker and fails if somebody broadens
+this fixed output allowlist. A later audit may be performed using private
+site-controlled storage with approved retention; this CI fix does not
+provide that storage or production WAF integration.
+

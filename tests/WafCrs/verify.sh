@@ -100,6 +100,9 @@ function teardown {
 trap teardown EXIT
 # A lab exception requires an explicit, short-lived, exact-scope policy
 # manifest. Fail before starting containers if it expires or broadens.
+# The CI upload must never include private operator corpus IDs, raw CRS
+# logs or request/response bytes, even when a failure triggers `always()`.
+python3 -m unittest discover -s tests/WafCrs -p 'test_ci_evidence_contract.py' -v
 python3 -m unittest discover -s tests/WafCrs -p 'test_exception_policy.py' -v
 python3 -m unittest discover -s tests/WafCrs -p 'test_operator_corpus_acceptance.py' -v
 python3 -m unittest discover -s tests/WafCrs -p 'test_benchmark_contract.py' -v
