@@ -56,7 +56,7 @@ assert 'Microsoft.Extensions.Hosting.WindowsServices' in support_installer
 assert 'Windows Service lifetime is registered' in support_doc
 assert 'not a service installer' in support_doc
 assert 'SCM lifetime is registered' in support_doc
-assert 'without changing DPAPI LocalMachine' not in support_doc or 'DPAPI LocalMachine' in support_doc
+assert 'DPAPI LocalMachine' in support_doc
 assert 'No production GatewayCore container image' in support_doc
 assert 'LocalMachine\\My' in support_doc
 assert 'not a service installer' in support_doc
