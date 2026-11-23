@@ -1,0 +1,93 @@
+name: RHEL-family UBI9 .NET 10 Data Protection compatibility
+on:
+  push:
+    branches: [main, "feature/**"]
+    paths:
+      - "control-center/LinuxKeyProtection.cs"
+      - "control-center/LinuxDpRecoveryEvidence.cs"
+      - "control-center/tools/LinuxDpRecoverySigner/**"
+      - "control-center/tests/LinuxKeyProtectionTests/**"
+      - "control-center/tests/RhelUbiCompat/**"
+      - "engines/GslbHealthContracts/PrivateKeyFileSecurity.cs"
+      - ".github/workflows/rhel-ubi9-dp-compat.yml"
+  pull_request:
+    paths:
+      - "control-center/LinuxKeyProtection.cs"
+      - "control-center/LinuxDpRecoveryEvidence.cs"
+      - "control-center/tools/LinuxDpRecoverySigner/**"
+      - "control-center/tests/LinuxKeyProtectionTests/**"
+      - "control-center/tests/RhelUbiCompat/**"
+      - "engines/GslbHealthContracts/PrivateKeyFileSecurity.cs"
+      - ".github/workflows/rhel-ubi9-dp-compat.yml"
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  ubi9-compat:
+    name: Actual .NET 10 Linux DP tests in UBI 9 userspace (NOT RHEL host)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+      - name: Build shipping Control Center for real RHEL-family startup smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          dotnet build control-center/GatewayCoreYarp.csproj --configuration Release
+          test -s control-center/bin/Release/net10.0/GatewayCoreYarp.dll
+      - name: Run real encrypted key-ring and signed restore tests in UBI9 .NET 10 SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          image='registry.access.redhat.com/ubi9/dotnet-100:latest'
+          docker pull "$image"
+          # Resolve a real immutable OCI repository manifest for THIS CI run.
+          digest="$(docker image inspect "$image" --format '{{index .RepoDigests 0}}')"
+          if [[ ! "$digest" =~ ^registry\.access\.redhat\.com/ubi9/dotnet-100@sha256:[a-f0-9]{64}$ ]]; then
+            echo 'FAIL: cannot establish immutable UBI9 SDK image digest' >&2
+            exit 1
+          fi
+          echo "UBI9_SDK_IMAGE=$digest"
+          # The UBI SDK is intentionally minimal and does not ship util-linux
+          # setsid, which the real systemd process-group cleanup test invokes.
+          # Extend the exact pinned Red Hat base using Red Hat's signed RPM
+          # repository during CI image preparation; the TEST execution below
+          # still has --network none, non-root and a read-only root filesystem.
+          docker build --pull=false --build-arg "UBI9_BASE=$digest" \
+            -t gatewaycore-ubi9-test:local -f - . <<'UBI9_DOCKERFILE'
+          ARG UBI9_BASE
+          FROM ${UBI9_BASE}
+          USER 0
+          RUN if command -v microdnf >/dev/null 2>&1; then \
+                microdnf install -y util-linux && microdnf clean all; \
+              else \
+                dnf install -y util-linux && dnf clean all; \
+              fi
+          USER 1001:0
+          UBI9_DOCKERFILE
+          # .NET builds and executes a temporary native apphost; only this
+          # disposable tmpfs needs execute permission. Root remains read-only.
+          docker run --rm --network none --read-only --cap-drop ALL \
+            --security-opt no-new-privileges --pids-limit 256 --memory 2g \
+            --tmpfs /tmp:rw,exec,nosuid,nodev,size=768m \
+            --user 1001:0 --volume "$PWD:/repo:ro" \
+            --env HOME=/tmp --env DOTNET_CLI_HOME=/tmp \
+            --env DOTNET_CLI_TELEMETRY_OPTOUT=1 --env DOTNET_SKIP_FIRST_TIME_EXPERIENCE=1 \
+            --env NUGET_PACKAGES=/tmp/.nuget/packages --entrypoint /bin/bash \
+            gatewaycore-ubi9-test:local -euo pipefail -c '
+              mkdir -p /tmp/work/engines/GslbHealthContracts
+              cp -R /repo/control-center /tmp/work/
+              cp /repo/engines/GslbHealthContracts/PrivateKeyFileSecurity.cs \
+                /tmp/work/engines/GslbHealthContracts/PrivateKeyFileSecurity.cs
+              printf "%s\n" "<configuration><packageSources><clear/></packageSources></configuration>" \
+                > /tmp/work/NuGet.Config
+              cd /tmp/work/control-center
+              dotnet --info
+              dotnet restore tests/LinuxKeyProtectionTests/LinuxKeyProtectionTests.csproj \
+                --configfile /tmp/work/NuGet.Config --ignore-failed-sources
+              dotnet run --project tests/LinuxKeyProtectionTests/LinuxKeyProtectionTests.csproj \
+                --configuration Release --no-restore
+            '
