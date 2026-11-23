@@ -114,7 +114,10 @@ class ReceiverTests(unittest.TestCase):
 
     def test_noncanonical_content_length_is_rejected_without_reading_body(self):
         import http.client
-        # HTTP header parsing strips leading optional whitespace before the\n        # handler sees Content-Length; " 28" becomes valid "28". Sending\n        # no body in that case would wait for 28 bytes, not reject framing.\n        for value in ("+28", "28 ", "1_0", "0x20", "-1"):
+        # HTTP header parsing strips leading optional whitespace before the
+        # handler sees Content-Length; " 28" becomes valid "28". Sending
+        # no body in that case would wait for 28 bytes, not reject framing.
+        for value in ("+28", "28 ", "1_0", "0x20", "-1"):
             with self.subTest(value=value):
                 connection = http.client.HTTPConnection(
                     "127.0.0.1", self.server.server_port, timeout=2)
