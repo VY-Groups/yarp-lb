@@ -38,3 +38,37 @@ Run via the dedicated
 test script manually on a real server or move its disposable credentials
 into production. Its CI PASS alone does not complete #48, and the real
 two-host production acceptance remains in #36.
+
+## Restricted built-in Windows LocalService SCM coverage
+
+The same test now accepts one explicit opt-in argument,
+`-Identity LocalService`, used by an **independent Windows Server 2022
+GitHub-hosted CI job**. This does not create a local user, set a service
+password or place credential material in the workflow logs.
+
+Only on a clean disposable GitHub runner, an elevated test process first
+creates the otherwise nonexistent `%ProgramData%\GatewayCoreYarp` root
+with inheritance disabled and full-control allow rules **only** for the
+well-known LocalService, LocalSystem and Administrators SIDs. It stages
+the application executable under that restricted directory, registers
+a manual SCM service running `NT AUTHORITY\LocalService` (not
+LocalSystem), verifies its observed SCM identity and startup, and checks
+the same protected state ACL, encrypted key XML and original cookie
+continuity across a real SCM stop/restart. It removes the test service
+and state in `finally`. Preexisting product state/service or non-CI
+execution is refused before any modification.
+
+This supplements the original LocalSystem SCM integration; both
+acceptance jobs must remain green. A PASS establishes that the actual
+gateway can run under a built-in low-privilege Windows service identity
+with this **pre-provisioned isolated ACL**. It does not prove arbitrary
+domain-managed account access, machine-certificate private-key ACLs,
+Active Directory/LDAPS, production Windows reboot, encrypted key-ring
+migration from a live instance, or physical two-host DR. Customer
+service identities still need explicit certificate, firewall, state
+and event-log permissions plus site acceptance in #36.
+
+The `-Identity LocalService` setting is a **test fixture**, not an
+installer option. Do not run this verification against real
+`%ProgramData%\GatewayCoreYarp` state; it deliberately refuses any
+existing directory or service name.
