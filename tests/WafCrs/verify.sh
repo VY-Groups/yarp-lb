@@ -250,7 +250,8 @@ printf '%s\n' "$spoofed_pkix_code" > "$DIR/spoofed-outside-pkix-http-status.txt"
 [[ "$spoofed_pkix_code" == "403" ]] ||
   { echo "FAIL: forwarded-client spoof bypassed scoped PKIX exclusion" >&2; exit 1; }
 echo "PASS: scoped PKIX exception is unchanged by forwarded headers"
-xss_code="$(curl --silent --show-error --max-time 8 -o "$DIR/xss-response.txt" \
+xss_code="$(curl --silent --show-error --max-time 8 \
+  -H 'X-GatewayCore-CI-Case: blocking-xss' -o "$DIR/xss-response.txt" \
   -w '%{http_code}' --get --data-urlencode \
   'q=<script>alert(1)</script>' "http://127.0.0.1:18888/")"
 printf '%s\n' "$xss_code" > "$DIR/xss-http-status.txt"
@@ -266,7 +267,8 @@ for entry in \
   "traversal|file=../../../../etc/passwd"; do
   name="${entry%%|*}"
   payload="${entry#*|}"
-  code="$(curl --silent --show-error --max-time 8 --get --data-urlencode "$payload" \
+  code="$(curl --silent --show-error --max-time 8 --get \
+    -H "X-GatewayCore-CI-Case: blocking-$name" --data-urlencode "$payload" \
     -o "$DIR/$name-response.txt" -w '%{http_code}' "http://127.0.0.1:18888/")"
   printf '%s\n' "$code" > "$DIR/$name-http-status.txt"
   if [[ "$code" != "403" ]]; then
@@ -286,6 +288,7 @@ for entry in \
   name="${entry%%|*}"
   payload="${entry#*|}"
   status="$(curl --silent --show-error --max-time 8 --get \
+    -H "X-GatewayCore-CI-Case: blocking-$name" \
     -H 'X-Forwarded-For: 127.0.0.1' \
     -H 'X-Real-IP: 127.0.0.1' \
     -H 'Forwarded: for=127.0.0.1;proto=https' \
@@ -345,6 +348,10 @@ if ! grep -q 'Request body limit is marked to reject the request' "$DIR/blocking
   echo "FAIL: expected ModSecurity body-limit rejection diagnostic absent" >&2; exit 1
 fi
 echo "PASS: oversized request rejected by configured ModSecurity body limit (HTTP $body_code)"
+# A 403 alone cannot establish a WAF true positive. Match each blocking
+# case header to its expected CRS family in one complete native transaction.
+# Raw audit stays local; the allowlisted report contains only synthetic names.
+python3 tests/WafCrs/correlate_native_audit.py "$DIR" "$DIR/blocking-audit.log" --blocking
 # Matched request counts, concurrency and payloads from an isolated
 # Docker-network client; the direct origin has no published host port.
 benchmark direct
