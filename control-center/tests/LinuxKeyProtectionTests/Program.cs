@@ -235,6 +235,28 @@ try
         Set(LinuxDpRecoveryEvidence.PublicKeyEnv,trustedPublicPath);
         Set(LinuxDpRecoveryEvidence.MinimumRevisionEnv,"42");
         Set(LinuxDpRecoveryEvidence.RequireEvidenceEnv,"true");
+
+        // A restored backup must never be trusted to supply its own signing
+        // identity or checkpoint, even if the signature itself is valid.
+        // These files have safe 0600 modes but are inside restored state.
+        var untrustedManifest=Path.Combine(state,"recovery-attestation.json");
+        File.Copy(attestationPath,untrustedManifest);
+        File.SetUnixFileMode(untrustedManifest,PrivateFile);
+        Set(LinuxDpRecoveryEvidence.ManifestEnv,untrustedManifest);
+        Assert(Throws(()=>{using var _=Provider(state);}),
+            "signed recovery checkpoint inside restored state fails closed");
+        Set(LinuxDpRecoveryEvidence.ManifestEnv,attestationPath);
+        File.Delete(untrustedManifest);
+
+        var untrustedVerifier=Path.Combine(state,"recovery-verifier.pem");
+        File.Copy(trustedPublicPath,untrustedVerifier);
+        File.SetUnixFileMode(untrustedVerifier,PrivateFile);
+        Set(LinuxDpRecoveryEvidence.PublicKeyEnv,untrustedVerifier);
+        Assert(Throws(()=>{using var _=Provider(state);}),
+            "recovery trust anchor inside restored state fails closed");
+        Set(LinuxDpRecoveryEvidence.PublicKeyEnv,trustedPublicPath);
+        File.Delete(untrustedVerifier);
+
         using(var service=Provider(state))
             Assert(service.GetRequiredService<IDataProtectionProvider>()
                 .CreateProtector("session-probe").Unprotect(encrypted)=="sensitive-session-value-123",
