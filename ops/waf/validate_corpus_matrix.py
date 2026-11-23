@@ -23,6 +23,17 @@ MAX_POLICY_CLASSES = 1_024
 MAX_INPUT_BYTES = 16 * 1024 * 1024
 
 
+def _reject_duplicate_json_keys(pairs):
+    # A second field can silently override a route threshold or a ground-truth
+    # case label. Reject it at every JSON object nesting level.
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON property in WAF evidence")
+        result[key] = value
+    return result
+
+
 def _read_bounded_json(path):
     if path.stat().st_size > MAX_INPUT_BYTES:
         raise ValueError("WAF evidence input exceeds 16 MiB")
@@ -30,7 +41,7 @@ def _read_bounded_json(path):
         raw = stream.read(MAX_INPUT_BYTES + 1)
     if len(raw) > MAX_INPUT_BYTES:
         raise ValueError("WAF evidence input exceeds 16 MiB")
-    return json.loads(raw.decode("utf-8"))
+    return json.loads(raw.decode("utf-8"), object_pairs_hook=_reject_duplicate_json_keys)
 
 
 def evaluate(corpus, policy):
