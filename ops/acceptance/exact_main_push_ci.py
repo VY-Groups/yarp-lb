@@ -50,6 +50,12 @@ def paged(path, token):
 
 def collect(repo, sha, token):
     encoded = urllib.parse.quote(repo, safe="/")
+    # Prevent a historical successful push from being presented as the
+    # current main acceptance result after a new merge advances the branch.
+    tip = get_json("/repos/" + encoded + "/git/ref/heads/main", token)
+    current = tip.get("object", {}).get("sha") if isinstance(tip, dict) else None
+    if current != sha:
+        raise ValueError("requested SHA is not the current main branch tip")
     runs = paged("/repos/" + encoded + "/actions/runs?event=push&head_sha=" + sha, token)
     exact = [r for r in runs if r.get("head_sha") == sha and
              r.get("head_branch") == "main" and r.get("event") == "push"]
