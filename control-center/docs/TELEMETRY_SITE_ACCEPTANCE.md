@@ -10,18 +10,43 @@ The operator must have authorized read-only Prometheus access and access to Coll
 
 ## Collector-to-Prometheus signal contract
 
-Set `PROM_URL` to a trusted loopback or approved management-network Prometheus base URL. This example deliberately refuses a missing variable and uses no shell history containing credentials.
+Set `PROM_URL` to a trusted HTTPS or loopback HTTP Prometheus **origin**,
+and list each expected deployed gateway's exact `service_instance_id`.
+Do not put credentials in the URL. The verifier refuses redirects, ambient
+proxies, missing nodes, duplicate/unexpected nodes, stale/nonfinite samples,
+private labels, and any unhealthy or disabled audit-delivery state.
+It never prints response bodies or customer identifiers. Example for two
+authorized site gateway nodes (substitute actual IDs in the restricted
+operator session, never commit them):
 
 ```bash
-: "${PROM_URL:?set approved Prometheus base URL}"
-curl --fail --silent --show-error --get --data-urlencode 'query=up' "$PROM_URL/api/v1/query" | jq -e '.status == "success"'
-for name in gateway_audit_outbox_enabled gateway_audit_outbox_pending gateway_audit_outbox_storage_fault gateway_audit_outbox_delivery_blocked; do
-  curl --fail --silent --show-error --get --data-urlencode "query=$name" "$PROM_URL/api/v1/query" |
-    jq -e --arg name "$name" '.status == "success" and (.data.result | type == "array") and (.data.result | length > 0)'
-done
+: "${PROM_URL:?set approved Prometheus origin}"
+python3 ops/acceptance/check_audit_outbox_metrics.py \
+  --expected-node gateway-node-a \
+  --expected-node gateway-node-b
 ```
 
-Expected: each query returns HTTP 200 and Prometheus `status=success` with at least one series **per expected gateway**. Empty results are FAIL, not zero. Compare labels to the documented label-free contract; reject actor, path, request, tenant or credential labels. Confirm `enabled=1` when durable delivery is configured, `pending>=0`, `storage_fault=0` and `delivery_blocked=0` in healthy state. Confirm the protected audit-delivery API independently and match pending counts within the documented two-second refresh and scrape delay. An `enabled=0` value is **not** delivery success. Record the full timestamped query JSON only in restricted evidence storage.
+Expected: **PASS only** if the Prometheus instant vector for all four
+`gateway_audit_outbox_*` metrics contains exactly one fresh sample per
+expected gateway node. Each series must be exported through the
+`otel-collector` job and must have no private request, actor, customer or
+credential labels. For each expected node the accepted values are
+`enabled=1`, `pending` in 0..4096, `storage_fault=0` and
+`delivery_blocked=0`. An unconfigured outbox (`enabled=0`) is **not**
+delivery success; a missing node is FAIL regardless of any other healthy
+gateway. The default freshness budget is 180 seconds and must be
+preapproved for the site's export/scrape interval. An actual credentialed
+Prometheus endpoint requires the site-approved management identity workflow;
+this example intentionally embeds no authentication material.
+
+During the controlled fault matrix, run the same checker against each
+gateway's expected identity and **require a FAIL** when the outbox becomes
+blocked, unreadable or unavailable. Verify that the corresponding critical
+Prometheus alert fires and an authenticated operator receives a notification.
+After recovery it must return PASS again, with the protected
+`/admin/api/audit/delivery` endpoint and signed collector receipts checked
+independently. Store the full timestamped evidence privately; no gauge
+proves that a particular remote audit record was delivered.
 
 ## Controlled fault and recovery
 
