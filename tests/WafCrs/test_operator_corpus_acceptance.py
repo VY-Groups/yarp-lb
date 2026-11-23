@@ -59,7 +59,7 @@ class LocalWaf(BaseHTTPRequestHandler):
             # A valid origin marker with an inaccurate HTTP length must never
             # qualify as proof that the complete private origin was reached.
             self.send_response(200)
-            payload = b"YARP-WAF-CI-BENIGN\\n".replace(b"\\n", b"\n")
+            payload = b"YARP-WAF-CI-BENIGN\n"
             content_type = "text/plain; charset=utf-8"
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(payload) + 12))
