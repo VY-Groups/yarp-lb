@@ -134,6 +134,27 @@ try
         "startup refuses dangling key-ring link before creating any external key directory");
     File.Delete(linkedKeyDir);
     Set("YARP_CONTROL_PLANE_DIR",state);
+
+    // A hardlinked secret can leave the protected provisioning directory
+    // without any symlink or realpath difference. Reject both RSA PFX and
+    // password aliases based on the already-open file's inode link count.
+    foreach (var (sourceSecret, aliasName) in new[]
+    {
+        (first.Pfx, "rsa-pfx-hardlink-alias"),
+        (first.PasswordFile, "rsa-password-hardlink-alias")
+    })
+    {
+        var extraLink=Path.Combine(root,aliasName);
+        MakeHardLink(sourceSecret,extraLink);
+        try
+        {
+            Assert(Throws(()=>{ using var _=Provider(state); }),
+                "Linux wrapping secret hardlink alias is rejected: "+aliasName);
+        }
+        finally { File.Delete(extraLink); }
+        Assert(File.ReadAllBytes(sourceSecret).Length>0,
+            "rejecting a secret alias does not mutate the protected secret");
+    }
     string encrypted;
     using(var service=Provider(state))
     {
