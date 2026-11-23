@@ -25,7 +25,7 @@ Linux (run from an isolated checkout, with test fixtures only):
 set -eu
 git rev-parse HEAD
 dotnet --info
-dotnet build control-center/GatewayCoreYarp/GatewayCoreYarp.csproj -c Release
+dotnet build control-center/GatewayCoreYarp.csproj -c Release
 id
 umask
 find /path/to/disposable/state -maxdepth 2 -printf '%m %u:%g %y %p\n'
@@ -40,7 +40,7 @@ Windows (PowerShell on a disposable VM):
 ```powershell
 git rev-parse HEAD
 dotnet --info
-dotnet build control-center/GatewayCoreYarp/GatewayCoreYarp.csproj -c Release
+dotnet build control-center/GatewayCoreYarp.csproj -c Release
 Get-CimInstance Win32_Service | Where-Object { $_.Name -like '*GatewayCore*' } | Select-Object Name,State,StartName,PathName
 Get-WinEvent -FilterHashtable @{ LogName='System'; StartTime=(Get-Date).AddMinutes(-15) } | Where-Object { $_.ProviderName -eq 'Service Control Manager' } | Select-Object TimeCreated,Id,Message
 ```
