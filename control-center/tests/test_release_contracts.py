@@ -48,7 +48,15 @@ assert 'not automatically rewrapped' in support_doc
 assert 'Key expiry alone is not sufficient' in support_doc
 assert 'Windows Server 2022' in support_doc and 'Ubuntu 24.04' in support_doc
 assert 'RHEL-family Linux' in support_doc and 'Not qualified for deployment' in support_doc
-assert 'Windows Service hosting and installation are not implemented' in support_doc
+# SCM integration is context-aware. It must not change the Windows DPAPI
+# scope or turn the offline source-staging installer into a service installer.
+assert 'if (OperatingSystem.IsWindows())\\n    builder.Services.AddWindowsService' in support_program
+assert 'Microsoft.Extensions.Hosting.WindowsServices' in support_project
+assert 'Microsoft.Extensions.Hosting.WindowsServices' in support_installer
+assert 'Windows Service lifetime is registered' in support_doc
+assert 'not a service installer' in support_doc
+assert 'SCM lifetime is registered' in support_doc
+assert 'without changing DPAPI LocalMachine' not in support_doc or 'DPAPI LocalMachine' in support_doc
 assert 'No production GatewayCore container image' in support_doc
 assert 'LocalMachine\\My' in support_doc
 assert 'not a service installer' in support_doc
