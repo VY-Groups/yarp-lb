@@ -55,3 +55,21 @@ than matching the old regular-expression `$` anchor. Regression tests verify
 actual rejection and preservation in the privacy processor. This is a
 trace-instrumentation candidate, not a demonstrated 8.6 KiB/request reduction;
 new exact-head paired profiling and independent review are required.
+
+### Export-only log cost and default-disabled behavior
+
+The IP-free `GatewayCore.TelemetryAccess` event is emitted **only** when an
+OTLP exporter is configured at startup. When `YARP_OTEL_ENDPOINT` is absent,
+no outbound event is created; normal local `GatewayCore.AccessLog` remains
+unchanged. When export is enabled, the bounded console provider excludes the
+export-only category, preventing a second formatted INFO line per request.
+The independent OTLP logger provider still receives the structured safe
+summary and its bounded async queue/timeout settings remain unchanged.
+
+The first three-pair profile of the privacy PR (head `5cd4a2ba`) measured
+**+847.222 B/request** (95% CI **+846.456 to +847.989**) with active OTLP.
+That measurable overhead was **not accepted as a production optimization**.
+This follow-up removes local duplicate formatting and redundant disabled-mode
+work; it requires a *fresh* exact-head paired profile before any claim of
+reduced full-gateway overhead. Both old and new profiles use synthetic loopback
+traffic and do not replace Windows/Ubuntu or production monitoring acceptance.
