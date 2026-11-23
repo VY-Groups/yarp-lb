@@ -21,6 +21,19 @@ groups:
         expr: up{job="gatewaycore-gateway"} == 0
         for: 1m
         labels: {severity: critical}
+      - alert: GatewayOtelCollectorScrapeFailed
+        # An OTLP-exporting gateway must not appear healthy solely because
+        # its own scrape succeeds while the telemetry collector is down.
+        # This rule fires only when an otel-collector scrape target exists;
+        # inventory and absent-target detection remain operator-managed.
+        expr: up{job="otel-collector"} == 0
+        for: 1m
+        labels: {severity: critical}
+        annotations:
+          summary: "GatewayCore OTLP Collector scrape has failed"
+          description: "Prometheus cannot scrape Collector {{ $labels.instance }}. Exported traces, access summaries and loss counters may be unavailable; verify the collector, exporter and independent audit path."
+          runbook: "control-center/docs/OTEL_EXPORT.md"
+
       - alert: YarpMetricsAbsent
         expr: absent(yarp_control_http_requests_total{job="gatewaycore-gateway"})
         for: 2m
