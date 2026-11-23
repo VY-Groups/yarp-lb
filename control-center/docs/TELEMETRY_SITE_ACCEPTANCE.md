@@ -14,7 +14,7 @@ Set `PROM_URL` to a trusted HTTPS or loopback HTTP Prometheus **origin**,
 and list each expected deployed gateway's exact `service_instance_id`.
 Do not put credentials in the URL. The verifier refuses redirects, ambient
 proxies, missing nodes, duplicate/unexpected nodes, stale/nonfinite samples,
-private labels, and any unhealthy or disabled audit-delivery state.
+private labels, stale worker status, and any unhealthy or disabled audit-delivery state.
 It never prints response bodies or customer identifiers. Example for two
 authorized site gateway nodes (substitute actual IDs in the restricted
 operator session, never commit them):
@@ -26,14 +26,16 @@ python3 ops/acceptance/check_audit_outbox_metrics.py \
   --expected-node gateway-node-b
 ```
 
-Expected: **PASS only** if the Prometheus instant vector for all four
+Expected: **PASS only** if the Prometheus instant vector for all five
 `gateway_audit_outbox_*` metrics contains exactly one fresh sample per
 expected gateway node. Each series must be exported through the
 `otel-collector` job and must have no private request, actor, customer or
 credential labels. For each expected node the accepted values are
 `enabled=1`, `pending` in 0..4096, `storage_fault=0` and
-`delivery_blocked=0`. An unconfigured outbox (`enabled=0`) is **not**
-delivery success; a missing node is FAIL regardless of any other healthy
+`delivery_blocked=0`, and a fresh `last_update_unixtime` value no more than
+90 seconds old (the worker status pass normally runs every two seconds).
+A stale or future heartbeat fails the check even if the last-known fault gauges
+remain zero. An unconfigured outbox (`enabled=0`) is **not** delivery success; a missing node is FAIL regardless of any other healthy
 gateway. The default freshness budget is 180 seconds and must be
 preapproved for the site's export/scrape interval. An actual credentialed
 Prometheus endpoint requires the site-approved management identity workflow;
@@ -41,7 +43,10 @@ this example intentionally embeds no authentication material.
 
 During the controlled fault matrix, run the same checker against each
 gateway's expected identity and **require a FAIL** when the outbox becomes
-blocked, unreadable or unavailable. Verify that the corresponding critical
+blocked, unreadable or unavailable, or when the worker stops refreshing its
+heartbeat while Prometheus remains reachable. Verify the
+`GatewayAuditOutboxWorkerStale` alert fires after the configured 90-second
+threshold and resolves after worker status updates resume. Verify that the corresponding critical
 Prometheus alert fires and an authenticated operator receives a notification.
 After recovery it must return PASS again, with the protected
 `/admin/api/audit/delivery` endpoint and signed collector receipts checked
