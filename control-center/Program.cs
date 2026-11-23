@@ -294,6 +294,9 @@ if (peerSyncSettings is not null)
         sp.GetRequiredService<PeerSyncPublisherDiagnostics>()));
 }
 var app = builder.Build();
+// Count config reload notifications as an operational signal, not proof that new routing was applied.
+var configurationReloadTelemetry = GatewayOpenTelemetry.WatchConfigurationReloads(builder.Configuration);
+app.Lifetime.ApplicationStopping.Register(configurationReloadTelemetry.Dispose);
 var accessLogger = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("GatewayCore.AccessLog");
 // Avoid even constructing/exporting the additional access-summary event
 // when no OTLP exporter was configured at startup.
