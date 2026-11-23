@@ -30,6 +30,24 @@ var previousEnv=new[] {
     LinuxDpRecoveryEvidence.RequireEvidenceEnv
 }.ToDictionary(k=>k,k=>Environment.GetEnvironmentVariable(k));
 void Set(string key,string? value) => Environment.SetEnvironmentVariable(key,value);
+// A hard link has a different pathname but the same backing inode; neither
+// GetFullPath nor realpath detects it. Use the standard Linux utility in the
+// disposable Ubuntu runner to construct this restore-trust bypass fixture.
+void MakeHardLink(string existingFile, string additionalPath)
+{
+    var start = new System.Diagnostics.ProcessStartInfo("ln")
+    {
+        UseShellExecute = false,
+        RedirectStandardError = true
+    };
+    start.ArgumentList.Add("--");
+    start.ArgumentList.Add(existingFile);
+    start.ArgumentList.Add(additionalPath);
+    using var process = System.Diagnostics.Process.Start(start)
+        ?? throw new Exception("FAIL: Linux hardlink regression fixture could not launch ln");
+    if (!process.WaitForExit(5000) || process.ExitCode != 0)
+        throw new Exception("FAIL: Linux hardlink regression fixture could not create an inode alias");
+}
 (string Pfx,string PasswordFile) CreateCertificate(string prefix,
     X509KeyUsageFlags? keyUsage=X509KeyUsageFlags.KeyEncipherment|X509KeyUsageFlags.DataEncipherment,
     bool isCa=false, bool includeBasicConstraints=true)
@@ -293,6 +311,27 @@ try
             "linked state-root alias cannot bypass restored authority boundary");
         File.Delete(aliasManifest);
         Directory.Delete(linkedStateRoot);
+
+        // The independent trust anchor cannot be the *same inode* as a
+        // file inside a restored snapshot. Hard links evade realpath and
+        // parent-directory symlink checks: reject both possible aliases.
+        var hardlinkedManifest=Path.Combine(state,"checkpoint-hardlink.json");
+        MakeHardLink(attestationPath,hardlinkedManifest);
+        try
+        {
+            Assert(Throws(()=>{using var _=Provider(state);}),
+                "external recovery checkpoint hardlinked into restored state fails closed");
+        }
+        finally { File.Delete(hardlinkedManifest); }
+
+        var hardlinkedVerifier=Path.Combine(state,"verifier-hardlink.pem");
+        MakeHardLink(trustedPublicPath,hardlinkedVerifier);
+        try
+        {
+            Assert(Throws(()=>{using var _=Provider(state);}),
+                "external recovery trust key hardlinked into restored state fails closed");
+        }
+        finally { File.Delete(hardlinkedVerifier); }
 
         using(var service=Provider(state))
             Assert(service.GetRequiredService<IDataProtectionProvider>()
