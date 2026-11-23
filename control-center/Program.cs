@@ -58,6 +58,15 @@ var builder = WebApplication.CreateBuilder(args);
 if (auditOutbox is not null)
     builder.Services.AddHostedService(sp => new AuditOutboxWorker(auditOutbox, sp.GetRequiredService<ILogger<AuditOutboxWorker>>()));
 var otlpConfigured = GatewayOpenTelemetry.Configure(builder.Services);
+// Seed audit metrics before the first export: an unconfigured external audit
+// path is explicitly disabled, not a successful empty/delivered queue.
+if (auditOutbox is { } configuredAuditOutbox)
+{
+    var status = configuredAuditOutbox.Status();
+    GatewayOpenTelemetry.ReportAuditOutboxStatus(
+        true, status.Pending, status.StorageFault, status.DeliveryBlocked);
+}
+else GatewayOpenTelemetry.ReportAuditOutboxStatus(false, 0, false, false);
 // Explicit v0.1 multi-socket mode; legacy loopback remains CI migration-only.
 var isolatedListeners = GatewayListenerIsolation.FromEnvironment();
 var acmeChallengeSetting = Environment.GetEnvironmentVariable("YARP_ACME_HTTP01_PUBLIC_ENTRYPOINT");
