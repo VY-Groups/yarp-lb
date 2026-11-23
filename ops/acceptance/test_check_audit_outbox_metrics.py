@@ -32,6 +32,12 @@ class AuditMetricAcceptanceTests(unittest.TestCase):
 
     def test_two_node_healthy_positive(self):
         self.assertEqual(verify(self.valid(), ["gateway-a", "gateway-b"], now=self.NOW), 2)
+        p = self.valid()
+        for name in METRICS:
+            for row in p[name]["data"]["result"]:
+                row["metric"]["service_name"] = "gatewaycore-control-center"
+                row["metric"]["telemetry_sdk_language"] = "dotnet"
+        self.assertEqual(verify(p, ["gateway-a", "gateway-b"], now=self.NOW), 2)
 
     def test_missing_node_or_unexpected_node_is_not_a_pass(self):
         for change in ("missing", "unexpected", "duplicate"):
@@ -64,13 +70,20 @@ class AuditMetricAcceptanceTests(unittest.TestCase):
                     verify(p, ["gateway-a", "gateway-b"], now=self.NOW)
 
     def test_untrusted_labels_and_unhealthy_samples_fail_closed(self):
-        for scenario in ("private-label", "wrong-job", "stale", "future",
+        for scenario in ("private-label", "route-label", "destination-label",
+                         "unknown-label", "wrong-job", "stale", "future",
                          "nan", "fraction", "scalar", "no-series"):
             with self.subTest(scenario=scenario):
                 p = self.valid()
                 row = p[METRICS[2]]["data"]["result"][0]
                 if scenario == "private-label":
                     row["metric"]["client_ip"] = "private-canary"
+                elif scenario == "route-label":
+                    row["metric"]["gateway_route_id"] = "route-a"
+                elif scenario == "destination-label":
+                    row["metric"]["destination"] = "backend-a"
+                elif scenario == "unknown-label":
+                    row["metric"]["arbitrary_dimension"] = "arbitrary"
                 elif scenario == "wrong-job":
                     row["metric"]["job"] = "gatewaycore-gateway"
                 elif scenario == "stale":
