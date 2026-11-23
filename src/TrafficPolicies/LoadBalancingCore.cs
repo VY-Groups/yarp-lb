@@ -58,16 +58,28 @@ public static class LoadBalancingCore
     {
         if (string.IsNullOrEmpty(clientKey)) throw new ArgumentException("Missing client key", nameof(clientKey));
         if (ids.Count != weights.Count) throw new ArgumentException("ID/weight lengths differ");
-        // Preserve the exact hash input and selection semantics while avoiding
-        // a concatenated string, UTF-8 byte[] and SHA-256 byte[] PER candidate.
-        // Stack memory is bounded; larger client/destination IDs use a single
-        // per-call allocation rather than per-candidate churn.
-        var maxInputBytes = Encoding.UTF8.GetByteCount(clientKey) + 1;
-        foreach (var id in ids)
+        return PickRendezvousIndex(clientKey, ids, weights, ids.Count);
+    }
+
+    // The count overload permits bounded, pooled destination snapshots whose
+    // backing arrays may have *different* capacities. Never hash uninitialized
+    // pool tails; the ordinary overload retains its strict equal-size contract.
+    public static int PickRendezvousIndex(string clientKey, IReadOnlyList<string> ids,
+        IReadOnlyList<int> weights, int candidateCount)
+    {
+        if (string.IsNullOrEmpty(clientKey)) throw new ArgumentException("Missing client key", nameof(clientKey));
+        if (candidateCount < 0 || candidateCount > ids.Count || candidateCount > weights.Count)
+            throw new ArgumentOutOfRangeException(nameof(candidateCount));
+        // Preserve the exact hash input, tie-breaking and selection semantics.
+        // Long inputs allocate at most one scratch byte[] per selection.
+        var keyBytesRequired = Encoding.UTF8.GetByteCount(clientKey);
+        var maxInputBytes = checked(keyBytesRequired + 1);
+        for (var i = 0; i < candidateCount; i++)
         {
+            var id = ids[i];
             if (string.IsNullOrEmpty(id)) throw new ArgumentOutOfRangeException(nameof(ids));
             maxInputBytes = checked(Math.Max(maxInputBytes,
-                Encoding.UTF8.GetByteCount(clientKey) + 1 + Encoding.UTF8.GetByteCount(id)));
+                keyBytesRequired + 1 + Encoding.UTF8.GetByteCount(id)));
         }
         Span<byte> input = maxInputBytes <= 1024
             ? stackalloc byte[maxInputBytes]
@@ -77,7 +89,7 @@ public static class LoadBalancingCore
         Span<byte> digest = stackalloc byte[32];
         var bestScore = double.PositiveInfinity;
         var bestIndex = -1;
-        for (var i = 0; i < ids.Count; i++)
+        for (var i = 0; i < candidateCount; i++)
         {
             if (weights[i] is < MinWeight or > MaxWeight || string.IsNullOrEmpty(ids[i]))
                 throw new ArgumentOutOfRangeException(nameof(weights));
