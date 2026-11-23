@@ -19,6 +19,11 @@ class FakeWaf:
         self.fail_smoke = None
         self.swap_image = False
         self.rollback_fails = False
+        self.ruleset = "A" * 64
+        self.swap_ruleset = False
+
+    def observed_rule_digest(self):
+        return self.ruleset
 
     def inspect(self):
         return {"mode": self.mode, "imageId": self.image}
@@ -41,6 +46,8 @@ class FakeWaf:
         self.mode = mode
         if self.swap_image and mode == "block":
             self.image = "sha256:" + "b" * 64
+        if self.swap_ruleset and mode == "block":
+            self.ruleset = "B" * 64
 
 
 class RolloutSafetyTests(unittest.TestCase):
@@ -57,7 +64,7 @@ class RolloutSafetyTests(unittest.TestCase):
     def test_approved_single_node_apply_creates_private_nonoverwriting_receipt(self):
         gateway = FakeWaf()
         self.assertEqual(subject.transaction(gateway, "block", 31, self.output,
-                                              self.hash), "applied")
+                                              self.hash, self.hash), "applied")
         self.assertEqual(gateway.mode, "block")
         self.assertEqual(gateway.requests, [("verify", "block"),
             ("smoke", "detect"), ("apply", "block"), ("smoke", "block")])
@@ -68,13 +75,13 @@ class RolloutSafetyTests(unittest.TestCase):
         self.assertFalse(result["rollbackVerified"])
         self.assertEqual(self.output.stat().st_mode & 0o077, 0)
         with self.assertRaises(ValueError):
-            subject.transaction(gateway, "block", 31, self.output, self.hash)
+            subject.transaction(gateway, "block", 31, self.output, self.hash, self.hash)
 
     def test_smoke_failure_rolls_back_to_original_mode_and_records_it(self):
         gateway = FakeWaf()
         gateway.fail_smoke = "block"
         with self.assertRaisesRegex(ValueError, "rollout unsuccessful"):
-            subject.transaction(gateway, "block", 32, self.output, self.hash)
+            subject.transaction(gateway, "block", 32, self.output, self.hash, self.hash)
         self.assertEqual(gateway.mode, "detect")
         result = self.read()
         self.assertEqual(result["result"], "rolled_back")
@@ -85,7 +92,7 @@ class RolloutSafetyTests(unittest.TestCase):
         gateway = FakeWaf()
         gateway.swap_image = True
         with self.assertRaises(ValueError):
-            subject.transaction(gateway, "block", 33, self.output, self.hash)
+            subject.transaction(gateway, "block", 33, self.output, self.hash, self.hash)
         self.assertEqual(self.read()["result"], "rollback_failed")
 
     def test_failed_rollback_is_never_reported_as_success(self):
@@ -93,7 +100,7 @@ class RolloutSafetyTests(unittest.TestCase):
         gateway.fail_smoke = "block"
         gateway.rollback_fails = True
         with self.assertRaises(ValueError):
-            subject.transaction(gateway, "block", 34, self.output, self.hash)
+            subject.transaction(gateway, "block", 34, self.output, self.hash, self.hash)
         self.assertEqual(self.read()["result"], "rollback_failed")
         self.assertFalse(self.read()["rollbackVerified"])
 
@@ -103,8 +110,28 @@ class RolloutSafetyTests(unittest.TestCase):
                 ("block", 35, self.hash), ("Off", 35, self.hash),
                 ("detect", 0, self.hash), ("detect", 35, "bad")):
             with self.subTest(mode=requested, revision=rev), self.assertRaises(ValueError):
-                subject.transaction(gateway, requested, rev, self.output, digest)
+                subject.transaction(gateway, requested, rev, self.output, digest, self.hash)
         self.assertFalse(self.output.exists())
+
+    def test_unapproved_live_rule_bytes_refused_before_any_mutation(self):
+        gateway = FakeWaf()
+        gateway.ruleset = "B" * 64
+        with self.assertRaisesRegex(ValueError, "approved CRS rule files"):
+            subject.transaction(gateway, "block", 45, self.output,
+                                self.hash, self.hash)
+        self.assertEqual(gateway.mode, "detect")
+        self.assertFalse(self.output.exists())
+        self.assertNotIn(("apply", "block"), gateway.requests)
+
+    def test_ruleset_swap_during_apply_is_not_a_success_or_verified_rollback(self):
+        gateway = FakeWaf()
+        gateway.swap_ruleset = True
+        with self.assertRaises(ValueError):
+            subject.transaction(gateway, "block", 46, self.output,
+                                self.hash, self.hash)
+        evidence = self.read()
+        self.assertEqual(evidence["result"], "rollback_failed")
+        self.assertFalse(evidence["rollbackVerified"])
 
     def test_existing_receipt_cannot_be_overwritten(self):
         self.output.write_text("original", encoding="utf-8")
@@ -231,7 +258,7 @@ class RolloutSafetyTests(unittest.TestCase):
         gateway = FakeWaf()
         with mock.patch.object(subject, "receipt", side_effect=OSError("no storage")):
             with self.assertRaises((OSError, ValueError)):
-                subject.transaction(gateway, "block", 42, self.output, self.hash)
+                subject.transaction(gateway, "block", 42, self.output, self.hash, self.hash)
         self.assertEqual(gateway.mode, "detect",
                          "A missing audit receipt must never leave an applied mode")
 
