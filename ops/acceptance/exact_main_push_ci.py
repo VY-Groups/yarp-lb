@@ -62,8 +62,11 @@ def collect(repo, sha, token):
     evidence = []
     for run in exact:
         run_id = run["id"]
-        if not isinstance(run_id, int) or run_id <= 0:
+        if type(run_id) is not int or run_id <= 0:
             raise ValueError("Invalid GitHub Actions run id")
+        attempt = run.get("run_attempt")
+        if type(attempt) is not int or attempt < 1:
+            raise ValueError("Invalid GitHub Actions run attempt")
         jobs = paged("/repos/" + encoded + "/actions/runs/" + str(run_id) + "/jobs", token)
         # GitHub job IDs are provenance handles for retrieving exact failed
         # logs. Missing/invalid IDs cannot be trusted as evidence, even when
@@ -71,7 +74,7 @@ def collect(repo, sha, token):
         if any(type(job.get("id")) is not int or job["id"] <= 0 for job in jobs):
             raise ValueError("Invalid GitHub Actions job id")
         evidence.append({
-            "run_id": run_id, "name": run.get("name"),
+            "run_id": run_id, "run_attempt": attempt, "name": run.get("name"),
             "url": run.get("html_url"), "status": run.get("status"),
             "conclusion": run.get("conclusion"),
             "jobs": [{"id": j.get("id"), "name": j.get("name"),
@@ -92,6 +95,24 @@ def collect(repo, sha, token):
     return evidence
 
 
+def classify_runs(runs):
+    """Separate observed CI failure from unrun/pending evidence."""
+    if not runs:
+        return "INCOMPLETE"
+    failed_conclusions = {"failure", "cancelled", "timed_out", "action_required"}
+    if any(run["conclusion"] in failed_conclusions or
+           any(job["conclusion"] in failed_conclusions for job in run["jobs"])
+           for run in runs):
+        return "FAIL"
+    if all(run["status"] == "completed" and run["conclusion"] == "success" and
+           bool(run["jobs"]) and all(job["status"] == "completed" and
+                                     job["conclusion"] == "success"
+                                     for job in run["jobs"])
+           for run in runs):
+        return "PASS"
+    return "INCOMPLETE"
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", required=True, help="owner/repository")
@@ -108,15 +129,11 @@ def main(argv=None):
     except (urllib.error.URLError, ValueError, KeyError, TypeError, TimeoutError) as exc:
         print("GitHub evidence unavailable: " + str(exc), file=sys.stderr)
         return 2
-    ok = bool(runs) and all(
-        r["status"] == "completed" and r["conclusion"] == "success" and
-        bool(r["jobs"]) and all(j["status"] == "completed" and
-                               j["conclusion"] == "success" for j in r["jobs"])
-        for r in runs
-    )
+    verdict = classify_runs(runs)
     report = {"repository": args.repo, "main_sha": args.sha,
               "push_runs": runs, "observed_runs": len(runs),
-              "all_observed_push_runs_passed": ok,
+              "verdict": verdict,
+              "all_observed_push_runs_passed": verdict == "PASS",
               "note": "This proves observed push runs only; compare required workflow inventory separately."}
     output = json.dumps(report, indent=2, sort_keys=True) + "\n"
     if args.output:
@@ -124,7 +141,7 @@ def main(argv=None):
             f.write(output)
     else:
         sys.stdout.write(output)
-    return 0 if ok else 1
+    return 0 if verdict == "PASS" else 1
 
 
 if __name__ == "__main__":
