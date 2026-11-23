@@ -30,6 +30,22 @@ public static partial class GatewayOpenTelemetry
         string clientIp, string clientIpSource, string method, string routeId,
         int statusCode, double durationMs);
 
+    // This source-generated record has no client address, forwarded-for data,
+    // path, headers, user/tenant identifier or request body. Only this category
+    // is allowed into the outbound OTLP log provider. Local access logs retain
+    // their existing restricted operational behavior separately.
+    [LoggerMessage(EventId = 1, Level = LogLevel.Information,
+        Message = "GATEWAY_TELEMETRY_ACCESS timestampUtc={TimestampUtc:o} method={Method} routeId={RouteId} statusCode={StatusCode} durationMs={DurationMs}")]
+    public static partial void LogTelemetryAccess(ILogger logger, DateTimeOffset timestampUtc,
+        string method, string routeId, int statusCode, double durationMs);
+
+    public static string BoundedTelemetryMethod(string? method) => method switch
+    {
+        "GET" or "HEAD" or "POST" or "PUT" or "DELETE" or "CONNECT" or
+        "OPTIONS" or "TRACE" or "PATCH" => method,
+        _ => "_OTHER"
+    };
+
     public const string ActivitySourceName = "GatewayCore.ControlCenter";
     public static readonly ActivitySource ActivitySource = new(ActivitySourceName, "0.1");
     private static readonly Meter Meter = new(ActivitySourceName, "0.1");
@@ -94,7 +110,7 @@ public static partial class GatewayOpenTelemetry
         if (instance.Length > 128) throw new InvalidOperationException("OTel service instance ID exceeds 128 characters");
 
         services.AddLogging(logging => logging.AddFilter<OpenTelemetryLoggerProvider>(
-            (category, level) => string.Equals(category, "GatewayCore.AccessLog", StringComparison.Ordinal) &&
+            (category, level) => string.Equals(category, "GatewayCore.TelemetryAccess", StringComparison.Ordinal) &&
                 level >= LogLevel.Information));
         services.AddOpenTelemetry()
             .ConfigureResource(resource => resource.AddService(
