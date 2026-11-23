@@ -445,26 +445,37 @@ internal sealed class GatewayTelemetryPrivacyProcessor : BaseProcessor<Activity>
     private static bool IsSafeRouteTemplate(string? route)
     {
         if (route is not { Length: > 0 and <= 256 } || route[0] != '/') return false;
+        // Literal request paths are not proof of a route template. A path
+        // like /users/alice123 uses only these safe ASCII characters but
+        // still contains a customer identifier. Fail closed unless the
+        // instrumented value contains a syntactically balanced parameter.
+        // Stable GatewayCore route IDs remain available independently.
         var insideParameter = false;
+        var parameterHasName = false;
+        var hasParameter = false;
         foreach (var character in route)
         {
             if (character == '{')
             {
                 if (insideParameter) return false;
                 insideParameter = true;
+                parameterHasName = false;
                 continue;
             }
             if (character == '}')
             {
-                if (!insideParameter) return false;
+                if (!insideParameter || !parameterHasName) return false;
                 insideParameter = false;
+                hasParameter = true;
                 continue;
             }
             if (character == '?' && !insideParameter) return false;
             if (!char.IsAsciiLetterOrDigit(character) &&
                 character is not ('/' or '_' or '-' or '.' or ':' or '*' or '?'))
                 return false;
+            if (insideParameter && (char.IsAsciiLetterOrDigit(character) || character == '_'))
+                parameterHasName = true;
         }
-        return !insideParameter;
+        return !insideParameter && hasParameter;
     }
 }
