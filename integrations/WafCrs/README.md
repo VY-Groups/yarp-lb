@@ -11,25 +11,27 @@ bash tests/WafCrs/verify.sh
 
 It binds 127.0.0.1:18888 and creates a Docker-private backend network. It captures container logs and removes temporary containers and the network.
 
-### Spoofed forwarded-client identity regression (#51)
+### Forwarded-header invariance fixture (disposable lab only, #51)
 
-The isolated CRS lab now tests the same synthetic XSS, SQL injection and
-path-traversal attacks with caller-supplied `X-Forwarded-For`,
-`X-Real-IP` and RFC 7239 `Forwarded` headers claiming the loopback
-address. Each must still receive HTTP 403; it also tests that those spoofed
-headers cannot expand the narrowly scoped lab PKIX content-type exception to
-another route. The malicious outcomes enter the same redacted, per-route and
-ground-truth-severity blocking-corpus report. These cases apply the
-*untrusted proxy identity* lesson from
-[the GatewayCore GSLB branch security review](../../control-center/docs/GSLB_BRANCH_DEEP_REVIEW.md);
-no source from that separate runtime is used.
+The isolated CRS lab sends the same synthetic XSS, SQL injection,
+path-traversal and benign requests with caller-controlled
+`X-Forwarded-For`, `X-Real-IP` and RFC 7239 `Forwarded` headers claiming
+loopback. The malicious cases must still receive HTTP 403 and the benign
+case HTTP 200. It separately confirms the exact-route PKIX laboratory
+exclusion is not broadened by adding these headers. Outcomes appear only
+as redacted case identifiers/statuses in the fixed lab corpus report.
 
-This is only a negative regression against a disposable upstream WAF.
-A physical ingress/WAF/API deployment must independently prove that
-forwarded identities are honored only from configured immediate peers,
-management endpoints remain privately authenticated, and no origin or
-configuration API can be reached around the WAF. The test does not claim
-to implement proxy authentication or certify production #51 acceptance.
+**Scope boundary:** Neither the disposable WAF nor its isolated backend
+rewrites the client identity from those headers or authorizes requests based
+on an immediate-peer trust list. These probes therefore test **invariance
+when unused headers are present**, NOT whether a real trusted proxy
+configuration correctly rejects spoofed client identity. The
+[GatewayCore GSLB engineering review](../../control-center/docs/GSLB_BRANCH_DEEP_REVIEW.md)
+identified the latter as an independent, high-severity threat-model item;
+no code from the reviewed system is imported here. An actual ingress/WAF
+and management API deployment must separately test that only configured
+immediate peers can supply forwarded identity and that origin/API bypass
+is impossible. No production WAF security-goal completion is implied.
 
 ## Production gaps
 
