@@ -31,13 +31,13 @@ Confirm measured 500 **Mbps**, not MB/s. If the real peak is 500 Mbps and approv
 ## Canonical evidence index and physical handover details
 
 This ledger is the proposed single living checklist; related draft-only worksheets
-[#419](PR #419),
-[#420](PR #420),
-[#421](PR #421),
-[#422](PR #422),
-[#423](PR #423),
-[#424](PR #424), and
-[#425](PR #425) are reference
+#419,
+#420,
+#421,
+#422,
+#423,
+#424, and
+#425 are reference
 drafts, **not execution evidence**. Preserve their unique prerequisites here
 before marking any as superseded; never merge multiple conflicting checklists.
 
