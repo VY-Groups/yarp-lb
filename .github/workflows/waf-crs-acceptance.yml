@@ -17,10 +17,26 @@ jobs:
       - name: Run OWASP CRS and real HTTP allow/block checks in isolated Docker network
         shell: bash
         run: bash tests/WafCrs/verify.sh
-      - name: Upload WAF acceptance logs (lab only)
+      # Never upload the entire directory: real ModSecurity audit/Compose
+      # logs can contain raw request paths, headers, cookies, and optional
+      # operator-supplied private corpus payloads. Export only fixed,
+      # synthetic bounded status/benchmark summaries and image digests.
+      - name: Upload allowlisted synthetic WAF evidence (no raw logs or private corpus)
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: waf-crs-http-evidence
-          path: artifacts/waf-crs/
+          path: |
+            artifacts/waf-crs/benchmark-direct.json
+            artifacts/waf-crs/benchmark-proxy-only.json
+            artifacts/waf-crs/benchmark-blocking.json
+            artifacts/waf-crs/benchmark-detection.json
+            artifacts/waf-crs/benchmark-restored.json
+            artifacts/waf-crs/benchmark-summary.json
+            artifacts/waf-crs/blocking-corpus-report.json
+            artifacts/waf-crs/detection-corpus-report.json
+            artifacts/waf-crs/waf-image-id.txt
+            artifacts/waf-crs/waf-image-digests.json
+            artifacts/waf-crs/waf-selected-image.txt
+            artifacts/waf-crs/backend-bindings.json
           retention-days: 14
