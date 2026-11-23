@@ -293,17 +293,19 @@ public static class GatewayOtlpExporterAcceptance
                                         $"observed [{string.Join(",", values ?? Array.Empty<long>())}]");
             }
             var logPayload = Encoding.Latin1.GetString(logs.SelectMany(x => x.Body).ToArray());
-            foreach (var expected in new[] { "GATEWAY_ACCESS", "timestampUtc", "clientIp", "203.0.113.17", "route_acceptance", "statusCode" })
+            foreach (var expected in new[] { "GATEWAY_TELEMETRY_ACCESS", "timestampUtc", "route_acceptance", "statusCode", "_OTHER" })
                 if (!logPayload.Contains(expected, StringComparison.Ordinal))
-                    throw new Exception($"Expected access log field was absent from OTLP: {expected}");
-            foreach (var sensitive in new[] { "otlp-secret-canary", "Authorization", "Cookie", "/private" })
+                    throw new Exception($"Expected bounded telemetry access log field was absent from OTLP: {expected}");
+            foreach (var sensitive in new[] { "GATEWAY_ACCESS", "clientIp", "clientIpSource",
+                         "203.0.113.17", "otlp-secret-canary", "Authorization",
+                         "Cookie", "/private", "UNTRUSTED-METHOD-SECRET" })
                 if (logPayload.Contains(sensitive, StringComparison.OrdinalIgnoreCase))
-                    throw new Exception($"Sensitive request data was present in OTLP log export: {sensitive}");
+                    throw new Exception($"Sensitive local-access or request data was present in OTLP log export: {sensitive}");
             foreach (var excluded in new[] { "otlp-audit-secret-canary", "otlp-application-secret-canary", "GatewayCore.SecurityAudit" })
                 if (logPayload.Contains(excluded, StringComparison.Ordinal))
                     throw new Exception($"Non-access log data was present in OTLP export: {excluded}");
             Console.WriteLine("PASS: real OTLP/HTTP collector received bounded console total/low/high drops and write-error counter values");
-            Console.WriteLine("PASS: real OTLP/HTTP collector received traces, metrics and structured access logs; traces redact client IP and logs omit request content");
+            Console.WriteLine("PASS: real OTLP/HTTP collector received traces, metrics and IP-free bounded access telemetry logs; local access/IP fields were excluded");
         }
         finally
         {
@@ -319,9 +321,20 @@ public static class GatewayOtlpExporterAcceptance
 
     private static void EmitAccessLog(IServiceProvider provider)
     {
-        var logger = provider.GetRequiredService<ILoggerFactory>().CreateLogger("GatewayCore.AccessLog");
-        GatewayOpenTelemetry.LogAccess(logger,
-            DateTimeOffset.UtcNow, "203.0.113.17", "remote", "GET", "route_acceptance", 200, 12.5);
+        var factory = provider.GetRequiredService<ILoggerFactory>();
+        var local = factory.CreateLogger("GatewayCore.AccessLog");
+        var exported = factory.CreateLogger("GatewayCore.TelemetryAccess");
+        var now = DateTimeOffset.UtcNow;
+        GatewayOpenTelemetry.LogAccess(local,
+            now, "203.0.113.17", "remote", "GET", "route_acceptance", 200, 12.5);
+        GatewayOpenTelemetry.LogTelemetryAccess(exported,
+            now, GatewayOpenTelemetry.BoundedTelemetryMethod("GET"), "route_acceptance", 200, 12.5);
+        // Unknown untrusted HTTP methods must never enter the OTLP log stream.
+        GatewayOpenTelemetry.LogTelemetryAccess(exported,
+            now, GatewayOpenTelemetry.BoundedTelemetryMethod("UNTRUSTED-METHOD-SECRET"),
+            "_other", 400, 1.0);
+        if (GatewayOpenTelemetry.BoundedTelemetryMethod("UNTRUSTED-METHOD-SECRET") != "_OTHER")
+            throw new Exception("Unknown HTTP method was not normalized before OTLP logging");
     }
 
     private static void EmitRestrictedLogs(IServiceProvider provider)
