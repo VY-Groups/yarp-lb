@@ -1,6 +1,8 @@
 import unittest
 from io import BytesIO
 import os
+import json
+from unittest.mock import patch
 from pathlib import Path
 import subprocess
 import sys
@@ -12,7 +14,8 @@ from instrument_lab_stats import (ADDITION, ANCHOR, DIMENSION_CALL_PATTERN, METR
                                  instrument_activity_lifecycle)
 from report import build_report
 from run_paired_profile import (_drain_bounded_log, measurement as parse_measurement,
-                               format_early_trace_exit, OtlpReceiver, resolve_checkout)
+                               format_early_trace_exit, OtlpReceiver, resolve_checkout,
+                               write_lab_config)
 
 
 ISSUE34_DIR = Path(__file__).resolve().parent
@@ -78,6 +81,21 @@ def records(before_commit="before-sha", after_commit="after-sha"):
 
 
 class ReportTests(unittest.TestCase):
+    def test_source_affinity_lab_policy_is_explicit_and_bounded(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with patch.dict(os.environ, {"YARP_LAB_LOAD_BALANCING_POLICY": "SourceIpHash"}):
+                config = json.loads(write_lab_config(root).read_text())
+                self.assertEqual(config["ReverseProxy"]["Clusters"]["api"]["LoadBalancingPolicy"],
+                                 "SourceIpHash")
+            with patch.dict(os.environ, {"YARP_LAB_LOAD_BALANCING_POLICY": "WeightedRandom"}):
+                config = json.loads(write_lab_config(root).read_text())
+                self.assertEqual(config["ReverseProxy"]["Clusters"]["api"]["LoadBalancingPolicy"],
+                                 "WeightedRandom")
+            with patch.dict(os.environ, {"YARP_LAB_LOAD_BALANCING_POLICY": "NoPolicy"}):
+                with self.assertRaisesRegex(ValueError, "Unsupported issue34"):
+                    write_lab_config(root)
+
     def test_disposable_otlp_receiver_counts_nonempty_signal_exports(self):
         receiver = OtlpReceiver()
         try:

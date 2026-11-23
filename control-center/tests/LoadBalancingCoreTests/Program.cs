@@ -87,6 +87,47 @@ foreach(var key in keys)
         LoadBalancingCore.PickRendezvousIndex(key,candidateIds,candidateWeights))
         throw new Exception("FAIL: rendezvous differs for Unicode key " + key);
 Check(true, "2000 Unicode candidates match original rendezvous output exactly");
+// Source-IP policy rents over-capacity arrays from ArrayPool. Selection must
+// hash ONLY the populated prefix, never stale entries from a previous request.
+var prefixIds = new string[16];
+var prefixWeights = new int[32];
+Array.Copy(candidateIds, prefixIds, candidateIds.Length);
+Array.Copy(candidateWeights, prefixWeights, candidateWeights.Length);
+prefixIds[4] = "stale-previous-client";
+prefixWeights[4] = 100;
+for (var i = 5; i < prefixIds.Length; i++)
+{
+    prefixIds[i] = "tail_" + i;
+    prefixWeights[i] = 1;
+}
+for (var i = 0; i < keys.Length; i++)
+{
+    var expected = LoadBalancingCore.PickRendezvousIndex(keys[i], candidateIds, candidateWeights);
+    var pooled = LoadBalancingCore.PickRendezvousIndex(
+        keys[i], prefixIds, prefixWeights, candidateIds.Length);
+    if (expected != pooled)
+        throw new Exception("Pooled affinity changed rendezvous result at sample " + i);
+}
+Check(true, "2000 bounded pooled-prefix matches including Unicode and long IDs");
+Check(LoadBalancingCore.PickRendezvousIndex("client", prefixIds, prefixWeights, 0) == -1,
+    "empty pooled prefix cannot select a stale candidate");
+foreach (var invalidCount in new[] {-1, 17, 33})
+{
+    var refused = false;
+    try { LoadBalancingCore.PickRendezvousIndex("client", prefixIds, prefixWeights, invalidCount); }
+    catch (ArgumentOutOfRangeException) { refused = true; }
+    Check(refused, "invalid pooled candidate count is rejected: " + invalidCount);
+}
+var invalidPooledIds = new[] {"gw-a", "gw-b", "ignored-tail"};
+var invalidPooledWeights = new[] {1, 0, 100, 100};
+var malformedWeightRejected = false;
+try { LoadBalancingCore.PickRendezvousIndex("client", invalidPooledIds, invalidPooledWeights, 2); }
+catch (ArgumentOutOfRangeException) { malformedWeightRejected = true; }
+Check(malformedWeightRejected, "invalid active weight is not hidden by pooled tail");
+Check(LoadBalancingCore.PickRendezvousIndex("client", invalidPooledIds,
+        invalidPooledWeights, 1) == 0,
+    "malformed weight outside the candidate prefix is never read");
+
 for(var i=0;i<1000;i++)
 {
     OriginalRendezvous(keys[i],candidateIds,candidateWeights);

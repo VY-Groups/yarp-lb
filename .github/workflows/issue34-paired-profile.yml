@@ -21,7 +21,7 @@ concurrency:
 jobs:
   paired-profile:
     runs-on: ubuntu-24.04
-    timeout-minutes: 35
+    timeout-minutes: 60
     steps:
       - name: Checkout candidate revision
         uses: actions/checkout@v4
@@ -97,6 +97,63 @@ jobs:
           # Keep the original .nettrace archives: Speedscope conversion
           # loses runtime event details and is a review aid, not independent
           # attribution of allocations/request.
+      - name: Run three additional SourceIpHash before/after allocation pairs
+        id: source_affinity_profile
+        env:
+          BASELINE_COMMIT: ${{ github.event.pull_request.base.sha || 'd2b135f760e92fb2646ec5542d89a7dc309eb88c' }}
+          CANDIDATE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+          # This branch changes the SourceIpHash policy hot path. The
+          # unchanged WeightedRandom baseline cannot measure that reduction.
+          # Both revisions use exactly the same explicit affinity policy.
+          YARP_LAB_LOAD_BALANCING_POLICY: "SourceIpHash"
+          YARP_LAB_OTEL_OVERHEAD: "0"
+        run: |
+          python3 source/candidate/tests/L7/performance/issue34/run_paired_profile.py \
+            --baseline-dir source/baseline \
+            --candidate-dir source/candidate \
+            --workspace "$GITHUB_WORKSPACE" \
+            --load-script "$GITHUB_WORKSPACE/source/candidate/tests/L7/performance/load.js" \
+            --output "$GITHUB_WORKSPACE/artifacts/issue34/source-affinity" \
+            --baseline-commit "$BASELINE_COMMIT" \
+            --candidate-commit "$CANDIDATE_COMMIT" \
+            --dotnet-trace "$RUNNER_TEMP/dotnet-tools/dotnet-trace" \
+            --rounds 3 --vus 75 --duration 45s --warmup 10s \
+            --trace-seconds 25 --payload-bytes 0
+      - name: Verify complete affinity evidence and reviewable GC stacks
+        if: always()
+        env:
+          AFFINITY_OUTCOME: ${{ steps.source_affinity_profile.outcome }}
+        run: |
+          set -euo pipefail
+          root="artifacts/issue34/source-affinity"
+          if [[ "$AFFINITY_OUTCOME" != "success" ]]; then
+            echo "## SourceIpHash paired profile incomplete" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          for path in paired-report.json trace-index.json \
+            traces/before-gc-verbose.nettrace traces/after-gc-verbose.nettrace; do
+            test -s "$root/$path" || { echo "Missing affinity evidence: $path" >&2; exit 1; }
+          done
+          for revision in before after; do
+            trace="$root/traces/${revision}-gc-verbose.nettrace"
+            base="${trace%.nettrace}"
+            "$RUNNER_TEMP/dotnet-tools/dotnet-trace" convert "$trace" \
+              --format Speedscope --output "$base"
+            python3 source/candidate/tests/L7/performance/issue34/verify_speedscope.py \
+              "${base}.speedscope.json"
+          done
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          report = json.loads(Path("artifacts/issue34/source-affinity/paired-report.json").read_text())
+          delta = report["paired_extra_allocation_delta"]
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as out:
+              print("## SourceIpHash isolated three-pair profile", file=out)
+              print(f"Allocation delta: {delta['mean']} B/request "
+                    f"(95% CI {delta['ci95_low']} to {delta['ci95_high']}); "
+                    f"{delta['interpretation']}", file=out)
+              print("Do not infer Windows parity or production 500 Mbps capacity.", file=out)
+          PY
       - name: Add paired measurement summary
         if: always()
         run: |

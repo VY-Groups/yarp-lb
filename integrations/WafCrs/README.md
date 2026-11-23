@@ -163,3 +163,16 @@ to exercise positive and forged-origin examples before Docker acceptance.
 This prevents false benchmark successes; it does **not** provide representative
 customer FP/FN, signed production rule governance, real YARP+WAF Windows
 and Linux capacity, or certify issue #51 as complete.
+
+### Operator-corpus response Transfer-Encoding validation (#51)
+
+The private operator-corpus acceptance now rejects duplicate or unsupported
+`Transfer-Encoding` response fields, `Content-Length` with any transfer coding,
+and multiple `Content-Length` headers. The only accepted transfer coding is
+a single `chunked` header (decoded by Python's HTTP client); ordinary exact
+length or close-delimited origin-marker responses remain supported. A local
+HTTP regression intentionally forges the correct origin body under an
+unsupported `gzip` transfer code and must yield ERROR rather than TN.
+Additional unit cases reject duplicate and combined framing declarations.
+This strengthens evidence integrity, not CRS rule coverage, production rule
+governance, or measured false-positive/false-negative performance.

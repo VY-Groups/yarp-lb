@@ -127,9 +127,18 @@ def verified_response_framing(headers, payload):
     When a length is present, it must be unique and match all received bytes.
     """
     lengths = headers.get_all("Content-Length", [])
-    if len(lengths) > 1 or (lengths and headers.get("Transfer-Encoding") is not None):
+    transfers = headers.get_all("Transfer-Encoding", [])
+    # http.client decodes a *single* standard chunked response; it does not
+    # validate or decode arbitrary Transfer-Encoding extensions. Without
+    # explicit framing checks a forged identity body could count as origin
+    # evidence under an unsupported or ambiguous transfer coding.
+    if len(lengths) > 1 or len(transfers) > 1 or (lengths and transfers):
         return False
+    if transfers:
+        return transfers[0].strip().lower() == "chunked"
     if not lengths:
+        # Close-delimited legacy HTTP responses remain supported, but their
+        # actual origin body still must match the exact bounded marker.
         return True
     length = lengths[0]
     if not length.isascii() or not length.isdecimal() or len(length) > 10:
