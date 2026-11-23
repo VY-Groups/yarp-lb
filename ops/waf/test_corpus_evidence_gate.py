@@ -14,12 +14,15 @@ spec = importlib.util.spec_from_file_location("waf_gate", pathlib.Path(__file__)
 gate = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(gate)
 
-POLICY = {"mode": "block", "routes": {"/api": {"max_fp": 0, "max_fn": 0}}}
+POLICY = {"schemaVersion": 2, "mode": "block", "routes": {"/api": {"max_fp": 0, "max_fn": 0}}}
 
 
-def row(case, expected, observed, mode="block", route="/api"):
+def row(case, expected, observed, mode="block", route="/api", would_block=None):
+    if would_block is None:
+        would_block = observed == "block"
     return {"case_id": case, "route": route, "expected": expected,
-            "observed": observed, "mode": mode, "severity": "high"}
+            "observed": observed, "would_block": "true" if would_block else "false",
+            "mode": mode, "severity": "high"}
 
 
 class EvidenceGateTests(unittest.TestCase):
@@ -49,11 +52,11 @@ class EvidenceGateTests(unittest.TestCase):
     def test_cli_rejects_non_object_policy_and_non_object_route_limits(self):
         invalid = [
             [], None, 42, "text",
-            {"mode": [], "routes": {"/api": {"max_fp": 0, "max_fn": 0}}},
-            {"mode": "block", "routes": {"/api": None}},
-            {"mode": "block", "routes": {"/api": ["max_fp", "max_fn"]}},
-            {"mode": "block", "routes": {"/api": 10}},
-            {"mode": "block", "routes": []},
+            {"schemaVersion": 2, "mode": [], "routes": {"/api": {"max_fp": 0, "max_fn": 0}}},
+            {"schemaVersion": 2, "mode": "block", "routes": {"/api": None}},
+            {"schemaVersion": 2, "mode": "block", "routes": {"/api": ["max_fp", "max_fn"]}},
+            {"schemaVersion": 2, "mode": "block", "routes": {"/api": 10}},
+            {"schemaVersion": 2, "mode": "block", "routes": []},
         ]
         for policy in invalid:
             with self.subTest(policy=policy):
@@ -61,8 +64,8 @@ class EvidenceGateTests(unittest.TestCase):
 
     def test_cli_rejects_duplicate_thresholds_and_non_json_constants(self):
         for policy_json in (
-            '{"mode":"block","routes":{"/api":{"max_fp":0,"max_fp":100,"max_fn":0}}}',
-            '{"mode":"block","routes":{"/api":{"max_fp":NaN,"max_fn":0}}}',
+            '{"schemaVersion":2,"mode":"block","routes":{"/api":{"max_fp":0,"max_fp":100,"max_fn":0}}}',
+            '{"schemaVersion":2,"mode":"block","routes":{"/api":{"max_fp":NaN,"max_fn":0}}}',
         ):
             with self.subTest(policy_json=policy_json):
                 self.check_cli_fails_cleanly(policy_json)
@@ -73,7 +76,7 @@ class EvidenceGateTests(unittest.TestCase):
             private_route = "/customer-route-secret-canary"
             policy_file, csv_file, output_file = (root / name for name in
                 ("policy.json", "cases.csv", "report.json"))
-            policy_file.write_text(json.dumps({"mode": "block", "routes": {
+            policy_file.write_text(json.dumps({"schemaVersion": 2, "mode": "block", "routes": {
                 private_route: {"max_fp": 0, "max_fn": 0}
             }}), encoding="utf-8")
             with csv_file.open("w", newline="", encoding="utf-8") as stream:
@@ -155,13 +158,47 @@ class EvidenceGateTests(unittest.TestCase):
             gate.evaluate([row("same", "benign", "allow"),
                            row("same", "malicious", "block")], POLICY)
 
+    def test_shadow_mode_counts_rule_verdict_without_blocking_requests(self):
+        policy = {"schemaVersion": 2, "mode": "detect", "routes": POLICY["routes"]}
+        report = gate.evaluate([
+            row("benign", "benign", "allow", mode="detect", would_block=False),
+            row("attack", "malicious", "allow", mode="detect", would_block=True)
+        ], policy)
+        self.assertEqual(report["status"], "PASS")
+        self.assertEqual(report["mode"], "detect")
+        self.assertEqual(report["schemaVersion"], 2)
+        self.assertEqual(report["routes"]["/api"],
+                         {"tp": 1, "tn": 1, "fp": 0, "fn": 0})
+
+    def test_shadow_false_positive_and_negative_still_fail(self):
+        policy = {"schemaVersion": 2, "mode": "detect", "routes": POLICY["routes"]}
+        report = gate.evaluate([
+            row("benign", "benign", "allow", mode="detect", would_block=True),
+            row("attack", "malicious", "allow", mode="detect", would_block=False)
+        ], policy)
+        self.assertEqual(report["status"], "FAIL")
+        self.assertEqual(report["routes"]["/api"]["fp"], 1)
+        self.assertEqual(report["routes"]["/api"]["fn"], 1)
+
+    def test_block_mode_rejects_unverifiable_or_inconsistent_decisions(self):
+        with self.assertRaises(ValueError):
+            gate.evaluate([row("inconsistent", "benign", "allow", would_block=True)], POLICY)
+        invalid = row("unknown", "benign", "allow")
+        invalid["would_block"] = "yes"
+        with self.assertRaises(ValueError):
+            gate.evaluate([invalid], POLICY)
+        legacy = row("legacy", "benign", "allow")
+        legacy.pop("would_block")
+        with self.assertRaises(ValueError):
+            gate.evaluate([legacy], POLICY)
+
     def test_detect_mode_must_not_block(self):
-        policy = {"mode": "detect", "routes": POLICY["routes"]}
+        policy = {"schemaVersion": 2, "mode": "detect", "routes": POLICY["routes"]}
         with self.assertRaises(ValueError):
             gate.evaluate([row("one", "benign", "block", mode="detect")], policy)
 
     def test_unrepresented_route_rejected(self):
-        policy = {"mode": "block", "routes": {**POLICY["routes"], "/admin": {"max_fp": 0, "max_fn": 0}}}
+        policy = {"schemaVersion": 2, "mode": "block", "routes": {**POLICY["routes"], "/admin": {"max_fp": 0, "max_fn": 0}}}
         with self.assertRaises(ValueError):
             gate.evaluate([row("benign", "benign", "allow"),
                            row("attack", "malicious", "block")], policy)
@@ -170,7 +207,7 @@ class EvidenceGateTests(unittest.TestCase):
         self.assertEqual(gate.evaluate([row("one", "benign", "allow")], POLICY)["status"], "FAIL")
 
     def test_non_integer_threshold_rejected(self):
-        policy = {"mode": "block", "routes": {"/api": {"max_fp": True, "max_fn": 0}}}
+        policy = {"schemaVersion": 2, "mode": "block", "routes": {"/api": {"max_fp": True, "max_fn": 0}}}
         with self.assertRaises(ValueError):
             gate.evaluate([row("one", "benign", "allow")], policy)
 
