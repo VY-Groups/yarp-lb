@@ -61,7 +61,7 @@ ServiceProvider Build(string name)
     var builder = services.AddDataProtection()
         .SetApplicationName("GatewayCoreYarpControlCenter")
         .PersistKeysToFileSystem(new DirectoryInfo(dir));
-    Check(WindowsFleetKeyProtection.TryConfigure(builder),
+    Check(WindowsFleetKeyProtection.TryConfigure(builder, dir),
         "opt-in fleet mode selected without DPAPI fallback");
     return services.BuildServiceProvider();
 }
