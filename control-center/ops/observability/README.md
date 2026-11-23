@@ -27,3 +27,21 @@ docker compose -f control-center/ops/observability/compose.yml down --remove-orp
 
 This is an integration fixture, not a production deployment recipe. Production requires authenticated TLS to the Collector and alert receivers, secret-managed credentials, protected Grafana/Prometheus access, durable storage and retention, customer-configured alert routing, tested outage handling, and host-specific capacity measurements. The fixture uses no persistent volumes; its Prometheus, Alertmanager, receiver, and Grafana state is disposable.
 
+## Log-loss alert routing from the OTLP Collector
+
+The shipped Prometheus rules detect `yarp_logging_dropped_total`,
+`yarp_logging_dropped_high_priority_total`, and
+`yarp_logging_write_errors_total` from **either** a directly scraped
+`gatewaycore-gateway` or OTLP-translated metrics under the lab
+`otel-collector` job. Without the Collector scrape label, the previous
+rules could miss exporter-supplied loss counters entirely. Critical severities,
+five-minute increase windows and existing zero-tolerance high-priority drop
+criteria are unchanged.
+
+The observability CI workflow now runs the pinned Prometheus `promtool test
+rules` command against `control-center/ops/prometheus/alert-tests.yml`,
+including positive Collector-job alerts and a no-fault control case.
+The production deployment must explicitly configure its scrape job labels
+and route receiver credentials, then prove a real high-priority warning/error
+loss and writer fault reach its paging destination. This disposable stack
+does not establish that operational acceptance and #50 remains open.
