@@ -8,6 +8,7 @@ on:
       - "control-center/ops/observability/**"
       - "control-center/ops/prometheus/gateway-dashboard.json"
       - "control-center/ops/prometheus/gateway-alerts.yml"
+      - "control-center/ops/prometheus/alert-tests.yml"
       - "control-center/ops/observability/alertmanager.yml"
       - "control-center/ops/observability/alert-delivery-test.yml"
       - "control-center/ops/observability/alert-receiver/**"
@@ -21,6 +22,7 @@ on:
       - "control-center/ops/observability/**"
       - "control-center/ops/prometheus/gateway-dashboard.json"
       - "control-center/ops/prometheus/gateway-alerts.yml"
+      - "control-center/ops/prometheus/alert-tests.yml"
       - "control-center/ops/observability/alertmanager.yml"
       - "control-center/ops/observability/alert-delivery-test.yml"
       - "control-center/ops/observability/alert-receiver/**"
@@ -44,6 +46,14 @@ jobs:
           python3 control-center/ops/prometheus/validate_gateway_dashboard.py
           python3 -m unittest discover -s control-center/ops/observability/alert-receiver -p 'test_*.py'
           docker compose -f control-center/ops/observability/compose.yml config --quiet
+      - name: Validate real Prometheus alert semantics, including Collector loss signals
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v "$PWD/control-center/ops/prometheus:/etc/prometheus:ro" \
+            --entrypoint promtool prom/prometheus:v3.14.0 \
+            test rules /etc/prometheus/alert-tests.yml
       - name: Start isolated observability stack
         shell: bash
         run: docker compose -f control-center/ops/observability/compose.yml up -d --build
