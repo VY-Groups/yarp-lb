@@ -7,6 +7,7 @@ This does not generate traffic or replace real Windows/Linux WAF acceptance.
 import argparse
 import csv
 import json
+import os
 import pathlib
 import sys
 from collections import defaultdict
@@ -67,6 +68,34 @@ def evaluate(rows, policy):
             "routes": dict(sorted(stats.items())), "failures": failures}
 
 
+def write_private_report(path, report):
+    """Write local, operator-owned evidence via a fresh 0600 temporary inode.
+
+    Never follow a predictable temporary symlink or publish route identifiers
+    to stdout. Parent-directory permissions remain the operator's duty.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".tmp")
+    if path.is_symlink():
+        raise ValueError("private WAF evidence report destination is a symlink")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(temporary, flags, 0o600)
+    created = True
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(report, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        if path.is_symlink():
+            raise ValueError("private WAF evidence destination became a symlink")
+        os.replace(temporary, path)
+        created = False
+    finally:
+        if created:
+            temporary.unlink(missing_ok=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--corpus", required=True, type=pathlib.Path)
@@ -96,9 +125,15 @@ def main():
             report = evaluate(reader, policy)
     except (ValueError, OSError, UnicodeError, json.JSONDecodeError) as exc:
         report = {"status": "FAIL", "failures": [str(exc)]}
-    args.out.parent.mkdir(parents=True, exist_ok=True)
-    args.out.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    print(json.dumps(report, sort_keys=True))
+    try:
+        write_private_report(args.out, report)
+    except (OSError, ValueError):
+        print("FAIL: unable to write private WAF evidence report", file=sys.stderr)
+        return 2
+    # Public CI stdout contains only status/count, never operator route names,
+    # case identifiers, policy values or detailed exceptions.
+    print(json.dumps({"status": report["status"], "cases": report.get("cases", 0)},
+                     sort_keys=True))
     return 0 if report["status"] == "PASS" else 1
 
 
