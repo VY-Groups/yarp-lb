@@ -108,7 +108,12 @@ class MatchedCapacityEvidenceTests(unittest.TestCase):
         ]
         for field,value in cases:
             e=copy.deepcopy(self.e)
-            e["runs"]["linux"]["yarp_waf"]["windows"][10][field]=value
+            window=e["runs"]["linux"]["yarp_waf"]["windows"][10]
+            window[field]=value
+            if field=="p95Ms":
+                # Preserve valid percentile ordering, exceed ONLY the
+                # independently preapproved p95 policy threshold.
+                window["p99Ms"]=230
             with self.subTest(field=field):
                 self.assertEqual(gated.gate(self.p,e)["decision"],"NO-GO")
         e=copy.deepcopy(self.e)
