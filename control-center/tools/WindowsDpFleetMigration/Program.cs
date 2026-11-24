@@ -98,6 +98,7 @@ public static class WindowsDpOfflineFleetMigration
         var wrapped = encryptor.Encrypt(plain);
         Stage = "certificate-roundtrip-decrypt";
         var recovered = decryptor.Decrypt(wrapped.EncryptedElement);
+        Stage = "certificate-roundtrip-compare";
         if (!XNode.DeepEquals(plain, recovered))
             throw new InvalidOperationException("Portable X.509 rewrap failed self-check");
         Stage = "certificate-decryptor-type";
@@ -275,10 +276,21 @@ public static class Program
                               "source untouched, live promotion NOT authorized");
             return count > 0 ? 0 : 1;
         }
-        catch (Exception)
+        catch (Exception ex)
         {
-            // Only fixed source-authored stage names; no exception strings,
-            // service SID, certificates, plaintext, file paths or key IDs.
+            // Only fixed source-authored stages and fixed exception CATEGORIES.
+            // Never expose raw exception strings, paths, cookies, certificate
+            // names, key IDs, private material or stack traces.
+            var category = ex switch {
+                CryptographicException => "cryptography",
+                UnauthorizedAccessException => "access",
+                IOException => "filesystem",
+                XmlException => "xml",
+                InvalidOperationException => "validation",
+                ArgumentException => "arguments",
+                _ => "other"
+            };
+            Console.Error.WriteLine("WIN_DP_MIGRATION_FAILURE_CATEGORY=" + category);
             Console.Error.WriteLine(
                 "WIN_DP_MIGRATION_FAILURE_STAGE=" + WindowsDpOfflineFleetMigration.Stage);
             Console.Error.WriteLine(
