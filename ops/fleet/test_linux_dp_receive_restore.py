@@ -102,6 +102,35 @@ class RecoveryTests(unittest.TestCase):
                                   invoke=self.fake_success)
         self.assertEqual(len(self.calls),1)
 
+    def test_ambient_dotnet_root_is_never_implicitly_trusted(self):
+        # An attacker may control an inherited service/CI environment.
+        # Only an independently approved root can be passed to the child.
+        with mock.patch.dict(os.environ, {
+            "DOTNET_ROOT": "/tmp/attacker-controlled-runtime",
+            "DOTNET_ROOT_X64": "/tmp/other-attacker-runtime"
+        }):
+            received = recovery.restore_once(
+                self.args, fetch=lambda *_:synthetic_blob(),
+                invoke=self.fake_success)
+        self.assertEqual(received, str(self.inbox/"rev8"))
+        child_environment = self.calls[0][1]["env"]
+        self.assertNotIn("DOTNET_ROOT", child_environment)
+        self.assertNotIn("DOTNET_ROOT_X64", child_environment)
+
+    def test_invalid_explicit_runtime_root_refuses_signed_restore(self):
+        # An operator cannot approve a symlink or an untrusted runtime
+        # directory, even when a malicious host-shaped executable exists.
+        path = self.root/"untrusted-runtime"
+        path.mkdir(mode=0o700)
+        (path/"dotnet").write_text("fixture-only", encoding="ascii")
+        (path/"dotnet").chmod(0o777)
+        self.args.dotnet_runtime_root = str(path)
+        with self.assertRaises(ValueError):
+            recovery.restore_once(
+                self.args, fetch=lambda *_:synthetic_blob(),
+                invoke=lambda *a, **k:self.fail("unsafe .NET runtime executed"))
+        self.assertFalse((self.state/"data-protection-keys").exists())
+
     def test_no_operator_approval_fails_before_any_communication(self):
         self.args.approved_offline=False
         with self.assertRaises(ValueError):
