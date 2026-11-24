@@ -7,7 +7,7 @@ internal static class ManagementPrivacyPolicy
 {
     internal const string CookieName = "GatewayCorePrivacy";
     internal const string AcceptancePath = "/admin/api/privacy/accept";
-    internal const string Text = """
+    private const string RawText = """
         GatewayCore Control Center — Privacy Policy
         Notice date: 24 November 2026
 
@@ -32,6 +32,9 @@ internal static class ManagementPrivacyPolicy
         Your choice
         Acknowledge this notice to use the management console. Declining leaves management functions unavailable; you may review the notice again or sign out. Acknowledgement does not waive privacy rights or constitute consent to unrelated optional processing. A new authenticated session or revised notice requires renewed acknowledgement.
         """;
+    // The same policy must have the same revision on Windows and Linux,
+    // regardless of checkout line endings. Render and hash identical bytes.
+    internal static readonly string Text = RawText.ReplaceLineEndings("\n");
     internal static readonly string Version = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(Text)));
 
     private static string? Binding(HttpContext ctx)

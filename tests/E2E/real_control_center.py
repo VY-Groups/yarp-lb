@@ -616,6 +616,9 @@ def acceptance(base:str,https_base:str,origin_port:int):
     pending=admin.session(accept_privacy=False)
     check(not pending["privacyAccepted"] and "Privacy Policy" in pending["privacyText"],
           "new authenticated session must acknowledge policy")
+    check("\r" not in pending["privacyText"] and
+          hashlib.sha256(pending["privacyText"].encode("utf-8")).hexdigest().upper()==pending["privacyVersion"],
+          "privacy revision hashes the canonical UTF-8 notice displayed to the user")
     admin.request("GET","/admin/api/state",expect=428)
     admin.request("POST","/admin/api/inventory",{"id":"blocked"},expect=428)
     admin.request("POST","/admin/api/privacy/accept",{"version":pending["privacyVersion"]},csrf=False,expect=403)

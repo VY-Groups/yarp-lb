@@ -9,3 +9,5 @@ The technical notice is not a jurisdiction-specific compliance certification. Th
 Real API and Chromium tests exercise decline, acceptance, stale versions, missing CSRF, direct API blocking and session refresh. Disposable test clients explicitly acknowledge the current notice; there is no production bypass.
 
 Additional browser checks verify the receipt is HttpOnly and SameSite=Strict, tampering does not grant access, and a previously valid receipt cannot unlock a new login. The API test also checks anonymous acceptance refusal, public notice availability, an audit event and absence of side effects from blocked writes. A 401 on the policy screen returns to sign-in; a 428 clears stale management state, closes any open editor and reloads the session notice. No mutation is automatically retried.
+
+The notice text is normalized to LF before rendering and SHA-256 hashing so Windows and Linux builds agree on the same revision regardless of source checkout line endings. The real API fixture verifies the returned notice bytes match the returned revision.
