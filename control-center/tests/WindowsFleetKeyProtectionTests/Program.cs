@@ -23,7 +23,7 @@ void Check(bool ok, string label)
     Console.WriteLine("PASS: " + label);
 }
 
-X509Certificate2 Install(bool encryptionLeaf)
+X509Certificate2 Install(bool encryptionLeaf, bool expired = false)
 {
     using var key = RSA.Create(3072);
     var req = new CertificateRequest(
@@ -34,7 +34,8 @@ X509Certificate2 Install(bool encryptionLeaf)
         encryptionLeaf ? X509KeyUsageFlags.KeyEncipherment
                        : X509KeyUsageFlags.DigitalSignature, critical: true));
     using var generated = req.CreateSelfSigned(
-        DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(31));
+        DateTimeOffset.UtcNow.AddDays(expired ? -30 : -1),
+        DateTimeOffset.UtcNow.AddDays(expired ? -2 : 31));
     var raw = generated.Export(X509ContentType.Pkcs12, "ci-test-only-windows-wrap");
     X509Certificate2 cert;
     try
@@ -209,6 +210,18 @@ try
     catch (InvalidOperationException) { aliasIdentityRejected = true; }
     Check(aliasIdentityRejected, "duplicated key XML under another GUID filename is refused");
     File.Delete(duplicateAlias);
+    // The old cert is still present in LocalMachine/My. That must NOT
+    // silently authorize retirement from the explicitly configured set.
+    Environment.SetEnvironmentVariable(Current, t2);
+    Environment.SetEnvironmentVariable(Previous, null);
+    var originalHashes = xml.ToDictionary(p=>p,p=>SHA256.HashData(File.ReadAllBytes(p)));
+    bool historicRetirementRejected = false;
+    try { using var _ = Build("gateway-one"); }
+    catch (InvalidOperationException) { historicRetirementRejected = true; }
+    Check(historicRetirementRejected &&
+          originalHashes.All(item=>SHA256.HashData(File.ReadAllBytes(item.Key)).SequenceEqual(item.Value)),
+        "retiring still-needed Windows wrapping identity refuses startup without mutating XML");
+    Environment.SetEnvironmentVariable(Current, t1);
     CopyKeys("gateway-one", "gateway-two");
     using var second = Build("gateway-two");
     Check(CanRead(second, token), "second isolated Windows gateway reads approved portable cookie");
@@ -323,6 +336,39 @@ try
         "staged rotation overlap accepts both old and new cookies");
     Check(Directory.GetFiles(ring, "*.xml").Length > 1,
         "rotation persisted old and new encrypted key XML revisions");
+    // Construct a genuine historical encrypted ring using the framework
+    // certificate wrapper directly: the now-expired fixture could have
+    // been valid when its key XML was originally created. The product
+    // must not permit that identity to create new keys today.
+    var expired = Install(true, expired: true);
+    var expiredThumbprint = expired.Thumbprint;
+    var historicDir = Path.Combine(root, "expired-historic-ring");
+    Directory.CreateDirectory(historicDir);
+    var historicServices = new ServiceCollection();
+    historicServices.AddDataProtection()
+        .SetApplicationName("GatewayCoreYarpControlCenter")
+        .PersistKeysToFileSystem(new DirectoryInfo(historicDir))
+        .ProtectKeysWithCertificate(expired);
+    string historicCookie;
+    using (var fixture = historicServices.BuildServiceProvider())
+        historicCookie = fixture.GetRequiredService<IDataProtectionProvider>()
+            .CreateProtector("gatewaycore-windows-fleet-cookie-v1").Protect("portable-cookie");
+    var historicXml = Directory.GetFiles(historicDir, "*.xml");
+    var historicHashes = historicXml.ToDictionary(p=>p,p=>SHA256.HashData(File.ReadAllBytes(p)));
+    Environment.SetEnvironmentVariable(Current, expiredThumbprint);
+    Environment.SetEnvironmentVariable(Previous, null);
+    bool expiredWriterRejected = false;
+    try { using var _ = Build("expired-historic-ring"); }
+    catch (InvalidOperationException) { expiredWriterRejected = true; }
+    Check(expiredWriterRejected,"expired wrapping certificate cannot be the active Windows writer");
+    Environment.SetEnvironmentVariable(Current,t2);
+    Environment.SetEnvironmentVariable(Previous,expiredThumbprint);
+    using (var recovered = Build("expired-historic-ring"))
+        Check(CanRead(recovered,historicCookie),
+            "expired previous certificate remains usable for historic cookie decryption");
+    Check(historicXml.Length == Directory.GetFiles(historicDir,"*.xml").Length &&
+          historicHashes.All(item=>SHA256.HashData(File.ReadAllBytes(item.Key)).SequenceEqual(item.Value)),
+        "historical decryption does not rewrite the protected Windows ring");
     Console.WriteLine("WINDOWS FLEET CERTIFICATE DATA PROTECTION SOFTWARE ACCEPTANCE PASSED");
 }
 finally
