@@ -159,7 +159,7 @@ class RecoveryTests(unittest.TestCase):
             invoke=self.fake_success, fence=fence)
         self.assertEqual(received,str(self.inbox/"rev8"))
         self.assertEqual(fence.phases,[
-            "preflight", "before-transfer", "after-transfer",
+            "preflight", "before-transfer", "after-transfer", "after-transfer",
             "before-signed-restore", "after-signed-restore"])
         self.assertEqual(len(self.calls),1)
         self.assertLessEqual(self.calls[0][1]["timeout"], 85)
@@ -180,6 +180,57 @@ class RecoveryTests(unittest.TestCase):
                                   invoke=lambda *a,**k:self.fail("wrong checkpoint"))
         self.assertFalse((self.state/"data-protection-keys").exists())
         self.assertEqual(fence.phases,["preflight", "before-transfer"])
+        self.assertFalse((self.inbox/"rev8").exists(),
+                         "wrong epoch must not reserve the durable archive label")
+
+    def test_quorum_loss_after_download_prevents_durable_publication(self):
+        fence = SyntheticFence(deny="after-transfer")
+        with self.assertRaises(ValueError):
+            recovery.restore_once(
+                self.args, fetch=lambda *_:synthetic_blob(), fence=fence,
+                stage=lambda *_:self.fail("unauthorized durable archive"),
+                invoke=lambda *a,**k:self.fail("unauthorized restore"))
+        self.assertEqual(fence.phases,["preflight", "before-transfer",
+                                       "after-transfer"])
+        self.assertEqual(list(self.inbox.iterdir()), [])
+
+    def test_quorum_revoked_during_staging_refuses_atomic_publish(self):
+        fence = SyntheticFence()
+        original_write = wire.safe_write
+
+        def revoke_while_writing(path, data):
+            original_write(path, data)
+            fence.deny = "after-transfer"
+
+        with mock.patch.object(wire, "safe_write", side_effect=revoke_while_writing):
+            with mock.patch.object(wire, "publish_no_replace",
+                                   side_effect=AssertionError("unfenced rename")) as publish:
+                with self.assertRaises(ValueError):
+                    recovery.restore_once(
+                        self.args, fetch=lambda *_:synthetic_blob(),
+                        fence=fence,
+                        invoke=lambda *a,**k:self.fail("unauthorized restore"))
+                publish.assert_not_called()
+        self.assertEqual(fence.phases, ["preflight", "before-transfer",
+                                       "after-transfer", "after-transfer"])
+        self.assertEqual(list(self.inbox.iterdir()), [],
+                         "revoked staging must leave no archive or temporary tree")
+        self.assertFalse((self.state/"data-protection-keys").exists())
+
+    def test_staged_checkpoint_must_match_inspected_response(self):
+        def tampered_stage(root, label, blob, *, authorize_publish):
+            path = wire.stage_received(root, label, blob,
+                                       authorize_publish=authorize_publish)
+            (Path(path)/"checkpoint.json").write_bytes(b"changed")
+            return path
+
+        with self.assertRaises(ValueError):
+            recovery.restore_once(
+                self.args, fetch=lambda *_:synthetic_blob(),
+                stage=tampered_stage, fence=SyntheticFence(),
+                invoke=lambda *a,**k:self.fail("changed checkpoint"))
+        self.assertFalse((self.inbox/".rev8.signed-checkpoint.json").exists())
+        self.assertFalse((self.state/"data-protection-keys").exists())
 
     def test_no_restore_execution_without_sufficient_lease_runway(self):
         fence = SyntheticFence(remaining=8)

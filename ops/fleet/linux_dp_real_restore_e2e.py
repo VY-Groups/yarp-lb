@@ -175,8 +175,9 @@ def integration(args):
                 STAGE = "mutual-tls-receive-and-signed-dotnet-restore"
                 fence.phases.clear()
                 returned = receiver.restore_once(request, fence=fence)
-                if (fence.phases[:3] != [
-                        "preflight", "before-transfer", "after-transfer"] or
+                if (fence.phases[:4] != [
+                        "preflight", "before-transfer", "after-transfer",
+                        "after-transfer"] or
                         fence.phases.count("before-signed-restore") < 2 or
                         fence.phases[-2:] != [
                             "after-signed-restore", "after-signed-restore"] or

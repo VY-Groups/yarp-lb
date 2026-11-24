@@ -227,7 +227,7 @@ def publish_no_replace(staging, final):
         raise ValueError("encrypted transfer target already exists or cannot be published")
 
 
-def stage_received(dest_root, label, blob):
+def stage_received(dest_root, label, blob, *, authorize_publish=None):
     valid_label(label)
     entries = verify_bundle(blob)
     root_fd = private_directory(dest_root)
@@ -249,6 +249,11 @@ def stage_received(dest_root, label, blob):
                     os.fsync(fd)
                 finally:
                     os.close(fd)
+            # Check authorization after all potentially slow writes and
+            # fsyncs, immediately before the no-replace namespace commit.
+            # The private temporary directory is removed on a veto.
+            if authorize_publish is not None and authorize_publish() is not True:
+                raise ValueError("encrypted archive publication not authorized")
             publish_no_replace(staging, final)
             # The source directory no longer exists after an atomic publish.
             os.fsync(root_fd)
