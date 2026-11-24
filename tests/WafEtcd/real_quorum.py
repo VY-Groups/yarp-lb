@@ -318,7 +318,20 @@ def main():
                   "fresh linearizable 2-of-3 WAF fencing")
 
             # A second controller cannot silently replace a live leased key.
+            # Compare the actual pre/post linearizable key contents and Raft
+            # revisions, not just a proto3 JSON boolean that etcd's gateway
+            # may omit for false-valued responses.
             STAGE = "live-conflicting-writer-cas"
+            before_cas = post(addr, ("/v3/kv/range", {
+                "key":keybase, "serializable":False
+            }), ca,writer_cert,writer_key)
+            before_members=before_cas.get("kvs")
+            if type(before_members) is not list or len(before_members)!=1:
+                raise RuntimeError("active lease key unreadable before CAS")
+            before_key=before_members[0]
+            fields=("create_revision","mod_revision","version","lease","value")
+            if any(field not in before_key for field in fields):
+                raise RuntimeError("active lease metadata incomplete before CAS")
             try:
                 duplicate = post(addr, ("/v3/kv/txn",{
                     "compare":[{"result":"EQUAL","target":"CREATE",
@@ -335,12 +348,26 @@ def main():
                         "etcd-http-503", "etcd-http-999",
                         "etcd-http-oversized"} else "request")
                 raise
-            if duplicate.get("succeeded") is not False:
-                # Never print the private WAF lease or any etcd body.
-                STAGE = "competing-writer-unexpected-" + (
-                    "true" if duplicate.get("succeeded") is True else
-                    "missing-or-nonboolean")
-                raise RuntimeError("second etcd WAF writer bypassed active lease")
+            header = duplicate.get("header")
+            # grpc-gateway/Proto3 may omit the zero/false-valued succeeded
+            # field. Only an authenticated exact-cluster response with
+            # a missing or literal-false field is eligible for verification.
+            if (type(header) is not dict or
+                    str(header.get("cluster_id")) != str(cluster) or
+                    duplicate.get("succeeded") not in (None,False) or
+                    duplicate.get("succeeded") is True or
+                    type(duplicate.get("responses",[])) is not list or
+                    duplicate.get("responses",[])):
+                STAGE = "competing-writer-invalid-result"
+                raise RuntimeError("second etcd WAF CAS response not a safe rejection")
+            after_cas=post(addr, ("/v3/kv/range",{
+                "key":keybase,"serializable":False
+            }),ca,writer_cert,writer_key)
+            actual=after_cas.get("kvs")
+            if (type(actual) is not list or len(actual)!=1 or
+                    any(before_key[field]!=actual[0].get(field) for field in fields)):
+                STAGE = "competing-writer-mutated-signed-lease"
+                raise RuntimeError("second etcd WAF writer changed existing Raft lease")
 
             # Independent revocation is a real quorum event, not a fake local
             # flag. The previously authorized controller must be refused.
