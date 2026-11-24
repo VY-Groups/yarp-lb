@@ -419,19 +419,31 @@ def main():
                 STAGE = "real-dp-cas-" + (
                     dp_issuer.phase if dp_issuer.phase in stages else "unclassified")
                 raise
+            STAGE = "real-dp-cas-issued-receipt"
             if (dp_receipt["checkpointSha256"] != P or
                     dp_receipt["leaseId"] <= 0 or
                     dp_receipt["senderNodeId"] != "gateway-a" or
                     dp_receipt["receiverNodeId"] != "gateway-b"):
                 raise RuntimeError("real Raft DP CAS did not pin signed recovery")
+            STAGE = "real-dp-reader-construction"
             dp_verifier = dp_recovery.RecoveryFence(
                 "fleet-ci", endpoints, cluster, ca, reader_cert, reader_key,
                 "gateway-a", "gateway-b", 43, P)
+            STAGE = "real-dp-read-only-majority"
             if not dp_verifier.current("preflight") or \
                     not dp_verifier.current("before-signed-restore"):
                 raise RuntimeError("real 2/3 Raft quorum denied signed DP recovery")
-            if not verifier.assert_current(NODES, 7, P, "before-receipt"):
-                raise RuntimeError("independent DP lease clobbered the WAF authority")
+            # The ORIGINAL WAF verifier is correctly fenced after the WAF
+            # test's intentional revocation and epoch rollover. Instantiate
+            # a new verifier for the newly issued WAF epoch; no unrelated DP
+            # grant is allowed to mutate that independent namespace.
+            STAGE = "real-dp-isolated-waf-namespace"
+            fresh_waf = quorum.EtcdQuorumFence(
+                "fleet-ci", endpoints, cluster, ca, reader_cert, reader_key)
+            if (not fresh_waf.assert_current(NODES, 7, P, "preflight") or
+                    not fresh_waf.assert_current(NODES, 7, P, "before-receipt") or
+                    verifier.assert_current(NODES, 7, P, "before-receipt")):
+                raise RuntimeError("independent DP lease changed existing WAF epoch")
             STAGE = "real-dp-recovery-contested-cas"
             try:
                 dp_issuer.issue_once()
