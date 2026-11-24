@@ -492,20 +492,33 @@ try
         Assert((File.GetUnixFileMode(revisionFloorPath)&(UnixFileMode.GroupRead|
             UnixFileMode.GroupWrite|UnixFileMode.OtherRead|UnixFileMode.OtherWrite))==0,
             "committed independent floor persists privately");
-        // Verify the SAME independently signed encrypted snapshot on a
-        // second, isolated Linux state root before enabling its sessions.
-        // Earlier fleet fixtures copied ciphertext only; no plaintext key,
-        // signer or external revision floor comes from the restored ring.
-        Assert(LinuxDpRecoveryEvidence.ComputeInventoryDigest(fleetReplicaKeys) ==
+        // Test RESTORATION into a fresh isolated key-ring root, not the
+        // earlier live fleet replica. That replica may legitimately have
+        // generated its own newer encrypted key and is not a byte-identical
+        // backup snapshot. A recovery MUST preserve the signed exact XML
+        // inventory before allowing the new service to use old sessions.
+        var signedRestoreState=Path.Combine(root,"signed-recovery-replica-state");
+        Set("YARP_CONTROL_PLANE_DIR",signedRestoreState);
+        Assert(LinuxKeyProtection.InitializeStateDirectory()==signedRestoreState,
+            "recovery creates a separate owner-only destination state");
+        Set("YARP_CONTROL_PLANE_DIR",state);
+        var signedRestoreKeys=Path.Combine(signedRestoreState,"data-protection-keys");
+        foreach(var sourceKey in Directory.GetFiles(keyDirectory,"*.xml"))
+        {
+            var restoredFile=Path.Combine(signedRestoreKeys,Path.GetFileName(sourceKey));
+            File.Copy(sourceKey,restoredFile,overwrite:false);
+            File.SetUnixFileMode(restoredFile,PrivateFile);
+        }
+        Assert(LinuxDpRecoveryEvidence.ComputeInventoryDigest(signedRestoreKeys) ==
             inventoryBeforeCommit,
-            "second isolated replica retains the exact signed encrypted inventory");
-        LinuxDpRecoveryEvidence.Verify(fleetReplicaKeys,generatedManifest,
+            "fresh isolated restore retains exact signed encrypted inventory");
+        LinuxDpRecoveryEvidence.Verify(signedRestoreKeys,generatedManifest,
             trustedPublicPath,LinuxDpRecoveryFloor.ReadExternalFloor(
-                fleetReplicaKeys,revisionFloorPath));
-        Assert(true,"second isolated replica accepts the independently trusted signed restore");
-        Assert(Throws(()=>LinuxDpRecoveryEvidence.Verify(fleetReplicaKeys,
+                signedRestoreKeys,revisionFloorPath));
+        Assert(true,"fresh isolated replica accepts independently signed restore");
+        Assert(Throws(()=>LinuxDpRecoveryEvidence.Verify(signedRestoreKeys,
                 attestationPath,trustedPublicPath,43)),
-            "second isolated replica rejects older signed restore after floor commit");
+            "fresh isolated replica rejects older signed restore after floor commit");
 
         // Fleet nodes opt into the independent revision FLOOR FILE at startup,
         // instead of copying a stale environment integer from a restored
@@ -519,8 +532,8 @@ try
             Assert(restored.GetRequiredService<IDataProtectionProvider>()
                 .CreateProtector("session-probe").Unprotect(encrypted)=="sensitive-session-value-123",
                 "service restart honors externally committed floor and old encrypted cookie");
-        Set("YARP_CONTROL_PLANE_DIR",fleetReplicaState);
-        using(var replicaRestored=Provider(fleetReplicaState))
+        Set("YARP_CONTROL_PLANE_DIR",signedRestoreState);
+        using(var replicaRestored=Provider(signedRestoreState))
             Assert(replicaRestored.GetRequiredService<IDataProtectionProvider>()
                 .CreateProtector("session-probe").Unprotect(encrypted)=="sensitive-session-value-123",
                 "independent replica restart preserves original session after signed restore");
