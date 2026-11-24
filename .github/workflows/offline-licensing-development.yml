@@ -85,9 +85,9 @@ jobs:
           dotnet build control-center/GatewayCoreYarp.csproj -c Release -o "$root/gateway" -p:GatewayCoreCommercial=true -p:GatewayCoreTrustFile="$root/keys/trust.json"
           dotnet build control-center/tests/EngineConfigSecurityTests/EngineConfigSecurityTests.csproj -c Release
           dotnet build tests/FleetQuorumAcceptance/FleetQuorumAcceptance.csproj -c Release
-          docker pull quay.io/coreos/etcd:v3.6.16
-          selected="$(docker image inspect quay.io/coreos/etcd:v3.6.16 --format '{{index .RepoDigests 0}}')"
-          if [[ ! "$selected" =~ ^quay\.io/coreos/etcd@sha256:[a-f0-9]{64}$ ]]; then exit 1; fi
+          # etcd v3.6.16 digest verified in prior successful real-quorum CI.
+          selected="quay.io/coreos/etcd@sha256:a9c7cc12156f4b26ca41f0b57ba5b76c45037ff6c1e47ea3d68cb7908d48a965"
+          docker pull "$selected"
           echo "ETCD_IMAGE=$selected" >> "$GITHUB_ENV"
       - name: Real licensed controller and two agents with production CRL validation, rollout and revoked recovery
         shell: bash
