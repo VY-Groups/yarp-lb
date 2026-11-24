@@ -5,6 +5,8 @@ on:
       - "ops/fleet/linux_dp_quiescence.py"
       - "ops/fleet/test_linux_dp_quiescence.py"
       - "ops/fleet/linux_dp_receive_restore.py"
+      - "ops/fleet/linux_dp_restore_watchdog.py"
+      - "ops/fleet/test_linux_dp_restore_watchdog.py"
       - "ops/fleet/test_linux_dp_receive_restore.py"
       - ".github/workflows/linux-dp-quiescence.yml"
   push:
@@ -13,6 +15,8 @@ on:
       - "ops/fleet/linux_dp_quiescence.py"
       - "ops/fleet/test_linux_dp_quiescence.py"
       - "ops/fleet/linux_dp_receive_restore.py"
+      - "ops/fleet/linux_dp_restore_watchdog.py"
+      - "ops/fleet/test_linux_dp_restore_watchdog.py"
       - "ops/fleet/test_linux_dp_receive_restore.py"
       - ".github/workflows/linux-dp-quiescence.yml"
   workflow_dispatch:
@@ -31,6 +35,7 @@ jobs:
           python3 -m py_compile ops/fleet/linux_dp_quiescence.py ops/fleet/linux_dp_receive_restore.py
           python3 -m unittest discover -s ops/fleet -p test_linux_dp_quiescence.py -v
           python3 -m unittest discover -s ops/fleet -p test_linux_dp_receive_restore.py -v
+          python3 -m unittest discover -s ops/fleet -p test_linux_dp_restore_watchdog.py -v
   actual-systemd-writer:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
