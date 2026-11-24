@@ -12,6 +12,50 @@ var binding = Convert.ToHexString(SHA256.HashData(installation.ExportSubjectPubl
 var now = DateTimeOffset.FromUnixTimeSeconds(1800000000);
 var keys = new Dictionary<string, byte[]> { ["test-1"] = signer.ExportSubjectPublicKeyInfo() };
 var verifier = new OfflineLicenseVerifier(keys);
+if (args.Length >= 2 && args[0] is "--ci-release-key" or "--ci-release-manifest")
+{
+    if (Environment.GetEnvironmentVariable("CI") != "true" ||
+        Environment.GetEnvironmentVariable("GITHUB_ACTIONS") != "true")
+        throw new InvalidOperationException("Disposable release fixture only.");
+    var releaseRoot = Path.GetFullPath(args[1]);
+    var fixtureKeyPath = Path.Combine(releaseRoot, "release-fixture.pk8");
+    if (args[0] == "--ci-release-key" && args.Length == 2)
+    {
+        Directory.CreateDirectory(releaseRoot);
+        var fixtureKeyBytes = signer.ExportPkcs8PrivateKey();
+        try
+        {
+            var fixtureOptions = new FileStreamOptions { Mode = FileMode.CreateNew, Access = FileAccess.Write, Share = FileShare.None };
+            if (OperatingSystem.IsLinux()) fixtureOptions.UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
+            using var fixtureKeyFile = new FileStream(fixtureKeyPath, fixtureOptions);
+            fixtureKeyFile.Write(fixtureKeyBytes);
+        }
+        finally { CryptographicOperations.ZeroMemory(fixtureKeyBytes); }
+        File.WriteAllBytes(Path.Combine(releaseRoot, "release-trust.json"), JsonSerializer.SerializeToUtf8Bytes(
+            new Dictionary<string,byte[]> { ["release-ci"] = signer.ExportSubjectPublicKeyInfo() }));
+        return;
+    }
+    if (args[0] != "--ci-release-manifest" || args.Length != 4) throw new ArgumentException("Invalid release fixture arguments.");
+    var fixturePackage = Path.GetFullPath(args[2]);
+    var fixturePrivateKey = File.ReadAllBytes(fixtureKeyPath);
+    try { signer.ImportPkcs8PrivateKey(fixturePrivateKey, out _); }
+    finally { CryptographicOperations.ZeroMemory(fixturePrivateKey); }
+    var fixtureFiles = Directory.EnumerateFiles(fixturePackage, "*", SearchOption.AllDirectories)
+        .Order(StringComparer.Ordinal).Select(path =>
+        {
+            using var input = File.OpenRead(path);
+            return new { path = Path.GetRelativePath(fixturePackage,path).Replace(Path.DirectorySeparatorChar,'/'),
+                size = input.Length, sha256 = Convert.ToHexString(SHA256.HashData(input)) };
+        }).ToArray();
+    var fixturePayload = JsonSerializer.SerializeToUtf8Bytes(new { schemaVersion = 1, product = "GatewayCore",
+        sourceCommit = args[3], files = fixtureFiles });
+    var fixturePrefix = "GCM1.release-ci." + B64(fixturePayload);
+    var fixtureManifest = fixturePrefix + "." + B64(signer.SignData(Encoding.ASCII.GetBytes(fixturePrefix),
+        HashAlgorithmName.SHA256,DSASignatureFormat.IeeeP1363FixedFieldConcatenation));
+    using var manifestFile = new FileStream(Path.Combine(fixturePackage,ReleaseIntegrityVerifier.ManifestName),FileMode.CreateNew);
+    manifestFile.Write(Encoding.ASCII.GetBytes(fixtureManifest));
+    return;
+}
 if (args.Length == 2 && args[0] == "--ci-trust")
 {
     // Disposable public-only trust resource for commercial compile CI.

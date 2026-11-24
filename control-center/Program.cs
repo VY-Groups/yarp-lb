@@ -23,6 +23,28 @@ using Microsoft.AspNetCore.Mvc;
 using System.Threading.RateLimiting;
 using Yarp.ReverseProxy.LoadBalancing;
 
+#if GATEWAYCORE_COMMERCIAL && GATEWAYCORE_RELEASE_PACKAGE
+// Release package inventory is checked before any local command, service,
+// listener, licensing state or other mutable runtime state is opened.
+try
+{
+    var verifiedSource = CommercialReleaseIntegrity.Verify();
+    if (args.Length == 1 && args[0] == "--verify-release")
+    {
+        Console.WriteLine("COMMERCIAL_RELEASE_INTEGRITY_PASS " + verifiedSource);
+        return;
+    }
+}
+catch (Exception ex) when (ex is IOException or CryptographicException or
+    InvalidDataException or JsonException or FormatException or ArgumentException or
+    InvalidOperationException or UnauthorizedAccessException)
+{
+    Console.Error.WriteLine("Commercial package integrity rejected: " + ex.GetType().Name);
+    Environment.ExitCode = 78;
+    return;
+}
+#endif
+
 // Explicit local operator command, never a remote management endpoint.
 // Handle before constructing any listener, audit worker or other hosted service.
 if(args.Length>0 && args[0]=="--linux-dp-key-issue")
