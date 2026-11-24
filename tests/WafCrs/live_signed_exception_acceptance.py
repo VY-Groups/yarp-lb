@@ -172,10 +172,30 @@ def main(compose):
                     media = "application/json" if name == "signed-other-mime" else "application/pkix-cert"
                     status, body = probe(path, name, media)
                     if status != code:
-                        # Only fixed synthetic case ID, status and numeric
-                        # target are safe for public CI; never request bytes.
+                        # Fixed synthetic case IDs and native CRS rule numbers
+                        # are safe public diagnostics. Never print request
+                        # bytes, raw audit, runtime credentials or file paths.
                         print(f"SYNTHETIC_SIGNED_SCOPE verdict={name} http={status} expected={code}",
                               file=sys.stderr)
+                        cid = compose_run([*prefix, "ps", "--quiet", "waf"],
+                                          env=env).strip()
+                        conf = ("/etc/modsecurity.d/owasp-crs/rules/"
+                                "REQUEST-901-GATEWAYCORE-SIGNED-PKIX.conf")
+                        readable = subprocess.run(["docker", "exec", cid, "test", "-r", conf],
+                                                  stdout=subprocess.DEVNULL,
+                                                  stderr=subprocess.DEVNULL,
+                                                  timeout=8, check=False).returncode == 0
+                        print("SYNTHETIC_SIGNED_CONFIG_READABLE=" + str(readable),
+                              file=sys.stderr)
+                        log = compose_run([*prefix, "logs", "--no-color", "waf"],
+                                          env=env, timeout=25)
+                        found = []
+                        for txn in native.audit_transactions(log):
+                            if CASE.findall("\n".join(txn["B"])) == [name]:
+                                found.append(sorted(set(native.RULE_ID.findall(
+                                    "\n".join(txn["H"])))))
+                        print("SYNTHETIC_SIGNED_NATIVE_RULE_IDS=" +
+                              json.dumps(found[:2]), file=sys.stderr)
                         raise ValueError("signed ModSecurity scoped request was not enforced")
                     if code == 200 and b'"accepted":true' not in body:
                         raise ValueError("signed exception request did not reach private origin")
