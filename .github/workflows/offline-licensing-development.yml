@@ -61,3 +61,35 @@ jobs:
         if: always() && runner.os == 'Linux'
         shell: bash
         run: rm -rf -- "$RUNNER_TEMP/commercial-ci-authority"
+
+  commercial-fleet-transaction:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - name: Build isolated commercial and ordinary test executables
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/commercial-fleet-transaction"
+          mkdir -p "$root"
+          dotnet build tests/OfflineLicensing/OfflineLicensing.csproj -c Release -o "$root/fixture"
+          dotnet "$root/fixture/OfflineLicensing.dll" --ci-engine-key "$root/keys"
+          dotnet build control-center/GatewayAgent/GatewayCoreGatewayAgent.csproj -c Release
+          dotnet build control-center/GatewayAgent/GatewayCoreGatewayAgent.csproj -c Release -o "$root/agent" -p:GatewayCoreCommercial=true -p:GatewayCoreTrustFile="$root/keys/trust.json"
+          dotnet build control-center/GatewayCoreYarp.csproj -c Release -o "$root/gateway" -p:GatewayCoreCommercial=true -p:GatewayCoreTrustFile="$root/keys/trust.json"
+          dotnet build control-center/tests/EngineConfigSecurityTests/EngineConfigSecurityTests.csproj -c Release
+      - name: Real licensed controller and two agents with production CRL validation, rollout and revoked recovery
+        shell: bash
+        run: |
+          set -euo pipefail
+          export GATEWAY_COMMERCIAL_RECOVERY_ROOT="$RUNNER_TEMP/commercial-fleet-transaction"
+          export GATEWAY_FLEET_RECOVERY_TEST_DLL="$GITHUB_WORKSPACE/control-center/tests/EngineConfigSecurityTests/bin/Release/net10.0/EngineConfigSecurityTests.dll"
+          python3 control-center/tests/EngineConfigSecurityTests/agent_crl_acceptance.py
+      - name: Remove disposable signing material
+        if: always()
+        shell: bash
+        run: rm -rf -- "$RUNNER_TEMP/commercial-fleet-transaction"

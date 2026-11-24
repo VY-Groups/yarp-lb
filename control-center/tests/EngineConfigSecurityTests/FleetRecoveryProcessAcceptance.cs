@@ -95,23 +95,25 @@ internal static class FleetRecoveryProcessAcceptance
         if(mode == "prepare")
         {
             var rows = new JsonArray();
+            long sequence=1;
             foreach(var id in new[]{"one","two"})
             {
                 var status=await Call(id,"agent/v1/status");
                 var revision=status["revision"]!.GetValue<string>();
                 Must(FleetRolloutJournal.IsDigest(revision),"real authenticated agent revision available");
+                sequence=Math.Max(sequence,checked(status["highestAcceptedSequence"]!.GetValue<long>()+1));
                 rows.Add(new JsonObject { ["id"]=id,["originalRevision"]=revision,
                     ["prepareSent"]=false,["activateSent"]=false,["rollbackVerified"]=false });
             }
             var journal = new JsonObject {["schema"]=2,["id"]=tx,["fleetDigest"]=digest,
-                ["status"]="preparing",["details"]=new JsonArray(),["targets"]=rows};
+                ["status"]="preparing",["sequence"]=sequence,["details"]=new JsonArray(),["targets"]=rows};
             FleetRolloutJournal.Write(path,journal);
             var proxy=JsonNode.Parse("""{"Routes":{},"Clusters":{},"fixture":"candidate"}""")!.AsObject();
             var signingKey=File.ReadAllText(Path.Combine(root,"fleet-private.pem"));
             foreach(var target in FleetRolloutJournal.Targets(journal))
             {
                 var id=target["id"]!.GetValue<string>();var revision=target["originalRevision"]!.GetValue<string>();
-                var signed=FleetConfigSignature.SignV2(signingKey,tx,revision,proxy,DateTimeOffset.UtcNow.AddMinutes(2).ToUnixTimeSeconds(),1);
+                var signed=FleetConfigSignature.SignV2(signingKey,tx,revision,proxy,DateTimeOffset.UtcNow.AddMinutes(2).ToUnixTimeSeconds(),sequence);
                 target["prepareSent"]=true;
                 FleetRolloutJournal.Log(path,journal,id,"prepare","dispatching");
                 var result=await Call(id,"agent/v1/config/prepare",new {TransactionId=tx,ExpectedRevision=revision,ReverseProxy=proxy,
@@ -151,12 +153,19 @@ internal static class FleetRecoveryProcessAcceptance
             var id=target["id"]!.GetValue<string>();
             var status=await Call(id,"agent/v1/status");
             Must(status["revision"]!.GetValue<string>()==target["originalRevision"]!.GetValue<string>() &&
-                 status["highestAcceptedSequence"]!.GetValue<long>()==1,"original revision and sequence high-water retained");
+                 status["highestAcceptedSequence"]!.GetValue<long>()==(recovered["sequence"]?.GetValue<long>()??1),"original revision and sequence high-water retained");
             var (origin,client)=Connect(id);
             using(client)
             using(var late=await client.PostAsJsonAsync(new Uri(origin,"agent/v1/config/activate"),
                 new {TransactionId=tx,PreparedRevision=target["preparedRevision"]!.GetValue<string>()}))
-                Must(late.StatusCode==HttpStatusCode.Conflict,"late activation rejected after rollback fence");
+            {
+                var revoked=Environment.GetEnvironmentVariable("GC_TEST_EXPECT_REVOKED")=="true";
+                Must(late.StatusCode==(revoked?HttpStatusCode.PaymentRequired:HttpStatusCode.Conflict),
+                    "late activation rejected after rollback");
+                if(revoked)
+                    Must(File.Exists(Path.Combine(root,id=="one"?"recovery-node-0":"recovery-node-1","stage",tx,"rollback-fence")),
+                        "durable rollback fence exists even in revoked recovery-only agent");
+            }
         }
         Console.WriteLine("FLEET_RECOVERY_COMPLETE");
     }
