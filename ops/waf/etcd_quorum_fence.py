@@ -81,7 +81,7 @@ def integer(value):
 
 
 def endpoint_parts(endpoint):
-    if type(endpoint) is not dict or set(endpoint) != {"url", "leafSha256"}:
+    if type(endpoint) is not dict or set(endpoint) != {"url", "leafSha256", "memberId"}:
         raise ValueError("explicit independent etcd member identity required")
     pin = endpoint["leafSha256"]
     if type(endpoint["url"]) is not str:
@@ -92,7 +92,7 @@ def endpoint_parts(endpoint):
             not u.hostname or u.path not in ("", "/") or u.query or u.fragment or
             u.port is None or u.port <= 0):
         raise ValueError("invalid etcd TLS endpoint or leaf pin")
-    return u.hostname, u.port, pin
+    return u.hostname, u.port, pin, integer(endpoint["memberId"])
 
 
 def valid_value(raw, names, revision, policy_digest):
@@ -112,6 +112,10 @@ def valid_value(raw, names, revision, policy_digest):
     return value["holder"]
 
 
+class MemberIdentityMismatch(ValueError):
+    """An authenticated endpoint claimed a different approved Raft member."""
+
+
 class EtcdQuorumFence:
     """A fresh linearizable etcd read + lease TTL from 2 of 3 distinct members."""
 
@@ -121,8 +125,9 @@ class EtcdQuorumFence:
         if type(endpoints) is not list or len(endpoints) != 3:
             raise ValueError("three independent etcd members required")
         parsed = [endpoint_parts(x) for x in endpoints]
-        if len({(host, port) for host, port, _ in parsed}) != 3 or \
-                len({pin for _, _, pin in parsed}) != 3:
+        if len({(host, port) for host, port, _, _ in parsed}) != 3 or \
+                len({pin for _, _, pin, _ in parsed}) != 3 or \
+                len({member_id for _, _, _, member_id in parsed}) != 3:
             raise ValueError("same etcd member/pin cannot count as quorum twice")
         cluster_id = integer(cluster_id)
         self.fleet = fleet
@@ -135,7 +140,7 @@ class EtcdQuorumFence:
         self.key = private_key(key)
 
     def _post(self, endpoint, resource, payload):
-        hostname, port, pinned_sha = endpoint
+        hostname, port, pinned_sha, expected_member_id = endpoint
         context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH,
                                              cafile=self.ca)
         context.check_hostname = True
@@ -178,6 +183,8 @@ class EtcdQuorumFence:
         if type(header) is not dict or integer(header.get("cluster_id")) != self.cluster_id:
             raise ValueError("wrong etcd quorum cluster")
         member = integer(header.get("member_id"))
+        if member != endpoint[3]:
+            raise MemberIdentityMismatch("etcd member ID not bound to approved TLS leaf")
         observed_revision = integer(header.get("revision"))
         kv = document["kvs"][0]
         if type(kv) is not dict:
@@ -231,6 +238,10 @@ class EtcdQuorumFence:
             try:
                 accepted.append(self._read_member(endpoint, names, revision,
                                                policy_digest))
+            except MemberIdentityMismatch:
+                # A reachable, authenticated endpoint impersonating a different
+                # pinned Raft member is a conflict, not an unreachable vote.
+                return False
             except (OSError, ValueError, KeyError, TypeError,
                     http.client.HTTPException, ssl.SSLError, OverflowError):
                 continue
