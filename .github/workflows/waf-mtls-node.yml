@@ -4,6 +4,7 @@ on:
     branches: [main, "feature/**"]
     paths:
       - "ops/waf/mtls_fenced_node.py"
+      - "ops/waf/waf_node_service.py"
       - "ops/waf/two_node_transaction.py"
       - "ops/waf/test_mtls_fenced_node.py"
       - "ops/waf/test_two_node_transaction.py"
@@ -11,6 +12,7 @@ on:
   pull_request:
     paths:
       - "ops/waf/mtls_fenced_node.py"
+      - "ops/waf/waf_node_service.py"
       - "ops/waf/two_node_transaction.py"
       - "ops/waf/test_mtls_fenced_node.py"
       - "ops/waf/test_two_node_transaction.py"
