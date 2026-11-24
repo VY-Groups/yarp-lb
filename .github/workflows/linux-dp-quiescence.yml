@@ -54,11 +54,11 @@ jobs:
           cleanup() {
             sudo systemctl unmask --runtime "$UNIT" >/dev/null 2>&1 || true
             sudo systemctl stop "$UNIT" >/dev/null 2>&1 || true
-            sudo rm -f "/etc/systemd/system/$UNIT"
+            sudo rm -f "/usr/lib/systemd/system/$UNIT"
             sudo systemctl daemon-reload
           }
           trap cleanup EXIT
-          sudo install -m 0644 "$RUNNER_TEMP/writer.service" "/etc/systemd/system/$UNIT"
+          sudo install -m 0644 "$RUNNER_TEMP/writer.service" "/usr/lib/systemd/system/$UNIT"
           sudo systemctl daemon-reload
           sudo systemctl start "$UNIT"
           sudo systemctl is-active --quiet "$UNIT"
