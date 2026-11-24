@@ -1,5 +1,7 @@
 # GatewayCore / YARP Control Center — v0.1
 
+**[Visual architecture and workflow atlas](docs/diagrams/README.md)** — system, traffic, security, licensing, fencing, recovery and CI diagrams.
+
 ## Ownership and future commercial licensing
 
 **GatewayCore is intended as an owner-controlled proprietary software product,
