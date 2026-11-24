@@ -20,6 +20,15 @@ jobs:
       - name: Run OWASP CRS and real HTTP allow/block checks in isolated Docker network
         shell: bash
         run: bash tests/WafCrs/verify.sh
+      - name: Exercise two isolated WAF containers with signed transaction and failure compensation
+        shell: bash
+        run: |
+          set -euo pipefail
+          # This is the immutable digest observed in the preceding real lab,
+          # not an operator-provided floating tag or untrusted PR input.
+          WAF_IMAGE="$(cat artifacts/waf-crs/waf-selected-image.txt)"
+          export WAF_IMAGE
+          python3 tests/WafCrs/live_two_node_transaction.py "$PWD/integrations/WafCrs/compose.lab.yml"
       # Never upload the entire directory: real ModSecurity audit/Compose
       # logs can contain raw request paths, headers, cookies, and optional
       # operator-supplied private corpus payloads. Export only fixed,
