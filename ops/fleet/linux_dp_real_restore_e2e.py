@@ -175,10 +175,16 @@ def integration(args):
                 STAGE = "mutual-tls-receive-and-signed-dotnet-restore"
                 fence.phases.clear()
                 returned = receiver.restore_once(request, fence=fence)
-                if fence.phases != [
-                        "preflight", "before-transfer", "after-transfer",
-                        "before-signed-restore", "after-signed-restore"]:
-                    raise ValueError("not all quorum phases were called on real .NET recovery")
+                if (fence.phases[:3] != [
+                        "preflight", "before-transfer", "after-transfer"] or
+                        fence.phases.count("before-signed-restore") < 2 or
+                        fence.phases[-2:] != [
+                            "after-signed-restore", "after-signed-restore"] or
+                        any(phase not in (
+                            "preflight", "before-transfer", "after-transfer",
+                            "before-signed-restore", "after-signed-restore")
+                            for phase in fence.phases)):
+                    raise ValueError("live quorum checks missing during real .NET recovery")
                 # Both receipt signatures were actually checked at every
                 # quorum boundary, not only once before starting the socket.
                 STAGE = "restored-archive-identity"

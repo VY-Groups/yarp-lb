@@ -2,9 +2,9 @@ name: Offline Linux DP pinned mTLS transfer acceptance
 on:
   push:
     branches: [main, "feature/**"]
-    paths: ["ops/fleet/linux_dp_mtls_transport.py", "ops/fleet/test_linux_dp_mtls_transport.py", "ops/fleet/linux_dp_receive_restore.py", "ops/fleet/test_linux_dp_receive_restore.py", "ops/fleet/linux_dp_real_restore_e2e.py", ".github/workflows/linux-dp-mtls-transfer.yml"]
+    paths: ["ops/fleet/linux_dp_mtls_transport.py", "ops/fleet/test_linux_dp_mtls_transport.py", "ops/fleet/linux_dp_receive_restore.py", "ops/fleet/linux_dp_restore_watchdog.py", "ops/fleet/test_linux_dp_restore_watchdog.py", "ops/fleet/test_linux_dp_receive_restore.py", "ops/fleet/linux_dp_real_restore_e2e.py", ".github/workflows/linux-dp-mtls-transfer.yml"]
   pull_request:
-    paths: ["ops/fleet/linux_dp_mtls_transport.py", "ops/fleet/test_linux_dp_mtls_transport.py", "ops/fleet/linux_dp_receive_restore.py", "ops/fleet/test_linux_dp_receive_restore.py", "ops/fleet/linux_dp_real_restore_e2e.py", ".github/workflows/linux-dp-mtls-transfer.yml"]
+    paths: ["ops/fleet/linux_dp_mtls_transport.py", "ops/fleet/test_linux_dp_mtls_transport.py", "ops/fleet/linux_dp_receive_restore.py", "ops/fleet/linux_dp_restore_watchdog.py", "ops/fleet/test_linux_dp_restore_watchdog.py", "ops/fleet/test_linux_dp_receive_restore.py", "ops/fleet/linux_dp_real_restore_e2e.py", ".github/workflows/linux-dp-mtls-transfer.yml"]
   workflow_dispatch:
 permissions:
   contents: read
@@ -22,8 +22,9 @@ jobs:
           openssl version
           python3 -m unittest discover -s ops/fleet -p 'test_linux_dp_mtls_transport.py' -v
           python3 -m unittest discover -s ops/fleet -p 'test_linux_dp_receive_restore.py' -v
+          python3 -m unittest discover -s ops/fleet -p 'test_linux_dp_restore_watchdog.py' -v
       - name: Reject unauthorized external Python dependencies and compile source
         shell: bash
         run: |
           set -euo pipefail
-          python3 -m py_compile ops/fleet/linux_dp_mtls_transport.py ops/fleet/test_linux_dp_mtls_transport.py ops/fleet/linux_dp_receive_restore.py ops/fleet/test_linux_dp_receive_restore.py ops/fleet/linux_dp_real_restore_e2e.py
+          python3 -m py_compile ops/fleet/linux_dp_mtls_transport.py ops/fleet/test_linux_dp_mtls_transport.py ops/fleet/linux_dp_receive_restore.py ops/fleet/test_linux_dp_receive_restore.py ops/fleet/linux_dp_restore_watchdog.py ops/fleet/test_linux_dp_restore_watchdog.py ops/fleet/linux_dp_real_restore_e2e.py
