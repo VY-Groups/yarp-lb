@@ -84,6 +84,47 @@ WAF integration, real customer FP/FN, operational false-positive tuning,
 p95/p99/CPU, policy rollback on hosts, physical failover, or #51 closure.
 Real environment acceptance stays under #36.
 
+
+## Two-node fenced transaction core (software candidate; not production fleet)
+
+\`ops/waf/two_node_transaction.py\` implements a security-oriented,
+**two-node coordinator core** for two independently validated WAF adapters.
+It accepts only a policy/ruleset digest that was separately verified against
+the signed P-256 policy and requires a live, independently authenticated
+fencing authority supplied by an external controller. There is **no**
+self-approved fence, unsigned CLI bypass, or fake local quorum fallback.
+
+The coordinator preflights **both** nodes (baseline mode, image, observed
+CRS bytes, prior HTTP smoke and target configuration) before changing either,
+requires matching baseline modes and identical pinned image digests, and
+writes a new-only private/fsynced intent record before the first mutation.
+Each activation rechecks the live fence and both nodes' runtime state,
+verifies unchanged image/rules and observed allow/block behavior after the
+actual apply. A timeout that occurs *after* remote mutation still requires
+compensation on both nodes. A failed activation, expired external fencing
+lease, changed image/CRS or missing final receipt triggers compensating
+rollback of **both** nodes to their original configuration. The private
+failure receipt records per-node rollback success/failure, never raw
+request bodies, credentials or private evidence. Unreconciled intents block
+replay. The trusted policy revision is **not** advanced automatically.
+
+\`\`\`sh
+python3 -m unittest discover -s ops/waf -p test_two_node_transaction.py -v
+\`\`\`
+
+**This is not a standalone deployment command**: it intentionally requires
+actual authenticated remote adapters and a **renewable, monotonic
+partition-fencing authority**, which have not yet been connected to the
+software core. It is NOT an atomic cross-host transaction. Crashes or network
+partitions after the first activation can leave mixed states; the protected
+intent must be reconciled under independently verified fencing before retry.
+In-process fake nodes validate software compensation paths only, not physical
+host recovery. No production capability or issue #51 closure should be
+inferred from the local protocol tests. Real two-host network isolation
+and site-specific traffic/capacity acceptance belong to #36; authenticated
+remote execution/quorum/software-integrated rollout still belong to #51.
+
+
 ## Gated single-node mode activation and rollback (candidate software)
 
 The optional Linux-only operator entrypoint at
