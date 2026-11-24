@@ -1,0 +1,32 @@
+name: Authenticated remote WAF node fencing acceptance
+on:
+  push:
+    branches: [main, "feature/**"]
+    paths:
+      - "ops/waf/mtls_fenced_node.py"
+      - "ops/waf/two_node_transaction.py"
+      - "ops/waf/test_mtls_fenced_node.py"
+      - "ops/waf/test_two_node_transaction.py"
+      - ".github/workflows/waf-mtls-node.yml"
+  pull_request:
+    paths:
+      - "ops/waf/mtls_fenced_node.py"
+      - "ops/waf/two_node_transaction.py"
+      - "ops/waf/test_mtls_fenced_node.py"
+      - "ops/waf/test_two_node_transaction.py"
+      - ".github/workflows/waf-mtls-node.yml"
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  node-transport:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify pinned mutual-TLS node mutation and two-node rollback
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m unittest discover -s ops/waf -p test_mtls_fenced_node.py -v
+          python3 -m unittest discover -s ops/waf -p test_two_node_transaction.py -v
