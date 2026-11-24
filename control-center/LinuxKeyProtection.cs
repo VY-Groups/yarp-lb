@@ -1,7 +1,11 @@
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Xml;
+using System.Xml.Linq;
 using Microsoft.AspNetCore.DataProtection;
+using Microsoft.AspNetCore.DataProtection.KeyManagement;
+using Microsoft.AspNetCore.DataProtection.Repositories;
+using Microsoft.Extensions.DependencyInjection;
 using GatewayCore.Gslb.Contracts;
 
 /// <summary>
@@ -11,6 +15,50 @@ using GatewayCore.Gslb.Contracts;
 /// </summary>
 public static class LinuxKeyProtection
 {
+    public const string FleetReplicaSetting = "YARP_LINUX_DP_FLEET_REPLICA";
+
+    // Prevent explicit IKeyManager creation and revocation writes as well
+    // as automatic generation. This is an in-process replica boundary,
+    // not an OS ACL or a distributed writer-promotion protocol.
+    private sealed class ReadOnlyRingRepository(IXmlRepository inner) : IXmlRepository
+    {
+        public IReadOnlyCollection<XElement> GetAllElements() => inner.GetAllElements();
+
+        public void StoreElement(XElement element, string friendlyName) =>
+            throw new InvalidOperationException(
+                "Fleet replica cannot persist Data Protection keys or revocations");
+    }
+
+    private static bool IsFleetReplica()
+    {
+        var value = Environment.GetEnvironmentVariable(FleetReplicaSetting);
+        return value switch
+        {
+            null or "false" => false,
+            "true" => true,
+            _ => throw new InvalidOperationException(
+                FleetReplicaSetting + " must be exactly true or false")
+        };
+    }
+
+    private static void ConfigureReplica(IDataProtectionBuilder builder, string keyDirectory)
+    {
+        if (!Directory.EnumerateFiles(keyDirectory, "key-*.xml").Any())
+            throw new InvalidOperationException(
+                "Fleet replica requires an existing encrypted Data Protection ring");
+
+        builder.DisableAutomaticKeyGeneration();
+        // PostConfigure runs after PersistKeysToFileSystem and all ordinary
+        // options setup. Refuse any implicit fallback repository.
+        builder.Services.PostConfigure<KeyManagementOptions>(options =>
+        {
+            options.AutoGenerateKeys = false;
+            options.XmlRepository = new ReadOnlyRingRepository(
+                options.XmlRepository ?? throw new InvalidOperationException(
+                    "Fleet replica requires an explicit key repository"));
+        });
+    }
+
     private const UnixFileMode PrivateDirectoryMode =
         UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute;
     private const UnixFileMode SecretFileMode =
@@ -354,6 +402,7 @@ public static class LinuxKeyProtection
         CheckPrivateDirectory(rootDirectory);
         var keyDirectory = Path.Combine(rootDirectory, "data-protection-keys");
         CheckPrivateDirectory(keyDirectory);
+        var replica = IsFleetReplica();
         ValidateExistingKeyRing(keyDirectory);
         // During a deliberately staged fleet restore, the independently held
         // signed checkpoint and minimum revision must match before key import.
@@ -381,5 +430,7 @@ public static class LinuxKeyProtection
         dataProtection.ProtectKeysWithCertificate(current);
         if (previous is not null)
             dataProtection.UnprotectKeysWithAnyCertificate(current, previous);
+        if (replica)
+            ConfigureReplica(dataProtection, keyDirectory);
     }
 }

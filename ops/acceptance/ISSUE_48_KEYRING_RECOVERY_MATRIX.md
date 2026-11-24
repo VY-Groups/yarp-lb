@@ -154,3 +154,7 @@ For **every case**, retain: source SHA, OS/runtime, disposable fixture SHA256, e
 ## Release decision and issue boundary
 
 A #48 software PASS requires merged implementation, Windows and Linux exact-head CI, real disposable service restart and negative tests, deterministic recovery/rotation/anti-rollback tests, supported-platform matrix, offline dependency/install/rollback instructions, and independent review. Any missing code or disposable-lab test stays **#48**. Only authorized physical site identity/PKI/HSM/backup restore and operational drills transfer to **#36**. Preserve Windows DPAPI defaults and existing L7/HA thresholds. Do not publish a release or declare production GO based on this matrix.
+
+## Opt-in Linux read-only fleet replica boundary
+
+Set `YARP_LINUX_DP_FLEET_REPLICA=true` on a provisioned secondary with a nonempty, previously approved encrypted key ring. Automatic key generation is disabled and the actual ASP.NET Core XML repository rejects explicit key creation and revocation writes. A replica can use existing shared keys to protect and unprotect sessions; the test checks byte-identical persistence after rejected mutations. `false` or absent preserves standalone behavior; other values fail closed. This mode does not make the filesystem read-only, authenticate future file changes, confer writer authority, or make local key activation a distributed transaction. Continuous independent writer fencing and coordinated traffic cutover remain required. Do not use an environment toggle as a promotion protocol.

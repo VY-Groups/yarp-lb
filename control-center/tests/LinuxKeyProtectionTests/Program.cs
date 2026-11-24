@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Xml.Linq;
 using Microsoft.AspNetCore.DataProtection;
+using Microsoft.AspNetCore.DataProtection.KeyManagement;
 using Microsoft.Extensions.DependencyInjection;
 
 static void Assert(bool condition, string message)
@@ -57,7 +58,8 @@ var previousEnv=new[] {
     LinuxDpRecoveryEvidence.ManifestEnv, LinuxDpRecoveryEvidence.PublicKeyEnv,
     LinuxDpRecoveryEvidence.MinimumRevisionEnv,
     LinuxDpRecoveryEvidence.MinimumRevisionFileEnv,
-    LinuxDpRecoveryEvidence.RequireEvidenceEnv
+    LinuxDpRecoveryEvidence.RequireEvidenceEnv,
+    LinuxKeyProtection.FleetReplicaSetting
 }.ToDictionary(k=>k,k=>Environment.GetEnvironmentVariable(k));
 void Set(string key,string? value) => Environment.SetEnvironmentVariable(key,value);
 // A hard link has a different pathname but the same backing inode; neither
@@ -148,6 +150,7 @@ static bool Throws(Action action)
 }
 try
 {
+    Set(LinuxKeyProtection.FleetReplicaSetting,null);
     var first=CreateCertificate("first");
     var second=CreateCertificate("second");
     Set("YARP_CONTROL_PLANE_DIR",state);
@@ -235,6 +238,41 @@ try
         Assert(dp.Unprotect(encrypted)=="sensitive-session-value-123",
             "session value decrypts across a new service provider using persisted key ring");
     }
+    // Enforce the read-only replica boundary using real Data Protection
+    // repository persistence rather than a mocked writer.
+    var beforeReplica = keyFiles.ToDictionary(p=>p,p=>SHA256.HashData(File.ReadAllBytes(p)));
+    Set(LinuxKeyProtection.FleetReplicaSetting,"true");
+    using(var replica=Provider(state))
+    {
+        var dp=replica.GetRequiredService<IDataProtectionProvider>()
+            .CreateProtector("session-probe");
+        Assert(dp.Unprotect(encrypted)=="sensitive-session-value-123",
+            "read-only fleet replica decrypts an existing cookie");
+        var minted=dp.Protect("replica-cookie");
+        Assert(dp.Unprotect(minted)=="replica-cookie",
+            "fleet replica serves sessions with the existing key");
+        var manager=replica.GetRequiredService<IKeyManager>();
+        Assert(Throws(()=>manager.CreateNewKey(DateTimeOffset.UtcNow,
+                DateTimeOffset.UtcNow.AddDays(14))),
+            "explicit key creation is refused on a read-only replica");
+        Assert(Throws(()=>manager.RevokeAllKeys(DateTimeOffset.UtcNow)),
+            "explicit revocation writes are refused on a read-only replica");
+    }
+    var afterReplica = Directory.GetFiles(Path.Combine(state,"data-protection-keys"),"*.xml");
+    Assert(afterReplica.Length==beforeReplica.Count &&
+           afterReplica.All(p=>beforeReplica.TryGetValue(p,out var hash) &&
+               SHA256.HashData(File.ReadAllBytes(p)).SequenceEqual(hash)),
+        "replica operations leave all encrypted repository XML unchanged");
+    var emptyReplica = Path.Combine(root,"empty-read-only-fleet-replica");
+    Set("YARP_CONTROL_PLANE_DIR",emptyReplica);
+    LinuxKeyProtection.InitializeStateDirectory();
+    Assert(Throws(()=>{using var _=Provider(emptyReplica);}),
+        "empty fleet replica refuses startup rather than generating a key");
+    Set("YARP_CONTROL_PLANE_DIR",state);
+    Set(LinuxKeyProtection.FleetReplicaSetting,"TRUE");
+    Assert(Throws(()=>{using var _=Provider(state);}),
+        "ambiguous fleet replica setting fails closed");
+    Set(LinuxKeyProtection.FleetReplicaSetting,null);
     // Two distinct private state roots simulate separate on-prem Linux
     // instances. Provision only the same operator-approved wrapping identity
     // and a byte-for-byte copy of encrypted XML; never create plaintext keys
