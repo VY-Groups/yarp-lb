@@ -40,7 +40,7 @@ class EffectiveRuntimeGraphTests(unittest.TestCase):
         for changed in (config.replace(b"on",b"off"),
                         config+b"\nmodsecurity off;",
                         config+b"\nmodsecurity_rules_file /etc/modsecurity.d/x.conf;",
-                        config.replace(b"/etc/modsecurity.d/","/outside/"),
+                        config.replace(b"/etc/modsecurity.d/",b"/outside/"),
                         b"server { proxy_pass http://origin; }"):
             with self.subTest(changed=changed[:45]),self.assertRaises(ValueError):
                 graph.root_from_nginx(changed)
