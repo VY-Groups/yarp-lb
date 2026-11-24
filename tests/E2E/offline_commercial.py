@@ -87,9 +87,24 @@ def main():
                   "signed active downgrade removes L7 admission immediately")
             admin.request("GET", "/admin/api/state", expect=402)
             anonymous.request("GET", "/fixture/check", expect=503)
+            admin.request("POST", "/admin/api/license/import", {"file":second}, expect=400)
+            anonymous.request("GET", "/fixture/check", expect=503)
+            check(True, "previously active L7 license cannot roll back signed downgrade")
+        with gateway(cwd, dll, root, listen) as base:
+            admin = Client(base)
+            anonymous = Client(base)
+            admin.login(user, password)
+            persisted = admin.request("GET", "/admin/api/license/status")
+            check(persisted["state"] == "feature-restricted" and not persisted["trafficAdmitted"],
+                  "signed L7 downgrade survives actual process restart")
+            admin.request("GET", "/admin/api/state", expect=402)
+            anonymous.request("GET", "/fixture/check", expect=503)
             request = root/"upgrade.gcr"
             request.write_text(admin.request("GET", "/admin/api/license/request")["file"], encoding="ascii")
             upgraded = issue("--ci-upgrade", request, root/"upgrade.lic")
+            forged_upgrade = upgraded[:-2] + ("A" if upgraded[-2] != "A" else "B") + upgraded[-1]
+            admin.request("POST", "/admin/api/license/import", {"file":forged_upgrade}, expect=400)
+            anonymous.request("GET", "/fixture/check", expect=503)
             restored = admin.request("POST", "/admin/api/license/import", {"file":upgraded})
             check(restored["revision"] == 4 and restored["trafficAdmitted"], "signed upgrade restores L7 admission")
             eventually(anonymous, "/fixture/check", "e2e-origin:/check")
