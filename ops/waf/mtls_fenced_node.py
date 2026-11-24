@@ -6,6 +6,7 @@ A trusted launcher MUST verify the signed policy and reviewer approvals, pin
 the local provider and independent quorum credentials, and approve each TLS
 leaf. No loopback/local JSON bypass or unauthenticated management endpoint.
 """
+import datetime as dt
 import hashlib
 import hmac
 import http.client
@@ -50,7 +51,7 @@ class FencedAgent:
     """Node MUST reattest the externally held lease immediately at mutation."""
 
     def __init__(self, node_id, node_ids, revision, policy_sha, ruleset_sha,
-                 approved_target, provider, fence, receipt_dir):
+                 approved_target, provider, fence, receipt_dir, *, policy_expires_utc=None):
         if (type(node_id) is not str or not NODE.fullmatch(node_id) or
                 type(node_ids) is not tuple or len(node_ids) != 2 or
                 node_ids != tuple(sorted(node_ids)) or node_id not in node_ids or
@@ -61,6 +62,12 @@ class FencedAgent:
                 approved_target not in local.MODES or
                 not callable(getattr(fence, "assert_current", None))):
             raise ValueError("unapproved fixed node deployment identity")
+        if (policy_expires_utc is not None and
+                (type(policy_expires_utc) is not dt.datetime or
+                 policy_expires_utc.tzinfo is None or
+                 policy_expires_utc <= dt.datetime.now(dt.timezone.utc))):
+            raise ValueError("approved policy expiry must be valid UTC")
+        self.policy_expires_utc = policy_expires_utc
         self.node_id, self.node_ids = node_id, node_ids
         self.revision, self.policy_sha = revision, policy_sha
         self.ruleset_sha, self.target = ruleset_sha, approved_target
@@ -98,6 +105,9 @@ class FencedAgent:
         return state
 
     def _apply(self, mode):
+        if (self.policy_expires_utc is not None and
+                dt.datetime.now(dt.timezone.utc) >= self.policy_expires_utc):
+            raise ValueError("WAF signed deployment policy expired")
         if mode not in (self.baseline, self.target):
             raise ValueError("unapproved WAF transition")
         stage = ("before-apply-" if mode == self.target else "rollback-") + self.node_id
