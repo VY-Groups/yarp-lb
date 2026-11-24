@@ -136,6 +136,13 @@ class TransportTests(unittest.TestCase):
         stream=io.BytesIO()
         with zipfile.ZipFile(stream,"w") as arch:
             arch.writestr("checkpoint.json",DUMMY_CHECKPOINT)
+            arch.writestr("ring/"+DUMMY_KEY,DUMMY_XML)
+            arch.writestr("ring/"+DUMMY_KEY.upper().replace(".XML",".xml"),DUMMY_XML)
+        with self.assertRaises(ValueError):
+            tx.verify_bundle(stream.getvalue())
+        stream=io.BytesIO()
+        with zipfile.ZipFile(stream,"w") as arch:
+            arch.writestr("checkpoint.json",DUMMY_CHECKPOINT)
             meta=zipfile.ZipInfo("ring/"+DUMMY_KEY)
             meta.create_system=3
             meta.external_attr=(stat.S_IFLNK | 0o777)<<16
