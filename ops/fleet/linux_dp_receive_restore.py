@@ -320,9 +320,25 @@ def restore_once(args, *, fetch=wire.fetch_pinned, stage=wire.stage_received,
         restore_timeout = min(restore_timeout, int(remaining - 5))
         if restore_timeout < 1:
             raise ValueError("independently authorized restore lease expired")
-    process = invoke(command, shell=False, stdin=subprocess.DEVNULL,
-                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                     env=environment, timeout=restore_timeout, check=False)
+    if fence is not None and invoke is subprocess.run:
+        # The production CLI must hold an authenticated majority and both
+        # signed service-stop receipts *throughout* the .NET subprocess.
+        # On partition, expired TTL, changed lease or malformed receipt,
+        # kill the entire private restore process group. Unit-test injected
+        # runners keep the existing bounded-execution contract.
+        import linux_dp_restore_watchdog as watchdog
+
+        def reattest_receipts():
+            require_signed_node_quiescence(proof, fence)
+            return True
+
+        result = watchdog.run_fenced_restore(
+            command, environment, fence, reattest_receipts, restore_timeout)
+        process = type("_OfflineRestoreStatus", (), {"returncode": result})()
+    else:
+        process = invoke(command, shell=False, stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         env=environment, timeout=restore_timeout, check=False)
     if process.returncode != 0:
         # No raw child stdout/stderr is ever emitted. An allowlisted numeric
         # process exit distinguishes a .NET host bootstrap failure from a
