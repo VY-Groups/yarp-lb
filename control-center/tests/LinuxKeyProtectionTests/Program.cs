@@ -1236,6 +1236,20 @@ try
             .CreateProtector("session-probe").Protect("before-rotation");
     Set("YARP_LINUX_DP_CERT_PFX_PATH",replacement.Pfx);
     Set("YARP_LINUX_DP_CERT_PASSWORD_FILE",replacement.PasswordFile);
+    Set("YARP_LINUX_DP_OLD_CERT_PFX_PATH",null);
+    Set("YARP_LINUX_DP_OLD_CERT_PASSWORD_FILE",null);
+    var previousRing = Directory.GetFiles(
+        Path.Combine(rotationState, "data-protection-keys"), "key-*.xml");
+    var beforeDenied = previousRing.ToDictionary(p=>p,p=>SHA256.HashData(File.ReadAllBytes(p)));
+    Assert(Throws(()=>{using var _=Provider(rotationState);}),
+        "new certificate alone must not start while historic XML still needs old private key");
+    Assert(previousRing.All(p=>SHA256.HashData(File.ReadAllBytes(p))
+            .SequenceEqual(beforeDenied[p])),
+        "blocked unsafe cert retirement never changes the encrypted key ring");
+    Set("YARP_LINUX_DP_OLD_CERT_PFX_PATH",first.Pfx);
+    Set("YARP_LINUX_DP_OLD_CERT_PASSWORD_FILE",first.PasswordFile);
+    Assert(Throws(()=>{using var _=Provider(rotationState);}),
+        "different but accessible previous wrapping certificate cannot masquerade as old recipient");
     Set("YARP_LINUX_DP_OLD_CERT_PFX_PATH",second.Pfx);
     Set("YARP_LINUX_DP_OLD_CERT_PASSWORD_FILE",second.PasswordFile);
     using(var provider=Provider(rotationState))
