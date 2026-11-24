@@ -160,6 +160,8 @@ def restore_once(args, *, fetch=wire.fetch_pinned, stage=wire.stage_received,
     if tree_hash(args.restore_bundle) != args.restore_bundle_sha256:
         raise ValueError("restore application changed during execution")
     restored = os.path.join(args.state_root, "data-protection-keys")
+    if not os.path.lexists(restored):
+        raise ValueError("restore exited without installing encrypted key ring")
     directory = wire.private_directory(restored)
     try:
         files = os.listdir(directory)
