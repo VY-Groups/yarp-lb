@@ -151,6 +151,15 @@ def restore_once(args, *, fetch=wire.fetch_pinned, stage=wire.stage_received,
     environment = {"PATH": "/usr/bin:/bin",
                    "DOTNET_CLI_TELEMETRY_OPTOUT": "1",
                    "DOTNET_SKIP_FIRST_TIME_EXPERIENCE": "1"}
+    # An official .NET runtime installed outside /usr/share/dotnet may use
+    # DOTNET_ROOT. Preserve only independently trusted, non-writable,
+    # canonical runtime-root paths, never an arbitrary inherited search path
+    # or untrusted runtime injection setting.
+    for name in ("DOTNET_ROOT", "DOTNET_ROOT_X64"):
+        if name in os.environ:
+            path = os.environ[name]
+            trusted_dir(path)
+            environment[name] = path
     process = invoke(command, shell=False, stdin=subprocess.DEVNULL,
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                      env=environment, timeout=180, check=False)
