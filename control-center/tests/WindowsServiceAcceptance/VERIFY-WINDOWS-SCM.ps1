@@ -4,7 +4,8 @@
 [CmdletBinding()]
 param(
     [ValidateSet('LocalSystem', 'LocalService')]
-    [string]$Identity = 'LocalSystem'
+    [string]$Identity = 'LocalSystem',
+    [string]$CandidateAppDirectory = ''
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -102,8 +103,21 @@ try {
         }
         Write-Output 'PASS: LocalService can execute but cannot replace its own CI executable'
     }
-    & dotnet publish $project --configuration Release --framework net10.0 -p:UseAppHost=true --output $published
-    if ($LASTEXITCODE -ne 0) { throw 'Disposable .NET publish failed' }
+    if ($CandidateAppDirectory) {
+        $candidate = (Resolve-Path -LiteralPath $CandidateAppDirectory).Path
+        if (-not (Test-Path -LiteralPath (Join-Path $candidate 'GatewayCoreYarp.exe') -PathType Leaf) -or
+            (Test-Path -LiteralPath (Join-Path $candidate 'appsettings.json'))) {
+            throw 'Invalid extracted candidate binary directory'
+        }
+        Get-ChildItem -LiteralPath $candidate -Force | Copy-Item -Destination $published -Recurse -Force
+        if ((Get-FileHash -LiteralPath (Join-Path $candidate 'GatewayCoreYarp.exe')).Hash -ne
+            (Get-FileHash -LiteralPath (Join-Path $published 'GatewayCoreYarp.exe')).Hash) {
+            throw 'SCM staged executable differs from extracted candidate'
+        }
+    } else {
+        & dotnet publish $project --configuration Release --framework net10.0 -p:UseAppHost=true --output $published
+        if ($LASTEXITCODE -ne 0) { throw 'Disposable .NET publish failed' }
+    }
     $exe = Join-Path $published 'GatewayCoreYarp.exe'
     if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) {
         throw 'Published Windows SCM executable missing'
