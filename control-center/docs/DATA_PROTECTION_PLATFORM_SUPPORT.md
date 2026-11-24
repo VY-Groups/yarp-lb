@@ -140,6 +140,72 @@ independent trusted revision and prove cross-node cookie continuity.
 Keep #48 open until its remaining operational and platform gates pass; #36
 tracks physical site proof.
 
+## Offline encrypted Linux Data Protection backup and signed restore
+
+\`control-center/tools/LinuxDpEncryptedSnapshot/LinuxDpEncryptedSnapshot.csproj\`
+offers a deliberately **offline** backup/restore workflow. It reads only the
+protected Data Protection XML ring (already certificate-wrapped at rest),
+rejects plaintext master keys and unexpected/symlinked/multiply-linked files,
+writes a new-only owner-private 0600 encrypted file set under a 0700 snapshot
+directory, double-checks the inventory against source modifications and fsyncs
+both ciphertext and the atomic backup directory rename. It does **not**
+export or distribute the RSA certificate private key or session cookies.
+
+First stop/fence all key-ring writers, protect the wrapping certificate
+under separate key custody and create a private archive root outside the
+restored Control Plane tree. Capture only on a quiesced authorized instance:
+
+\`\`\`sh
+dotnet run --project control-center/tools/LinuxDpEncryptedSnapshot/LinuxDpEncryptedSnapshot.csproj -- \
+  capture --ring /var/lib/gatewaycore-yarp/control-plane/data-protection-keys \
+  --archive-root /secure/offline-dp-backups \
+  --label rev43
+\`\`\`
+
+After capturing, use the *independent* P-256 signing/checkpoint tool to
+approve the exact encrypted snapshot contents and maintain its immutable
+manifest separately from the backup. No backup label is an attestation.
+
+Restore only into a **new private state root without any existing key ring**,
+after independently obtaining the signed checkpoint, pinned SPKI public key
+and monotonic external revision floor:
+
+\`\`\`sh
+dotnet run --project control-center/tools/LinuxDpEncryptedSnapshot/LinuxDpEncryptedSnapshot.csproj -- \
+  restore --archive /secure/offline-dp-backups/rev43 \
+  --state-root /var/lib/gatewaycore-yarp/recovery-staged-control-plane \
+  --checkpoint /secure/recovery-checkpoints/rev43.json \
+  --trusted-public-key /secure/recovery-authority/trusted-verifier.pem \
+  --minimum-revision-file /secure/recovery-authority/min-revision.txt
+\`\`\`
+
+The restore utility verifies the exact signed P-256 manifest and encrypted
+inventory **before** creating the destination, copies only validated XML to
+a new 0700 stage, verifies the signature again on the stage, atomically
+renames the directory to \`data-protection-keys\`, fsyncs its parent and
+verifies again after installation. A stale signed revision, tampering,
+missing trust key, symlinked key XML, plaintext master key, changed source
+or pre-existing destination is rejected without overwriting a live ring.
+The external high-water file remains outside both source and restored state;
+the backup command does NOT advance it or silently accept a lower revision.
+
+Disposable Linux CI executes the actual .NET backup and restore CLI in child
+processes with a real certificate-wrapped Data Protection ring, P-256-signed
+checkpoint, external revision floor, tampered archive, duplicate backup,
+duplicate restore, plaintext source and authenticated cookie continuity.
+The same tests run in UBI 9 userspace, **not** a full RHEL host.
+
+**Operational boundary:** This is not an online live-ring clone, cross-host
+transport, fleet-quorum authority, wrapping-certificate backup, remotely
+authenticated deployment, backup-media immutability service or disaster
+recovery sign-off. It **cannot** automatically know whether a serving
+process still holds a key-ring writer. The operator must fence writers and
+confirm wrapping-key custody independently. Only an authorized offline
+recovery controller can distribute approved encrypted snapshots and
+eventually switch active nodes; #48 remains open until those software gates
+are accepted and #36 records the physical host drills.
+
+
 ## Independently committed Linux recovery revision floor (software candidate)
 
 Linux restore can now read a **durable, owner-only revision floor file**
