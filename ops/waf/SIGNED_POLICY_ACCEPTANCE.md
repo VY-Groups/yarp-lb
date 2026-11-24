@@ -171,6 +171,58 @@ python3 ops/waf/rollout_controller.py \
 # Add --execute ONLY after a separate authorized change approval.
 ```
 
+## Narrow signed WAF exception configuration candidate (offline only)
+
+`ops/waf/render_signed_exceptions.py` now transforms a **fully verified**
+two-reviewer P-256 policy into one protected, non-overwritten ModSecurity
+configuration *candidate*. It repeats the complete signed-policy and
+independent trust/revision checks before reading the accepted policy bytes,
+compares those bytes to both approved policy digests, and refuses any
+unapproved scope. It does not alter a running container, replace an active
+configuration, or advance the independent revision floor.
+
+The initial supported carve-out is deliberately limited to **CRS 920420**
+for **POST**, exact **application/pkix-cert** and a nonroot, canonical ASCII
+path. GET, arbitrary rule IDs (including XSS/SQLi), encoded/aliased paths,
+duplicate effective scopes, unsupported MIME types and unsafe output paths
+fail closed. The generated chain requires `TIME_EPOCH` within the signed
+UTC issue/expiry window, exact request method, **raw URI** and media type
+before removing that single CRS rule for that request; it does not weaken
+the global anomaly threshold or remove an entire rule family.
+
+Example (operator must supply private, genuine review/evidence files; do not
+use fixture keys or policy in a real environment):
+
+```sh
+python3 ops/waf/render_signed_exceptions.py \
+  --policy /private/waf/candidate/policy.json \
+  --approval /private/waf/candidate/review-a.json \
+  --approval /private/waf/candidate/review-b.json \
+  --reviewer-key reviewerA=/secure/waf/reviewer-a.pub \
+  --reviewer-key reviewerB=/secure/waf/reviewer-b.pub \
+  --minimum-revision-file /secure/waf/accepted-revision \
+  --observed-ruleset-sha256 REPLACE_WITH_ACTUAL_OBSERVED_DIGEST \
+  --observed-mode detect \
+  --out /private/waf/generated/scoped-exception-rev7.conf
+```
+
+Use a separate private pathname for every new candidate. Output is a
+new-only, fsynced 0600 file in an operator-owned 0700 directory. Review the
+rendered SHA-256, signed exception scope, actual inclusion order, live
+ModSecurity parser behavior, expiry and rollback before anyone mounts the
+candidate. In particular this feature **does not implement** an authenticated
+two-host transaction, live include-graph attestation, atomic fleet activation,
+automatic policy expiration removal, independent audit storage or production
+rollback. A request-time expiry condition still requires an independent
+integration test on the exact deployed runtime. #51 remains OPEN until
+signed deployment and all performance/evidence acceptance are complete.
+
+Run the new disposable cryptographic and rendering regressions:
+
+```sh
+python3 -m unittest discover -s ops/waf -p test_render_signed_exceptions.py -v
+```
+
 **Unqualified and intentionally unsupported:** rendering signed exact-route
 exceptions, cryptographic attestation of the full effective configuration/include graph, active
 distributed two-node canary/quorum/fencing, atomic cross-node rollback,
