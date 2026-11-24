@@ -556,6 +556,7 @@ authorityKeyIdentifier = keyid,issuer
                                 for row in node_rows:
                                     admin.request("POST","/admin/api/fleet",row)
                                 if commercial:
+                                    if os.environ.get("GC_FLEET_QUORUM_MEMBER_CONTAINERS"):invoke("reject-unfenced")
                                     reviewer=Client(base);reviewer.login("fleetreviewer","Disposable-reviewer-123!")
                                     state=admin.request("GET","/admin/api/state")
                                     payload={name:state[name] for name in ("routes","clusters","disabled","revision")}
@@ -569,6 +570,21 @@ authorityKeyIdentifier = keyid,issuer
                                         config=json.loads((temp/f"recovery-node-{i}"/"gateway.json").read_bytes())
                                         check("commercial-rollout" in config["ReverseProxy"]["Routes"],"actual licensed agent config activated")
                                 invoke("prepare")
+                                if commercial and os.environ.get("GC_FLEET_QUORUM_MEMBER_CONTAINERS"):
+                                    members=json.loads(os.environ["GC_FLEET_QUORUM_MEMBER_CONTAINERS"])
+                                    if len(members)!=3 or any(not name.startswith("gc-fleet-raft-") for name in members):
+                                        raise AssertionError("Expected only disposable CI Raft members")
+                                    paused=[]
+                                    try:
+                                        for name in members[1:]:
+                                            subprocess.run(["docker","pause",name],check=True,timeout=15)
+                                            paused.append(name)
+                                        invoke("reject-partition")
+                                    finally:
+                                        for name in paused:
+                                            subprocess.run(["docker","unpause",name],check=True,timeout=15)
+                                    # Allow the real Raft majority to elect/reconnect before recovery.
+                                    time.sleep(5)
                                 if commercial:
                                     revocation=controller_root/"revoked.gcv"
                                     command(fixture,"--ci-engine-revoke",keys,controller_request,revocation,"fleet")
