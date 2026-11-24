@@ -11,7 +11,7 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 $source = $PSScriptRoot
-$originals = @('Program.cs','WindowsFleetKeyProtection.cs','LoadBalancingCore.cs','LoadBalancingExtensions.cs','CapabilityRegistry.cs','OrganizationProfile.cs','Onboarding.cs','DirectoryAuth.cs','SetupCenter.cs','GatewayCoreYarp.csproj','wwwroot\index.html','wwwroot\style.css','wwwroot\app.js','wwwroot\app.ts','wwwroot\tsconfig.json')
+$originals = @('Program.cs','WindowsFleetKeyProtection.cs','LoadBalancingCore.cs','LoadBalancingExtensions.cs','CapabilityRegistry.cs','OrganizationProfile.cs','ManagementPrivacyPolicy.cs','Onboarding.cs','DirectoryAuth.cs','SetupCenter.cs','GatewayCoreYarp.csproj','wwwroot\index.html','wwwroot\style.css','wwwroot\app.js','wwwroot\app.ts','wwwroot\tsconfig.json')
 
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     throw 'Open PowerShell as Administrator before running INSTALL.ps1.'

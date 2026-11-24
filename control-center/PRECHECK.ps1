@@ -6,7 +6,7 @@ Set-StrictMode -Version Latest
 $source=$PSScriptRoot
 Write-Host 'YARP Control Center 0.1 - offline preflight' -ForegroundColor Cyan
 $failures = New-Object System.Collections.Generic.List[string]
-$required = @('Program.cs','LoadBalancingCore.cs','LoadBalancingExtensions.cs','CapabilityRegistry.cs','OrganizationProfile.cs','Onboarding.cs','DirectoryAuth.cs','SetupCenter.cs','wwwroot\index.html','wwwroot\style.css','wwwroot\app.js','wwwroot\app.ts','wwwroot\tsconfig.json')
+$required = @('Program.cs','LoadBalancingCore.cs','LoadBalancingExtensions.cs','CapabilityRegistry.cs','OrganizationProfile.cs','ManagementPrivacyPolicy.cs','Onboarding.cs','DirectoryAuth.cs','SetupCenter.cs','wwwroot\index.html','wwwroot\style.css','wwwroot\app.js','wwwroot\app.ts','wwwroot\tsconfig.json')
 foreach($f in $required) { if (-not (Test-Path -LiteralPath (Join-Path $source $f) -PathType Leaf)) { $failures.Add("Missing package file $f") } }
 if (-not (Test-Path -LiteralPath 'C:\YARP-Packages\System.DirectoryServices.Protocols.10.0.15.nupkg')) { $failures.Add('Offline LDAP package missing: C:\YARP-Packages\System.DirectoryServices.Protocols.10.0.15.nupkg. Download on laptop and transfer first.') }
 if (-not (Test-Path -LiteralPath (Join-Path $ProjectRoot 'GatewayCoreYarp.csproj') -PathType Leaf)) { $failures.Add('Existing GatewayCoreYarp project missing') }
