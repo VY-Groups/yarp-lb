@@ -24,6 +24,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "ops" / "waf"))
 import etcd_quorum_fence as quorum
 import etcd_cas_writer as writer
+import real_dp_runtime
 sys.path.insert(0, str(ROOT))
 from ops.fleet import linux_dp_quorum_authority as dp_recovery
 
@@ -534,6 +535,10 @@ def main():
                 raise RuntimeError("revoked runtime writer appended a key")
             print("PASS: real etcd runtime encrypted XML append, duplicate and revoked writer refusal")
 
+            STAGE = "real-dotnet-distributed-key-ring"
+            dp_runtime = real_dp_runtime.run(root, endpoints, cluster, ca, ids,
+                                             addr, post, checked)
+
             # Lose 2/3 independent members: the surviving member cannot
             # authorize mutation. No automatic rescue via a local JSON lease.
             STAGE = "loss-of-real-etcd-majority"
@@ -541,6 +546,8 @@ def main():
                 docker("stop", "--time", "1", container)
             if verifier.assert_current(NODES,7,P,"before-receipt"):
                 raise RuntimeError("minority etcd partition authorized WAF mutation")
+            STAGE = "real-dotnet-minority-denies-fresh-start"
+            dp_runtime()
             print("PASS: actual two-member etcd outage denies transaction "
                   "and leaves recovery for independent reconciliation")
         finally:

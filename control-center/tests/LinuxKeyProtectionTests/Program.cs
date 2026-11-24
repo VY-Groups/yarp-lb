@@ -15,6 +15,10 @@ if (!OperatingSystem.IsLinux())
     Console.WriteLine("SKIP: Linux-specific filesystem/DAPI tests on non-Linux host");
     return;
 }
+if (args.Length>0 && args[0]=="--distributed-real")
+{
+    Environment.Exit(DistributedRealAcceptance.Run(args));
+}
 // DP-09/DP-13: execute the real key-ring loader in a separate OS process.
 // The disposable protected cookie and expected plaintext travel over stdin, never argv or logs.
 if (args.Length > 0 && args[0] == "--verify-cookie")
