@@ -683,6 +683,64 @@ try
             LinuxDpRecoveryEvidence.ComputeInventoryDigest(
                 Path.Combine(backupRoot,"data-protection-keys"))==inventoryBeforeCommit,
             "real CLI restores P-256-signed ciphertext into only an absent isolated key ring");
+
+        // End-to-end software acceptance must execute the ACTUAL published
+        // signed .NET restore after an actual OpenSSL mutual-TLS transfer,
+        // not only separate transport/restore tests or a mock Python process.
+        var deliveredState = Path.Combine(root, "pinned-mtls-restored-state");
+        var deliveredInbox = Path.Combine(root, "pinned-mtls-receiver-inbox");
+        Directory.CreateDirectory(deliveredState, PrivateDir);
+        Directory.CreateDirectory(deliveredInbox, PrivateDir);
+        var deliveredApphostRoot = Path.GetFullPath(Path.Combine(
+            "tools", "LinuxDpEncryptedSnapshot", "bin", "Release", "net10.0"));
+        var deliveredApphost = Path.Combine(deliveredApphostRoot, "LinuxDpEncryptedSnapshot");
+        Assert(File.Exists(deliveredApphost), "real signed restore apphost exists after CLI build");
+        var deliveredHarness = Path.GetFullPath(Path.Combine(
+            "..", "ops", "fleet", "linux_dp_real_restore_e2e.py"));
+        Assert(File.Exists(deliveredHarness), "real pinned mTLS to .NET restore harness exists");
+        var transfer = new System.Diagnostics.ProcessStartInfo("python3")
+        {
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true
+        };
+        foreach (var (flag, value) in new[] {
+            ("--source-root", snapshotVault),
+            ("--label", "rev43"),
+            ("--checkpoint", generatedManifest),
+            ("--trusted-public-key", trustedPublicPath),
+            ("--minimum-revision-file", revisionFloorPath),
+            ("--state-root", deliveredState),
+            ("--inbox", deliveredInbox),
+            ("--restore-bundle", deliveredApphostRoot)
+        })
+        {
+            transfer.ArgumentList.Add(flag);
+            transfer.ArgumentList.Add(value);
+        }
+        transfer.ArgumentList.Insert(0, deliveredHarness);
+        using (var realTransfer = System.Diagnostics.Process.Start(transfer)
+            ?? throw new Exception("FAIL: actual pinned mutual-TLS receiver did not start"))
+        {
+            if (!realTransfer.WaitForExit(180000))
+            {
+                realTransfer.Kill(entireProcessTree: true);
+                throw new Exception("FAIL: real encrypted DP network-to-restore test timeout");
+            }
+            // Never emit raw customer data or subprocess stderr/stdout; this
+            // test uses disposable TLS keys and only reports exit validity.
+            Assert(realTransfer.ExitCode == 0,
+                "real pinned TLS transfer plus signed .NET 10 offline restore accepted");
+        }
+        Assert(LinuxDpRecoveryEvidence.ComputeInventoryDigest(
+            Path.Combine(deliveredState,"data-protection-keys")) == inventoryBeforeCommit,
+            "pinned mTLS receiver preserved actual P-256-verified ciphertext inventory");
+        Assert(VerifyInFreshProcess(deliveredState, "OnPremLinuxDpIntegration.v1",
+                "session-probe", encrypted, "sensitive-session-value-123") == 0,
+            "real pinned mTLS recovery preserves original authenticated cookie in fresh OS process");
+        Assert(!File.Exists(Path.Combine(deliveredInbox, "rev43", "ring", "private.key")),
+            "network DP snapshot contains no private wrapping-key file");
+
         Assert(RunSnapshot("restore","--archive",archivePath,
                 "--state-root",backupRoot,
                 "--checkpoint",generatedManifest,
