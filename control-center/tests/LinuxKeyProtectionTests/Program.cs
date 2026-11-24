@@ -520,6 +520,97 @@ try
                 attestationPath,trustedPublicPath,43)),
             "fresh isolated replica rejects older signed restore after floor commit");
 
+        // A separate offline executable now captures only wrapped XML into
+        // a new-only atomic archive directory and restores it only after the
+        // same independently signed P-256 inventory / external floor check.
+        var snapshotCli=Path.GetFullPath(Path.Combine(
+            "tools","LinuxDpEncryptedSnapshot","LinuxDpEncryptedSnapshot.csproj"));
+        Assert(File.Exists(snapshotCli),"offline encrypted snapshot CLI project exists");
+        int RunSnapshot(params string[] options)
+        {
+            var start=new System.Diagnostics.ProcessStartInfo("dotnet")
+            {
+                UseShellExecute=false,
+                RedirectStandardError=true,
+                RedirectStandardOutput=true
+            };
+            foreach(var arg in new[] {
+                "run","--project",snapshotCli,"--configuration","Release","--" })
+                start.ArgumentList.Add(arg);
+            foreach(var arg in options) start.ArgumentList.Add(arg);
+            using var process=System.Diagnostics.Process.Start(start)
+                ?? throw new Exception("FAIL: encrypted snapshot CLI failed to start");
+            if(!process.WaitForExit(120000))
+            {
+                process.Kill(entireProcessTree:true);
+                throw new Exception("FAIL: encrypted snapshot CLI exceeded timeout");
+            }
+            return process.ExitCode;
+        }
+        var snapshotVault=Path.Combine(root,"encrypted-snapshot-vault");
+        Directory.CreateDirectory(snapshotVault,PrivateDir);
+        Assert(RunSnapshot("capture","--ring",keyDirectory,
+                "--archive-root",snapshotVault,"--label","rev43") == 0 &&
+            LinuxDpRecoveryEvidence.ComputeInventoryDigest(
+                Path.Combine(snapshotVault,"rev43"))==inventoryBeforeCommit,
+            "real CLI creates immutable-by-name encrypted DP snapshot with exact inventory");
+        Assert(RunSnapshot("capture","--ring",keyDirectory,
+                "--archive-root",snapshotVault,"--label","rev43")!=0,
+            "encrypted DP snapshot cannot overwrite an earlier backup");
+        var backupRoot=Path.Combine(root,"encrypted-snapshot-restored-state");
+        Directory.CreateDirectory(backupRoot,PrivateDir);
+        var archivePath=Path.Combine(snapshotVault,"rev43");
+        Assert(RunSnapshot("restore","--archive",archivePath,
+                "--state-root",backupRoot,
+                "--checkpoint",generatedManifest,
+                "--trusted-public-key",trustedPublicPath,
+                "--minimum-revision-file",revisionFloorPath)==0 &&
+            LinuxDpRecoveryEvidence.ComputeInventoryDigest(
+                Path.Combine(backupRoot,"data-protection-keys"))==inventoryBeforeCommit,
+            "real CLI restores P-256-signed ciphertext into only an absent isolated key ring");
+        Assert(RunSnapshot("restore","--archive",archivePath,
+                "--state-root",backupRoot,
+                "--checkpoint",generatedManifest,
+                "--trusted-public-key",trustedPublicPath,
+                "--minimum-revision-file",revisionFloorPath)!=0 &&
+            LinuxDpRecoveryEvidence.ComputeInventoryDigest(
+                Path.Combine(backupRoot,"data-protection-keys"))==inventoryBeforeCommit,
+            "restoring over existing encrypted key ring is denied without mutation");
+        var tamperedArchiveXml=Directory.GetFiles(archivePath,"key-*.xml").Single();
+        var originalArchivedXml=File.ReadAllBytes(tamperedArchiveXml);
+        var alteredTargetRoot=Path.Combine(root,"tampered-backup-target");
+        Directory.CreateDirectory(alteredTargetRoot,PrivateDir);
+        try
+        {
+            File.AppendAllText(tamperedArchiveXml,"<!-- altered archive -->");
+            File.SetUnixFileMode(tamperedArchiveXml,PrivateFile);
+            Assert(RunSnapshot("restore","--archive",archivePath,
+                    "--state-root",alteredTargetRoot,
+                    "--checkpoint",generatedManifest,
+                    "--trusted-public-key",trustedPublicPath,
+                    "--minimum-revision-file",revisionFloorPath)!=0 &&
+                !Path.Exists(Path.Combine(alteredTargetRoot,"data-protection-keys")),
+                "tampered signed ciphertext archive fails before destination is installed");
+        }
+        finally
+        {
+            File.WriteAllBytes(tamperedArchiveXml,originalArchivedXml);
+            File.SetUnixFileMode(tamperedArchiveXml,PrivateFile);
+        }
+        var plaintextStateRoot=Path.Combine(root,"disposable-plaintext-state");
+        var plaintextRing=Path.Combine(plaintextStateRoot,"data-protection-keys");
+        Directory.CreateDirectory(plaintextRing,PrivateDir);
+        var plaintextFile=Path.Combine(plaintextRing,"key-unwrapped.xml");
+        File.WriteAllText(plaintextFile,
+            "<key><masterKey>DISPOSABLE-PLAINTEXT-FIXTURE-ONLY</masterKey></key>");
+        File.SetUnixFileMode(plaintextFile,PrivateFile);
+        Assert(RunSnapshot("capture","--ring",plaintextRing,
+                "--archive-root",snapshotVault,"--label","plaintext")!=0 &&
+            !Directory.Exists(Path.Combine(snapshotVault,"plaintext")),
+            "backup utility rejects and does not archive plaintext key XML");
+        Assert(LinuxDpRecoveryEvidence.ComputeInventoryDigest(keyDirectory)==inventoryBeforeCommit,
+            "offline backup/restore never mutates the original wrapped key ring");
+
         // Fleet nodes opt into the independent revision FLOOR FILE at startup,
         // instead of copying a stale environment integer from a restored
         // backup. The legacy integer contract must still work by default.
@@ -537,6 +628,11 @@ try
             Assert(replicaRestored.GetRequiredService<IDataProtectionProvider>()
                 .CreateProtector("session-probe").Unprotect(encrypted)=="sensitive-session-value-123",
                 "independent replica restart preserves original session after signed restore");
+        Set("YARP_CONTROL_PLANE_DIR",backupRoot);
+        using(var snapshotRestored=Provider(backupRoot))
+            Assert(snapshotRestored.GetRequiredService<IDataProtectionProvider>()
+                .CreateProtector("session-probe").Unprotect(encrypted)=="sensitive-session-value-123",
+                "offline signed archive restore preserves original cookie across isolated service restart");
         Set("YARP_CONTROL_PLANE_DIR",state);
         Set(LinuxDpRecoveryEvidence.ManifestEnv,attestationPath);
         Assert(Throws(()=>{using var _=Provider(state);}),
