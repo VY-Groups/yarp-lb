@@ -110,11 +110,16 @@ def includes_from_conf(blob):
 
 
 def walk_graph(files, root):
-    if not isinstance(files, dict) or not (1 <= len(files) <= MAX_FILES) or \
-            not all(type(p) is str and type(v) is bytes and
-                    0 < len(v) <= MAX_FILE for p, v in files.items()) or \
-            sum(len(v) for v in files.values()) > MAX_TOTAL:
-        raise ValueError("unbounded ModSecurity config file inventory")
+    if not isinstance(files, dict) or not (1 <= len(files) <= MAX_FILES):
+        raise ValueError("ModSecurity config inventory count cap")
+    if any(type(p) is not str or type(v) is not bytes for p, v in files.items()):
+        raise ValueError("ModSecurity config inventory type rejected")
+    if any(len(v) == 0 for v in files.values()):
+        raise ValueError("ModSecurity config inventory empty file")
+    if any(len(v) > MAX_FILE for v in files.values()):
+        raise ValueError("ModSecurity config inventory single file cap")
+    if sum(map(len, files.values())) > MAX_TOTAL:
+        raise ValueError("ModSecurity config inventory total cap")
     if len({p.casefold() for p in files}) != len(files):
         raise ValueError("case-aliased WAF configuration path")
     for path in files:
@@ -248,7 +253,11 @@ def observe(container_id):
             # Only deterministic source-owned verdict categories, never an
             # include path or raw ModSecurity configuration fragment.
             categories = {
-                "unbounded ModSecurity config file inventory": "inventory",
+                "ModSecurity config inventory count cap": "inventory-count",
+                "ModSecurity config inventory type rejected": "inventory-type",
+                "ModSecurity config inventory empty file": "inventory-empty",
+                "ModSecurity config inventory single file cap": "inventory-file",
+                "ModSecurity config inventory total cap": "inventory-total",
                 "case-aliased WAF configuration path": "case-alias",
                 "untrusted ModSecurity include path": "path",
                 "ModSecurity include path not canonical": "path",
@@ -293,7 +302,9 @@ def main(argv=None):
             "config-symlink-other", "config-symlink-target-unapproved",
             "config-followed-tree",
             "read-actual-config-bytes", "graph-check", "graph-digest",
-            "graph-inventory", "graph-case-alias", "graph-path",
+            "graph-inventory-count", "graph-inventory-type",
+            "graph-inventory-empty", "graph-inventory-file", "graph-inventory-total",
+            "graph-case-alias", "graph-path",
             "graph-root-missing", "graph-cycle", "graph-duplicate",
             "graph-missing-file", "graph-file-too-large", "graph-dynamic",
             "graph-nested-glob", "graph-missing-target", "graph-unreached",
