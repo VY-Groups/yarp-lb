@@ -4,6 +4,25 @@
 
 
 
+## Certificate expiration during staged rotation (decrypt-only retention)
+
+An active Linux fleet wrapper requires a currently valid RSA encryption leaf,
+including its minimum remaining validity window. A *previous* RSA wrapper
+is not allowed to generate newly persisted keys, but may have expired
+while encrypted historical XML and authentication cookies remain live.
+The runtime must permit that previous certificate's private key for
+**decryption only**, retaining strict RSA/key-encipherment, non-CA,
+permissions, owner-only PFX and separate password checks. New key XML
+must use the current unexpired RSA recipient only.
+
+Do not delete an expired previous private PFX based solely on the public
+X.509 NotAfter timestamp. Retire it only after verified expiry/revocation
+of every session and backup depending on that XML key, followed by
+approved retention and attested data-destruction handling. An expired
+certificate is not authorized as the active new-key writer. Dispose
+only disposable test keys in CI; host service owners must keep custody
+and audit of historic decrypt identities.
+
 ## Latest automated evidence (2026-11-23; CI only)
 
 These runs exercise real processes on disposable GitHub-hosted runners. They update the rows below but do **not** qualify an operator-managed installation or production platform.
