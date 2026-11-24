@@ -4,6 +4,9 @@ on:
     branches: [main]
     paths:
       - 'src/GatewayCore.Licensing/**'
+      - 'src/CommercialEngine/**'
+      - 'engines/**'
+      - 'tests/E2E/commercial_engines.py'
       - 'tests/OfflineLicensing/**'
       - 'tests/E2E/offline_commercial.py'
       - 'tests/E2E/release_integrity.py'
@@ -18,7 +21,7 @@ jobs:
       matrix:
         os: [ubuntu-24.04, windows-2022]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
@@ -50,6 +53,8 @@ jobs:
           ' _ "$(id -un)" "$PATH" "$DOTNET_ROOT" "$RUNNER_TEMP/commercial-ci-authority"
       - name: Published commercial package startup integrity
         run: python tests/E2E/release_integrity.py
+      - name: Commercial independent engine feature acceptance
+        run: python tests/E2E/commercial_engines.py
       - name: Remove disposable signing fixture
         if: always() && runner.os == 'Linux'
         shell: bash

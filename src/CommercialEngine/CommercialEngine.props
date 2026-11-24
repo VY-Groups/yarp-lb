@@ -1,0 +1,17 @@
+<Project>
+  <PropertyGroup Condition="'$(GatewayCoreCommercial)' == 'true'">
+    <DefineConstants>$(DefineConstants);GATEWAYCORE_COMMERCIAL</DefineConstants>
+  </PropertyGroup>
+  <ItemGroup Condition="'$(GatewayCoreCommercial)' == 'true'">
+    <ProjectReference Include="$(MSBuildThisFileDirectory)../GatewayCore.Licensing/GatewayCore.Licensing.csproj" />
+    <Compile Include="$(MSBuildThisFileDirectory)EngineLicenseGate.cs" Link="EngineLicenseGate.cs" />
+    <EmbeddedResource Include="$(GatewayCoreTrustFile)" LogicalName="GatewayCore.CommercialTrust" Condition="'$(GatewayCoreTrustFile)' != ''" />
+  </ItemGroup>
+  <Target Name="RequireEngineEntitlementTrust" BeforeTargets="PrepareForBuild" Condition="'$(GatewayCoreCommercial)' == 'true'">
+    <Error Condition="'$(GatewayCoreTrustFile)' == '' Or !Exists('$(GatewayCoreTrustFile)')" Text="Commercial engine requires pinned public trust." />
+  </Target>
+  <!-- No independent commercial engine distribution before signed-package enforcement. -->
+  <Target Name="PreventUnsignedCommercialEnginePublish" BeforeTargets="Publish" Condition="'$(GatewayCoreCommercial)' == 'true'">
+    <Error Text="Independent commercial engine publication is not authorized until signed package verification is integrated." />
+  </Target>
+</Project>

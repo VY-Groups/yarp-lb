@@ -5,6 +5,10 @@ using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
 
+#if GATEWAYCORE_COMMERCIAL
+if(EngineLicenseGate.Command(args,out var licenseExit))return licenseExit;
+using var engineLicense=EngineLicenseGate.Start("l4");
+#endif
 // Separate experimental L4 engine. Not YARP or an ASP.NET HTTP route.
 if (args.Length != 1 || !File.Exists(args[0]))
 {
@@ -107,6 +111,9 @@ async Task RunTcp(L4Listener cfg, CancellationToken token)
             try { client = await listener.AcceptTcpClientAsync(token); }
             catch (OperationCanceledException) when (token.IsCancellationRequested) { break; }
             catch (SocketException) when (token.IsCancellationRequested) { break; }
+#if GATEWAYCORE_COMMERCIAL
+            if(!engineLicense.Allows("l4")){client.Dispose();continue;}
+#endif
             // Only the accept loop acquires slots; every forwarding exit
             // releases one. Reject before allocating upstream sockets/pumps.
             if (Interlocked.Increment(ref admitted) > cfg.TcpMaxConnections)
@@ -287,6 +294,9 @@ async Task RunUdp(L4Listener cfg, CancellationToken token)
             }
             if (!receive.IsCompleted) continue;
             var received = await receive;
+#if GATEWAYCORE_COMMERCIAL
+            if(!engineLicense.Allows("l4")){receive=Receive();continue;}
+#endif
             var now = Environment.TickCount64;
             var remote = (IPEndPoint)received.RemoteEndPoint;
             var key = remote.ToString();

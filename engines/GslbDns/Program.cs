@@ -5,6 +5,10 @@ using System.Text;
 using System.Text.Json;
 using GatewayCore.Gslb.Contracts;
 
+#if GATEWAYCORE_COMMERCIAL
+if(EngineLicenseGate.Command(args,out var licenseExit))return licenseExit;
+using var engineLicense=EngineLicenseGate.Start("gslb");
+#endif
 // Standalone, non-recursive authoritative DNS/GSLB lab engine (UDP and TCP).
 // NS/SOA responses require explicit per-zone name server metadata.
 // No traffic passes through the YARP HTTP reverse proxy.
@@ -501,6 +505,9 @@ var tcpAccept = Task.Run(async () =>
                     await stream.ReadExactlyAsync(packet, deadline.Token);
                     runtimeMetrics.QueryReceived(tcp: true);
                     var resolverIp=(session.Client.RemoteEndPoint as IPEndPoint)?.Address;
+#if GATEWAYCORE_COMMERCIAL
+                    if(!engineLicense.Allows("gslb")){runtimeMetrics.RequestDropped(tcp:true);return;}
+#endif
                     var response = DnsWireProtocol.Build(packet, groups, tcp: true,
                         resolverIp:resolverIp, agentReports:reportStore, authorityFence:authorityFenceStore);
                     if (response is null)
@@ -547,6 +554,9 @@ try
             runtimeMetrics.RequestDropped(tcp: false);
             continue;
         }
+#if GATEWAYCORE_COMMERCIAL
+        if(!engineLicense.Allows("gslb")){runtimeMetrics.RequestDropped(tcp:false);continue;}
+#endif
         var response=DnsWireProtocol.Build(buffer.AsSpan(0,received.ReceivedBytes),groups,
             tcp:false,resolverIp:source,agentReports:reportStore,authorityFence:authorityFenceStore);
         if(response is null)

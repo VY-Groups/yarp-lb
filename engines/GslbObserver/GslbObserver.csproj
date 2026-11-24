@@ -7,4 +7,5 @@
   <ItemGroup>
     <ProjectReference Include="../GslbHealthContracts/GslbHealthContracts.csproj" />
   </ItemGroup>
+  <Import Project="../../src/CommercialEngine/CommercialEngine.props" />
 </Project>

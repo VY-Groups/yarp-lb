@@ -8,4 +8,5 @@
 </ItemGroup>
 <ItemGroup>
   <PackageReference Include="MaxMind.Db" Version="5.2.0" />
-</ItemGroup></Project>
+</ItemGroup>  <Import Project="../../src/CommercialEngine/CommercialEngine.props" />
+</Project>

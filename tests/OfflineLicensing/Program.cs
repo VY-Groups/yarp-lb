@@ -12,6 +12,45 @@ var binding = Convert.ToHexString(SHA256.HashData(installation.ExportSubjectPubl
 var now = DateTimeOffset.FromUnixTimeSeconds(1800000000);
 var keys = new Dictionary<string, byte[]> { ["test-1"] = signer.ExportSubjectPublicKeyInfo() };
 var verifier = new OfflineLicenseVerifier(keys);
+if (args.Length >= 2 && args[0] is "--ci-engine-key" or "--ci-engine-license" or "--ci-engine-revoke")
+{
+    if(Environment.GetEnvironmentVariable("CI")!="true" || Environment.GetEnvironmentVariable("GITHUB_ACTIONS")!="true")
+        throw new InvalidOperationException("Disposable engine test only.");
+    var rootPath=Path.GetFullPath(args[1]);
+    var privatePath=Path.Combine(rootPath,"fixture-engine.pk8");
+    if(args is ["--ci-engine-key",_])
+    {
+        Directory.CreateDirectory(rootPath);
+        var rawKey=signer.ExportPkcs8PrivateKey();
+        try
+        {
+            var opts=new FileStreamOptions{Mode=FileMode.CreateNew,Access=FileAccess.Write,Share=FileShare.None};
+            if(OperatingSystem.IsLinux())opts.UnixCreateMode=UnixFileMode.UserRead|UnixFileMode.UserWrite;
+            using var outputKey=new FileStream(privatePath,opts);
+            outputKey.Write(rawKey);
+        }
+        finally{CryptographicOperations.ZeroMemory(rawKey);}
+        File.WriteAllBytes(Path.Combine(rootPath,"trust.json"),JsonSerializer.SerializeToUtf8Bytes(keys));
+        return;
+    }
+    if(args.Length!=5)throw new ArgumentException("Engine fixture arguments.");
+    var rawFixtureKey=File.ReadAllBytes(privatePath);
+    try{signer.ImportPkcs8PrivateKey(rawFixtureKey,out _);}
+    finally{CryptographicOperations.ZeroMemory(rawFixtureKey);}
+    var engineBinding=OfflineActivationRequest.Verify(File.ReadAllBytes(args[2])).InstallationKeySha256;
+    var engineNow=DateTimeOffset.UtcNow;
+    var engineBytes=args[0]=="--ci-engine-license"?FixtureSign("GCL1",new{
+        schemaVersion=1,product="GatewayCore",licenseId="engine-ci",customerId="ci",deploymentId="ci",
+        allocationId="engine-node",installationKeySha256=engineBinding,edition="standard",revision=1,
+        maxNodes=1,maxSites=1,issuedAt=engineNow.ToUnixTimeSeconds(),notBefore=engineNow.ToUnixTimeSeconds(),
+        expiresAt=engineNow.AddDays(1).ToUnixTimeSeconds(),features=new[]{args[4]}},signer):
+        FixtureSign("GCV1",new{schemaVersion=1,product="GatewayCore",licenseId="engine-ci",customerId="ci",
+        deploymentId="ci",allocationId="engine-node",installationKeySha256=engineBinding,
+        revokedAt=engineNow.ToUnixTimeSeconds()},signer);
+    using var engineOutput=new FileStream(args[3],FileMode.CreateNew);
+    engineOutput.Write(engineBytes);
+    return;
+}
 if (args.Length >= 2 && args[0] is "--ci-release-key" or "--ci-release-manifest")
 {
     if (Environment.GetEnvironmentVariable("CI") != "true" ||
