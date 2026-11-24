@@ -182,7 +182,7 @@ public static class LinuxDpEncryptedSnapshot
         var document = XDocument.Load(reader);
         if (document.Root is null)
             throw new InvalidOperationException("Encrypted XML root missing");
-        if (document.DescendantsAndSelf().Any(element =>
+        if (document.Root.DescendantsAndSelf().Any(element =>
                 element.Name.LocalName is "masterKey" or "secret"))
             throw new InvalidOperationException("Plaintext Data Protection key rejected");
         if (filename.StartsWith("key-", StringComparison.Ordinal))
