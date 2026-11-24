@@ -177,16 +177,26 @@ def restore_once(args, *, fetch=wire.fetch_pinned, stage=wire.stage_received,
     environment = {"PATH": "/usr/bin:/bin",
                    "DOTNET_CLI_TELEMETRY_OPTOUT": "1",
                    "DOTNET_SKIP_FIRST_TIME_EXPERIENCE": "1"}
-    # An official .NET runtime installed outside /usr/share/dotnet may use
-    # DOTNET_ROOT. Preserve only independently trusted, non-writable,
-    # canonical runtime-root paths, never an arbitrary inherited search path
-    # or untrusted runtime injection setting.
+    # Never import ambient DOTNET_ROOT[_X64] from a shell, service account,
+    # runner or sender. A runtime outside the system apphost discovery path
+    # requires a separately approved canonical root on this *receiver*.
+    # The operator must pin it at the same authorization boundary as the
+    # exact whole-application bundle. An unapproved environment variable
+    # cannot redirect the recovery executable to a foreign runtime.
     STAGE = "approved-dotnet-runtime"
-    for name in ("DOTNET_ROOT", "DOTNET_ROOT_X64"):
-        if name in os.environ:
-            path = os.environ[name]
-            trusted_dir(path)
-            environment[name] = path
+    runtime_root = getattr(args, "dotnet_runtime_root", None)
+    if runtime_root is not None:
+        if type(runtime_root) is not str:
+            raise ValueError("approved .NET runtime root must be a path")
+        trusted_dir(runtime_root)
+        host = os.path.join(runtime_root, "dotnet")
+        info = os.lstat(host)
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid not in
+                (0, os.geteuid()) or not info.st_mode & stat.S_IXUSR or
+                info.st_nlink != 1 or stat.S_IMODE(info.st_mode) & 0o022):
+            raise ValueError("approved .NET runtime executable not trusted")
+        environment["DOTNET_ROOT"] = runtime_root
+        environment["DOTNET_ROOT_X64"] = runtime_root
     STAGE = "signed-dotnet-restore-subprocess"
     process = invoke(command, shell=False, stdin=subprocess.DEVNULL,
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -236,6 +246,8 @@ def main(argv=None):
     parser.add_argument("--minimum-revision-file", required=True)
     parser.add_argument("--restore-bundle", required=True)
     parser.add_argument("--restore-bundle-sha256", required=True)
+    parser.add_argument("--dotnet-runtime-root",
+                        help="optional independently approved non-writable .NET root")
     options = parser.parse_args(argv)
     try:
         restore_once(options)
