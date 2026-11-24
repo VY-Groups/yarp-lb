@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import secrets
 import subprocess
+import sys
 import time
 
 FLEET = "fleet-dotnet-ci"
@@ -52,10 +53,78 @@ def run(root, endpoints, cluster, ca, ids, addr, post, checked):
         pfx.chmod(0o600)
         return str(pfx), password
 
-    # Independently held copies of the approved common wrapping identity.
-    # This is fixture provisioning, not automated production secret delivery.
-    wrap_a = pfx_for("wrap-a", wrapping_crt, wrapping_key)
-    wrap_b = pfx_for("wrap-b", wrapping_crt, wrapping_key)
+    # Provision one source wrapping identity, then use the actual offline
+    # delivery CLI in separate processes. The destination runtime only sees
+    # its own received credential files, never the original PFX or sender key.
+    source_pfx,source_password=pfx_for("source-wrap",wrapping_crt,wrapping_key)
+    def pin(cert):
+        der=subprocess.run(["openssl","x509","-in",str(cert),"-outform","DER"],
+                           check=True,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,
+                           timeout=10).stdout
+        return hashlib.sha256(der).hexdigest().upper()
+
+    def identity(label,signing=False):
+        directory=state/label
+        directory.mkdir(mode=0o700)
+        cert,key=directory/"leaf.pem",directory/"leaf.key"
+        algorithm=(["-newkey","ec","-pkeyopt","ec_paramgen_curve:prime256v1"]
+                   if signing else ["-newkey","rsa:3072"])
+        checked(["openssl","req","-x509","-nodes",*algorithm,"-days","2",
+                 "-subj","/CN="+label,"-addext","basicConstraints=critical,CA:FALSE",
+                 "-addext","keyUsage=critical,"+
+                 ("digitalSignature" if signing else "keyEncipherment"),
+                 "-keyout",str(key),"-out",str(cert)])
+        cert.chmod(0o600);key.chmod(0o600)
+        return cert,key,pin(cert)
+
+    signer=identity("delivery-signer",signing=True)
+    recipients={node:identity("delivery-"+node) for node in ("node-a","node-b")}
+    tool=Path(__file__).resolve().parents[2]/"ops"/"fleet"/"linux_dp_wrap_delivery.py"
+    if not tool.is_file():
+        raise RuntimeError("required wrapping-key delivery implementation missing")
+    wrapping_pin=pin(wrapping_crt)
+    transport=state/"sealed";transport.mkdir(mode=0o700)
+
+    def invoke_delivery(command,arguments,expected):
+        result=subprocess.run([sys.executable,str(tool),command,*arguments],
+            stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,
+            timeout=90,check=False)
+        if result.returncode!=expected:
+            raise RuntimeError("unexpected actual credential delivery outcome "+command)
+
+    def receive(node,identity,revision=1):
+        cert,key,recipient_pin=identity
+        common=["--fleet",FLEET,"--recipient",node,"--revision",str(revision),
+                "--signer-certificate",str(signer[0]),"--signer-sha256",signer[2],
+                "--recipient-certificate",str(cert),"--recipient-sha256",recipient_pin,
+                "--wrapping-sha256",wrapping_pin]
+        invoke_delivery("seal",common+["--signer-key",str(signer[1]),
+            "--pfx",source_pfx,"--password-file",source_password,
+            "--output-root",str(transport)],0)
+        envelope=transport/(FLEET+"--"+node+"--"+str(revision))/"envelope.der"
+        destination=state/("received-"+node);destination.mkdir(mode=0o700)
+        # Test the other node's private key before accepting the envelope.
+        other=recipients["node-b" if node=="node-a" else "node-a"]
+        common_open=common+["--envelope",str(envelope),"--output-root",str(destination)]
+        invoke_delivery("open",common_open+["--recipient-key",str(other[1])],1)
+        if list(destination.iterdir()):
+            raise RuntimeError("wrong recipient published a wrapping credential")
+        invoke_delivery("open",common_open+["--recipient-key",str(key)],0)
+        target=destination/(FLEET+"--"+node+"--"+str(revision))
+        invoke_delivery("open",common_open+["--recipient-key",str(key)],1)
+        if len(list(destination.iterdir()))!=1:
+            raise RuntimeError("credential delivery replay changed received inventory")
+        pfx,password=target/"wrapper.pfx",target/"wrapper.password"
+        if any(path.stat().st_mode&0o777!=0o600 for path in (pfx,password)):
+            raise RuntimeError("received credential is not owner-private")
+        return str(pfx),str(password)
+
+    wrap_a=receive("node-a",recipients["node-a"])
+    wrap_b=receive("node-b",recipients["node-b"])
+    # Remove source export before starting either product runtime. The CI
+    # account is still shared; this is not OS-user or physical-host isolation.
+    Path(source_pfx).unlink();Path(source_password).unlink();wrapping_key.unlink()
+    print("PASS: actual recipient-bound credential delivery, cross-recipient and replay denial",flush=True)
     client_a = (*pfx_for("tls-a", *ids["writer"][:2]), ids["writer"][2])
     client_b = (*pfx_for("tls-b", *ids["reader"][:2]), ids["reader"][2])
     Path(ca).chmod(0o600)
