@@ -64,6 +64,46 @@ public static class WindowsDpOfflineFleetMigration
         return id.ToString("D");
     }
 
+    private static bool SameDecodedMasterKey(XElement before, XElement after)
+    {
+        // XML encryption changes harmless namespace-declaration/whitespace
+        // representation. Never compare only a serialized XML string or
+        // ignore the sensitive material. Verify same master-key identity,
+        // exact non-xmlns attributes and SAME DECODED KEY BYTES in constant
+        // time; refuse any second/unknown child.
+        if (before.Name != after.Name || before.Name.LocalName != "masterKey" ||
+            before.Elements().Count() != 1 || after.Elements().Count() != 1)
+            return false;
+        var left = before.Elements().Single();
+        var right = after.Elements().Single();
+        if (left.Name != right.Name || left.Name.LocalName != "value" ||
+            left.HasElements || right.HasElements)
+            return false;
+        var beforeAttrs = before.Attributes()
+            .Where(a => !a.IsNamespaceDeclaration)
+            .OrderBy(a => a.Name.ToString(), StringComparer.Ordinal)
+            .Select(a => (a.Name, a.Value));
+        var afterAttrs = after.Attributes()
+            .Where(a => !a.IsNamespaceDeclaration)
+            .OrderBy(a => a.Name.ToString(), StringComparer.Ordinal)
+            .Select(a => (a.Name, a.Value));
+        if (!beforeAttrs.SequenceEqual(afterAttrs))
+            return false;
+        var originalBytes = Convert.FromBase64String(left.Value);
+        var recoveredBytes = Convert.FromBase64String(right.Value);
+        try
+        {
+            return originalBytes.Length is >= 16 and <= 4096 &&
+                   CryptographicOperations.FixedTimeEquals(
+                       originalBytes, recoveredBytes);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(originalBytes);
+            CryptographicOperations.ZeroMemory(recoveredBytes);
+        }
+    }
+
     private static void Rewrap(XDocument document, string filename,
                                CertificateXmlEncryptor encryptor,
                                EncryptedXmlDecryptor decryptor)
@@ -99,8 +139,9 @@ public static class WindowsDpOfflineFleetMigration
         Stage = "certificate-roundtrip-decrypt";
         var recovered = decryptor.Decrypt(wrapped.EncryptedElement);
         Stage = "certificate-roundtrip-compare";
-        if (!XNode.DeepEquals(plain, recovered))
-            throw new InvalidOperationException("Portable X.509 rewrap failed self-check");
+        if (!SameDecodedMasterKey(plain, recovered))
+            throw new InvalidOperationException(
+                "Portable X.509 rewrap did not preserve exact master key bytes");
         Stage = "certificate-decryptor-type";
         var typeName = wrapped.DecryptorType.AssemblyQualifiedName;
         if (string.IsNullOrWhiteSpace(typeName) ||
