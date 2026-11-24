@@ -48,3 +48,6 @@ A signed currently active renewal which removes L7 immediately fences new proxy 
 
 ## Company-side portal prototype
 Added a separate PostgreSQL-backed ASP.NET Core portal under tools/LicensePortal: pinned software mTLS operator identities, customer and subscription records, signed activation request validation, transactional distinct-person approval/rejection, audit records and approved job export, with a browser UI. The private issuer key remains outside the portal. The exported record is not yet an enforced signed authorization for the CLI issuer. MFA, issuance linkage, accounting, production database roles and real PostgreSQL/HTTPS acceptance still need verification. See tools/LicensePortal/README.md.
+
+## Database-backed approved signing path
+Added a separate PostgreSQL signing worker for independently approved jobs. It performs serialized seat/site allocation, exact request and terms-revision checks, transactional signed output storage, idempotent execution, offline revocation and approved subscription term changes. The portal has no signer key and only reads completed results. This is source committed and requires build/real PostgreSQL verification; company-side software credentials and permissions must be configured independently. The prototype does not claim resilient HA DB custody or MFA.

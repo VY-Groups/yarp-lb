@@ -76,9 +76,9 @@ app.MapGet("/api/session", (HttpContext ctx) => Results.Ok(Actor(ctx)));
 app.MapGet("/api/customers", async (NpgsqlDataSource ds) => Results.Ok(await ReadRows(ds,
     "SELECT id,name,created_at FROM gc_customers ORDER BY created_at DESC LIMIT 500")));
 app.MapGet("/api/subscriptions", async (NpgsqlDataSource ds) => Results.Ok(await ReadRows(ds,
-    "SELECT id,customer_id,deployment_id,edition,max_nodes,max_sites,expires_at,features FROM gc_subscriptions ORDER BY created_at DESC LIMIT 500")));
+    "SELECT id,customer_id,deployment_id,edition,max_nodes,max_sites,expires_at,features,terms_revision FROM gc_subscriptions ORDER BY created_at DESC LIMIT 500")));
 app.MapGet("/api/jobs", async (NpgsqlDataSource ds) => Results.Ok(await ReadRows(ds,
-    "SELECT id,subscription_id,kind,site_id,installation_hash,allocation_id,requested_by,requested_at,approved_by,approved_at,state FROM gc_license_jobs ORDER BY requested_at DESC LIMIT 500")));
+    "SELECT j.id,j.subscription_id,j.kind,j.site_id,j.installation_hash,j.allocation_id,j.requested_by,j.requested_at,j.approved_by,j.approved_at,j.state,j.expected_terms_revision,j.proposed_terms::text AS proposed_terms,r.completed_at FROM gc_license_jobs j LEFT JOIN gc_issuer_results r ON r.job_id=j.id ORDER BY j.requested_at DESC LIMIT 500")));
 
 app.MapPost("/api/customers", async (HttpContext ctx, CustomerInput input) =>
 {
@@ -143,20 +143,49 @@ app.MapPost("/api/jobs", async (HttpContext ctx, JobInput input) =>
     try
     {
         await using var cmd = new NpgsqlCommand("""
-            INSERT INTO gc_license_jobs(id,subscription_id,kind,site_id,request_id,installation_hash,request_file,allocation_id,requested_by)
-            VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)
+            INSERT INTO gc_license_jobs(id,subscription_id,kind,site_id,request_id,installation_hash,request_file,allocation_id,requested_by,expected_terms_revision)
+            SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,terms_revision FROM gc_subscriptions WHERE id=$2
             """, conn, tx);
         cmd.Parameters.AddWithValue(id); cmd.Parameters.AddWithValue(input.SubscriptionId); cmd.Parameters.AddWithValue(input.Kind);
         foreach (var value in new[] { input.SiteId, request?.RequestId, request?.InstallationKeySha256, input.RequestFile, input.AllocationId })
             cmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text, Value = (object?)value ?? DBNull.Value });
         cmd.Parameters.AddWithValue(Actor(ctx).Id);
-        await cmd.ExecuteNonQueryAsync();
+        if (await cmd.ExecuteNonQueryAsync() != 1) return Results.NotFound();
         await Audit(conn, tx, Actor(ctx).Id, "job_requested", id.ToString());
         await tx.CommitAsync();
         return Results.Ok(new { id });
     }
     catch (PostgresException e) when (e.SqlState is PostgresErrorCodes.UniqueViolation or PostgresErrorCodes.ForeignKeyViolation)
     { return Results.Conflict(new { error = "Unknown subscription or duplicate activation request." }); }
+});
+app.MapPost("/api/subscriptions/{id}/renew", async (HttpContext ctx, string id, Subscription input) =>
+{
+    if (Actor(ctx).Role != "requester") return Results.StatusCode(403);
+    if (id != input.LicenseId || !ValidTerms(input)) return Results.BadRequest();
+    var job = Guid.NewGuid();
+    await using var conn = await db.OpenConnectionAsync();
+    await using var tx = await conn.BeginTransactionAsync();
+    await using var cmd = new NpgsqlCommand("""
+        INSERT INTO gc_license_jobs(id,subscription_id,kind,requested_by,expected_terms_revision,proposed_terms)
+        SELECT $1,id,'renew_terms',$2,terms_revision,$3::jsonb FROM gc_subscriptions
+        WHERE id=$4 AND customer_id=$5 AND deployment_id=$6
+        """,conn,tx);
+    cmd.Parameters.AddWithValue(job);cmd.Parameters.AddWithValue(Actor(ctx).Id);
+    cmd.Parameters.AddWithValue(JsonSerializer.Serialize(input));cmd.Parameters.AddWithValue(id);
+    cmd.Parameters.AddWithValue(input.CustomerId);cmd.Parameters.AddWithValue(input.DeploymentId);
+    if(await cmd.ExecuteNonQueryAsync()!=1) return Results.NotFound();
+    await Audit(conn,tx,Actor(ctx).Id,"renewal_requested",job.ToString());
+    await tx.CommitAsync();
+    return Results.Ok(new {id=job});
+});
+app.MapGet("/api/jobs/{id:guid}/result", async (Guid id) =>
+{
+    await using var conn = await db.OpenConnectionAsync();
+    await using var cmd = new NpgsqlCommand("SELECT envelope,completed_at FROM gc_issuer_results WHERE job_id=$1", conn);
+    cmd.Parameters.AddWithValue(id);
+    await using var reader=await cmd.ExecuteReaderAsync();
+    if(!await reader.ReadAsync()) return Results.NotFound();
+    return Results.Ok(Row(reader));
 });
 app.MapPost("/api/jobs/{id:guid}/decision", async (HttpContext ctx, Guid id, DecisionInput input) =>
 {
@@ -184,7 +213,7 @@ app.MapGet("/api/jobs/{id:guid}/approved-package", async (HttpContext ctx, Guid 
         s.id AS license_id,s.customer_id,s.deployment_id,s.edition,s.max_nodes,s.max_sites,
         extract(epoch from s.expires_at)::bigint AS expires_at,s.features
         FROM gc_license_jobs j JOIN gc_subscriptions s ON s.id=j.subscription_id
-        WHERE j.id=$1 AND j.state='approved'
+        WHERE j.id=$1 AND j.state='approved' AND j.expected_terms_revision=s.terms_revision
         """, conn);
     cmd.Parameters.AddWithValue(id);
     await using var reader = await cmd.ExecuteReaderAsync();
