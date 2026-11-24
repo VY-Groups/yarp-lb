@@ -227,8 +227,33 @@ def main():
                         "utf-8", "replace").lower()
                     labels = sorted(name for name, needles in categories.items()
                                     if any(token in raw for token in needles))
+                    # Real etcd logs never leave the runner. Report only
+                    # fixed known diagnostic event categories for debugging.
+                    probes = {
+                        "remote-peer-active": "peer became active",
+                        "remote-peer-inactive": "peer became inactive",
+                        "peer-connect-fail": "failed to connect to peer",
+                        "peer-dial-error": "failed dialing",
+                        "elected-leader": "elected leader",
+                        "leader-changed": "leader changed",
+                        "raft-proposal-timeout": "timed out",
+                        "raft-no-leader": "no leader",
+                        "peer-unauthorized": "unmatched member while checking peer urls",
+                        "published-local": "published local member",
+                        "serving-client": "serving client traffic securely",
+                        "peer-stream-established": "established tcp streaming connection",
+                        "peer-stream-rejected": "rejected connection",
+                        "cluster-identity-mismatch": "cluster id mismatch",
+                        "peer-remotes-missing": "no route to host",
+                        "peer-unresolved": "no such host",
+                        "quorum-unavailable": "not capable",
+                    }
+                    observed = sorted(name for name, needle in probes.items()
+                                      if needle in raw)
                     print("ETCD_DISPOSABLE_MEMBER_DIAG_" + str(idx+1) + "=" +
-                          (",".join(labels) if labels else "none"), flush=True)
+                          (",".join(labels) if labels else "none") +
+                          " EVENTS=" +
+                          (",".join(observed) if observed else "none"), flush=True)
                 states=[]
                 for item in created:
                     try:
