@@ -8,12 +8,16 @@ apphost that could dynamically load an untrusted DLL beside it.
 """
 import argparse
 import hashlib
+import hmac
+import ipaddress
+import math
 import os
 from pathlib import Path
 import re
 import stat
 import subprocess
 import sys
+from urllib.parse import urlsplit
 
 import linux_dp_mtls_transport as wire
 
@@ -113,12 +117,64 @@ def verify_restore_app(app_dir, approved_hash):
     return exe
 
 
+def require_approved_authority(fence, phase):
+    if fence is not None and fence.current(phase) is not True:
+        raise ValueError("independent signed DP recovery quorum refused phase")
+
+
+def build_quorum_authority(args):
+    names = (
+        "fleet_quorum_inventory", "fleet", "sender_node_id",
+        "receiver_node_id", "recovery_revision", "checkpoint_sha256",
+        "etcd_ca", "etcd_certificate", "etcd_private_key"
+    )
+    values = [getattr(args, name, None) for name in names]
+    if all(value is None for value in values):
+        return None
+    if any(value is None for value in values):
+        raise ValueError("incomplete externally approved DP recovery authority")
+    import linux_dp_quorum_authority as authority
+    inventory_path = args.fleet_quorum_inventory
+    for path in (inventory_path, args.etcd_ca, args.etcd_certificate,
+                 args.etcd_private_key):
+        wire.canonical_absolute(path)
+        if (not disjoint(path, args.destination_root) or
+                not disjoint(path, args.state_root) or
+                not disjoint(path, args.restore_bundle)):
+            raise ValueError("independent DP recovery authority overlaps untrusted state")
+    raw = wire.read_private_path(inventory_path, 8192)
+    config = authority.etcd.strict_json(raw)
+    if (type(config) is not dict or set(config) !=
+            {"schemaVersion", "fleet", "clusterId", "endpoints"} or
+            type(config["schemaVersion"]) is not int or
+            config["schemaVersion"] != 1 or
+            config["fleet"] != args.fleet or
+            type(config["endpoints"]) is not list):
+        raise ValueError("unapproved independent etcd recovery inventory")
+    return authority.RecoveryFence(
+        args.fleet, config["endpoints"], config["clusterId"],
+        args.etcd_ca, args.etcd_certificate, args.etcd_private_key,
+        args.sender_node_id, args.receiver_node_id, args.recovery_revision,
+        args.checkpoint_sha256)
+
+
 def restore_once(args, *, fetch=wire.fetch_pinned, stage=wire.stage_received,
-                 invoke=subprocess.run):
+                 invoke=subprocess.run, fence=None):
     global STAGE
     STAGE = "platform-and-operator-approval"
     if not sys.platform.startswith("linux") or not args.approved_offline:
         raise ValueError("explicit offline Linux writer-fencing approval required")
+    # A remotely reachable sender requires an independently held quorum
+    # authority; an operator's local flag and a pinned leaf alone cannot
+    # fence both sides of a fleet partition or authorize remote recovery.
+    host = urlsplit(args.server_url).hostname
+    try:
+        loopback = host is not None and ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        loopback = False
+    if not loopback and fence is None:
+        raise ValueError("remote DP recovery requires independent quorum")
+    require_approved_authority(fence, "preflight")
     for path in (args.destination_root, args.state_root, args.trusted_public_key,
                  args.minimum_revision_file, args.restore_bundle):
         wire.canonical_absolute(str(path))
@@ -141,6 +197,7 @@ def restore_once(args, *, fetch=wire.fetch_pinned, stage=wire.stage_received,
     STAGE = "pinned-complete-dotnet-bundle"
     app = verify_restore_app(args.restore_bundle, args.restore_bundle_sha256)
     STAGE = "pinned-mtls-fetch"
+    require_approved_authority(fence, "before-transfer")
     binary = fetch(args.server_url, args.label, args.server_cert_sha256, args.ca,
                    args.certificate, args.private_key)
     if type(binary) is not bytes or len(binary) > wire.MAX_BUNDLE:
@@ -156,6 +213,16 @@ def restore_once(args, *, fetch=wire.fetch_pinned, stage=wire.stage_received,
     STAGE = "independent-checkpoint-staging"
     raw_checkpoint = wire.read_private_path(
         os.path.join(received, "checkpoint.json"), wire.MAX_MANIFEST)
+    if fence is not None:
+        # A sender's mTLS cert cannot authorize an unrelated P-256 signed
+        # recovery checkpoint. The actual signed .NET restore also verifies
+        # signature and independent monotonic revision before installation.
+        if (type(fence.checkpoint_sha) is not str or
+                not hmac.compare_digest(
+                    hashlib.sha256(raw_checkpoint).hexdigest().upper(),
+                    fence.checkpoint_sha)):
+            raise ValueError("received DP checkpoint differs from quorum epoch")
+    require_approved_authority(fence, "after-transfer")
     checkpoint = os.path.join(args.destination_root,
                               "." + args.label + ".signed-checkpoint.json")
     wire.safe_write(checkpoint, raw_checkpoint)
@@ -198,9 +265,23 @@ def restore_once(args, *, fetch=wire.fetch_pinned, stage=wire.stage_received,
         environment["DOTNET_ROOT"] = runtime_root
         environment["DOTNET_ROOT_X64"] = runtime_root
     STAGE = "signed-dotnet-restore-subprocess"
+    require_approved_authority(fence, "before-signed-restore")
+    restore_timeout = 180
+    if fence is not None:
+        # A 120s maximum etcd lease must NEVER authorize an unbounded 180s
+        # .NET subprocess. Count from the oldest accepted member's TTL read,
+        # not the last server response; leave five seconds to reattest
+        # and refuse/reconcile a potentially installed OFFLINE stage.
+        remaining = fence.remaining_seconds()
+        if (type(remaining) not in (float, int) or
+                not math.isfinite(remaining) or remaining < 10):
+            raise ValueError("insufficient independently fenced restore runway")
+        restore_timeout = min(restore_timeout, int(remaining - 5))
+        if restore_timeout < 1:
+            raise ValueError("independently authorized restore lease expired")
     process = invoke(command, shell=False, stdin=subprocess.DEVNULL,
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                     env=environment, timeout=180, check=False)
+                     env=environment, timeout=restore_timeout, check=False)
     if process.returncode != 0:
         # No raw child stdout/stderr is ever emitted. An allowlisted numeric
         # process exit distinguishes a .NET host bootstrap failure from a
@@ -228,6 +309,8 @@ def restore_once(args, *, fetch=wire.fetch_pinned, stage=wire.stage_received,
             wire.private_file(name, directory, wire.MAX_XML)
     finally:
         os.close(directory)
+    STAGE = "post-restore-quorum"
+    require_approved_authority(fence, "after-signed-restore")
     return received
 
 
@@ -248,9 +331,17 @@ def main(argv=None):
     parser.add_argument("--restore-bundle-sha256", required=True)
     parser.add_argument("--dotnet-runtime-root",
                         help="optional independently approved non-writable .NET root")
+    # All-or-nothing, private operator-provisioned external authority.
+    # Issuer mTLS private keys must NOT be reused for this read-only verifier.
+    for name in ("fleet-quorum-inventory", "fleet", "sender-node-id",
+                 "receiver-node-id", "checkpoint-sha256", "etcd-ca",
+                 "etcd-certificate", "etcd-private-key"):
+        parser.add_argument("--" + name)
+    parser.add_argument("--recovery-revision", type=int)
     options = parser.parse_args(argv)
     try:
-        restore_once(options)
+        authority = build_quorum_authority(options)
+        restore_once(options, fence=authority)
     except (OSError, ValueError, TypeError, subprocess.SubprocessError):
         print("FAIL: pinned offline ciphertext transfer or signed restore refused",
               file=sys.stderr)

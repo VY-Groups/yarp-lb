@@ -24,6 +24,8 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "ops" / "waf"))
 import etcd_quorum_fence as quorum
 import etcd_cas_writer as writer
+sys.path.insert(0, str(ROOT))
+from ops.fleet import linux_dp_quorum_authority as dp_recovery
 
 IMAGE = os.getenv("ETCD_IMAGE", "")
 P = "A" * 64
@@ -394,6 +396,79 @@ def main():
                 raise RuntimeError("changed etcd Raft lease epoch reauthorized old controller")
             print("PASS: real etcd CAS rejects competing writer and revocation/"
                   "epoch rollover fences old transaction")
+
+            # A completely separate signed Data Protection recovery epoch
+            # must coexist with (and never impersonate) the WAF lease. The
+            # exact same REAL three-member Raft quorum and TLS endpoints are
+            # used; CI alone does not prove independently housed hosts.
+            STAGE = "real-dp-recovery-issuer-construct"
+            dp_issuer = dp_recovery.RecoveryLeaseIssuer(
+                "fleet-ci", endpoints, cluster, ca, writer_cert, writer_key,
+                "gateway-a", "gateway-b", 43, P, ttl=120)
+            STAGE = "real-dp-recovery-cas-issue"
+            try:
+                dp_receipt = dp_issuer.issue_once()
+            except Exception:
+                # Only hardcoded source phase names leave the disposable
+                # runner. Never echo etcd responses, tokens, private trust
+                # paths or dynamic exception strings.
+                stages = {"preflight", "read-absent-quorum",
+                          "grant-new-lease", "validate-lease-grant",
+                          "compare-and-swap", "validate-cas-header",
+                          "verify-live-quorum"}
+                STAGE = "real-dp-cas-" + (
+                    dp_issuer.phase if dp_issuer.phase in stages else "unclassified")
+                raise
+            STAGE = "real-dp-cas-issued-receipt"
+            if (dp_receipt["checkpointSha256"] != P or
+                    dp_receipt["leaseId"] <= 0 or
+                    dp_receipt["senderNodeId"] != "gateway-a" or
+                    dp_receipt["receiverNodeId"] != "gateway-b"):
+                raise RuntimeError("real Raft DP CAS did not pin signed recovery")
+            STAGE = "real-dp-reader-construction"
+            dp_verifier = dp_recovery.RecoveryFence(
+                "fleet-ci", endpoints, cluster, ca, reader_cert, reader_key,
+                "gateway-a", "gateway-b", 43, P)
+            STAGE = "real-dp-read-only-majority"
+            if not dp_verifier.current("preflight") or \
+                    not dp_verifier.current("before-signed-restore"):
+                raise RuntimeError("real 2/3 Raft quorum denied signed DP recovery")
+            # The ORIGINAL WAF verifier is correctly fenced after the WAF
+            # test's intentional revocation and epoch rollover. Instantiate
+            # a new verifier for the newly issued WAF epoch; no unrelated DP
+            # grant is allowed to mutate that independent namespace.
+            STAGE = "real-dp-isolated-waf-namespace"
+            fresh_waf = quorum.EtcdQuorumFence(
+                "fleet-ci", endpoints, cluster, ca, reader_cert, reader_key)
+            if (not fresh_waf.assert_current(NODES, 7, P, "preflight") or
+                    not fresh_waf.assert_current(NODES, 7, P, "before-receipt") or
+                    verifier.assert_current(NODES, 7, P, "before-receipt")):
+                raise RuntimeError("independent DP lease changed existing WAF epoch")
+            STAGE = "real-dp-recovery-contested-cas"
+            try:
+                dp_issuer.issue_once()
+            except ValueError:
+                pass
+            else:
+                raise RuntimeError("second DP recovery CAS stole active lease")
+            STAGE = "real-dp-recovery-revocation"
+            post(addr, ("/v3/lease/revoke",
+                        {"ID":str(dp_receipt["leaseId"])}),
+                 ca, writer_cert, writer_key)
+            if dp_verifier.current("after-signed-restore"):
+                raise RuntimeError("revoked DP lease authorized a stale restore")
+            # A NEW independent operator instance must acquire a new
+            # epoch. The old issuer/verifier is pinned to the old holder and
+            # must not silently self-renew after a revocation.
+            dp_new_issuer = dp_recovery.RecoveryLeaseIssuer(
+                "fleet-ci", endpoints, cluster, ca, writer_cert, writer_key,
+                "gateway-a", "gateway-b", 43, P, ttl=120)
+            dp_new_epoch = dp_new_issuer.issue_once()
+            if dp_new_epoch["holder"] == dp_receipt["holder"] or \
+                    dp_verifier.current("after-signed-restore"):
+                raise RuntimeError("DP recovery old epoch survived Raft lease rollover")
+            print("PASS: real three-member Raft signed-DP recovery CAS, "
+                  "read-only mTLS verifier, namespace isolation and revocation")
 
             # Lose 2/3 independent members: the surviving member cannot
             # authorize mutation. No automatic rescue via a local JSON lease.

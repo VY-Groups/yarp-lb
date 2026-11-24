@@ -154,3 +154,79 @@ Always confirm the .NET runtime version and vendor provenance during
 offline installation or service-account provisioning; a protected path
 alone is not a binary code-signing attestation. This is a software
 recovery integration control, not production site DR evidence.
+
+
+## Required external quorum for cross-host recovery
+
+Any non-loopback sender URL requires ALL of these additional, independently
+provisioned flags. A lone `--approved-offline` or trusted TLS leaf fingerprint
+**cannot** authorize fleet recovery:
+
+```sh
+  --fleet-quorum-inventory /secure/authority/dp-etcd-members.json \
+  --fleet fleet-prod \
+  --sender-node-id gateway-a \
+  --receiver-node-id gateway-b \
+  --recovery-revision 43 \
+  --checkpoint-sha256 REPLACE_WITH_INDEPENDENTLY_APPROVED_P256_CHECKPOINT_SHA256 \
+  --etcd-ca /secure/etcd-reader/root.pem \
+  --etcd-certificate /secure/etcd-reader/client.pem \
+  --etcd-private-key /secure/etcd-reader/client.key
+```
+
+The owner-private, independently held JSON inventory uses this exact
+schema (illustrative placeholder values, **not** real cluster identities):
+
+```json
+{
+  "schemaVersion": 1,
+  "fleet": "fleet-prod",
+  "clusterId": "999",
+  "endpoints": [
+    {"url":"https://127.0.0.1:2379","leafSha256":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","memberId":1001},
+    {"url":"https://127.0.0.2:2379","leafSha256":"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB","memberId":1002},
+    {"url":"https://127.0.0.3:2379","leafSha256":"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC","memberId":1003}
+  ]
+}
+```
+
+The source operator must separately verify the independently issued
+P-256 signed checkpoint and epoch **before** provisioning the lease:
+`RecoveryLeaseIssuer.issue_once()` can issue a one-shot CAS epoch but
+does not sign a checkpoint, export a wrapping key, stop an active
+service, renew a lease or make a gateway eligible for promotion.
+The receiver's read-only etcd credential must be distinct from the
+issuer's privileged CAS writer identity.
+
+The receiver verifies a fresh pinned etcd majority and unchanged epoch
+at these boundaries: preflight, before-transfer, after-transfer,
+before-signed-restore and after-signed-restore. It verifies that the
+checkpoint received via mTLS has exactly the SHA-256 digest bound into
+the approved epoch and delegates the actual P-256 validation to .NET.
+All external authority files must be disjoint from the inbox, restored
+state and approved application executable tree. No successful return
+is allowed if the epoch changed or lost majority even *after* the
+offline restore command.
+
+**Operation deadline:** the signed .NET restore subprocess is bounded
+by the current live quorum verifier's EARLIEST accepted etcd lease
+expiry, reserving at least five seconds for post-run verification. A
+lease with under ten seconds of trusted remaining runway cannot start
+the restore. The environment cannot override this deadline, and a
+timeout is an incident, never successful fleet admission. The
+`remaining_seconds()` value is cleared after any unsuccessful quorum
+check; it cannot be reused from a previously healthy epoch. Unlike a
+local offline test-only restore, cross-host recovery cannot take the
+unbounded default 180-second subprocess allowance.
+
+**Crash/expiry limit:** even when an after-restore check fails, a
+ciphertext key ring might already have been installed in the
+intentionally offline staging root. It is NOT a production gateway and
+must remain quarantined for independently authorized reconciliation.
+The currently bounded one-shot lease does not guarantee that a long
+restore operation completes within TTL. The final software acceptance
+must include renewable authority/transfer handoff or a strongly
+bounded operation window, separately authenticated writer quiescence,
+source+destination two-node role fencing, audited rotation/rollback
+and a real operator-approved service promotion contract. The CI tests
+here establish no automatic HA cutover and do not satisfy #36.
