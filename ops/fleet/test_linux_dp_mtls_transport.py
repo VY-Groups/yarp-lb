@@ -231,6 +231,42 @@ class TransportTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             tx.fetch_pinned(target, "rev9", server_pin, ca, client_cert, client_key)
 
+    def test_live_tls_transfer_rechecks_authority_before_final_chunk(self):
+        ca, identities = self.identities()
+        server_cert, server_key, server_pin = identities["server"]
+        client_cert, client_key, client_pin = identities["client"]
+        bundle = tx.build_bundle(str(self.source), "rev9", str(self.checkpoint))
+
+        class Fence:
+            checkpoint_sha = hashlib.sha256(DUMMY_CHECKPOINT).hexdigest().upper()
+            calls = 0
+
+            def current(self, phase):
+                self.calls += 1
+                # preflight, request authorization, first chunk succeed;
+                # final chunk is vetoed by the freshly revoked epoch.
+                return self.calls <= 3
+
+            def remaining_seconds(self):
+                return 90
+
+        fence = Fence()
+        srv = tx.make_server("127.0.0.1", 0, bundle, "rev9", client_pin,
+                             ca, server_cert, server_key, fence=fence)
+        thread = threading.Thread(target=srv.serve_forever,
+                                  kwargs={"poll_interval": .02}, daemon=True)
+        thread.start()
+        self.addCleanup(lambda: (srv.shutdown(), srv.server_close(), thread.join(5)))
+        target = "https://127.0.0.1:" + str(srv.server_port)
+        from unittest.mock import patch
+        import http.client
+        with patch.object(tx, "TRANSFER_CHUNK_BYTES", (len(bundle)+1)//2):
+            with self.assertRaises((ValueError, http.client.HTTPException)):
+                tx.fetch_pinned(target, "rev9", server_pin, ca,
+                                client_cert, client_key)
+        self.assertEqual(fence.calls, 4)
+        self.assertEqual(list(self.destination.iterdir()), [])
+
     def test_stalled_unauthenticated_tls_never_blocks_real_client(self):
         ca,identities=self.identities()
         server_cert,server_key,server_pin=identities["server"]
