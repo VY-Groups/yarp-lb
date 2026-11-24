@@ -484,4 +484,8 @@ write_corpus_report 1
 # Requires genuine container HTTP allow/block, after-activation inspection,
 # private audit receipts and rejection of tampered signed evidence.
 python3 tests/WafCrs/live_signed_rollout.py "$COMPOSE"
+# Verify a separately rendered signed exception loads under the immutable
+# real WAF image, remains exact-scoped, and preserves native 920420 denial.
+# Synthetic approval keys are ephemeral; no customer traffic or payloads.
+python3 tests/WafCrs/live_signed_exception_acceptance.py "$COMPOSE"
 echo "WAF_CRS_LAB_PASS"
