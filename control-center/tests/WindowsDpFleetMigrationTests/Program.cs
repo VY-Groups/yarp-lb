@@ -48,8 +48,25 @@ int Invoke(string[] arguments)
         process.Kill(entireProcessTree: true);
         throw new InvalidOperationException("Migration process timed out");
     }
-    // Test contract: never echo child logs, cookies, key files, private keys
-    // or live state. A failing code must be reproducible without source dump.
+    // Never echo child logs, cookies, XML, private paths, exception messages.
+    // The separate CLI can expose only one short, hardcoded source stage.
+    var childError = process.StandardError.ReadToEnd();
+    if (process.ExitCode != 0)
+    {
+        var matched = System.Text.RegularExpressions.Regex.Match(
+            childError, @"WIN_DP_MIGRATION_FAILURE_STAGE=([a-z-]{1,40})");
+        var knownStages = new HashSet<string>(StringComparer.Ordinal) {
+            "init","source-acl","target-parent-acl",
+            "approved-certificate","inventory","create-private-stage",
+            "read-original","parse-original","dpapi-to-cert-rewrap",
+            "write-private-encrypted","validate-staged-acl",
+            "verify-source-inventory","atomic-publish",
+            "verify-published-acl","complete"
+        };
+        Console.WriteLine("WIN_DP_TEST_REJECTION_STAGE=" +
+            (matched.Success && knownStages.Contains(matched.Groups[1].Value)
+                ? matched.Groups[1].Value : "unclassified"));
+    }
     return process.ExitCode;
 }
 
@@ -103,7 +120,7 @@ try
         "real Windows DPAPI LocalMachine key XML generated");
 
     var originalFiles = Directory.GetFiles(source, "*.xml")
-        .ToDictionary(Path.GetFileName, File.ReadAllBytes);
+        .ToDictionary(x => Path.GetFileName(x)!, File.ReadAllBytes);
     Check(Invoke(new[] {"migrate", "--approved-offline", source,
                         destination, thumbprint}) == 0,
         "real separate OS process rewrapped DPAPI XML to certificate");
