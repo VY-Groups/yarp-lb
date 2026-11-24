@@ -62,7 +62,15 @@ python3 ops/fleet/linux_dp_receive_restore.py \
 There is no headless live deployment action, implicit recovery retry or
 fail-open fallback. The TLS server cert is checked against both the CA/SAN
 and exact leaf pin; the received bounded ZIP is non-overwriting and private.
-The verified bytes land under `/secure/dp-inbox/rev43`. Only then is the
+The verified bytes land under `/secure/dp-inbox/rev43`. The signed,
+still-untrusted checkpoint is **also** written atomically without overwrite
+as owner-only `/secure/dp-inbox/.rev43.signed-checkpoint.json`: outside
+the `rev43` snapshot state tree, because the independent .NET verifier
+correctly refuses using any checkpoint from inside that tree to
+self-authorize a restore. Only a valid P-256 signature under the separately
+provisioned trusted verifier and external high-water floor can authenticate
+this separate copy. The receiver never trusts the backup's checkpoint
+simply because of its physical location. Only then is the
 approved local .NET apphost executed with a fixed argument list, no shell,
 bounded timeout and no private stdout/stderr collection. It must enforce
 the **real** P-256 inventory signature and minimum revision; the Python
