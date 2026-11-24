@@ -204,9 +204,9 @@ class TwoNodeQuiescenceTests(unittest.TestCase):
             gate._validated_p256_spki(
                 SimpleNamespace(returncode=0,stdout=generated)),
             __import__("hashlib").sha256(generated).digest())
-        for untrusted in (generated+b"\\x00",generated[1:],
-                          generated.replace(b"\\x03\\x42\\x00\\x04",
-                                            b"\\x03\\x42\\x01\\x04",1)):
+        for untrusted in (generated + bytes([0]), generated[1:],
+                          generated.replace(bytes.fromhex("03420004"),
+                                            bytes.fromhex("03420104"), 1)):
             with self.subTest(value=len(untrusted)):
                 with self.assertRaises(ValueError):
                     gate._validated_p256_spki(
