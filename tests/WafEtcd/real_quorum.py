@@ -496,6 +496,45 @@ def main():
             print("PASS: real three-member Raft signed-DP recovery CAS, "
                   "read-only mTLS verifier, namespace isolation and revocation")
 
+            STAGE = "runtime-encrypted-ring-atomic-append"
+            runtime_issuer = dp_recovery.RuntimeWriterLeaseIssuer(
+                "fleet-ci", endpoints, cluster, ca, writer_cert, writer_key,
+                "gateway-a", "gateway-b", 44, P, ttl=120)
+            runtime_receipt = runtime_issuer.issue_once()
+            runtime_writer = dp_recovery.RuntimeEncryptedRingWriter(
+                "fleet-ci", endpoints, cluster, ca, writer_cert, writer_key,
+                "gateway-a", "gateway-b", 44, P, node_id="gateway-a")
+            name = "key-11111111-2222-3333-4444-555555555555.xml"
+            ciphertext_fixture = (
+                '<key id="11111111-2222-3333-4444-555555555555">'
+                '<encryptedSecret xmlns="http://schemas.asp.net/2015/03/dataProtection" '
+                'decryptorType="Microsoft.AspNetCore.DataProtection.XmlEncryption.EncryptedXmlDecryptor, Microsoft.AspNetCore.DataProtection">'
+                '<EncryptedData xmlns="http://www.w3.org/2001/04/xmlenc#">'
+                '<CipherData><CipherValue>fixture-only</CipherValue></CipherData>'
+                '</EncryptedData></encryptedSecret></key>').encode()
+            if runtime_writer.append_once(name,ciphertext_fixture) <= 0:
+                raise RuntimeError("runtime append did not commit")
+            try:
+                runtime_writer.append_once(name,ciphertext_fixture)
+            except ValueError:
+                pass
+            else:
+                raise RuntimeError("runtime writer overwrote existing key")
+            post(addr, ("/v3/lease/revoke",
+                        {"ID":str(runtime_receipt["leaseId"])}),
+                 ca, writer_cert, writer_key)
+            replacement = "key-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.xml"
+            replacement_xml = ciphertext_fixture.replace(
+                b"11111111-2222-3333-4444-555555555555",
+                b"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
+            try:
+                runtime_writer.append_once(replacement,replacement_xml)
+            except ValueError:
+                pass
+            else:
+                raise RuntimeError("revoked runtime writer appended a key")
+            print("PASS: real etcd runtime encrypted XML append, duplicate and revoked writer refusal")
+
             STAGE = "real-dotnet-distributed-key-ring"
             dp_runtime = real_dp_runtime.run(root, endpoints, cluster, ca, ids,
                                              addr, post, checked)

@@ -236,6 +236,41 @@ class RecoveryAuthorityTests(unittest.TestCase):
             self.publisher().publish_once()
         self.assertEqual(self.publication_count,0)
 
+    def test_runtime_append_is_atomic_and_create_only(self):
+        name = "key-11111111-2222-3333-4444-555555555555.xml"
+        raw = ('<key id="11111111-2222-3333-4444-555555555555">'
+               '<encryptedSecret xmlns="http://schemas.asp.net/2015/03/dataProtection" '
+               'decryptorType="Microsoft.AspNetCore.DataProtection.XmlEncryption.EncryptedXmlDecryptor, Microsoft.AspNetCore.DataProtection">'
+               '<EncryptedData xmlns="http://www.w3.org/2001/04/xmlenc#">'
+               '<CipherData><CipherValue>fixture-only</CipherValue></CipherData>'
+               '</EncryptedData></encryptedSecret></key>').encode()
+        writer = dp.RuntimeEncryptedRingWriter(*self.params, node_id=SENDER)
+        self.assertNotEqual(writer.key_name,self.issuer.key_name)
+        with self.assertRaises(ValueError):
+            dp.RuntimeEncryptedRingWriter(*self.params,node_id=RECEIVER)
+        writer._identity = (999,90,456,"a"*32)
+        with mock.patch.object(writer,"current",return_value=True), \
+                mock.patch.object(writer,"remaining_seconds",return_value=90), \
+                mock.patch.object(writer.client,"_post",return_value={
+                    "header":{"cluster_id":"999","member_id":"1","revision":"101"},
+                    "succeeded":True}) as post:
+            self.assertEqual(writer.append_once(name,raw),101)
+            body=post.call_args.args[2]
+            self.assertEqual([x["target"] for x in body["compare"]],
+                             ["MOD","LEASE","CREATE"])
+            self.assertEqual(body["compare"][1]["lease"],"456")
+            put=body["success"][0]["requestPut"]
+            self.assertEqual(base64.b64decode(put["value"]),raw)
+            self.assertNotIn("lease",put)
+            post.return_value={"header":{"cluster_id":"999","member_id":"1"},
+                               "succeeded":False}
+            with self.assertRaises(ValueError):
+                writer.append_once(name,raw)
+            calls=post.call_count
+            with self.assertRaises(ValueError):
+                writer.append_once(name,b"<key><masterKey>plaintext</masterKey></key>")
+            self.assertEqual(post.call_count,calls)
+
     def test_disallowed_phase_and_identity_fail_without_network(self):
         self.assertFalse(self.issuer.current("before-transfer"))
         self.assertFalse(self.issuer.current("emergency-override"))
