@@ -205,9 +205,10 @@ def observe(container_id):
         stage = "nginx-root-path"
         root = root_from_nginx(nginx)
         stage = "config-path-listing"
-        names = run_bounded(
-            ["docker", "exec", container_id, "find", ROOT, "-type", "f",
-             "-name", "*.conf"], max_bytes=MAX_LISTING).decode("utf-8", "strict")
+        # The pinned CRS image installs its immutable public rule subtree
+        # beneath /opt, exposed through exactly one well-known alias. Follow
+        # that alias ONLY after independently verifying the resolved target.
+        names = None
         # Unfollowed symlinks can hide additional effective rules. Refuse
         # the whole tree instead of assuming Docker's pinned image has none.
         stage = "config-symlink-check"
@@ -215,21 +216,22 @@ def observe(container_id):
                              "-type", "l"], max_bytes=MAX_LISTING)
         if links.strip():
             entries = links.decode("utf-8", "strict").splitlines()
-            if len(entries) > 16:
-                stage = "config-symlink-many"
-                raise ValueError("unexpected symlink inventory")
-            for entry in entries:
-                valid_config_path(entry)
-                root_link = entry in (ROOT + "/owasp-crs",
-                                      ROOT + "/owasp-crs/rules")
-                resolved = run_bounded(
-                    ["docker", "exec", container_id, "readlink", "-f", entry],
-                    max_bytes=512).decode("utf-8", "strict").strip()
-                area = ("opt" if resolved.startswith("/opt/") else
-                        "usr" if resolved.startswith("/usr/share/") else
-                        "etc" if resolved.startswith(ROOT + "/") else "other")
-                stage = "config-symlink-" + ("crs-" if root_link else "other-") + area
-                raise ValueError("unreviewed Docker image ModSecurity alias")
+            if entries != [ROOT + "/owasp-crs"]:
+                stage = "config-symlink-other"
+                raise ValueError("unexpected WAF alias inventory")
+            resolved = run_bounded(
+                ["docker", "exec", container_id, "readlink", "-f", entries[0]],
+                max_bytes=512).decode("utf-8", "strict").strip()
+            # Only a reviewed pinned-image public CRS directory, not a
+            # wildcard /opt subtree or arbitrary symlink into mutable state.
+            if resolved != "/opt/owasp-crs":
+                stage = "config-symlink-target-unapproved"
+                raise ValueError("unrecognized WAF CRS image target")
+        stage = "config-followed-tree"
+        names = run_bounded(
+            ["docker", "exec", container_id, "find", "-L", ROOT,
+             "-type", "f", "-name", "*.conf"],
+            max_bytes=MAX_LISTING).decode("utf-8", "strict")
         filenames = names.splitlines()
         if len(filenames) > MAX_FILES or len(filenames) != len(set(filenames)):
             raise ValueError("oversized/duplicate WAF path inventory")
@@ -263,11 +265,8 @@ def main(argv=None):
         stages = {
             "nginx-command", "nginx-mode", "nginx-root-count",
             "nginx-root-path", "config-path-listing", "config-symlink-check",
-            "config-symlink-many",
-            "config-symlink-crs-opt", "config-symlink-crs-usr",
-            "config-symlink-crs-etc", "config-symlink-crs-other",
-            "config-symlink-other-opt", "config-symlink-other-usr",
-            "config-symlink-other-etc", "config-symlink-other-other",
+            "config-symlink-other", "config-symlink-target-unapproved",
+            "config-followed-tree",
             "read-actual-config-bytes", "graph-and-inventory"
         }
         stage = str(exc).removeprefix("Effective WAF graph rejected at ")
