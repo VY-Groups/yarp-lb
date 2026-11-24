@@ -94,6 +94,17 @@ class EffectiveRuntimeGraphTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             graph.walk_graph(a,P+"modsecurity.conf")
 
+    def test_empty_inert_wrapper_is_allowed_but_empty_crs_rule_is_not(self):
+        # Pinned images may contain inert zero-length wrapper configuration.
+        # These do not change an executed rule digest; empty actual CRS rule
+        # files remain impossible under the independent archive contract.
+        files=dict(FILES)
+        files[P+"unused-empty-wrapper.conf"]=b""
+        self.assertEqual(graph.walk_graph(files,P+"modsecurity.conf")[1],5)
+        files[R+"REQUEST-944-EMPTY.conf"]=b""
+        with self.assertRaisesRegex(ValueError,"empty"):
+            graph.walk_graph(files,P+"modsecurity.conf")
+
     def test_glob_does_not_match_nested_rule_paths(self):
         files = dict(FILES)
         files[R+"nested/REQUEST-944-HIDDEN.conf"]=b"SecRule id:944000\n"
