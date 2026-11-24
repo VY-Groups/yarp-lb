@@ -8,6 +8,7 @@ under its own local systemd authority, verifies 0 running main PIDs, and
 signs a bounded epoch-specific receipt using an independently held P-256
 identity. The receiving node requires two different verified identities.
 """
+import argparse
 import base64
 import hashlib
 import json
@@ -239,3 +240,61 @@ def verify_two_receipts(fence, source_wire, destination_wire, *,
     second = verify_receipt(destination_wire, receiver_key, fence, fence.receiver,
                            receiver_units, clock=clock, runner=runner)
     return first and second
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--approved-offline", action="store_true")
+    for name in ("fleet-quorum-inventory", "fleet", "sender-node-id",
+                 "receiver-node-id", "checkpoint-sha256", "etcd-ca",
+                 "etcd-certificate", "etcd-private-key", "node-id",
+                 "signing-private-key", "output-receipt"):
+        parser.add_argument("--" + name, required=True)
+    parser.add_argument("--recovery-revision", required=True, type=int)
+    parser.add_argument("--writer-unit", action="append", required=True)
+    options = parser.parse_args(argv)
+    try:
+        if not options.approved_offline or not sys.platform.startswith("linux"):
+            raise ValueError("explicit operator approval and Linux required")
+        inventory = wire.read_private_path(options.fleet_quorum_inventory, 8192)
+        doc = authority.etcd.strict_json(inventory)
+        if (type(doc) is not dict or set(doc) != {
+                "schemaVersion","fleet","clusterId","endpoints"} or
+                doc["schemaVersion"] != 1 or doc["fleet"] != options.fleet or
+                type(doc["endpoints"]) is not list):
+            raise ValueError("unapproved independent Raft cluster inventory")
+        fence = authority.RecoveryFence(
+            options.fleet, doc["endpoints"], doc["clusterId"],
+            options.etcd_ca, options.etcd_certificate, options.etcd_private_key,
+            options.sender_node_id, options.receiver_node_id,
+            options.recovery_revision, options.checkpoint_sha256)
+        out = options.output_receipt
+        wire.canonical_absolute(out)
+        fd = wire.private_directory(os.path.dirname(out))
+        os.close(fd)
+        if os.path.lexists(out):
+            raise ValueError("signed writer receipt may not be overwritten")
+        binary = issue(fence, options.node_id, tuple(options.writer_unit),
+                       options.signing_private_key)
+        wire.safe_write(out, binary)
+        fd = wire.private_directory(os.path.dirname(out))
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except (OSError, ValueError, TypeError, subprocess.SubprocessError):
+        # Never expose signed receipts, TLS keys, service identities, paths,
+        # private exception content or real systemd output.
+        stages = {"init","preflight","stop-registered-writer",
+                  "mask-registered-writer","verify-masked-inactive",
+                  "verify-live-quorum-after-stop","sign-node-quiescence"}
+        print("FAIL: signed Linux DP writer quiescence at " +
+              (STAGE if STAGE in stages else "unclassified"), file=sys.stderr)
+        return 1
+    print("PASS: independently signed and still-masked OFFLINE service witness; "
+          "not a production promotion authorization")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
