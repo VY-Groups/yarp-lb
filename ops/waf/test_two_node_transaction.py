@@ -217,6 +217,27 @@ class FleetTests(unittest.TestCase):
             self.call()
         self.assertEqual({n.mode for n in self.nodes.values()}, {"detect"})
 
+    def test_explicit_compose_project_identity_cannot_alias_or_inject(self):
+        source = self.folder / "compose.yml"
+        source.write_text("services: {}", encoding="ascii")
+        image = "owasp/modsecurity-crs@sha256:" + "a" * 64
+        invocations = []
+        def fake_runner(argv, env=None):
+            invocations.append(argv)
+            return "test"
+        for value in ("../alias", "UPPER", "x", "a b", "--force",
+                      "a" * 60, ""):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                fleet.local.DockerComposeProvider(
+                    source, image, "http://127.0.0.1:18888/",
+                    runner=fake_runner, project_name=value)
+        provider = fleet.local.DockerComposeProvider(
+            source, image, "http://127.0.0.1:18888/",
+            runner=fake_runner, project_name="gatewaycore-waf-node-a")
+        self.assertEqual(provider.command("ps", "-q", "waf"), "test")
+        self.assertEqual(invocations[-1][4:6],
+                         ["--project-name", "gatewaycore-waf-node-a"])
+
     def test_bad_policy_values_never_create_intent(self):
         for changes in ({"target": "Off"}, {"revision": 0},
                         {"revision": True}, {"policy_digest": "bad"},
