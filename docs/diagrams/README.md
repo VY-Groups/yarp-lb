@@ -5,7 +5,7 @@ Start here to understand the product, its trust boundaries and its engineering w
 ## Status and revision legend
 
 - **Main**: documentation branch based on customer main `20e465054cd30704ae163f89ed578c8e9c4862d8`.
-- **Candidate**: customer licensing/fleet stack through PR #549, snapshot [`6c24dbb`](https://github.com/VY-Groups/yarp-lb/tree/6c24dbbab53718102cd96c6380bbe15263a36fe9). Commercial behavior described here is candidate behavior, not an assertion of merge or exact-head CI success.
+- **Candidate**: customer licensing/fleet stack through PR #549, snapshot `6c24dbb` (repository revision/path: `6c24dbbab53718102cd96c6380bbe15263a36fe9`). Commercial behavior described here is candidate behavior, not an assertion of merge or exact-head CI success.
 - **Opt-in**: separate configuration, credentials and external services are required.
 - **External / physical**: operator-owned network, PKI, production systems or actual-host acceptance. Software diagrams never constitute production signoff.
 
@@ -22,7 +22,7 @@ Start here to understand the product, its trust boundaries and its engineering w
 | [07 — Build, test & release](07-delivery.md) | PR dependency chain, exact-head CI, release and physical acceptance |
 | [08 — CI workflow catalog](08-ci-index.md) | Individual workflow job graphs generated from pinned YAML |
 | [09 — Installation and config-as-code](09-installation.md) | Windows/Linux testing, onboarding, offline GitOps planning and Kubernetes import |
-| [Company authority atlas](https://github.com/VY-Groups/gatewaycore-license-authority/tree/docs/visual-authority-atlas/docs/diagrams) | Issuance, billing, approval, PostgreSQL, recovery and independent signing |
+| Company authority atlas — `gatewaycore-license-authority:docs/diagrams/README.md` | Issuance, billing, approval, PostgreSQL, recovery and independent signing |
 
 ## One picture of the whole system
 

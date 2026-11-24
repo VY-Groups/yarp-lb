@@ -25,7 +25,7 @@ J -->|Yes| T["Controlled test only"]
 
 The Windows test package is distinct from the commercial signed package. Existing state is not automatically overwritten. Health 200 is liveness, not upstream readiness. No firewall, IIS or database modification is implied.
 
-**Source:** [ops/windows-test/README.md](https://github.com/VY-Groups/yarp-lb/blob/6c24dbbab53718102cd96c6380bbe15263a36fe9/ops/windows-test/README.md) · [control-center/docs/SETUP_CHECKLIST.md](https://github.com/VY-Groups/yarp-lb/blob/6c24dbbab53718102cd96c6380bbe15263a36fe9/control-center/docs/SETUP_CHECKLIST.md)
+**Source:** `ops/windows-test/README.md` (source 6c24dbb) · `control-center/docs/SETUP_CHECKLIST.md` (source 6c24dbb)
 
 
 ## Ubuntu disposable Docker laboratory
@@ -47,7 +47,7 @@ E --> R["Preserve evidence; stop test stack"]
 
 One Docker host is not two physical HA hosts. Use a separate load generator for capacity evidence and retain raw results.
 
-**Source:** [ops/test-server/README.md](https://github.com/VY-Groups/yarp-lb/blob/6c24dbbab53718102cd96c6380bbe15263a36fe9/ops/test-server/README.md)
+**Source:** `ops/test-server/README.md` (source 6c24dbb)
 
 
 ## Architecture onboarding
@@ -65,7 +65,7 @@ DesignConfirmed --> DesignConfirmed: stale revision rejected
 
 This state machine deliberately has no deployed state. Onboarding validates and stores metadata; actual routing changes use reviewed changes.
 
-**Source:** [control-center/Onboarding.cs](https://github.com/VY-Groups/yarp-lb/blob/6c24dbbab53718102cd96c6380bbe15263a36fe9/control-center/Onboarding.cs) · [control-center/docs/ARCHITECTURE.md](https://github.com/VY-Groups/yarp-lb/blob/6c24dbbab53718102cd96c6380bbe15263a36fe9/control-center/docs/ARCHITECTURE.md)
+**Source:** `control-center/Onboarding.cs` (source 6c24dbb) · `control-center/docs/ARCHITECTURE.md` (source 6c24dbb)
 
 
 ## Offline GitOps-style planning and Gateway API import
@@ -85,5 +85,5 @@ D --> E["Reviewed Control Center apply / fleet workflow"]
 
 The tool has no cluster lookup, watch, live reconciliation, Terraform provider, full Kubernetes controller, or automatic revocation of a changed ReferenceGrant. Import output contains addresses and requires protected storage. Plan/validate output is redacted. Unsupported configuration semantics must be rejected, not silently stripped.
 
-**Source:** [control-center/tools/GatewayConfigPlan/README.md](https://github.com/VY-Groups/yarp-lb/blob/6c24dbbab53718102cd96c6380bbe15263a36fe9/control-center/tools/GatewayConfigPlan/README.md) · [control-center/tools/GatewayConfigPlan/PlanEngine.cs](https://github.com/VY-Groups/yarp-lb/blob/6c24dbbab53718102cd96c6380bbe15263a36fe9/control-center/tools/GatewayConfigPlan/PlanEngine.cs) · [control-center/tools/GatewayConfigPlan/GatewayApiImport.cs](https://github.com/VY-Groups/yarp-lb/blob/6c24dbbab53718102cd96c6380bbe15263a36fe9/control-center/tools/GatewayConfigPlan/GatewayApiImport.cs)
+**Source:** `control-center/tools/GatewayConfigPlan/README.md` (source 6c24dbb) · `control-center/tools/GatewayConfigPlan/PlanEngine.cs` (source 6c24dbb) · `control-center/tools/GatewayConfigPlan/GatewayApiImport.cs` (source 6c24dbb)
 
