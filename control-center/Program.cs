@@ -23,6 +23,14 @@ using Microsoft.AspNetCore.Mvc;
 using System.Threading.RateLimiting;
 using Yarp.ReverseProxy.LoadBalancing;
 
+// Explicit local operator command, never a remote management endpoint.
+// Handle before constructing any listener, audit worker or other hosted service.
+if(args.Length>0 && args[0]=="--linux-dp-key-issue")
+{
+    Environment.ExitCode=LinuxDistributedKeyIssue.Run(args);
+    return;
+}
+
 // Windows neutral-identity deployments use a new ProgramData root. Refuse
 // silent re-bootstrap when another YARP control plane already has identities.
 // Disposable EC2 CI uses a private workspace; production Linux state is

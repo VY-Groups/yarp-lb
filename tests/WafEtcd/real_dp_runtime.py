@@ -34,6 +34,9 @@ def run(root, endpoints, cluster, ca, ids, addr, post, checked):
     dll = Path(os.environ.get("DP_RUNTIME_FIXTURE_DLL", ""))
     if not dll.is_absolute() or not dll.is_file():
         raise RuntimeError("required real .NET acceptance executable missing")
+    product=Path(os.environ.get("DP_RUNTIME_PRODUCT_DLL",""))
+    if not product.is_absolute() or not product.is_file():
+        raise RuntimeError("required shipping key issuance executable missing")
     state = root / "dotnet-runtime"
     state.mkdir(mode=0o700)
     provision = state / "provision"
@@ -173,7 +176,7 @@ def run(root, endpoints, cluster, ca, ids, addr, post, checked):
             "WriterRecordSha256":epoch[2] if epoch else None}
         return private_file(path,json.dumps(document,separators=(",",":")))
 
-    def execute(node,config,wrapping,operation,expected=0,cookie=None):
+    def execute(node,config,wrapping,operation,expected=0,cookie=None,product_args=None):
         directory=state/node
         directory.mkdir(mode=0o700,exist_ok=True)
         env={k:v for k,v in os.environ.items() if not k.startswith("YARP_")}
@@ -181,7 +184,10 @@ def run(root, endpoints, cluster, ca, ids, addr, post, checked):
                    YARP_LINUX_DP_DISTRIBUTED_RING_CONFIG=config,
                    YARP_LINUX_DP_CERT_PFX_PATH=wrapping[0],
                    YARP_LINUX_DP_CERT_PASSWORD_FILE=wrapping[1])
-        result=subprocess.run(["dotnet",str(dll),"--distributed-real",operation],
+        command=(["dotnet",str(product),"--linux-dp-key-issue",*product_args]
+                 if product_args is not None else
+                 ["dotnet",str(dll),"--distributed-real",operation])
+        result=subprocess.run(command,
             env=env,input=(cookie+"\n") if cookie else "",text=True,
             stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=45,check=False)
         if result.returncode!=expected:
@@ -208,8 +214,12 @@ def run(root, endpoints, cluster, ca, ids, addr, post, checked):
     wrong_client=configuration("wrong-client","node-a","writer",
                                (client_a[0],client_a[1],client_b[2]),epoch_a)
     execute("a",wrong_client,wrap_a,"rotate",expected=4)
-    execute("a",writer_a,wrap_a,"rotate")
+    execute("a",writer_a,wrap_a,"product-bootstrap",product_args=["bootstrap"])
     original=inventory()
+    execute("a",writer_a,wrap_a,"duplicate-product-bootstrap",expected=1,
+            product_args=["bootstrap"])
+    if inventory()!=original:
+        raise RuntimeError("repeated shipping bootstrap changed encrypted ring")
     if len(original)!=1:
         raise RuntimeError("actual Data Protection did not publish exactly one key")
     for encoded in original.values():
@@ -221,6 +231,8 @@ def run(root, endpoints, cluster, ca, ids, addr, post, checked):
         raise RuntimeError("actual distributed Data Protection cookie missing")
     execute("b",reader_b,wrap_b,"verify",cookie=old)
     execute("b",reader_b,wrap_b,"rotate",expected=5)
+    execute("b",reader_b,wrap_b,"product-reader-bootstrap",expected=1,
+            product_args=["bootstrap"])
     rpc("/v3/lease/revoke",{"ID":str(epoch_a[0])})
     execute("a",writer_a,wrap_a,"rotate",expected=5)
     if inventory()!=original:
@@ -247,6 +259,24 @@ def run(root, endpoints, cluster, ca, ids, addr, post, checked):
     for cookie in (old,new):
         execute("a",reader_a,wrap_a,"verify",cookie=cookie)
         execute("b",writer_b,wrap_b,"verify",cookie=cookie)
+    # The shipping operator command stages a future key without changing
+    # the currently usable cookie generation. The test uses an active lease.
+    import datetime
+    activation=(datetime.datetime.now(datetime.timezone.utc)+
+                datetime.timedelta(days=3)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    execute("b",writer_b,wrap_b,"product-stage",product_args=["stage",activation])
+    staged=inventory()
+    if len(staged)!=3 or any(staged.get(k)!=v for k,v in rotated.items()):
+        raise RuntimeError("shipping scheduled rotation changed existing keys")
+    execute("b",writer_b,wrap_b,"product-duplicate-stage",expected=1,
+            product_args=["stage",activation])
+    if inventory()!=staged:
+        raise RuntimeError("competing future issuance changed ring")
+    if key_id(execute("b",writer_b,wrap_b,"mint"))!=key_id(new):
+        raise RuntimeError("future staged key became active early")
+    for cookie in (old,new):
+        execute("a",reader_a,wrap_a,"verify",cookie=cookie)
+    print("PASS: shipping operator bootstrap, duplicate/reader denial and future rotation staging",flush=True)
     print("PASS: real .NET + three-member mTLS Raft encrypted key storage, "
           "cookie continuity, revoked/stale writer denial and epoch rollover",flush=True)
 

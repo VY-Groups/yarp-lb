@@ -44,6 +44,7 @@ public static class LinuxKeyProtection
         private readonly object sync = new();
         private readonly string prefix, writerKey;
         private long floor;
+        private bool requireEmptyRing;
 
         internal DistributedRingRepository(Settings settings, X509Certificate2 current,
             X509Certificate2? historic, Func<Member,string,object,JsonDocument>? testRpc = null)
@@ -378,6 +379,19 @@ public static class LinuxKeyProtection
             return (selected,approvedValue);
         }
 
+        // Used only by the explicit bootstrap command. The range-wide
+        // CREATE comparison is checked inside the actual Raft write, so
+        // competing first-key commands cannot both initialize the ring.
+        internal void RequireEmptyRing()
+        {
+            lock(sync)
+            {
+                if(config.Mode!="writer" || GetAllElements().Count!=0)
+                    throw new InvalidOperationException("Distributed bootstrap requires an empty ring");
+                requireEmptyRing=true;
+            }
+        }
+
         public void StoreElement(XElement element,string friendlyName)
         {
             lock(sync)
@@ -391,14 +405,18 @@ public static class LinuxKeyProtection
                 // Revocation/epoch replacement makes the compare fail.
                 var (member,approvedValue)=AttestWriter();
                 var item=B64(prefix+name);
+                var compares=new List<object> {
+                    new {result="EQUAL",target="MOD",key=writerKey,
+                        modRevision=config.WriterModRevision!.Value.ToString(CultureInfo.InvariantCulture)},
+                    new {result="EQUAL",target="LEASE",key=writerKey,
+                        lease=config.LeaseId!.Value.ToString(CultureInfo.InvariantCulture)},
+                    new {result="EQUAL",target="VALUE",key=writerKey,value=approvedValue},
+                    new {result="EQUAL",target="CREATE",key=item,createRevision="0"}};
+                if(requireEmptyRing)
+                    compares.Add(new {result="EQUAL",target="CREATE",key=B64(prefix),
+                        range_end=B64(prefix[..^1]+"0"),createRevision="0"});
                 var body=new {
-                    compare=new object[] {
-                        new {result="EQUAL",target="MOD",key=writerKey,
-                            modRevision=config.WriterModRevision!.Value.ToString(CultureInfo.InvariantCulture)},
-                        new {result="EQUAL",target="LEASE",key=writerKey,
-                            lease=config.LeaseId!.Value.ToString(CultureInfo.InvariantCulture)},
-                        new {result="EQUAL",target="VALUE",key=writerKey,value=approvedValue},
-                        new {result="EQUAL",target="CREATE",key=item,createRevision="0"}},
+                    compare=compares,
                     success=new[]{new {requestPut=new {key=item,value=Convert.ToBase64String(raw)}}},
                     failure=Array.Empty<object>()};
                 // Never retry ambiguous mutations. The transaction itself
