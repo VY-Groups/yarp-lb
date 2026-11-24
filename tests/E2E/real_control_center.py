@@ -153,9 +153,16 @@ class Client:
         if "json" in ctype:
             return json.loads(raw) if raw else {}
         return raw.decode("utf8","replace")
-    def session(self):
+    def session(self, *, accept_privacy=True):
         info=self.request("GET","/admin/api/session")
-        if info.get("authenticated"): self.csrf=info["csrf"]
+        if info.get("authenticated"):
+            self.csrf=info["csrf"]
+            # Disposable test clients explicitly acknowledge the notice.
+            # Never retry a blocked mutation automatically.
+            if accept_privacy and not info.get("privacyAccepted"):
+                self.request("POST","/admin/api/privacy/accept",{"version":info["privacyVersion"]})
+                info=self.request("GET","/admin/api/session")
+                check(info["privacyAccepted"],"server confirms explicit privacy acceptance")
         return info
     def login(self, user, password):
         r=self.request("POST","/admin/api/login",{"username":user,"password":password,"provider":"local"})
@@ -595,13 +602,33 @@ def acceptance(base:str,https_base:str,origin_port:int):
     anonymous=Client(base)
     check(not anonymous.session()["initialized"],"clean state requires bootstrap")
     check("<html" in anonymous.request("GET","/dashboard"),"real dashboard HTML served")
+    check("Privacy Policy" in anonymous.request("GET","/dashboard/privacy"),"standalone privacy notice is accessible before login")
+    anonymous.request("POST","/admin/api/privacy/accept",{"version":"forged"},expect=401)
     check("function" in anonymous.request("GET","/dashboard/app.js"),"real browser JavaScript served")
     check(anonymous.request("GET","/admin/api/users",expect=401)=="","anonymous users endpoint remains 401")
     anonymous.request("POST","/admin/api/users",{"username":"unauth"},expect=401)
     anonymous.request("POST","/admin/api/bootstrap",{"username":"a","password":"weak","email":"invalid"},expect=400)
     anonymous.request("GET","/admin/api/gateway-readiness",expect=401)
     admin=Client(base)
-    admin.bootstrap("admin_e2e","Admin-secret-long-4096!","admin@example.invalid")
+    created=admin.request("POST","/admin/api/bootstrap",{"username":"admin_e2e",
+        "password":"Admin-secret-long-4096!","email":"admin@example.invalid"})
+    check(created["authenticated"],"first admin bootstrap")
+    pending=admin.session(accept_privacy=False)
+    check(not pending["privacyAccepted"] and "Privacy Policy" in pending["privacyText"],
+          "new authenticated session must acknowledge policy")
+    check("\r" not in pending["privacyText"] and
+          hashlib.sha256(pending["privacyText"].encode("utf-8")).hexdigest().upper()==pending["privacyVersion"],
+          "privacy revision hashes the canonical UTF-8 notice displayed to the user")
+    admin.request("GET","/admin/api/state",expect=428)
+    admin.request("POST","/admin/api/inventory",{"id":"blocked"},expect=428)
+    admin.request("POST","/admin/api/privacy/accept",{"version":pending["privacyVersion"]},csrf=False,expect=403)
+    admin.request("POST","/admin/api/privacy/accept",{"version":"stale"},expect=409)
+    check(not admin.session(accept_privacy=False)["privacyAccepted"],"invalid acceptance leaves access locked")
+    eventually(anonymous,"/fixture/check","e2e-origin:/check")
+    check(admin.session()["privacyAccepted"],"explicit current-policy acceptance unlocks management")
+    check(not admin.request("GET","/admin/api/inventory"),"blocked pre-acceptance mutation had no effect")
+    check(any(row.get("action")=="PRIVACY_POLICY_ACCEPTED" for row in admin.request("GET","/admin/api/audit")),
+          "explicit acceptance is recorded in the management audit")
     admin.request("POST","/admin/api/bootstrap",{"username":"other","password":"Another-very-long-secret!","email":"a@example.invalid"},expect=409)
     check(len(admin.request("GET","/admin/api/users"))==1,"admin user listing")
     admin.request("POST","/admin/api/users",{"username":"operator_e2e","role":"Operator","password":"Operator-secret-long!","email":"operator@example.invalid"},csrf=False,expect=403)
