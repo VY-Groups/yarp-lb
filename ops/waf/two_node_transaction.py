@@ -19,6 +19,7 @@ import re
 import stat
 
 import rollout_controller as local
+import mtls_fenced_node as remote
 
 NODE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{1,47}\Z", re.ASCII)
 DIGEST = re.compile(r"[0-9A-F]{64}\Z", re.ASCII)
@@ -36,6 +37,15 @@ def _validate_nodes(nodes):
     if len({id(node) for node in nodes.values()}) != 2:
         raise ValueError("two independent node adapter instances required")
     ordered = sorted(nodes.items())
+    remote_nodes = [(name, node) for name, node in ordered
+                    if isinstance(node, remote.RemoteNodeProvider)]
+    if remote_nodes:
+        if len(remote_nodes) != 2 or any(name != node.node_id
+                                        for name, node in remote_nodes):
+            raise ValueError("remote WAF identity must match signed node mapping")
+        if (len({(node.host, node.port) for _, node in remote_nodes}) != 2 or
+                len({node.server_pin for _, node in remote_nodes}) != 2):
+            raise ValueError("WAF remote endpoints and TLS identities must be independent")
     if all(isinstance(p, local.DockerComposeProvider) for _, p in ordered):
         # A local Docker lab needs two actually separate Compose projects and
         # health listeners. Do not accept the same WAF under two names.
@@ -149,7 +159,7 @@ def coordinate(nodes, target, revision, policy_digest, ruleset_digest,
         }
         # Exclusive fsync + no-overwrite (same safety contract as receipts).
         _check_fence(fence, names, revision, policy_digest, "before-journal")
-        local.receipt(journal, {**evidence, "state": "prepared-no-node-mutated"})
+        local.receipt(journal, {**evidence, "state": "intent-fsynced-mutation-may-start"})
         mutated = []
         try:
             for name, node in ordered:
