@@ -158,6 +158,41 @@ def build_quorum_authority(args):
         args.checkpoint_sha256)
 
 
+def signed_node_quiescence(args, fence, loopback):
+    """Both independent systemd identities must attest the SAME live epoch."""
+    fields = ("sender_quiescence_receipt", "receiver_quiescence_receipt",
+              "sender_quiescence_public_key", "receiver_quiescence_public_key",
+              "sender_writer_units", "receiver_writer_units")
+    values = [getattr(args, field, None) for field in fields]
+    if all(value is None for value in values):
+        if not loopback:
+            raise ValueError("remote signed DP recovery requires two independent writer guards")
+        return None
+    if any(value is None for value in values) or fence is None:
+        raise ValueError("partial independent writer fencing authority rejected")
+    import linux_dp_quiescence as witness
+    for path in values[:4]:
+        wire.canonical_absolute(path)
+        for unsafe in (args.destination_root, args.state_root,
+                       args.restore_bundle):
+            if not disjoint(path, unsafe):
+                raise ValueError("writer fencing proof overlaps restored state")
+    receipts = (wire.read_private_path(values[0], witness.MAX_RECEIPT),
+                wire.read_private_path(values[1], witness.MAX_RECEIPT))
+    return (witness, receipts, values[2], values[3],
+            values[4], values[5])
+
+
+def require_signed_node_quiescence(proof, fence):
+    if proof is None:
+        return
+    witness, receipts, sender_key, receiver_key, sender_units, receiver_units = proof
+    if witness.verify_two_receipts(
+            fence, *receipts, sender_key=sender_key, receiver_key=receiver_key,
+            sender_units=sender_units, receiver_units=receiver_units) is not True:
+        raise ValueError("two-node signed writer quiescence rejected")
+
+
 def restore_once(args, *, fetch=wire.fetch_pinned, stage=wire.stage_received,
                  invoke=subprocess.run, fence=None):
     global STAGE
@@ -194,10 +229,14 @@ def restore_once(args, *, fetch=wire.fetch_pinned, stage=wire.stage_received,
         wire.read_private_path(str(item), 16384)
     if os.path.lexists(os.path.join(args.state_root, "data-protection-keys")):
         raise ValueError("live or previously restored DP ring must not be overwritten")
+    STAGE = "independent-two-node-writer-quiescence"
+    proof = signed_node_quiescence(args, fence, loopback)
+    require_signed_node_quiescence(proof, fence)
     STAGE = "pinned-complete-dotnet-bundle"
     app = verify_restore_app(args.restore_bundle, args.restore_bundle_sha256)
     STAGE = "pinned-mtls-fetch"
     require_approved_authority(fence, "before-transfer")
+    require_signed_node_quiescence(proof, fence)
     binary = fetch(args.server_url, args.label, args.server_cert_sha256, args.ca,
                    args.certificate, args.private_key)
     if type(binary) is not bytes or len(binary) > wire.MAX_BUNDLE:
@@ -223,6 +262,7 @@ def restore_once(args, *, fetch=wire.fetch_pinned, stage=wire.stage_received,
                     fence.checkpoint_sha)):
             raise ValueError("received DP checkpoint differs from quorum epoch")
     require_approved_authority(fence, "after-transfer")
+    require_signed_node_quiescence(proof, fence)
     checkpoint = os.path.join(args.destination_root,
                               "." + args.label + ".signed-checkpoint.json")
     wire.safe_write(checkpoint, raw_checkpoint)
@@ -266,6 +306,7 @@ def restore_once(args, *, fetch=wire.fetch_pinned, stage=wire.stage_received,
         environment["DOTNET_ROOT_X64"] = runtime_root
     STAGE = "signed-dotnet-restore-subprocess"
     require_approved_authority(fence, "before-signed-restore")
+    require_signed_node_quiescence(proof, fence)
     restore_timeout = 180
     if fence is not None:
         # A 120s maximum etcd lease must NEVER authorize an unbounded 180s
@@ -311,6 +352,7 @@ def restore_once(args, *, fetch=wire.fetch_pinned, stage=wire.stage_received,
         os.close(directory)
     STAGE = "post-restore-quorum"
     require_approved_authority(fence, "after-signed-restore")
+    require_signed_node_quiescence(proof, fence)
     return received
 
 
@@ -338,6 +380,11 @@ def main(argv=None):
                  "etcd-certificate", "etcd-private-key"):
         parser.add_argument("--" + name)
     parser.add_argument("--recovery-revision", type=int)
+    for name in ("sender-quiescence-receipt", "receiver-quiescence-receipt",
+                 "sender-quiescence-public-key", "receiver-quiescence-public-key"):
+        parser.add_argument("--" + name)
+    parser.add_argument("--sender-writer-units", nargs="+")
+    parser.add_argument("--receiver-writer-units", nargs="+")
     options = parser.parse_args(argv)
     try:
         authority = build_quorum_authority(options)

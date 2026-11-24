@@ -1,0 +1,93 @@
+name: Signed Linux DP dual-node writer quiescence acceptance
+on:
+  pull_request:
+    paths:
+      - "ops/fleet/linux_dp_quiescence.py"
+      - "ops/fleet/test_linux_dp_quiescence.py"
+      - "ops/fleet/linux_dp_receive_restore.py"
+      - "ops/fleet/test_linux_dp_receive_restore.py"
+      - ".github/workflows/linux-dp-quiescence.yml"
+  push:
+    branches: [main]
+    paths:
+      - "ops/fleet/linux_dp_quiescence.py"
+      - "ops/fleet/test_linux_dp_quiescence.py"
+      - "ops/fleet/linux_dp_receive_restore.py"
+      - "ops/fleet/test_linux_dp_receive_restore.py"
+      - ".github/workflows/linux-dp-quiescence.yml"
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  two-node-real-p256:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify real P-256 signatures, source/destination identity and replay
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m py_compile ops/fleet/linux_dp_quiescence.py ops/fleet/linux_dp_receive_restore.py
+          python3 -m unittest discover -s ops/fleet -p test_linux_dp_quiescence.py -v
+          python3 -m unittest discover -s ops/fleet -p test_linux_dp_receive_restore.py -v
+  actual-systemd-writer:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Stop and runtime-mask disposable actual systemd writer
+        shell: bash
+        run: |
+          set -euo pipefail
+          UNIT=gatewaycore-dp-quiescence-ci.service
+          cat > "$RUNNER_TEMP/writer.service" <<'UNITFILE'
+          [Unit]
+          Description=Disposable Data Protection service-writer acceptance
+          [Service]
+          Type=simple
+          Restart=no
+          ExecStart=/usr/bin/sleep 180
+          [Install]
+          WantedBy=multi-user.target
+          UNITFILE
+          cleanup() {
+            sudo systemctl unmask --runtime "$UNIT" >/dev/null 2>&1 || true
+            sudo systemctl stop "$UNIT" >/dev/null 2>&1 || true
+            sudo rm -f "/usr/lib/systemd/system/$UNIT"
+            sudo systemctl daemon-reload
+          }
+          trap cleanup EXIT
+          sudo install -m 0644 "$RUNNER_TEMP/writer.service" "/usr/lib/systemd/system/$UNIT"
+          sudo systemctl daemon-reload
+          sudo systemctl start "$UNIT"
+          sudo systemctl is-active --quiet "$UNIT"
+          sudo python3 - <<'PY'
+          import sys
+          sys.path.insert(0, "ops/fleet")
+          import linux_dp_quiescence as dp
+          unit = "gatewaycore-dp-quiescence-ci.service"
+          dp.invoke_systemctl(dp.subprocess.run, "stop", unit)
+          dp.invoke_systemctl(dp.subprocess.run, "mask", "--runtime", unit)
+          dp.invoke_systemctl(dp.subprocess.run, "daemon-reload")
+          if not dp.stopped_and_masked(dp.subprocess.run, unit):
+              # No private log or arbitrary systemd output. Fixed allowlist
+              # of service-state categories for this disposable CI unit only.
+              report = dp.invoke_systemctl(dp.subprocess.run, "show", unit,
+                  "--property=LoadState,ActiveState,SubState,MainPID,UnitFileState")
+              expected = {
+                  "LoadState":{"loaded","masked","not-found"},
+                  "ActiveState":{"inactive","active","failed"},
+                  "SubState":{"dead","running","failed"},
+                  "MainPID":{"0","1","other"},
+                  "UnitFileState":{"masked-runtime","masked","disabled",
+                                   "enabled","static","linked",""}
+              }
+              for line in report.splitlines():
+                  key, sep, value = line.partition("=")
+                  if sep and key in expected:
+                      print("DP_CI_SYSTEMD_" + key + "=" +
+                            (value if value in expected[key] else "other"))
+              raise SystemExit("FAIL: actual systemd service not masked and inactive")
+          print("PASS: real systemd writer stopped, runtime-masked and MainPID=0")
+          PY
