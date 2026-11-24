@@ -79,9 +79,14 @@ if (args.Length >= 2 && args[0] is "--ci-authority" or "--ci-issue" or "--ci-rev
             schemaVersion = 1, product = "GatewayCore", licenseId = "ci-license",
             customerId = "ci-customer", deploymentId = "ci-deployment", allocationId = fixtureAllocation,
             installationKeySha256 = fixtureRequest.InstallationKeySha256, edition = "standard",
-            revision = step + 1, maxNodes = 1, maxSites = 1, issuedAt = utc.ToUnixTimeSeconds(),
+            revision = step + 1, maxNodes = step == 3 ? 2 : 1, maxSites = 1, issuedAt = utc.ToUnixTimeSeconds(),
             notBefore = utc.ToUnixTimeSeconds(), expiresAt = utc.AddDays(2).ToUnixTimeSeconds(),
-            features = step == 2 ? new[] { "monitoring" } : new[] { "l7", "tls", "monitoring" }
+            features = step switch
+            {
+                2 => new[] { "monitoring" },
+                3 => new[] { "l7", "tls", "monitoring", "ha", "fleet" },
+                _ => new[] { "l7", "tls", "monitoring" }
+            }
         }, signer);
     }
     using var output = new FileStream(args[3], FileMode.CreateNew, FileAccess.Write, FileShare.None);

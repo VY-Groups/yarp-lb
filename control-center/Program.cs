@@ -2241,6 +2241,10 @@ app.MapPost("/admin/api/fleet", async (HttpContext ctx, FleetGateway row) =>
         var before = externalAuditIntent is null && oidcPolicy is null ? Array.Empty<byte>() : AuditStateBytes(fleetPath);
         var list = ReadFleet();
         if (list.Any(x => x.Id.Equals(row.Id, StringComparison.OrdinalIgnoreCase))) return Results.Conflict(new { error = "Duplicate gateway ID" });
+#if GATEWAYCORE_COMMERCIAL
+        if (!commercialLicense.AllowsFleetCount(list.Count + 1))
+            return Results.Json(new { error = "Licensed managed-gateway count exceeded or HA/fleet feature unavailable.", code = "license_node_limit" }, statusCode: 402);
+#endif
         list.Add(row);
         var proposed = JsonSerializer.SerializeToUtf8Bytes(list);
         var denied = await ConfirmAndWriteResourceMutation(ctx, fleetPath, before, proposed, "FLEET_REGISTER_INTENT", true);
@@ -2385,6 +2389,10 @@ app.MapPost("/admin/api/fleet/rollout/{changeId}", async (HttpContext ctx, strin
         gateways = ReadFleet();
         if (gateways.Count < 2 || gateways.Count > 20)
             return Results.Conflict(new { error = "Register at least two managed gateways; maximum 20" });
+#if GATEWAYCORE_COMMERCIAL
+        if (!commercialLicense.AllowsFleetCount(gateways.Count))
+            return Results.Json(new { error = "Licensed managed-gateway count exceeded or HA/fleet feature unavailable.", code = "license_node_limit" }, statusCode: 402);
+#endif
         var fleetDigest = FleetDigest();
         var proxy = new JsonObject { ["Routes"] = routes.DeepClone(), ["Clusters"] = clusters.DeepClone() };
         var signingKeyPath = Path.Combine(privateDir, "fleet-signing-private.pem");
@@ -2414,6 +2422,9 @@ app.MapPost("/admin/api/fleet/rollout/{changeId}", async (HttpContext ctx, strin
         var denied = await ConfirmStateMutation(ctx, logPath, Array.Empty<byte>(), initial, "FLEET_ROLLOUT_INTENT", true);
         if (denied is not null) return denied;
         async Task<bool> CurrentPlan() => await AuditActorCurrent(ctx, true) && !ctx.RequestAborted.IsCancellationRequested &&
+#if GATEWAYCORE_COMMERCIAL
+            commercialLicense.AllowsFleetCount(gateways.Count) &&
+#endif
             OnboardingApi.IsMultiGatewayDesign(privateDir) && FleetDigest() == fleetDigest &&
             File.Exists(changePath) && File.ReadAllBytes(changePath).AsSpan().SequenceEqual(changeBytes);
         if (!await CurrentPlan()) return Results.Conflict(new { error = "Rollout authorization or plan changed" });
@@ -2541,7 +2552,11 @@ app.MapCapabilityRegistry();
 app.MapOnboardingApi(privateDir,
     (ctx, path, before, proposed, operation, administratorOnly) =>
         ConfirmStateMutation(ctx, path, before, proposed, operation, administratorOnly),
-    WriteAuditedState, Audit);
+    WriteAuditedState, Audit
+#if GATEWAYCORE_COMMERCIAL
+    , commercialLicense.AllowsTopology
+#endif
+    );
 // Enforce onboarding state server-side; hiding navigation is never a security boundary.
 app.Use(async (ctx, next) =>
 {

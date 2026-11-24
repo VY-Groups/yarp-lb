@@ -64,6 +64,10 @@ def main():
             check("fixture" in admin.request("GET", "/admin/api/state")["routes"], "management API unlocks after activation")
             check(not admin.request("GET", "/admin/api/inventory"), "pre-activation write was denied")
             admin.request("GET", "/admin/api/fleet", expect=402)
+            admin.request("GET", "/admin/api/directory", expect=402)
+            admin.request("GET", "/admin/api/audit", expect=402)
+            admin.request("GET", "/admin/api/metrics")
+            admin.request("GET", "/admin/api/tls/inventory")
             eventually(anonymous, "/fixture/check", "e2e-origin:/check")
             check(True, "actual YARP forwarding unlocks without external network")
         with gateway(cwd, dll, root, listen) as base:
@@ -106,7 +110,31 @@ def main():
             admin.request("POST", "/admin/api/license/import", {"file":forged_upgrade}, expect=400)
             anonymous.request("GET", "/fixture/check", expect=503)
             restored = admin.request("POST", "/admin/api/license/import", {"file":upgraded})
-            check(restored["revision"] == 4 and restored["trafficAdmitted"], "signed upgrade restores L7 admission")
+            check(restored["revision"] == 4 and restored["trafficAdmitted"] and restored["maxNodes"] == 2,
+                  "signed upgrade restores L7 and two managed gateway entitlements")
+            plan = {"mode":"ha-pair","controlPlane":"single-controller","dataStore":"local-file",
+                    "publicVip":"vip.example.invalid","upstreamHealthAware":True,
+                    "gateways":[{"id":f"node-{i}","hostname":f"node-{i}.example.invalid",
+                                  "agentUrl":f"https://node-{i}.example.invalid/"} for i in (1,2)],
+                    "workloads":[{"id":f"origin-{i}","application":"synthetic","url":f"http://127.0.0.1:{18000+i}/",
+                                  "zone":"public","hostingEngine":"http"} for i in (1,2)]}
+            excess = dict(plan, mode="fleet", gateways=plan["gateways"] + [
+                {"id":"node-3","hostname":"node-3.example.invalid","agentUrl":"https://node-3.example.invalid/"}])
+            admin.request("POST", "/admin/api/onboarding/validate", {"plan":excess}, expect=402)
+            check(admin.request("POST", "/admin/api/onboarding/validate", {"plan":plan})["issues"]==[],
+                  "two-node topology within signed entitlement")
+            revision = admin.request("GET", "/admin/api/onboarding")["revision"]
+            admin.request("POST", "/admin/api/onboarding", {"plan":excess,"confirmDesign":True,
+                          "expectedRevision":revision}, expect=402)
+            admin.request("POST", "/admin/api/onboarding", {"plan":plan,"confirmDesign":True,
+                          "expectedRevision":revision})
+            def fleet_row(i):
+                return {"id":f"node-{i}","url":f"https://node-{i}.example.invalid/",
+                        "clientCertificateThumbprint":"A"*40}
+            for i in (1,2):
+                admin.request("POST", "/admin/api/fleet", fleet_row(i))
+            admin.request("POST", "/admin/api/fleet", fleet_row(3), expect=402)
+            check(len(admin.request("GET", "/admin/api/fleet"))==2,"excess local fleet registration denied")
             eventually(anonymous, "/fixture/check", "e2e-origin:/check")
             revoked = issue("--ci-revoke", renewed["allocationId"], root/"revocation.gcv")
             state = admin.request("POST", "/admin/api/license/revoke", {"file":revoked})

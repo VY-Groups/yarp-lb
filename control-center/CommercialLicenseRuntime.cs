@@ -110,14 +110,48 @@ internal sealed class CommercialLicenseRuntime : BackgroundService
         path == "/admin/api/license/import" || path == "/admin/api/license/revoke" ||
         path == "/admin/api/privacy/accept";
 
+    // Local controller cap; does not assert that every remote gateway has
+    // a valid unique allocation or prove a global site count.
+    internal bool AllowsFleetCount(int count)
+    {
+        lock (sync)
+            return count >= 0 && Allows("l7") && Allows("fleet") && Allows("ha") &&
+                current is not null && count <= current.MaxNodes;
+    }
+
+    internal bool AllowsTopology(OnboardingPlan plan)
+    {
+        lock (sync)
+        {
+            if (!Allows("l7") || current is null || plan.Gateways is null ||
+                plan.Gateways.Count > current.MaxNodes) return false;
+            return plan.Mode switch
+            {
+                "standalone" => true,
+                "ha-pair" => Allows("ha") && Allows("fleet"),
+                "fleet" => Allows("ha") && Allows("fleet"),
+                _ => false
+            };
+        }
+    }
+
     internal bool Permits(PathString path)
     {
-        if (!Allows("l7")) return false;
-        if (path.StartsWithSegments("/admin/api/fleet")) return Allows("fleet") && Allows("ha");
-        if (path.StartsWithSegments("/admin/api/gitops")) return Allows("gitops");
-        if (path.StartsWithSegments("/admin/api/tls")) return Allows("tls");
-        if (path.StartsWithSegments("/admin/api/audit")) return Allows("audit");
-        return true;
+        lock (sync)
+        {
+            if (!Allows("l7")) return false;
+            if (path.StartsWithSegments("/admin/api/fleet")) return Allows("fleet") && Allows("ha");
+            if (path.StartsWithSegments("/admin/api/peer-sync")) return Allows("ha");
+            if (path.StartsWithSegments("/admin/api/gitops")) return Allows("gitops");
+            if (path.StartsWithSegments("/admin/api/tls")) return Allows("tls");
+            if (path.StartsWithSegments("/admin/api/audit")) return Allows("audit");
+            if (path.StartsWithSegments("/admin/api/directory")) return Allows("enterprise-sso");
+            if (path.StartsWithSegments("/admin/api/metrics") ||
+                path.StartsWithSegments("/admin/api/destination-metrics") ||
+                path.StartsWithSegments("/admin/api/reports") ||
+                path.StartsWithSegments("/admin/api/logging-health")) return Allows("monitoring");
+            return true;
+        }
     }
 
     internal static async Task<byte[]> ReadUpload(HttpContext ctx)
