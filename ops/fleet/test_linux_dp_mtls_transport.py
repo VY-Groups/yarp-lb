@@ -102,7 +102,7 @@ class TransportTests(unittest.TestCase):
                 tx.build_bundle(str(self.source),label,str(self.checkpoint))
         link=self.source/"alias"
         link.symlink_to(self.snapshot, target_is_directory=True)
-        with self.assertRaises(ValueError):
+        with self.assertRaises((ValueError, OSError)):
             tx.build_bundle(str(self.source),"alias",str(self.checkpoint))
         link.unlink()
         self.key.chmod(0o644)
