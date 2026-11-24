@@ -2,7 +2,7 @@
 
 Candidate PR #549: persistent per-deployment Raft ownership for **L7 fleet configuration**. This does not coordinate every engine, the data plane, external VIP, or offline installation clones.
 
-[← Visual atlas](README.md) · [Authority visual atlas](https://github.com/VY-Groups/gatewaycore-license-authority/tree/docs/visual-authority-atlas/docs/diagrams)
+[← Visual atlas](README.md) · Authority visual atlas — `gatewaycore-license-authority:docs/diagrams/README.md`
 
 > Source snapshot: `6c24dbbab53718102cd96c6380bbe15263a36fe9` (commercial development candidate, not a production release). Diagrams are logical views, not physical deployment instructions. Optional integrations must be explicitly provisioned. See the linked source and exact-head CI before treating any behavior as accepted.
 
@@ -35,7 +35,7 @@ G2 --> F2["Durable agent epoch + staged config"]
 
 The scope is the SHA-256 of signed license ID, customer ID and deployment ID (newline-delimited). Key is persistent, not TTL-based. Raft modification revision is the signed fleet epoch. Reader and writer credentials must be separately scoped; the same cluster identity and distinct member certificate pins are provisioned on all participants.
 
-**Source at candidate:** [control-center/FleetQuorum.cs](https://github.com/VY-Groups/yarp-lb/blob/6c24dbbab53718102cd96c6380bbe15263a36fe9/control-center/FleetQuorum.cs) · [control-center/GatewayAgent/Program.cs](https://github.com/VY-Groups/yarp-lb/blob/6c24dbbab53718102cd96c6380bbe15263a36fe9/control-center/GatewayAgent/Program.cs)
+**Source at candidate:** `control-center/FleetQuorum.cs` (source 6c24dbb) · `control-center/GatewayAgent/Program.cs` (source 6c24dbb)
 
 ## Normal rollout sequence
 ```mermaid
@@ -71,7 +71,7 @@ C-->>A: Activated, pending application health validation
 ```
 
 
-**Source at candidate:** [control-center/Program.cs](https://github.com/VY-Groups/yarp-lb/blob/6c24dbbab53718102cd96c6380bbe15263a36fe9/control-center/Program.cs) · [control-center/FleetRolloutJournal.cs](https://github.com/VY-Groups/yarp-lb/blob/6c24dbbab53718102cd96c6380bbe15263a36fe9/control-center/FleetRolloutJournal.cs) · [control-center/FleetQuorum.cs](https://github.com/VY-Groups/yarp-lb/blob/6c24dbbab53718102cd96c6380bbe15263a36fe9/control-center/FleetQuorum.cs)
+**Source at candidate:** `control-center/Program.cs` (source 6c24dbb) · `control-center/FleetRolloutJournal.cs` (source 6c24dbb) · `control-center/FleetQuorum.cs` (source 6c24dbb)
 
 ## Competing controllers and partition
 ```mermaid
@@ -102,7 +102,7 @@ Note over A,N: Persistent lock remains; healthy local traffic is a separate conc
 
 Definite competing acquisition does not leave a blocking local mutation; an uncertain CAS preserves unresolved state. No automatic timeout or minority takeover.
 
-**Source at candidate:** [control-center/FleetQuorum.cs](https://github.com/VY-Groups/yarp-lb/blob/6c24dbbab53718102cd96c6380bbe15263a36fe9/control-center/FleetQuorum.cs) · [tests/WafEtcd/commercial_fleet_quorum.py](https://github.com/VY-Groups/yarp-lb/blob/6c24dbbab53718102cd96c6380bbe15263a36fe9/tests/WafEtcd/commercial_fleet_quorum.py)
+**Source at candidate:** `control-center/FleetQuorum.cs` (source 6c24dbb) · `tests/WafEtcd/commercial_fleet_quorum.py` (source 6c24dbb)
 
 ## Recovery and completion state
 ```mermaid
@@ -144,7 +144,7 @@ I --> V
 
 Recovery does not relicense revoked installations. Late activation is rejected by local durable fence, sequence and entitlement checks. Do not manually delete a stuck Raft key or restore an old snapshot without independent reconciliation. The lock deliberately trades automatic takeover for safety.
 
-**Source at candidate:** [control-center/FleetRolloutJournal.cs](https://github.com/VY-Groups/yarp-lb/blob/6c24dbbab53718102cd96c6380bbe15263a36fe9/control-center/FleetRolloutJournal.cs) · [control-center/GatewayAgent/Program.cs](https://github.com/VY-Groups/yarp-lb/blob/6c24dbbab53718102cd96c6380bbe15263a36fe9/control-center/GatewayAgent/Program.cs) · [control-center/tests/EngineConfigSecurityTests/agent_crl_acceptance.py](https://github.com/VY-Groups/yarp-lb/blob/6c24dbbab53718102cd96c6380bbe15263a36fe9/control-center/tests/EngineConfigSecurityTests/agent_crl_acceptance.py)
+**Source at candidate:** `control-center/FleetRolloutJournal.cs` (source 6c24dbb) · `control-center/GatewayAgent/Program.cs` (source 6c24dbb) · `control-center/tests/EngineConfigSecurityTests/agent_crl_acceptance.py` (source 6c24dbb)
 
 ## Distinct distributed contracts
 | Contract | Authority | Scope |

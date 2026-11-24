@@ -2,7 +2,7 @@
 
 Source to acceptance. No automatic production deployment.
 
-[← Visual atlas](README.md) · [Authority visual atlas](https://github.com/VY-Groups/gatewaycore-license-authority/tree/docs/visual-authority-atlas/docs/diagrams)
+[← Visual atlas](README.md) · Authority visual atlas — `gatewaycore-license-authority:docs/diagrams/README.md`
 
 > Source snapshot: `6c24dbbab53718102cd96c6380bbe15263a36fe9` (commercial development candidate, not a production release). Diagrams are logical views, not physical deployment instructions. Optional integrations must be explicitly provisioned. See the linked source and exact-head CI before treating any behavior as accepted.
 
@@ -25,7 +25,7 @@ P --> H["Issue #36 physical and operational acceptance"]
 
 This is a dependency map, not live PR status. Check PRs and CI links before merging or releasing. Historical public-source licensing obligations and owner-approved commercial terms remain separate.
 
-**Source at candidate:** [docs/OFFLINE_COMMERCIAL_LICENSING.md](https://github.com/VY-Groups/yarp-lb/blob/6c24dbbab53718102cd96c6380bbe15263a36fe9/docs/OFFLINE_COMMERCIAL_LICENSING.md) · [ops/release/README.md](https://github.com/VY-Groups/yarp-lb/blob/6c24dbbab53718102cd96c6380bbe15263a36fe9/ops/release/README.md)
+**Source at candidate:** `docs/OFFLINE_COMMERCIAL_LICENSING.md` (source 6c24dbb) · `ops/release/README.md` (source 6c24dbb)
 
 ## CI gate and release
 ```mermaid
@@ -48,5 +48,5 @@ K --> H["Physical / operational signoff"]
 
 Individual job graphs are in the [CI catalog](08-ci-index.md). The catalog is source-derived; green run status is not inferred.
 
-**Source at candidate:** [docs/CI_SCOPE.md](https://github.com/VY-Groups/yarp-lb/blob/6c24dbbab53718102cd96c6380bbe15263a36fe9/docs/CI_SCOPE.md) · [control-center/docs/RELEASE_GATES.md](https://github.com/VY-Groups/yarp-lb/blob/6c24dbbab53718102cd96c6380bbe15263a36fe9/control-center/docs/RELEASE_GATES.md) · [ops/release/README.md](https://github.com/VY-Groups/yarp-lb/blob/6c24dbbab53718102cd96c6380bbe15263a36fe9/ops/release/README.md)
+**Source at candidate:** `docs/CI_SCOPE.md` (source 6c24dbb) · `control-center/docs/RELEASE_GATES.md` (source 6c24dbb) · `ops/release/README.md` (source 6c24dbb)
 

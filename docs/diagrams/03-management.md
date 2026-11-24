@@ -2,7 +2,7 @@
 
 Identity, approval, configuration, certificates and observability.
 
-[← Visual atlas](README.md) · [Authority visual atlas](https://github.com/VY-Groups/gatewaycore-license-authority/tree/docs/visual-authority-atlas/docs/diagrams)
+[← Visual atlas](README.md) · Authority visual atlas — `gatewaycore-license-authority:docs/diagrams/README.md`
 
 > Source snapshot: `6c24dbbab53718102cd96c6380bbe15263a36fe9` (commercial development candidate, not a production release). Diagrams are logical views, not physical deployment instructions. Optional integrations must be explicitly provisioned. See the linked source and exact-head CI before treating any behavior as accepted.
 
@@ -28,7 +28,7 @@ E -->|Allowed| G["Authorized operation"]
 
 Logical gates rather than literal middleware order. Viewer cannot perform ordinary mutations; approved recovery exceptions are deliberately narrow. IdP owns passkey verification. Notice acknowledgement is not a legal compliance certification.
 
-**Source at candidate:** [control-center/Program.cs](https://github.com/VY-Groups/yarp-lb/blob/6c24dbbab53718102cd96c6380bbe15263a36fe9/control-center/Program.cs) · [control-center/ManagementPrivacyPolicy.cs](https://github.com/VY-Groups/yarp-lb/blob/6c24dbbab53718102cd96c6380bbe15263a36fe9/control-center/ManagementPrivacyPolicy.cs) · [control-center/docs/ENTERPRISE_OIDC.md](https://github.com/VY-Groups/yarp-lb/blob/6c24dbbab53718102cd96c6380bbe15263a36fe9/control-center/docs/ENTERPRISE_OIDC.md)
+**Source at candidate:** `control-center/Program.cs` (source 6c24dbb) · `control-center/ManagementPrivacyPolicy.cs` (source 6c24dbb) · `control-center/docs/ENTERPRISE_OIDC.md` (source 6c24dbb)
 
 ## Reviewed configuration
 ```mermaid
@@ -54,7 +54,7 @@ end
 
 For remote fleet changes use the separate [quorum sequence](05-fencing.md); local change approval is not proof of every remote activation or application health.
 
-**Source at candidate:** [control-center/Program.cs](https://github.com/VY-Groups/yarp-lb/blob/6c24dbbab53718102cd96c6380bbe15263a36fe9/control-center/Program.cs) · [control-center/docs/API_CONTRACT.md](https://github.com/VY-Groups/yarp-lb/blob/6c24dbbab53718102cd96c6380bbe15263a36fe9/control-center/docs/API_CONTRACT.md)
+**Source at candidate:** `control-center/Program.cs` (source 6c24dbb) · `control-center/docs/API_CONTRACT.md` (source 6c24dbb)
 
 ## External audit
 ```mermaid
@@ -79,7 +79,7 @@ end
 
 The receipt proves the accepted intent, not application of the later write. Retention enforcement and external provider trust require operational verification.
 
-**Source at candidate:** [engines/AuditCollector/README.md](https://github.com/VY-Groups/yarp-lb/blob/6c24dbbab53718102cd96c6380bbe15263a36fe9/engines/AuditCollector/README.md) · [control-center/docs/EXTERNAL_AUDIT_INTENT.md](https://github.com/VY-Groups/yarp-lb/blob/6c24dbbab53718102cd96c6380bbe15263a36fe9/control-center/docs/EXTERNAL_AUDIT_INTENT.md)
+**Source at candidate:** `engines/AuditCollector/README.md` (source 6c24dbb) · `control-center/docs/EXTERNAL_AUDIT_INTENT.md` (source 6c24dbb)
 
 ## TLS and ACME
 ```mermaid
@@ -101,7 +101,7 @@ X -->|No| R["Restore last-good PFX"]
 
 Both are explicitly configured opt-in paths; external CA/domain/TSIG interoperability, multi-node issuance and custody require real acceptance.
 
-**Source at candidate:** [control-center/docs/ACME_IMPLEMENTATION_STATUS.md](https://github.com/VY-Groups/yarp-lb/blob/6c24dbbab53718102cd96c6380bbe15263a36fe9/control-center/docs/ACME_IMPLEMENTATION_STATUS.md) · [control-center/AcmeRenewal.cs](https://github.com/VY-Groups/yarp-lb/blob/6c24dbbab53718102cd96c6380bbe15263a36fe9/control-center/AcmeRenewal.cs)
+**Source at candidate:** `control-center/docs/ACME_IMPLEMENTATION_STATUS.md` (source 6c24dbb) · `control-center/AcmeRenewal.cs` (source 6c24dbb)
 
 ## Observability
 ```mermaid
@@ -121,5 +121,5 @@ O -. "export outage: bounded queue/drop" .-> Drop["Observe loss counters"]
 
 Metrics are not approval records; no telemetry dependency on the per-request license path. External monitoring and alert delivery need deployment acceptance.
 
-**Source at candidate:** [control-center/docs/OTEL_EXPORT.md](https://github.com/VY-Groups/yarp-lb/blob/6c24dbbab53718102cd96c6380bbe15263a36fe9/control-center/docs/OTEL_EXPORT.md) · [control-center/docs/NONBLOCKING_LOGGING.md](https://github.com/VY-Groups/yarp-lb/blob/6c24dbbab53718102cd96c6380bbe15263a36fe9/control-center/docs/NONBLOCKING_LOGGING.md)
+**Source at candidate:** `control-center/docs/OTEL_EXPORT.md` (source 6c24dbb) · `control-center/docs/NONBLOCKING_LOGGING.md` (source 6c24dbb)
 

@@ -2,7 +2,7 @@
 
 Candidate commercial profile; normal development builds do not enforce the commercial profile.
 
-[← Visual atlas](README.md) · [Authority visual atlas](https://github.com/VY-Groups/gatewaycore-license-authority/tree/docs/visual-authority-atlas/docs/diagrams)
+[← Visual atlas](README.md) · Authority visual atlas — `gatewaycore-license-authority:docs/diagrams/README.md`
 
 > Source snapshot: `6c24dbbab53718102cd96c6380bbe15263a36fe9` (commercial development candidate, not a production release). Diagrams are logical views, not physical deployment instructions. Optional integrations must be explicitly provisioned. See the linked source and exact-head CI before treating any behavior as accepted.
 
@@ -28,7 +28,7 @@ G-->>U: License status / entitled features
 
 No customer network call to the issuer. Key custody stays with the company; local private installation key stays with its installation.
 
-**Source at candidate:** [src/GatewayCore.Licensing/OfflineLicenseStore.cs](https://github.com/VY-Groups/yarp-lb/blob/6c24dbbab53718102cd96c6380bbe15263a36fe9/src/GatewayCore.Licensing/OfflineLicenseStore.cs) · [control-center/CommercialLicenseRuntime.cs](https://github.com/VY-Groups/yarp-lb/blob/6c24dbbab53718102cd96c6380bbe15263a36fe9/control-center/CommercialLicenseRuntime.cs)
+**Source at candidate:** `src/GatewayCore.Licensing/OfflineLicenseStore.cs` (source 6c24dbb) · `control-center/CommercialLicenseRuntime.cs` (source 6c24dbb)
 
 ## Validation and runtime state
 ```mermaid
@@ -49,7 +49,7 @@ Revoked --> Revoked: same allocation permanently fenced
 
 This is a logical state view, not a promise of identical policies for every engine. Candidate L7 admits no new requests after explicit downgrade/revocation/expiry; limited continuity for an unexpected state fault is bounded by monotonic and signed expiry. L4 entitlement loss stops forwarding including established sessions. Recovery-only agent operations remain narrowly authenticated. Whole-VM clone/rollback by privileged operators cannot be categorically prevented by software-only offline licensing.
 
-**Source at candidate:** [control-center/CommercialLicenseRuntime.cs](https://github.com/VY-Groups/yarp-lb/blob/6c24dbbab53718102cd96c6380bbe15263a36fe9/control-center/CommercialLicenseRuntime.cs) · [src/CommercialEngine/EngineLicenseGate.cs](https://github.com/VY-Groups/yarp-lb/blob/6c24dbbab53718102cd96c6380bbe15263a36fe9/src/CommercialEngine/EngineLicenseGate.cs) · [docs/OFFLINE_COMMERCIAL_LICENSING.md](https://github.com/VY-Groups/yarp-lb/blob/6c24dbbab53718102cd96c6380bbe15263a36fe9/docs/OFFLINE_COMMERCIAL_LICENSING.md)
+**Source at candidate:** `control-center/CommercialLicenseRuntime.cs` (source 6c24dbb) · `src/CommercialEngine/EngineLicenseGate.cs` (source 6c24dbb) · `docs/OFFLINE_COMMERCIAL_LICENSING.md` (source 6c24dbb)
 
 ## Import decision
 ```mermaid
@@ -65,7 +65,7 @@ P --> A["Apply committed result and enforce features"]
 ```
 
 
-**Source at candidate:** [src/GatewayCore.Licensing/OfflineLicenseVerifier.cs](https://github.com/VY-Groups/yarp-lb/blob/6c24dbbab53718102cd96c6380bbe15263a36fe9/src/GatewayCore.Licensing/OfflineLicenseVerifier.cs) · [src/GatewayCore.Licensing/OfflineLicenseStore.cs](https://github.com/VY-Groups/yarp-lb/blob/6c24dbbab53718102cd96c6380bbe15263a36fe9/src/GatewayCore.Licensing/OfflineLicenseStore.cs)
+**Source at candidate:** `src/GatewayCore.Licensing/OfflineLicenseVerifier.cs` (source 6c24dbb) · `src/GatewayCore.Licensing/OfflineLicenseStore.cs` (source 6c24dbb)
 
 ## Release package integrity
 ```mermaid
@@ -80,5 +80,5 @@ V -->|Yes| L["Run normal local license gates"]
 
 Separate release-signing and entitlement keys. Integrity is enforced by the genuine commercial release profile; OS execution trust and key custody remain operator gates.
 
-**Source at candidate:** [src/GatewayCore.Licensing/ReleaseIntegrityVerifier.cs](https://github.com/VY-Groups/yarp-lb/blob/6c24dbbab53718102cd96c6380bbe15263a36fe9/src/GatewayCore.Licensing/ReleaseIntegrityVerifier.cs) · [control-center/CommercialReleaseIntegrity.cs](https://github.com/VY-Groups/yarp-lb/blob/6c24dbbab53718102cd96c6380bbe15263a36fe9/control-center/CommercialReleaseIntegrity.cs) · [control-center/GatewayCoreYarp.csproj](https://github.com/VY-Groups/yarp-lb/blob/6c24dbbab53718102cd96c6380bbe15263a36fe9/control-center/GatewayCoreYarp.csproj)
+**Source at candidate:** `src/GatewayCore.Licensing/ReleaseIntegrityVerifier.cs` (source 6c24dbb) · `control-center/CommercialReleaseIntegrity.cs` (source 6c24dbb) · `control-center/GatewayCoreYarp.csproj` (source 6c24dbb)
 

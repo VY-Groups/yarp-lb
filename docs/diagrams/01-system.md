@@ -2,7 +2,7 @@
 
 Architectural context and responsibility boundaries.
 
-[← Visual atlas](README.md) · [Authority visual atlas](https://github.com/VY-Groups/gatewaycore-license-authority/tree/docs/visual-authority-atlas/docs/diagrams)
+[← Visual atlas](README.md) · Authority visual atlas — `gatewaycore-license-authority:docs/diagrams/README.md`
 
 > Source snapshot: `6c24dbbab53718102cd96c6380bbe15263a36fe9` (commercial development candidate, not a production release). Diagrams are logical views, not physical deployment instructions. Optional integrations must be explicitly provisioned. See the linked source and exact-head CI before treating any behavior as accepted.
 
@@ -32,7 +32,7 @@ PKI["CA/HSM/signing services"] -. "separate authorization and network controls" 
 
 GatewayCore does not own the application database, firewall, HSM, or external VIP. Listener segregation is configured, not a replacement for network ACLs.
 
-**Source at candidate:** [control-center/docs/ARCHITECTURE.md](https://github.com/VY-Groups/yarp-lb/blob/6c24dbbab53718102cd96c6380bbe15263a36fe9/control-center/docs/ARCHITECTURE.md) · [control-center/docs/WEB_SERVER_BACKENDS.md](https://github.com/VY-Groups/yarp-lb/blob/6c24dbbab53718102cd96c6380bbe15263a36fe9/control-center/docs/WEB_SERVER_BACKENDS.md) · [control-center/docs/EXTERNAL_INTEGRATION_ACCEPTANCE.md](https://github.com/VY-Groups/yarp-lb/blob/6c24dbbab53718102cd96c6380bbe15263a36fe9/control-center/docs/EXTERNAL_INTEGRATION_ACCEPTANCE.md)
+**Source at candidate:** `control-center/docs/ARCHITECTURE.md` (source 6c24dbb) · `control-center/docs/WEB_SERVER_BACKENDS.md` (source 6c24dbb) · `control-center/docs/EXTERNAL_INTEGRATION_ACCEPTANCE.md` (source 6c24dbb)
 
 ## Deployment modes
 ```mermaid
@@ -63,7 +63,7 @@ end
 
 All data-plane gateways are active peers; controller ownership is separate. The topology API stores design metadata only. A multi-controller desired-state database and physical ingress are not created by onboarding.
 
-**Source at candidate:** [control-center/Onboarding.cs](https://github.com/VY-Groups/yarp-lb/blob/6c24dbbab53718102cd96c6380bbe15263a36fe9/control-center/Onboarding.cs) · [control-center/docs/V1_HA_SCOPE.md](https://github.com/VY-Groups/yarp-lb/blob/6c24dbbab53718102cd96c6380bbe15263a36fe9/control-center/docs/V1_HA_SCOPE.md)
+**Source at candidate:** `control-center/Onboarding.cs` (source 6c24dbb) · `control-center/docs/V1_HA_SCOPE.md` (source 6c24dbb)
 
 ## Component ownership
 ```mermaid
@@ -81,5 +81,5 @@ WAF --> L7
 
 Separate binaries and optional integrations have distinct configuration, credentials and acceptance gates. This is not a single automatically installed appliance.
 
-**Source at candidate:** [engines/L4/README.md](https://github.com/VY-Groups/yarp-lb/blob/6c24dbbab53718102cd96c6380bbe15263a36fe9/engines/L4/README.md) · [engines/GslbDns/README.md](https://github.com/VY-Groups/yarp-lb/blob/6c24dbbab53718102cd96c6380bbe15263a36fe9/engines/GslbDns/README.md) · [engines/GslbObserver/README.md](https://github.com/VY-Groups/yarp-lb/blob/6c24dbbab53718102cd96c6380bbe15263a36fe9/engines/GslbObserver/README.md) · [control-center/docs/ENGINE_GATES.md](https://github.com/VY-Groups/yarp-lb/blob/6c24dbbab53718102cd96c6380bbe15263a36fe9/control-center/docs/ENGINE_GATES.md)
+**Source at candidate:** `engines/L4/README.md` (source 6c24dbb) · `engines/GslbDns/README.md` (source 6c24dbb) · `engines/GslbObserver/README.md` (source 6c24dbb) · `control-center/docs/ENGINE_GATES.md` (source 6c24dbb)
 
