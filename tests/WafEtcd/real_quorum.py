@@ -27,6 +27,7 @@ import etcd_quorum_fence as quorum
 IMAGE = os.getenv("ETCD_IMAGE", "")
 P = "A" * 64
 NODES = ("node-a", "node-b")
+STAGE = "startup"  # Only source-owned safe classification; never raw TLS/logs.
 
 
 def checked(args, timeout=30):
@@ -107,6 +108,8 @@ def docker(*args, timeout=30):
 
 
 def main():
+    global STAGE
+    STAGE = "immutable-image-identity"
     if (os.getenv("GITHUB_ACTIONS") != "true" or
             os.getenv("RUNNER_OS") != "Linux" or
             not IMAGE.startswith("quay.io/coreos/etcd@sha256:") or
@@ -119,14 +122,17 @@ def main():
     with tempfile.TemporaryDirectory(prefix="waf-etcd-real-ci-") as folder:
         root = Path(folder)
         root.chmod(0o700)
+        STAGE = "disposable-ca"
         ca, ids = certs(root / "certs")
         ports = [open_port() for _ in range(3)]
         while len(set(ports)) != 3:
             ports = [open_port() for _ in range(3)]
         try:
+            STAGE = "private-etcd-network"
             docker("network", "create", "--internal", network)
             net_created = True
             peers = ",".join(f"ci{i}=http://ci{i}:2380" for i in (1, 2, 3))
+            STAGE = "three-etcd-processes"
             for idx in (1, 2, 3):
                 name = "ci" + str(idx)
                 container = "waf-etcd-" + label + "-" + name
@@ -165,6 +171,8 @@ def main():
             keybase = base64.b64encode(keyname.encode("ascii")).decode("ascii")
             start = time.monotonic()
             cluster = None
+            STAGE = "cluster-linearizable-readiness"
+            last_class = "unclassified"
             while time.monotonic() - start < 45:
                 try:
                     response = post(addr, ("/v3/kv/range",
@@ -173,9 +181,14 @@ def main():
                     cluster = response["header"]["cluster_id"]
                     break
                 except (OSError, RuntimeError, KeyError, ValueError,
-                        http.client.HTTPException, ssl.SSLError):
+                        http.client.HTTPException, ssl.SSLError) as exc:
+                    last_class = type(exc).__name__
                     time.sleep(.5)
             if cluster is None:
+                STAGE = "cluster-readiness-" + (last_class if last_class in {
+                    "ConnectionRefusedError", "SSLCertVerificationError",
+                    "SSLError", "TimeoutError", "RuntimeError", "KeyError",
+                    "ValueError", "ConnectionResetError", "OSError"} else "unknown")
                 raise RuntimeError("three-member etcd leader never became ready")
             endpoints = [
                 {"url":f"https://127.0.0.1:{port}",
@@ -205,7 +218,9 @@ def main():
                     raise RuntimeError("etcd atomic lease key reservation failed")
                 return lease
 
+            STAGE = "lease-cas-grant"
             lease = grant_and_put()
+            STAGE = "live-three-member-fence"
             if not verifier.assert_current(NODES,7,P,"preflight") or \
                     not verifier.assert_current(NODES,7,P,"before-apply-node-a"):
                 raise RuntimeError("real three-member live etcd quorum did not grant fence")
@@ -213,6 +228,7 @@ def main():
                   "fresh linearizable 2-of-3 WAF fencing")
 
             # A second controller cannot silently replace a live leased key.
+            STAGE = "live-conflicting-writer-cas"
             duplicate = post(addr, ("/v3/kv/txn",{
                 "compare":[{"result":"EQUAL","target":"CREATE",
                             "key":keybase,"createRevision":"0"}],
@@ -225,6 +241,7 @@ def main():
 
             # Independent revocation is a real quorum event, not a fake local
             # flag. The previously authorized controller must be refused.
+            STAGE = "live-lease-revoke"
             post(addr, ("/v3/lease/revoke",{"ID":lease}),
                  ca,writer_cert,writer_key)
             if verifier.assert_current(NODES,7,P,"before-apply-node-b"):
@@ -237,6 +254,7 @@ def main():
 
             # Lose 2/3 independent members: the surviving member cannot
             # authorize mutation. No automatic rescue via a local JSON lease.
+            STAGE = "loss-of-real-etcd-majority"
             for container in created[1:]:
                 docker("stop", "--time", "1", container)
             if verifier.assert_current(NODES,7,P,"before-receipt"):
@@ -261,5 +279,6 @@ if __name__ == "__main__":
         main()
     except (OSError, ValueError, KeyError, RuntimeError,
             subprocess.SubprocessError, ssl.SSLError, http.client.HTTPException):
-        print("FAIL: real isolated three-member etcd quorum test", file=sys.stderr)
+        print("FAIL: real isolated three-member etcd quorum test at "+STAGE,
+              file=sys.stderr)
         raise SystemExit(1)
