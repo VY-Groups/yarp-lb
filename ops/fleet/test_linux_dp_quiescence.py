@@ -90,10 +90,11 @@ class TwoNodeQuiescenceTests(unittest.TestCase):
             sender_units=("gatewaycore.service",),
             receiver_units=("gatewaycore.service",),
             clock=lambda:NOW,runner=self.run_child))
-        self.assertEqual(len(self.commands),6)
+        self.assertEqual(len(self.commands),8)
         self.assertIn("stop",self.commands[0])
         self.assertIn("mask",self.commands[1])
-        self.assertIn("show",self.commands[2])
+        self.assertIn("daemon-reload",self.commands[2])
+        self.assertIn("show",self.commands[3])
 
     def test_remote_receiver_requires_two_real_signed_node_receipts(self):
         from types import SimpleNamespace
