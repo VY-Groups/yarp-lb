@@ -41,7 +41,8 @@ jobs:
           path: artifacts/issue48/
           if-no-files-found: error
   package:
-    needs: frozen-gate
+    needs: [contract, frozen-gate]
+    if: always() && needs.contract.result == 'success' && (github.event_name == 'pull_request' || needs.frozen-gate.result == 'success')
     strategy:
       fail-fast: false
       matrix:
@@ -55,7 +56,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
       - uses: actions/setup-dotnet@v4
         with:
@@ -63,7 +64,7 @@ jobs:
       - name: Publish exact candidate, not a production installer
         shell: bash
         env:
-          EXACT_SHA: ${{ github.sha }}
+          EXACT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           RID: ${{ matrix.rid }}
         run: |
           set -euo pipefail
@@ -77,11 +78,27 @@ jobs:
         shell: bash
         env:
           RID: ${{ matrix.rid }}
-          EXACT_SHA: ${{ github.sha }}
+          EXACT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           set -euo pipefail
           python ops/release/package_candidate.py --root candidate --rid "$RID" --sha "$EXACT_SHA" --out artifacts/candidate
+      - name: Verify checksum and extract into fresh directory
+        shell: bash
+        run: python ops/release/extract_candidate.py --archive-dir artifacts/candidate --out extracted
+      - name: Actual archived Linux apphost production start, negative keys and restart
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          dotnet run --project control-center/tests/LinuxKeyProtectionTests/LinuxKeyProtectionTests.csproj -c Release -- --candidate-smoke "$PWD/extracted/app/GatewayCoreYarp"
+      - name: Actual archived Windows executable SCM DPAPI restart
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          .\control-center\tests\WindowsServiceAcceptance\VERIFY-WINDOWS-SCM.ps1 -CandidateAppDirectory (Resolve-Path 'extracted/app').Path
+          .\control-center\tests\WindowsServiceAcceptance\VERIFY-WINDOWS-SCM.ps1 -Identity LocalService -CandidateAppDirectory (Resolve-Path 'extracted/app').Path
       - uses: actions/upload-artifact@v4
+        if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
         with:
           name: gatewaycore-issue48-${{ matrix.rid }}-${{ github.sha }}
           path: artifacts/candidate/

@@ -8,12 +8,22 @@ using Microsoft.AspNetCore.DataProtection;
 
 public static class ProductLinuxStartupSmoke
 {
-    public static async Task RunAsync()
+    public static async Task RunAsync(string? candidateExecutable = null)
     {
         if (!OperatingSystem.IsLinux()) return;
         var dll=Path.Combine(Directory.GetCurrentDirectory(),"bin","Release","net10.0","GatewayCoreYarp.dll");
-        if (!File.Exists(dll))
+        if(candidateExecutable is not null &&
+            (Environment.GetEnvironmentVariable("GITHUB_ACTIONS")!="true" ||
+             Environment.GetEnvironmentVariable("RUNNER_OS")!="Linux" ||
+             !Path.IsPathFullyQualified(candidateExecutable) ||
+             Path.GetFileName(candidateExecutable)!="GatewayCoreYarp" ||
+             !File.Exists(candidateExecutable)))
+            throw new InvalidOperationException("Refused invalid disposable candidate executable");
+        if (candidateExecutable is null && !File.Exists(dll))
             throw new FileNotFoundException("Build shipping Control Center before smoke test",dll);
+        var executable=candidateExecutable ?? "dotnet";
+        var workingDirectory=candidateExecutable is null ? Directory.GetCurrentDirectory() :
+            Path.GetDirectoryName(candidateExecutable)!;
         const UnixFileMode privateDir=UnixFileMode.UserRead|UnixFileMode.UserWrite|UnixFileMode.UserExecute;
         const UnixFileMode secret=UnixFileMode.UserRead|UnixFileMode.UserWrite;
         var root=Path.Combine(Path.GetTempPath(),"onprem-product-start-"+Guid.NewGuid().ToString("N"));
@@ -61,12 +71,12 @@ public static class ProductLinuxStartupSmoke
         listener.Start();
         var port=((IPEndPoint)listener.LocalEndpoint).Port;
         listener.Stop();
-        var info=new ProcessStartInfo("dotnet") {
-            WorkingDirectory=Directory.GetCurrentDirectory(),
+        var info=new ProcessStartInfo(executable) {
+            WorkingDirectory=workingDirectory,
             UseShellExecute=false,RedirectStandardOutput=true,
             RedirectStandardError=true,CreateNoWindow=true
         };
-        info.ArgumentList.Add(dll);
+        if(candidateExecutable is null) info.ArgumentList.Add(dll);
         info.Environment["ASPNETCORE_ENVIRONMENT"]="Production";
         info.Environment["ASPNETCORE_URLS"]="http://127.0.0.1:"+port;
         info.Environment["YARP_CONTROL_PLANE_DIR"]=state;
@@ -77,12 +87,12 @@ public static class ProductLinuxStartupSmoke
 
         async Task RequireProductionStartupFailureAsync(string name, Action<ProcessStartInfo> configure)
         {
-            var failureInfo=new ProcessStartInfo("dotnet") {
-                WorkingDirectory=Directory.GetCurrentDirectory(),
+            var failureInfo=new ProcessStartInfo(executable) {
+                WorkingDirectory=workingDirectory,
                 UseShellExecute=false,RedirectStandardOutput=true,
                 RedirectStandardError=true,CreateNoWindow=true
             };
-            failureInfo.ArgumentList.Add(dll);
+            if(candidateExecutable is null) failureInfo.ArgumentList.Add(dll);
             failureInfo.Environment["ASPNETCORE_ENVIRONMENT"]="Production";
             failureInfo.Environment["ASPNETCORE_URLS"]="http://127.0.0.1:"+port;
             failureInfo.Environment["YARP_CONTROL_PLANE_DIR"]=state;
