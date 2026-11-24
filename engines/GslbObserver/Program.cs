@@ -8,6 +8,7 @@ using Microsoft.AspNetCore.Server.Kestrel.Https;
 using GatewayCore.Gslb.Contracts;
 
 #if GATEWAYCORE_COMMERCIAL
+if(EngineLicenseGate.VerifyReleaseOrExit(args,out var releaseExit)){Environment.ExitCode=releaseExit;return;}
 if(EngineLicenseGate.Command(args,out var licenseExit)){Environment.ExitCode=licenseExit;return;}
 using var engineLicense=EngineLicenseGate.Start("gslb");
 #endif

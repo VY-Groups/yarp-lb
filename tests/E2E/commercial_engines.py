@@ -39,10 +39,25 @@ with tempfile.TemporaryDirectory(prefix="gc-engine-acceptance-") as td:
     trust=key/"trust.json"
     env=dict(os.environ,GATEWAYCORE_ENGINE_LICENSE_DIR=str(folder/"identity"))
     dlls=[]
+    release=folder/"release"
+    run(fixture,"--ci-release-key",release)
+    commit=os.environ["GITHUB_SHA"]
     for project,dll in projects:
         out=folder/Path(project).stem
-        run("build",root/project,"-c","Release","-o",out,"-p:GatewayCoreCommercial=true",f"-p:GatewayCoreTrustFile={trust}")
+        run("publish",root/project,"-c","Release","-o",out,"-p:GatewayCoreCommercial=true",
+            f"-p:GatewayCoreTrustFile={trust}","-p:GatewayCoreReleasePackage=true",
+            f"-p:GatewayCoreReleaseTrustFile={release/'release-trust.json'}",f"-p:GatewayCoreReleaseSourceCommit={commit}")
         dlls.append(out/dll)
+        rejected=run(out/dll,"--license-init",env=env,ok=False)
+        assert rejected.returncode==78 and "Commercial package integrity rejected" in rejected.stderr
+        run(fixture,"--ci-release-manifest",release,out,commit)
+        verified=run(out/dll,"--verify-release",env=env)
+        assert "COMMERCIAL_RELEASE_INTEGRITY_PASS "+commit in verified.stdout
+        injected=out/"injected.txt"
+        injected.write_text("unsigned")
+        rejected=run(out/dll,"--license-init",env=env,ok=False)
+        assert rejected.returncode==78 and "Commercial package integrity rejected" in rejected.stderr
+        injected.unlink()
         result=run(out/dll,env=env,ok=False)
         assert "License" in result.stderr or "license" in result.stderr,result.stderr
     l4=dlls[0]

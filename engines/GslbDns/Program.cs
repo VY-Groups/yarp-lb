@@ -6,6 +6,7 @@ using System.Text.Json;
 using GatewayCore.Gslb.Contracts;
 
 #if GATEWAYCORE_COMMERCIAL
+if(EngineLicenseGate.VerifyReleaseOrExit(args,out var releaseExit))return releaseExit;
 if(EngineLicenseGate.Command(args,out var licenseExit))return licenseExit;
 using var engineLicense=EngineLicenseGate.Start("gslb");
 #endif

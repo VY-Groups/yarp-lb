@@ -33,6 +33,29 @@ internal sealed class EngineLicenseGate : IDisposable
             ?? throw new InvalidDataException("Missing engine trust.");
         return new OfflineLicenseStore(directory,new OfflineLicenseVerifier(keys));
     }
+    public static bool VerifyReleaseOrExit(string[] args,out int code)
+    {
+        code=0;
+#if GATEWAYCORE_RELEASE_PACKAGE
+        try
+        {
+            var commit=CommercialReleaseIntegrity.Verify();
+            if(args is ["--verify-release"])
+            {
+                Console.WriteLine("COMMERCIAL_RELEASE_INTEGRITY_PASS "+commit);
+                return true;
+            }
+        }
+        catch(Exception ex) when(ex is IOException or CryptographicException or InvalidDataException or
+            JsonException or FormatException or ArgumentException or InvalidOperationException or UnauthorizedAccessException)
+        {
+            Console.Error.WriteLine("Commercial package integrity rejected: "+ex.GetType().Name);
+            code=78;
+            return true;
+        }
+#endif
+        return false;
+    }
     public static bool Command(string[] args,out int code)
     {
         code=0;

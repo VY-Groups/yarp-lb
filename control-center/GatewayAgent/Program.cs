@@ -9,6 +9,7 @@ using System.Text.RegularExpressions;
 using Microsoft.AspNetCore.Server.Kestrel.Https;
 
 #if GATEWAYCORE_COMMERCIAL
+if(EngineLicenseGate.VerifyReleaseOrExit(args,out var releaseExit)){Environment.ExitCode=releaseExit;return;}
 if(EngineLicenseGate.Command(args,out var licenseExit)){Environment.ExitCode=licenseExit;return;}
 using var engineLicense=EngineLicenseGate.Start("ha","fleet");
 #endif
