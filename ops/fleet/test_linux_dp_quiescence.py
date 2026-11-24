@@ -136,6 +136,36 @@ class TwoNodeQuiescenceTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             receiver.signed_node_quiescence(args,self.fence,loopback=False)
 
+    def test_wrong_rsa_signer_refused_before_any_service_stop(self):
+        private = self.root/"wrong-rsa.key"
+        subprocess.run(["openssl", "genpkey", "-algorithm", "RSA",
+                        "-pkeyopt", "rsa_keygen_bits:2048",
+                        "-out", str(private)], check=True, timeout=15,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        private.chmod(0o600)
+        with self.assertRaises(ValueError):
+            gate.issue(self.fence, "gateway-a", ("gatewaycore.service",),
+                       str(private), runner=self.run_child, clock=lambda:NOW)
+        self.assertEqual(self.commands, [],
+                         "unapproved signing algorithm cannot stop service")
+
+    def test_identical_p256_spki_with_different_pem_encoding_refused(self):
+        a,b=self.receipt("gateway-a"),self.receipt("gateway-b")
+        source=Path(self.keys["gateway-a"][1])
+        reformatted=self.root/"different-newlines.pub"
+        reformatted.write_bytes(source.read_bytes().replace(b"\\n", b"\\r\\n"))
+        reformatted.chmod(0o600)
+        # The new file is a different inode and byte sequence, but the
+        # same elliptic-curve public key. No duplicate witness authority.
+        self.assertNotEqual(reformatted.read_bytes(), source.read_bytes())
+        with self.assertRaises(ValueError):
+            gate.verify_two_receipts(
+                self.fence,a,b,
+                sender_key=str(source),receiver_key=str(reformatted),
+                sender_units=("gatewaycore.service",),
+                receiver_units=("gatewaycore.service",),
+                clock=lambda:NOW,runner=self.run_child)
+
     def test_no_quorum_refuses_before_any_systemd_change(self):
         self.fence.allowed=False
         with self.assertRaises(ValueError):
