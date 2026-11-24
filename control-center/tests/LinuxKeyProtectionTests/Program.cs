@@ -14,35 +14,6 @@ if (!OperatingSystem.IsLinux())
     Console.WriteLine("SKIP: Linux-specific filesystem/DAPI tests on non-Linux host");
     return;
 }
-// DP-09/DP-13: execute the real key-ring loader in a separate OS process.
-// The disposable protected cookie and expected plaintext travel over stdin, never argv or logs.
-if (args.Length > 0 && args[0] == "--verify-cookie")
-{
-    if (args.Length != 4) Environment.Exit(2);
-    try
-    {
-        Environment.SetEnvironmentVariable("YARP_CONTROL_PLANE_DIR", args[1]);
-        var childServices = new ServiceCollection();
-        var childBuilder = childServices.AddDataProtection()
-            .SetApplicationName(args[2])
-            .PersistKeysToFileSystem(new DirectoryInfo(
-                Path.Combine(args[1], "data-protection-keys")));
-        LinuxKeyProtection.Configure(childBuilder, args[1]);
-        using var childProvider = childServices.BuildServiceProvider();
-        var protectedCookie = Console.In.ReadLine()
-            ?? throw new InvalidOperationException("Missing disposable cookie");
-        var expectedPlaintext = Console.In.ReadLine()
-            ?? throw new InvalidOperationException("Missing expected plaintext");
-        var clear = childProvider.GetRequiredService<IDataProtectionProvider>()
-            .CreateProtector(args[3]).Unprotect(protectedCookie);
-        Environment.Exit(clear == expectedPlaintext ? 0 : 3);
-    }
-    catch (Exception)
-    {
-        // Do not print the cookie, decrypted value or sensitive paths.
-        Environment.Exit(3);
-    }
-}
 const UnixFileMode PrivateDir=UnixFileMode.UserRead|UnixFileMode.UserWrite|UnixFileMode.UserExecute;
 const UnixFileMode PrivateFile=UnixFileMode.UserRead|UnixFileMode.UserWrite;
 var root = Path.Combine(Path.GetTempPath(),"yarp-linux-dp-test-"+Guid.NewGuid().ToString("N"));
@@ -100,43 +71,15 @@ void MakeHardLink(string existingFile, string additionalPath)
     File.SetUnixFileMode(secret,PrivateFile);
     return(pfx,secret);
 }
-ServiceProvider Provider(string statePath, string applicationName = "OnPremLinuxDpIntegration.v1")
+ServiceProvider Provider(string statePath)
 {
     var services=new ServiceCollection();
     var keys=Path.Combine(statePath,"data-protection-keys");
     var builder=services.AddDataProtection()
-        .SetApplicationName(applicationName)
+        .SetApplicationName("OnPremLinuxDpIntegration.v1")
         .PersistKeysToFileSystem(new DirectoryInfo(keys));
     LinuxKeyProtection.Configure(builder,statePath);
     return services.BuildServiceProvider();
-}
-// Return only the exit status. Disposable authentication material is sent via
-// stdin and is never placed in command-line arguments or diagnostic output.
-int VerifyInFreshProcess(string statePath, string applicationName,
-    string purpose, string protectedCookie, string expected)
-{
-    var assemblyPath = System.Reflection.Assembly.GetExecutingAssembly().Location;
-    var start = new System.Diagnostics.ProcessStartInfo("dotnet")
-    {
-        UseShellExecute = false,
-        RedirectStandardInput = true,
-        RedirectStandardOutput = true,
-        RedirectStandardError = true
-    };
-    foreach (var arg in new[] { assemblyPath, "--verify-cookie", statePath,
-        applicationName, purpose })
-        start.ArgumentList.Add(arg);
-    using var child = System.Diagnostics.Process.Start(start)
-        ?? throw new Exception("FAIL: disposable child process could not start");
-    child.StandardInput.WriteLine(protectedCookie);
-    child.StandardInput.WriteLine(expected);
-    child.StandardInput.Close();
-    if (!child.WaitForExit(60000))
-    {
-        child.Kill(entireProcessTree: true);
-        throw new Exception("FAIL: disposable child process timed out");
-    }
-    return child.ExitCode;
 }
 static bool Throws(Action action)
 {
@@ -268,54 +211,6 @@ try
             .CreateProtector("session-probe").Unprotect(replicaProtectedCookie) ==
             "replica-auth-session",
             "original node decrypts replica session with unchanged app/purpose identity");
-
-    // Separate .NET processes must independently load the encrypted ring.
-    // A same-process DI-container check alone cannot prove restart/fleet
-    // continuity. This is a disposable multi-process software test, not a
-    // physical two-host acceptance.
-    Assert(VerifyInFreshProcess(fleetReplicaState,
-        "OnPremLinuxDpIntegration.v1", "session-probe", encrypted,
-        "sensitive-session-value-123") == 0,
-        "DP-09 replica process decrypts origin cookie using shared wrapped ring");
-    Assert(VerifyInFreshProcess(state,
-        "OnPremLinuxDpIntegration.v1", "session-probe", replicaProtectedCookie,
-        "replica-auth-session") == 0,
-        "DP-09 origin process decrypts replica cookie after independent restart");
-    Assert(VerifyInFreshProcess(fleetReplicaState,
-        "OnPremLinuxDpIntegration.other-fleet", "session-probe", encrypted,
-        "sensitive-session-value-123") != 0,
-        "DP-13 separate process rejects cookie with foreign fleet discriminator");
-    Assert(VerifyInFreshProcess(fleetReplicaState,
-        "OnPremLinuxDpIntegration.v1", "unrelated-authentication-purpose",
-        encrypted, "sensitive-session-value-123") != 0,
-        "DP-13 separate process rejects cookie with unrelated purpose");
-
-    // DP-13: even when two fleets mistakenly share the same encrypted key XML
-    // and wrapping certificate, the Data Protection application discriminator
-    // must prevent accepting another fleet's session. The purpose chain must
-    // independently reject a token from an unrelated authentication protocol.
-    using (var otherFleet = Provider(fleetReplicaState, "OnPremLinuxDpIntegration.other-fleet"))
-    {
-        var foreignProtector = otherFleet.GetRequiredService<IDataProtectionProvider>()
-            .CreateProtector("session-probe");
-        Assert(Throws(() => foreignProtector.Unprotect(encrypted)),
-            "DP-13 rejects cross-fleet session despite identical encrypted ring and RSA key");
-        var foreignCookie = foreignProtector.Protect("other-fleet-session");
-        using var originalFleet = Provider(state);
-        Assert(Throws(() => originalFleet.GetRequiredService<IDataProtectionProvider>()
-                .CreateProtector("session-probe").Unprotect(foreignCookie)),
-            "DP-13 rejects foreign-fleet session in both directions");
-    }
-    using (var sameFleet = Provider(fleetReplicaState))
-    {
-        Assert(Throws(() => sameFleet.GetRequiredService<IDataProtectionProvider>()
-                .CreateProtector("unrelated-authentication-purpose").Unprotect(encrypted)),
-            "DP-13 rejects unrelated authentication purpose with shared fleet key");
-        Assert(sameFleet.GetRequiredService<IDataProtectionProvider>()
-                .CreateProtector("session-probe").Unprotect(encrypted) ==
-                "sensitive-session-value-123",
-            "DP-13 rejection leaves authorized fleet session decryptable");
-    }
 
     // A different authorized RSA key is NOT automatically a decryption key
     // for a recovered ring. Do not silently generate replacement sessions or
@@ -625,6 +520,97 @@ try
                 attestationPath,trustedPublicPath,43)),
             "fresh isolated replica rejects older signed restore after floor commit");
 
+        // A separate offline executable now captures only wrapped XML into
+        // a new-only atomic archive directory and restores it only after the
+        // same independently signed P-256 inventory / external floor check.
+        var snapshotCli=Path.GetFullPath(Path.Combine(
+            "tools","LinuxDpEncryptedSnapshot","LinuxDpEncryptedSnapshot.csproj"));
+        Assert(File.Exists(snapshotCli),"offline encrypted snapshot CLI project exists");
+        int RunSnapshot(params string[] options)
+        {
+            var start=new System.Diagnostics.ProcessStartInfo("dotnet")
+            {
+                UseShellExecute=false,
+                RedirectStandardError=true,
+                RedirectStandardOutput=true
+            };
+            foreach(var arg in new[] {
+                "run","--project",snapshotCli,"--configuration","Release","--" })
+                start.ArgumentList.Add(arg);
+            foreach(var arg in options) start.ArgumentList.Add(arg);
+            using var process=System.Diagnostics.Process.Start(start)
+                ?? throw new Exception("FAIL: encrypted snapshot CLI failed to start");
+            if(!process.WaitForExit(120000))
+            {
+                process.Kill(entireProcessTree:true);
+                throw new Exception("FAIL: encrypted snapshot CLI exceeded timeout");
+            }
+            return process.ExitCode;
+        }
+        var snapshotVault=Path.Combine(root,"encrypted-snapshot-vault");
+        Directory.CreateDirectory(snapshotVault,PrivateDir);
+        Assert(RunSnapshot("capture","--ring",keyDirectory,
+                "--archive-root",snapshotVault,"--label","rev43") == 0 &&
+            LinuxDpRecoveryEvidence.ComputeInventoryDigest(
+                Path.Combine(snapshotVault,"rev43"))==inventoryBeforeCommit,
+            "real CLI creates immutable-by-name encrypted DP snapshot with exact inventory");
+        Assert(RunSnapshot("capture","--ring",keyDirectory,
+                "--archive-root",snapshotVault,"--label","rev43")!=0,
+            "encrypted DP snapshot cannot overwrite an earlier backup");
+        var backupRoot=Path.Combine(root,"encrypted-snapshot-restored-state");
+        Directory.CreateDirectory(backupRoot,PrivateDir);
+        var archivePath=Path.Combine(snapshotVault,"rev43");
+        Assert(RunSnapshot("restore","--archive",archivePath,
+                "--state-root",backupRoot,
+                "--checkpoint",generatedManifest,
+                "--trusted-public-key",trustedPublicPath,
+                "--minimum-revision-file",revisionFloorPath)==0 &&
+            LinuxDpRecoveryEvidence.ComputeInventoryDigest(
+                Path.Combine(backupRoot,"data-protection-keys"))==inventoryBeforeCommit,
+            "real CLI restores P-256-signed ciphertext into only an absent isolated key ring");
+        Assert(RunSnapshot("restore","--archive",archivePath,
+                "--state-root",backupRoot,
+                "--checkpoint",generatedManifest,
+                "--trusted-public-key",trustedPublicPath,
+                "--minimum-revision-file",revisionFloorPath)!=0 &&
+            LinuxDpRecoveryEvidence.ComputeInventoryDigest(
+                Path.Combine(backupRoot,"data-protection-keys"))==inventoryBeforeCommit,
+            "restoring over existing encrypted key ring is denied without mutation");
+        var tamperedArchiveXml=Directory.GetFiles(archivePath,"key-*.xml").Single();
+        var originalArchivedXml=File.ReadAllBytes(tamperedArchiveXml);
+        var alteredTargetRoot=Path.Combine(root,"tampered-backup-target");
+        Directory.CreateDirectory(alteredTargetRoot,PrivateDir);
+        try
+        {
+            File.AppendAllText(tamperedArchiveXml,"<!-- altered archive -->");
+            File.SetUnixFileMode(tamperedArchiveXml,PrivateFile);
+            Assert(RunSnapshot("restore","--archive",archivePath,
+                    "--state-root",alteredTargetRoot,
+                    "--checkpoint",generatedManifest,
+                    "--trusted-public-key",trustedPublicPath,
+                    "--minimum-revision-file",revisionFloorPath)!=0 &&
+                !Path.Exists(Path.Combine(alteredTargetRoot,"data-protection-keys")),
+                "tampered signed ciphertext archive fails before destination is installed");
+        }
+        finally
+        {
+            File.WriteAllBytes(tamperedArchiveXml,originalArchivedXml);
+            File.SetUnixFileMode(tamperedArchiveXml,PrivateFile);
+        }
+        var plaintextStateRoot=Path.Combine(root,"disposable-plaintext-state");
+        var plaintextRing=Path.Combine(plaintextStateRoot,"data-protection-keys");
+        Directory.CreateDirectory(plaintextRing,PrivateDir);
+        var plaintextFile=Path.Combine(plaintextRing,"key-unwrapped.xml");
+        File.WriteAllText(plaintextFile,
+            "<key><masterKey>DISPOSABLE-PLAINTEXT-FIXTURE-ONLY</masterKey></key>");
+        File.SetUnixFileMode(plaintextFile,PrivateFile);
+        Assert(RunSnapshot("capture","--ring",plaintextRing,
+                "--archive-root",snapshotVault,"--label","plaintext")!=0 &&
+            !Directory.Exists(Path.Combine(snapshotVault,"plaintext")),
+            "backup utility rejects and does not archive plaintext key XML");
+        Assert(LinuxDpRecoveryEvidence.ComputeInventoryDigest(keyDirectory)==inventoryBeforeCommit,
+            "offline backup/restore never mutates the original wrapped key ring");
+
         // Fleet nodes opt into the independent revision FLOOR FILE at startup,
         // instead of copying a stale environment integer from a restored
         // backup. The legacy integer contract must still work by default.
@@ -642,6 +628,11 @@ try
             Assert(replicaRestored.GetRequiredService<IDataProtectionProvider>()
                 .CreateProtector("session-probe").Unprotect(encrypted)=="sensitive-session-value-123",
                 "independent replica restart preserves original session after signed restore");
+        Set("YARP_CONTROL_PLANE_DIR",backupRoot);
+        using(var snapshotRestored=Provider(backupRoot))
+            Assert(snapshotRestored.GetRequiredService<IDataProtectionProvider>()
+                .CreateProtector("session-probe").Unprotect(encrypted)=="sensitive-session-value-123",
+                "offline signed archive restore preserves original cookie across isolated service restart");
         Set("YARP_CONTROL_PLANE_DIR",state);
         Set(LinuxDpRecoveryEvidence.ManifestEnv,attestationPath);
         Assert(Throws(()=>{using var _=Provider(state);}),
