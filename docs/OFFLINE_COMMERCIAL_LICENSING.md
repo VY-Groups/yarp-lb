@@ -54,3 +54,7 @@ Added a separate PostgreSQL signing worker for independently approved jobs. It p
 
 ### Real HTTP regression correction
 The Linux no-egress fixture reached the actual gateway and caught an ASP0016 route-handler overload defect: a Task<IResult> lambda selected RequestDelegate, silently discarding HTTP error/success results. The import and revoke routes now explicitly use the Delegate route-handler overload; commercial builds treat ASP0016 as an error. Existing expected HTTP statuses are unchanged. Repeat exact-head real-process acceptance required.
+
+
+## Company repository separation — current layout
+The company issuer, portal, database schema and signing worker are now migrated byte-for-byte to [GatewayCore License Authority PR #1](https://github.com/VY-Groups/gatewaycore-license-authority/pull/1), initially public for development and to become private before commercial operations. Earlier phase descriptions above are historical. This customer branch removes all three company project directories and their build references. The customer SDK and License Center remain here; CI uses fixed synthetic signed envelopes and disposable keys, not the company issuer. Real issuer allocation, replay, renewal and seat/site tests remain intact in authority CI. Cross-repository interoperability and independent approval of both exact heads are required before commercial release. No production keys, customer records or signing credentials in Git. Earlier public history cannot be made confidential by removal.

@@ -3,7 +3,6 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using GatewayCore.Licensing;
-using GatewayCore.LicenseAuthority;
 
 // Test-only ephemeral signing keys; no issuer or reusable private key ships.
 using var signer = ECDsa.Create(ECCurve.NamedCurves.nistP256);
@@ -26,7 +25,10 @@ if (args.Length >= 2 && args[0] is "--ci-authority" or "--ci-issue" or "--ci-rev
         throw new InvalidOperationException("Disposable Linux CI fixture only.");
     var root = Path.GetFullPath(args[1]);
     var keyPath = Path.Combine(root, "disposable-ci-issuer.pk8");
-    var ledgerPath = Path.Combine(root, "issuer.json");
+    // Fixed synthetic one-node scenario. Not a production issuer, no customer
+    // terms, allocations, approvals, durable issuance ledger or real keys.
+    var bindingPath = Path.Combine(root, "fixture-binding.txt");
+    var stepPath = Path.Combine(root, "fixture-step.txt");
     if (args[0] == "--ci-authority" && args.Length == 2)
     {
         Directory.CreateDirectory(root, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
@@ -43,32 +45,49 @@ if (args.Length >= 2 && args[0] is "--ci-authority" or "--ci-issue" or "--ci-rev
         }
         finally { CryptographicOperations.ZeroMemory(raw); }
         File.WriteAllBytes(Path.Combine(root, "public-trust.json"), JsonSerializer.SerializeToUtf8Bytes(keys));
-        var issuer = new OfflineIssuer(ledgerPath, signer, "test-1");
-        issuer.Initialize(new Subscription("ci-license", "ci-customer", "ci-deployment", "standard",
-            1, 1, DateTimeOffset.UtcNow.AddDays(2).ToUnixTimeSeconds(), new[] {"l7", "tls", "monitoring"}),
-            DateTimeOffset.UtcNow);
+        File.WriteAllText(stepPath, "0");
         return;
     }
     if (args.Length != 4) throw new ArgumentException("Invalid CI fixture arguments.");
     var privateKey = File.ReadAllBytes(keyPath);
     try { signer.ImportPkcs8PrivateKey(privateKey, out _); }
     finally { CryptographicOperations.ZeroMemory(privateKey); }
-    var authority = new OfflineIssuer(ledgerPath, signer, "test-1");
-    if (args[0] is "--ci-downgrade" or "--ci-upgrade")
+    var step = int.Parse(File.ReadAllText(stepPath), System.Globalization.CultureInfo.InvariantCulture);
+    var utc = DateTimeOffset.UtcNow;
+    const string fixtureAllocation = "ci-node";
+    byte[] fixtureEnvelope;
+    if (args[0] == "--ci-revoke")
     {
-        authority.RenewSubscription(new Subscription("ci-license", "ci-customer", "ci-deployment", "standard",
-            1, 1, DateTimeOffset.UtcNow.AddDays(2).ToUnixTimeSeconds(),
-            args[0] == "--ci-downgrade" ? new[] {"monitoring"} : new[] {"l7", "tls", "monitoring"}),
-            DateTimeOffset.UtcNow);
+        if (step != 4 || args[2] != fixtureAllocation) throw new InvalidOperationException("Unexpected fixture step.");
+        fixtureEnvelope = FixtureSign("GCV1", new
+        {
+            schemaVersion = 1, product = "GatewayCore", licenseId = "ci-license",
+            customerId = "ci-customer", deploymentId = "ci-deployment", allocationId = fixtureAllocation,
+            installationKeySha256 = File.ReadAllText(bindingPath), revokedAt = utc.ToUnixTimeSeconds()
+        }, signer);
     }
-    var fixtureEnvelope = args[0] switch
+    else
     {
-        "--ci-issue" or "--ci-downgrade" or "--ci-upgrade" => authority.Issue(File.ReadAllBytes(args[2]), "ci-dc", DateTimeOffset.UtcNow),
-        "--ci-revoke" => authority.Revoke(args[2], DateTimeOffset.UtcNow),
-        _ => throw new ArgumentException("Invalid CI command.")
-    };
+        var expected = step switch { 0 or 1 => "--ci-issue", 2 => "--ci-downgrade", 3 => "--ci-upgrade", _ => "" };
+        if (args[0] != expected) throw new InvalidOperationException("Unexpected fixture step.");
+        var fixtureRequest = OfflineActivationRequest.Verify(File.ReadAllBytes(args[2]));
+        if (step == 0) File.WriteAllText(bindingPath, fixtureRequest.InstallationKeySha256);
+        else if (File.ReadAllText(bindingPath) != fixtureRequest.InstallationKeySha256)
+            throw new CryptographicException("Fixture installation changed.");
+        fixtureEnvelope = FixtureSign("GCL1", new
+        {
+            schemaVersion = 1, product = "GatewayCore", licenseId = "ci-license",
+            customerId = "ci-customer", deploymentId = "ci-deployment", allocationId = fixtureAllocation,
+            installationKeySha256 = fixtureRequest.InstallationKeySha256, edition = "standard",
+            revision = step + 1, maxNodes = 1, maxSites = 1, issuedAt = utc.ToUnixTimeSeconds(),
+            notBefore = utc.ToUnixTimeSeconds(), expiresAt = utc.AddDays(2).ToUnixTimeSeconds(),
+            features = step == 2 ? new[] { "monitoring" } : new[] { "l7", "tls", "monitoring" }
+        }, signer);
+    }
     using var output = new FileStream(args[3], FileMode.CreateNew, FileAccess.Write, FileShare.None);
     output.Write(fixtureEnvelope);
+    output.Flush(true);
+    File.WriteAllText(stepPath, (step + 1).ToString(System.Globalization.CultureInfo.InvariantCulture));
     return;
 }
 var model = new JsonObject
@@ -188,52 +207,36 @@ finally
     if (Directory.Exists(directory)) Directory.Delete(directory, true);
     if (Directory.Exists(directory2)) Directory.Delete(directory2, true);
 }
-var issuerDir = Path.Combine(Path.GetTempPath(), "gc-issuer-" + Guid.NewGuid().ToString("N"));
-var nodeDirs = Enumerable.Range(0,3).Select(i => issuerDir + "-node-" + i).ToArray();
+// Customer-side revocation acceptance, with synthetic signed documents.
+// Real issuance, seat/site limits and issuer ledger tests live in authority CI.
+var revokeDir = Path.Combine(Path.GetTempPath(), "gc-revoke-" + Guid.NewGuid().ToString("N"));
 try
 {
-    if (OperatingSystem.IsLinux()) Directory.CreateDirectory(issuerDir, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
-    else Directory.CreateDirectory(issuerDir);
-    var authority = new OfflineIssuer(Path.Combine(issuerDir, "subscription.json"), signer, "test-1");
-    var terms = new Subscription("business-license", "business-customer", "business-deployment",
-        "professional", 2, 1, now.AddDays(30).ToUnixTimeSeconds(), new[] {"l7", "ha"});
-    authority.Initialize(terms, now);
-    var nodes = nodeDirs.Select(path => new OfflineLicenseStore(path, verifier)).ToArray();
-    foreach (var node in nodes) node.Initialize();
-    var req = nodes[0].ExportActivationRequest();
-    var issued = authority.Issue(req, "dc", now);
-    Check(nodes[0].Import(issued, now).Allows("ha"), "real issuer-to-installation offline activation");
-    Check(issued.SequenceEqual(authority.Issue(req, "dc", now.AddMinutes(1))), "issuer committed request replay returns original bytes");
-    try { authority.Issue(nodes[1].ExportActivationRequest(), "dr", now); throw new Exception("FAIL: site limit"); }
-    catch (InvalidOperationException) { Console.WriteLine("PASS: issuer denies excess site"); }
-    Check(nodes[1].Import(authority.Issue(nodes[1].ExportActivationRequest(), "dc", now), now).Allows("ha"), "second allocated node");
-    try { authority.Issue(nodes[2].ExportActivationRequest(), "dc", now); throw new Exception("FAIL: seat limit"); }
-    catch (InvalidOperationException) { Console.WriteLine("PASS: issuer denies excess node"); }
-    var recovered = new OfflineIssuer(Path.Combine(issuerDir, "subscription.json"), signer, "test-1");
-    recovered.RenewSubscription(terms with { ExpiresAt = now.AddDays(365).ToUnixTimeSeconds() }, now.AddMinutes(2));
-    var renewed = nodes[0].Import(recovered.Issue(nodes[0].ExportActivationRequest(), "dc", now.AddMinutes(2)), now.AddMinutes(2));
-    Check(renewed.Revision == 2 && renewed.ExpiresAt > now.AddDays(360), "issuer renewal retains allocation and advances revision");
-    Reject(() => nodes[0].Import(issued, now.AddMinutes(3)), "old issuer license after renewal");
-    var revoked = recovered.Revoke(renewed.AllocationId, now.AddMinutes(4));
-    Check(revoked.SequenceEqual(recovered.Revoke(renewed.AllocationId, now.AddMinutes(5))), "revocation retry is idempotent");
-    Reject(() => nodes[1].ImportRevocation(revoked, now.AddMinutes(4)), "revocation for different allocation");
-    var tampered = revoked.ToArray();
-    tampered[^2] = tampered[^2] == (byte)'A' ? (byte)'B' : (byte)'A';
-    Reject(() => nodes[0].ImportRevocation(tampered, now.AddMinutes(4)), "forged revocation");
-    Check(nodes[0].Inspect(now.AddMinutes(4))?.Allows("ha") == true, "invalid revocation leaves entitlement intact");
-    Check(nodes[0].ImportRevocation(revoked, now.AddMinutes(4)).Validity == LicenseValidity.Revoked, "valid offline revocation");
-    var reopenedRevoked = new OfflineLicenseStore(nodeDirs[0], verifier);
-    Check(reopenedRevoked.Inspect(now.AddMinutes(5))?.Validity == LicenseValidity.Revoked, "revocation survives restart");
-    Reject(() => reopenedRevoked.Import(issued, now.AddMinutes(5)), "revoked allocation cannot import old license");
-    try { recovered.Issue(nodes[0].ExportActivationRequest(), "dc", now.AddMinutes(5)); throw new Exception("FAIL: revoked renewal"); }
-    catch (InvalidOperationException) { Console.WriteLine("PASS: issuer denies revoked renewal"); }
-    try { recovered.Issue(nodes[2].ExportActivationRequest(), "dc", now.AddMinutes(5)); throw new Exception("FAIL: revoked seat reused"); }
-    catch (InvalidOperationException) { Console.WriteLine("PASS: offline revoked seat not silently reused"); }
+    var revokeStore = new OfflineLicenseStore(revokeDir, verifier);
+    revokeStore.Initialize();
+    var revokeBinding = OfflineActivationRequest.Verify(revokeStore.ExportActivationRequest()).InstallationKeySha256;
+    var entitlement = (JsonObject)model.DeepClone();
+    entitlement["installationKeySha256"] = revokeBinding;
+    var activeFile = Sign(entitlement.ToJsonString());
+    var activeLicense = revokeStore.Import(activeFile, now);
+    byte[] MakeRevocation(string allocation) => FixtureSign("GCV1", new
+    {
+        schemaVersion = 1, product = "GatewayCore", licenseId = activeLicense.LicenseId,
+        customerId = activeLicense.CustomerId, deploymentId = activeLicense.DeploymentId,
+        allocationId = allocation, installationKeySha256 = revokeBinding, revokedAt = now.ToUnixTimeSeconds()
+    }, signer);
+    Reject(() => revokeStore.ImportRevocation(MakeRevocation("wrong-node"), now), "different allocation revocation");
+    var revocation = MakeRevocation(activeLicense.AllocationId);
+    var edited = revocation.ToArray();
+    edited[^2] = edited[^2] == (byte)'A' ? (byte)'B' : (byte)'A';
+    Reject(() => revokeStore.ImportRevocation(edited, now), "forged revocation");
+    Check(revokeStore.Inspect(now)?.Allows("ha") == true, "invalid revocation leaves entitlement intact");
+    Check(revokeStore.ImportRevocation(revocation, now).Validity == LicenseValidity.Revoked, "valid offline revocation");
+    var reopened = new OfflineLicenseStore(revokeDir, verifier);
+    Check(reopened.Inspect(now.AddMinutes(1))?.Validity == LicenseValidity.Revoked, "revocation survives restart");
+    Reject(() => reopened.Import(activeFile, now.AddMinutes(1)), "revoked allocation cannot import old license");
 }
-finally
-{
-    foreach (var path in nodeDirs.Append(issuerDir)) if (Directory.Exists(path)) Directory.Delete(path, true);
-}
+finally { if (Directory.Exists(revokeDir)) Directory.Delete(revokeDir, true); }
 var package = Path.Combine(Path.GetTempPath(), "gc-package-" + Guid.NewGuid().ToString("N"));
 try
 {
@@ -278,3 +281,11 @@ try
 }
 finally { if (Directory.Exists(package)) Directory.Delete(package, true); }
 Console.WriteLine("OFFLINE_LICENSE_VERIFIER_ACCEPTANCE_PASS");
+
+// Test-only envelope construction, never included in shipping projects.
+byte[] FixtureSign(string kind, object payload, ECDsa key)
+{
+    var prefix = kind + ".test-1." + B64(JsonSerializer.SerializeToUtf8Bytes(payload));
+    return Encoding.ASCII.GetBytes(prefix + "." + B64(key.SignData(Encoding.ASCII.GetBytes(prefix),
+        HashAlgorithmName.SHA256, DSASignatureFormat.IeeeP1363FixedFieldConcatenation)));
+}

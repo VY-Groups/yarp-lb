@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Real commercial-profile .NET gateway + private disposable issuer.
+"""Real commercial-profile .NET gateway + disposable synthetic signing fixture.
 Requires a network namespace containing only loopback; no license server,
 internet, mocked APIs or external hosts. No production private keys.
 """
