@@ -81,8 +81,9 @@ class EtcdQuorumTests(unittest.TestCase):
                                  "/gatewaycore/waf/fence/fleet-a")
                 return self.kvs.get(host,range_response(self.members[host]))
             if resource=="/v3/lease/timetolive":
-                self.assertEqual(payload,{"ID":"123","keys":False})
-                return self.ttls.get(host,ttl_response())
+                self.assertRegex(payload["ID"],r"^[1-9][0-9]+$")
+                self.assertIs(payload["keys"],False)
+                return self.ttls.get(host,ttl_response(lease=int(payload["ID"])))
             raise AssertionError("unapproved etcd operation")
 
         self.patcher=mock.patch.object(self.f,"_post",side_effect=stub)
