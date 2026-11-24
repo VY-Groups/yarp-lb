@@ -23,6 +23,7 @@ let currentRole = '';
 let currentUser = '';
 let federatedOidcSession = false;
 let otpChallenge = '';
+let privacyVersion = '';
 let authGeneration = 0;
 let gatewayReadyLabel = '● Backend readiness not checked';
 let gatewayReadyWarn = true;
@@ -81,7 +82,11 @@ async function api(url, method = 'GET', body, signal) { const opts = { method, c
     opts.headers['X-CSRF-Token'] = csrf;
     opts.body = JSON.stringify(body ?? {});
 } const generation = authGeneration; const r = await fetch(url, opts); if (generation !== authGeneration)
-    throw Error('Management session changed. Outdated response ignored.'); if (r.status === 401) {
+    throw Error('Management session changed. Outdated response ignored.'); if (r.status === 428) {
+    showLogin(false);
+    void initSession();
+    throw Error('Please accept the Privacy Policy to continue.');
+} if (r.status === 401) {
     if (!['/admin/api/session', '/admin/api/login', '/admin/api/bootstrap', '/admin/api/login/verify'].includes(url)) {
         if (!$('app-shell').hidden) {
             showLogin(false);
@@ -1106,6 +1111,33 @@ $('logout').onclick = () => { if (dirty && !confirm('Sign out? Your unsubmitted 
 } void api('/admin/api/logout', 'POST', {}).then(() => showLogin(false)).catch(e => show(String(e), true)); };
 setInterval(() => { if (!$('app-shell').hidden)
     void refreshGatewayReadiness(); }, 30000);
+function showPrivacy(r) {
+    privacyVersion = r.privacyVersion;
+    $('auth-screen').hidden = true;
+    $('app-shell').hidden = true;
+    $('privacy-screen').hidden = false;
+    $('privacy-text').textContent = r.privacyText;
+    $('privacy-version').textContent = 'Revision: ' + privacyVersion.slice(0, 12);
+    $('privacy-message').textContent = '';
+}
+$('privacy-accept').onclick = async () => {
+    const button = $('privacy-accept');
+    if (button.disabled)
+        return;
+    button.disabled = true;
+    try {
+        await api('/admin/api/privacy/accept', 'POST', { version: privacyVersion });
+        await initSession();
+    }
+    catch (e) {
+        $('privacy-message').textContent = String(e);
+    }
+    finally {
+        button.disabled = false;
+    }
+};
+$('privacy-decline').onclick = () => { $('privacy-message').textContent = 'Please accept the Privacy Policy to continue using GatewayCore. You can review it again or sign out.'; };
+$('privacy-signout').onclick = () => { $('logout').click(); };
 void initSession();
 async function initSession() {
     try {
@@ -1118,6 +1150,11 @@ async function initSession() {
         currentRole = r.role;
         currentUser = r.username;
         federatedOidcSession = r.federatedOidc === true;
+        if (r.privacyAccepted !== true) {
+            showPrivacy(r);
+            return;
+        }
+        $('privacy-screen').hidden = true;
         $('user-badge').textContent = currentUser + ' · ' + currentRole;
         $('auth-screen').hidden = true;
         $('app-shell').hidden = false;
@@ -1133,12 +1170,15 @@ async function initSession() {
         await reload();
     }
     catch (err) {
+        $('privacy-screen').hidden = true;
         $('auth-message').textContent = String(err);
         $('auth-screen').hidden = false;
         $('app-shell').hidden = true;
     }
 }
 function showLogin(first) {
+    $('privacy-screen').hidden = true;
+    privacyVersion = '';
     authGeneration++;
     readinessGeneration++;
     readinessAbort?.abort();

@@ -13,6 +13,13 @@ test('browser: bootstrap, navigation, onboarding, websites, route edit, users an
   await page.locator('#auth-email').fill('browseradmin@example.invalid');
   await page.locator('#auth-password').fill('Browser-secret-long-4096!');
   await page.locator('#auth-submit').click();
+  await expect(page.locator('#privacy-screen')).toBeVisible();
+  await expect(page.locator('#app-shell')).toBeHidden();
+  await expect(page.locator('#privacy-text')).toContainText('Privacy Policy');
+  await page.locator('#privacy-decline').click();
+  await expect(page.locator('#privacy-message')).toContainText('Please accept');
+  expect(await page.evaluate(async()=> (await fetch('/admin/api/state')).status)).toBe(428);
+  await page.locator('#privacy-accept').click();
   await expect(page.locator('#app-shell')).toBeVisible();
   await expect(page.locator('#user-badge')).toContainText('browseradmin');
 
@@ -269,6 +276,8 @@ test('browser: bootstrap, navigation, onboarding, websites, route edit, users an
     await expect(page.locator('#app-shell')).toBeHidden();
     await page.locator('#auth-password').fill('Browser-secret-long-4096!');
     await page.locator('#auth-submit').click();
+    await expect(page.locator('#privacy-screen')).toBeVisible();
+    await page.locator('#privacy-accept').click();
     await expect(page.locator('#app-shell')).toBeVisible();
   });
 

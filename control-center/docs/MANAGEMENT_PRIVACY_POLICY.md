@@ -1,0 +1,9 @@
+# Management privacy notice and acceptance
+
+The backend owns the notice and its SHA-256 content version. The dashboard renders that text before exposing management data; /dashboard/privacy is a read-only copy accessible before login and from the footer. Accept & continue is required after authentication (including OTP, OIDC and Viewer). Decline keeps the console locked and allows review or sign-out.
+
+API clients must GET /admin/api/session, review privacyText and explicitly POST /admin/api/privacy/accept with {"version":"<privacyVersion>"} and the existing X-CSRF-Token. The server audits acceptance and issues a separate protected HttpOnly cookie bound to the account, authenticated session and exact notice version. Other management APIs return 428 without acceptance; existing authentication, roles, CSRF and step-up requirements still apply. Public proxy traffic, gateway health and OIDC callbacks are unaffected. Refresh retains acceptance; a new login or policy change requires acknowledgement.
+
+The technical notice is not a jurisdiction-specific compliance certification. The deploying organization must review retention, recipients, contact details and legal requirements before production. Existing frozen release artifacts do not include this feature. Full CI and independent review are required before freezing a new candidate.
+
+Real API and Chromium tests exercise decline, acceptance, stale versions, missing CSRF, direct API blocking and session refresh. Disposable test clients explicitly acknowledge the current notice; there is no production bypass.
