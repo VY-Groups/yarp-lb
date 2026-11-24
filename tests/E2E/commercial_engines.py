@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 """Compile all separate commercial engines and test real L4 admission and revocation."""
 import json
+import hashlib
 import os
+import ssl
+import urllib.request
+import urllib.error
+import secrets
 from pathlib import Path
 import socket
 import socketserver
@@ -130,3 +135,97 @@ with tempfile.TemporaryDirectory(prefix="gc-engine-acceptance-") as td:
         result=run(l4,config,env=env,ok=False)
         assert "Active engine feature entitlement required" in result.stderr
         tcp.shutdown();udp.shutdown()
+    if os.name=="posix":
+        # Real agent binary and its existing loopback-only mTLS lab PKI.
+        # No production PKI relaxation or gateway signing keys.
+        pki=folder/"agent-pki";pki.mkdir()
+        def openssl(*args):
+            result=subprocess.run(["openssl",*map(str,args)],cwd=pki,capture_output=True,text=True,timeout=30)
+            if result.returncode:raise AssertionError(result.stderr)
+        openssl("req","-x509","-newkey","rsa:2048","-nodes","-days","2","-subj","/CN=disposable-fleet-root",
+                "-addext","basicConstraints=critical,CA:TRUE","-addext","keyUsage=critical,keyCertSign,cRLSign",
+                "-keyout","ca.key","-out","ca.pem")
+        def cert(name,usage):
+            openssl("req","-new","-newkey","rsa:2048","-nodes","-subj","/CN="+name,
+                    "-keyout",name+".key","-out",name+".csr")
+            ext=pki/(name+".ext")
+            ext.write_text("basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage="+usage+
+                ("\nsubjectAltName=IP:127.0.0.1\n" if usage=="serverAuth" else "\n"))
+            openssl("x509","-req","-in",name+".csr","-CA","ca.pem","-CAkey","ca.key","-CAcreateserial",
+                    "-days","1","-sha256","-extfile",ext.name,"-out",name+".pem")
+        cert("server","serverAuth");cert("controller","clientAuth");cert("untrusted-controller","clientAuth")
+        pin=hashlib.sha256(ssl.PEM_cert_to_DER_cert((pki/"controller.pem").read_text())).hexdigest().upper()
+        # Existing agent policy accepts SHA-1 or SHA-256 pins; use SHA-256.
+        def client(name=None):
+            context=ssl.create_default_context(cafile=str(pki/"ca.pem"))
+            if name:context.load_cert_chain(str(pki/(name+".pem")),str(pki/(name+".key")))
+            return urllib.request.build_opener(urllib.request.ProxyHandler({}),urllib.request.HTTPSHandler(context=context))
+        def proof_request(opener,origin,nonce,expected=200):
+            req=urllib.request.Request(origin+"/agent/v1/license/proof",data=json.dumps({"challenge":nonce}).encode(),
+                headers={"Content-Type":"application/json"})
+            try:
+                with opener.open(req,timeout=4) as res:status,body=res.status,res.read()
+            except urllib.error.HTTPError as exc:status,body=exc.code,exc.read()
+            assert status==expected,(status,body[:300])
+            return json.loads(body)["proof"] if expected==200 else None
+        agent=dlls[3];processes=[];logs=[];nodes=[]
+        try:
+            for site in ("dc","dr"):
+                node=folder/("agent-"+site);node.mkdir()
+                node_env=dict(os.environ,GATEWAYCORE_ENGINE_LICENSE_DIR=str(node/"identity"))
+                run(agent,"--license-init",env=node_env)
+                activation=node/"activation.gcr";license_path=node/"active.lic"
+                run(agent,"--license-request",activation,env=node_env)
+                run(fixture,"--ci-fleet-license",key,activation,license_path,site)
+                run(agent,"--license-import",license_path,env=node_env)
+                port=free_port(socket.SOCK_STREAM);origin=f"https://127.0.0.1:{port}"
+                node_env.update({"Agent__TrustedClientThumbprints__0":pin,
+                    "Agent__LabOnlyClientCaCertificatePath":str(pki/"ca.pem"),
+                    "Agent__EnableConfigChanges":"false","Agent__EnableEngineConfigChanges":"false","Agent__EnableServiceActions":"false",
+                    "Kestrel__Endpoints__AgentHttps__Url":origin,
+                    "Kestrel__Endpoints__AgentHttps__Certificate__Path":str(pki/"server.pem"),
+                    "Kestrel__Endpoints__AgentHttps__Certificate__KeyPath":str(pki/"server.key")})
+                log=(node/"agent.log").open("w+");logs.append(log)
+                process=subprocess.Popen(["dotnet",str(agent)],cwd=node,env=node_env,stdout=log,stderr=subprocess.STDOUT)
+                processes.append(process);nodes.append((origin,node_env,activation,node))
+            controller=client("controller")
+            challenge=secrets.token_hex(32).upper()
+            proofs=[]
+            for origin,_,_,node in nodes:
+                for _ in range(40):
+                    try:
+                        value=proof_request(controller,origin,challenge)
+                        break
+                    except (OSError,urllib.error.URLError):time.sleep(.25)
+                else:raise AssertionError("Licensed agent did not become ready")
+                path=node/"proof.gcp";path.write_text(value,encoding="ascii");proofs.append(path)
+            result=run(fixture,"--ci-verify-fleet-proofs",trust,challenge,*proofs)
+            assert "REAL_MTLS_FLEET_PROOFS_VERIFIED" in result.stdout
+            run(fixture,"--ci-verify-fleet-proofs",trust,secrets.token_hex(32).upper(),*proofs,ok=False)
+            for unauthorized in (client(),client("untrusted-controller")):
+                try:
+                    proof_request(unauthorized,nodes[0][0],challenge)
+                except (OSError,urllib.error.URLError,AssertionError) as exc:
+                    if isinstance(exc,AssertionError):
+                        assert exc.args and exc.args[0][0] in (401,403),exc
+                else:raise AssertionError("Unauthorized client obtained a fleet proof")
+            origin,node_env,activation,node=nodes[1]
+            revocation=node/"revoke.gcv"
+            run(fixture,"--ci-engine-revoke",key,activation,revocation,"fleet")
+            for _ in range(10):
+                imported=subprocess.run(["dotnet",str(agent),"--license-revoke",str(revocation)],env=node_env,capture_output=True)
+                if imported.returncode==0:break
+                time.sleep(.2)
+            else:raise AssertionError("Agent revocation import failed")
+            time.sleep(4)
+            proof_request(controller,origin,secrets.token_hex(32).upper(),expected=402)
+            print("COMMERCIAL_REAL_TWO_AGENT_MTLS_SITE_PROOF_REVOCATION_PASS",flush=True)
+        except Exception:
+            for log in logs:log.flush();log.seek(0);print(log.read()[-5000:])
+            raise
+        finally:
+            for process in processes:
+                if process.poll() is None:process.terminate()
+                try:process.wait(timeout=10)
+                except subprocess.TimeoutExpired:process.kill();process.wait()
+            for log in logs:log.close()
