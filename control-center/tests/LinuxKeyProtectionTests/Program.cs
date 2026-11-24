@@ -698,21 +698,18 @@ try
         var deliveredHarness = Path.GetFullPath(Path.Combine(
             "..", "ops", "fleet", "linux_dp_real_restore_e2e.py"));
         Assert(File.Exists(deliveredHarness), "real pinned mTLS to .NET restore harness exists");
-        // The disposable runner already launched a trusted .NET host to
-        // execute this assembly. Resolve its real host binary instead of
-        // forwarding ambient DOTNET_ROOT into the separate recovery process.
-        // The Python receiver independently checks the approved path and
-        // refuses group-writable or untrusted runtime roots.
-        var systemDotnet = new FileInfo("/usr/bin/dotnet");
-        var approvedDotnetBinary = systemDotnet.Exists
-            ? (systemDotnet.ResolveLinkTarget(returnFinalTarget: true)?.FullName
-                ?? systemDotnet.FullName)
-            : Path.Combine(Environment.GetEnvironmentVariable("DOTNET_ROOT")
-                ?? "/usr/share/dotnet", "dotnet");
-        var approvedDotnetRoot = Path.GetDirectoryName(
-            Path.GetFullPath(approvedDotnetBinary))!;
+        // Identify the runtime currently executing the real DP test rather
+        // than guessing /usr/bin/dotnet or inheriting an ambient DOTNET_ROOT.
+        // Both paths could select a DIFFERENT SDK/runtime from the one that
+        // produced the signed restore apphost in disposable GitHub CI.
+        // The receiver subsequently checks the canonical root ownership,
+        // write permissions and native host executable before process launch.
+        var executingRuntimeDirectory =
+            System.Runtime.InteropServices.RuntimeEnvironment.GetRuntimeDirectory();
+        var approvedDotnetRoot = Path.GetFullPath(Path.Combine(
+            executingRuntimeDirectory, "..", "..", ".."));
         Assert(File.Exists(Path.Combine(approvedDotnetRoot, "dotnet")),
-            "approved runner .NET host executable exists");
+            "approved currently executing .NET runtime host exists");
         var transfer = new System.Diagnostics.ProcessStartInfo("python3")
         {
             UseShellExecute = false,
