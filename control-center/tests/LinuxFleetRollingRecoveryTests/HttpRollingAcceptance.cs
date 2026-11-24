@@ -49,6 +49,11 @@ internal static class HttpRollingAcceptance
         });
         builder.Services.AddAuthorization();
         var app = builder.Build();
+        app.Use(async (ctx,next) =>
+        {
+            ctx.Response.Headers["X-Fleet-Fixture-Node"]=Path.GetFileName(state);
+            await next();
+        });
         app.UseAuthentication();
         app.UseAuthorization();
         app.MapPost("/mint", async (HttpContext ctx) =>
@@ -75,6 +80,7 @@ internal static class HttpRollingAcceptance
         private readonly Process process;
         private readonly Task<string> stderr;
         public string Address { get; private set; } = "";
+        public string Name { get; private set; } = "";
         private Node(Process p)
         {
             process = p;
@@ -104,6 +110,7 @@ internal static class HttpRollingAcceptance
                     address.Port <= 0)
                     throw new InvalidOperationException("HTTP fleet fixture failed readiness");
                 node.Address = address.GetLeftPart(UriPartial.Authority);
+                node.Name = Path.GetFileName(state);
                 return node;
             }
             catch { node.Dispose(); throw; }
@@ -121,22 +128,26 @@ internal static class HttpRollingAcceptance
         }
     }
 
-    private static async Task<string> Mint(HttpClient http, Node node)
+    private static Task<string> Mint(HttpClient http, Node node) => MintAt(http,node.Address);
+    private static async Task<string> MintAt(HttpClient http, string address)
     {
-        using var response = await http.PostAsync(node.Address+"/mint",null);
+        using var response = await http.PostAsync(address+"/mint",null);
         response.EnsureSuccessStatusCode();
         var cookie = response.Headers.GetValues("Set-Cookie").Single(
             x=>x.StartsWith(CookieName+"=",StringComparison.Ordinal));
         return cookie.Split(';',2)[0];
     }
-    private static async Task Probe(HttpClient http, Node node, string cookie)
+    private static Task<string> Probe(HttpClient http, Node node, string cookie) =>
+        ProbeAt(http,node.Address,cookie);
+    private static async Task<string> ProbeAt(HttpClient http, string address, string cookie)
     {
-        using var request = new HttpRequestMessage(HttpMethod.Get,node.Address+"/probe");
+        using var request = new HttpRequestMessage(HttpMethod.Get,address+"/probe");
         request.Headers.TryAddWithoutValidation("Cookie",cookie);
         using var response = await http.SendAsync(request);
         if (response.StatusCode != HttpStatusCode.OK ||
             await response.Content.ReadAsStringAsync() != "disposable-fleet-user")
             throw new InvalidOperationException("Live authenticated fleet request failed");
+        return response.Headers.GetValues("X-Fleet-Fixture-Node").Single();
     }
     private static bool DifferentKeys(string oldCookie,string newCookie)
     {
@@ -146,9 +157,9 @@ internal static class HttpRollingAcceptance
             !oldBytes.AsSpan(4,16).SequenceEqual(newBytes.AsSpan(4,16));
     }
 
-    // Serial admission/drain fixture: each admission update waits for the
-    // current request to finish. No retry, redirect, or failed request is
-    // hidden. This measures cookie traffic while one live node is restarted.
+    // Actual shipping GatewayCore handles every workload request. Config
+    // reload and observed destination drain precede each process restart.
+    // No failed request is retried or excluded from the acceptance gate.
     internal static async Task RunAsync(string stateA,string stateB,
         (string Pfx,string Password) oldA,(string Pfx,string Password) nextA,
         (string Pfx,string Password) oldB,(string Pfx,string Password) nextB,
@@ -161,13 +172,33 @@ internal static class HttpRollingAcceptance
         using var stop=new CancellationTokenSource();
         Node? a=null,b=null;
         Task? traffic=null;
-        Node[] admitted=Array.Empty<Node>();
+        ProductFleetProxy? gateway=null;
+        string? oldCookie=null;
+        string? routed=null;
+        var observedCookies=new Queue<string>();
         int success=0;
         async Task Admit(params Node[] nodes)
         {
-            await gate.WaitAsync();
-            try { admitted=nodes; }
-            finally { gate.Release(); }
+            if(gateway is null||routed is null||oldCookie is null||nodes.Length==0)
+                throw new InvalidOperationException("Product cutover fixture not initialized");
+            var active=nodes.Select(x=>x.Name).ToHashSet(StringComparer.Ordinal);
+            var current=new[]{a,b}.Where(x=>x is not null).Select(x=>x!).ToArray();
+            gateway.Apply(current.ToDictionary(x=>x.Name,x=>(x.Address,!active.Contains(x.Name))));
+            using var limit=new CancellationTokenSource(TimeSpan.FromSeconds(20));
+            var seen=new HashSet<string>(StringComparer.Ordinal);
+            var consecutive=0;
+            while(consecutive<8||!seen.SetEquals(active))
+            {
+                limit.Token.ThrowIfCancellationRequested();
+                if(traffic?.IsCompleted==true)await traffic;
+                var actual=await ProbeAt(http,routed,oldCookie);
+                if(active.Contains(actual)){seen.Add(actual);consecutive++;}
+                else {seen.Clear();consecutive=0;}
+                await Task.Delay(30,limit.Token);
+            }
+            // The continuous workload has at most one pair in flight.
+            // Wait for it before stopping a drained process.
+            await gate.WaitAsync(limit.Token);gate.Release();
         }
         async Task Progress(int before)
         {
@@ -182,22 +213,28 @@ internal static class HttpRollingAcceptance
         try
         {
             a=await Node.Start(stateA,oldA,null);
-            var oldCookie=await Mint(http,a);
+            oldCookie=await Mint(http,a);
             replicate(stateA,stateB);
             b=await Node.Start(stateB,nextB,oldB);
             await Probe(http,b,oldCookie);
+            gateway=await ProductFleetProxy.Start(
+                Path.Combine(Path.GetDirectoryName(stateA)!,"http-gateway"),
+                oldA,http,new Dictionary<string,(string Address,bool Draining)> {
+                    [a.Name]=(a.Address,false),[b.Name]=(b.Address,false)});
+            routed=gateway.Address+"/fleet";
             await Admit(a,b);
             traffic=Task.Run(async () =>
             {
-                var index=0;
                 while (!stop.IsCancellationRequested)
                 {
                     await gate.WaitAsync();
                     try
                     {
-                        if (admitted.Length==0)
-                            throw new InvalidOperationException("No admitted fleet node");
-                        await Probe(http,admitted[index++%admitted.Length],oldCookie);
+                        await ProbeAt(http,routed!,oldCookie!);
+                        var minted=await MintAt(http,routed!);
+                        await ProbeAt(http,routed!,minted);
+                        observedCookies.Enqueue(minted);
+                        if(observedCookies.Count>128)observedCookies.Dequeue();
                         Interlocked.Increment(ref success);
                     }
                     finally { gate.Release(); }
@@ -216,17 +253,21 @@ internal static class HttpRollingAcceptance
             await Probe(http,a,oldCookie);
             await Progress(before);
             await Admit(a);
+            var stageCookie=await MintAt(http,routed);
+            if(!DifferentKeys(oldCookie,stageCookie))
+                throw new InvalidOperationException("Product cutover did not select a newly rotated key");
+            await ProbeAt(http,routed,stageCookie);
             before=Volatile.Read(ref success);
-            // B is offline before copying newly wrapped XML; no live partial
-            // file import. New cookie issuance is tested only after both
-            // nodes have the same new ring, not during the staging interval.
+            // B is offline before copying newly wrapped XML; the actual
+            // proxy keeps routing old-cookie and new-login traffic to A.
             b.Dispose(); b=null;
             replicate(stateA,stateB);
             b=await Node.Start(stateB,nextB,oldB);
             await Probe(http,b,oldCookie);
+            await Probe(http,b,stageCookie);
             await Progress(before);
             await Admit(a,b);
-            var newCookie=await Mint(http,a);
+            var newCookie=await MintAt(http,routed);
             if (!DifferentKeys(oldCookie,newCookie))
                 throw new InvalidOperationException("HTTP rotation did not select new key");
             foreach(var node in new[]{a,b})
@@ -237,13 +278,15 @@ internal static class HttpRollingAcceptance
             await Progress(Volatile.Read(ref success));
             stop.Cancel();
             await traffic;
-            Console.WriteLine("PASS: continuous old-cookie HTTP probes during two-node rolling restart; both cookie generations accepted after coordinated staging");
+            foreach(var cookie in observedCookies.Append(stageCookie))
+                foreach(var node in new[]{a,b})await Probe(http,node,cookie);
+            Console.WriteLine("PASS: shipping GatewayCore proxy drain and rolling restart with continuous old-cookie and new-login HTTP traffic; both key generations accepted");
         }
         finally
         {
             stop.Cancel();
             try { if (traffic!=null) await traffic; }
-            finally { try { a?.Dispose(); } finally { b?.Dispose(); } }
+            finally { try { gateway?.Dispose(); } finally { try { a?.Dispose(); } finally { b?.Dispose(); } } }
         }
     }
 }
