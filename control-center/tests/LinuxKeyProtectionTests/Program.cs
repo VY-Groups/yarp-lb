@@ -735,9 +735,31 @@ try
         Assert(LinuxDpRecoveryEvidence.ComputeInventoryDigest(
             Path.Combine(deliveredState,"data-protection-keys")) == inventoryBeforeCommit,
             "pinned mTLS receiver preserved actual P-256-verified ciphertext inventory");
-        Assert(VerifyInFreshProcess(deliveredState, "OnPremLinuxDpIntegration.v1",
-                "session-probe", encrypted, "sensitive-session-value-123") == 0,
-            "real pinned mTLS recovery preserves original authenticated cookie in fresh OS process");
+        // Temporarily bind the fresh receiver process to the actual signed
+        // manifest and committed floor. Restore exact previous environment
+        // values before the existing negative/failure tests resume.
+        var previousRecoveryValues = new[] {
+            LinuxDpRecoveryEvidence.ManifestEnv, LinuxDpRecoveryEvidence.PublicKeyEnv,
+            LinuxDpRecoveryEvidence.MinimumRevisionEnv,
+            LinuxDpRecoveryEvidence.MinimumRevisionFileEnv,
+            LinuxDpRecoveryEvidence.RequireEvidenceEnv
+        }.ToDictionary(key => key, key => Environment.GetEnvironmentVariable(key));
+        try
+        {
+            Set(LinuxDpRecoveryEvidence.ManifestEnv, generatedManifest);
+            Set(LinuxDpRecoveryEvidence.PublicKeyEnv, trustedPublicPath);
+            Set(LinuxDpRecoveryEvidence.MinimumRevisionEnv, null);
+            Set(LinuxDpRecoveryEvidence.MinimumRevisionFileEnv, revisionFloorPath);
+            Set(LinuxDpRecoveryEvidence.RequireEvidenceEnv, "true");
+            Assert(VerifyInFreshProcess(deliveredState, "OnPremLinuxDpIntegration.v1",
+                    "session-probe", encrypted, "sensitive-session-value-123") == 0,
+                "real pinned mTLS recovery preserves original authenticated cookie in fresh OS process");
+        }
+        finally
+        {
+            foreach (var item in previousRecoveryValues)
+                Set(item.Key, item.Value);
+        }
         Assert(!File.Exists(Path.Combine(deliveredInbox, "rev43", "ring", "private.key")),
             "network DP snapshot contains no private wrapping-key file");
 
