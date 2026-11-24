@@ -1,0 +1,36 @@
+name: Live three-member etcd quorum fencing CI
+on:
+  push:
+    branches: [main, "feature/**"]
+    paths: ["ops/waf/etcd_quorum_fence.py", "ops/waf/test_etcd_quorum_fence.py", "tests/WafEtcd/**", ".github/workflows/waf-etcd-quorum.yml"]
+  pull_request:
+    paths: ["ops/waf/etcd_quorum_fence.py", "ops/waf/test_etcd_quorum_fence.py", "tests/WafEtcd/**", ".github/workflows/waf-etcd-quorum.yml"]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  real-quorum:
+    name: Actual three-member etcd Raft lease CAS/revoke/partition with pinned mTLS
+    runs-on: ubuntu-24.04
+    timeout-minutes: 18
+    steps:
+      - uses: actions/checkout@v4
+      - name: Resolve immutable upstream etcd release image
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker pull quay.io/coreos/etcd:v3.6.16
+          selected="$(docker image inspect quay.io/coreos/etcd:v3.6.16 --format '{{index .RepoDigests 0}}')"
+          if [[ ! "$selected" =~ ^quay\.io/coreos/etcd@sha256:[a-f0-9]{64}$ ]]; then
+            echo 'FAIL: upstream etcd image cannot be pinned to OCI digest' >&2
+            exit 1
+          fi
+          echo "ETCD_IMAGE=$selected" >> "$GITHUB_ENV"
+      - name: Run disposable real mTLS etcd consensus and failure acceptance
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tests/WafEtcd/real_quorum.py
+      - name: Repeat synthetic fail-closed quorum client contracts
+        shell: bash
+        run: python3 -m unittest discover -s ops/waf -p test_etcd_quorum_fence.py -v
