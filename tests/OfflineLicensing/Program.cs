@@ -13,6 +13,12 @@ var binding = Convert.ToHexString(SHA256.HashData(installation.ExportSubjectPubl
 var now = DateTimeOffset.FromUnixTimeSeconds(1800000000);
 var keys = new Dictionary<string, byte[]> { ["test-1"] = signer.ExportSubjectPublicKeyInfo() };
 var verifier = new OfflineLicenseVerifier(keys);
+if (args.Length == 2 && args[0] == "--ci-trust")
+{
+    // Disposable public-only trust resource for commercial compile CI.
+    File.WriteAllBytes(args[1], JsonSerializer.SerializeToUtf8Bytes(keys));
+    return;
+}
 var model = new JsonObject
 {
     ["schemaVersion"] = 1, ["product"] = "GatewayCore", ["licenseId"] = "test-license",

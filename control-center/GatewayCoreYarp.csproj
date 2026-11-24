@@ -5,6 +5,16 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
   </PropertyGroup>
+  <PropertyGroup Condition="'$(GatewayCoreCommercial)' == 'true'">
+    <DefineConstants>$(DefineConstants);GATEWAYCORE_COMMERCIAL</DefineConstants>
+  </PropertyGroup>
+  <ItemGroup Condition="'$(GatewayCoreCommercial)' == 'true'">
+    <ProjectReference Include="../src/GatewayCore.Licensing/GatewayCore.Licensing.csproj" />
+    <EmbeddedResource Include="$(GatewayCoreTrustFile)" LogicalName="GatewayCore.CommercialTrust" Condition="'$(GatewayCoreTrustFile)' != ''" />
+  </ItemGroup>
+  <Target Name="RequireCommercialTrust" BeforeTargets="PrepareForBuild" Condition="'$(GatewayCoreCommercial)' == 'true'">
+    <Error Condition="'$(GatewayCoreTrustFile)' == '' Or !Exists('$(GatewayCoreTrustFile)')" Text="Commercial build requires an owner-pinned public trust file." />
+  </Target>
   <ItemGroup>
     <Compile Remove="GatewayAgent/**/*.cs;tests/**/*.cs;tools/**/*.cs" />
     <Compile Include="../engines/GslbHealthContracts/PrivateKeyFileSecurity.cs" Link="PrivateKeyFileSecurity.cs" />

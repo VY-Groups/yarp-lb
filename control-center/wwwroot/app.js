@@ -1118,6 +1118,11 @@ async function initSession() {
         currentRole = r.role;
         currentUser = r.username;
         federatedOidcSession = r.federatedOidc === true;
+        $('license-link').hidden = r.commercial !== true;
+        if (r.commercial === true && r.licenseActive !== true) {
+            location.assign('/dashboard/license');
+            return;
+        }
         $('user-badge').textContent = currentUser + ' · ' + currentRole;
         $('auth-screen').hidden = true;
         $('app-shell').hidden = false;

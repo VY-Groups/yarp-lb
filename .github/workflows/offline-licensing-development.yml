@@ -6,6 +6,7 @@ on:
       - 'src/GatewayCore.Licensing/**'
       - 'tests/OfflineLicensing/**'
       - 'tools/LicenseAuthority/**'
+      - 'control-center/**'
       - '.github/workflows/offline-licensing-development.yml'
 permissions:
   contents: read
@@ -23,3 +24,9 @@ jobs:
         with:
           dotnet-version: '10.0.x'
       - run: dotnet run --project tests/OfflineLicensing/OfflineLicensing.csproj --configuration Release
+
+      - name: Compile commercial gateway against disposable public trust
+        shell: bash
+        run: |
+          dotnet run --project tests/OfflineLicensing/OfflineLicensing.csproj --configuration Release -- --ci-trust "$RUNNER_TEMP/commercial-public-trust.json"
+          dotnet build control-center/GatewayCoreYarp.csproj --configuration Release -p:GatewayCoreCommercial=true -p:GatewayCoreTrustFile="$RUNNER_TEMP/commercial-public-trust.json"

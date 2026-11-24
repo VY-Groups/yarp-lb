@@ -495,6 +495,8 @@ async function initSession(){
     const r=await api('/admin/api/session');
     if(!r.authenticated){showLogin(!r.initialized);return}
     csrf=r.csrf;currentRole=r.role;currentUser=r.username;federatedOidcSession=r.federatedOidc===true;
+    $('license-link').hidden=r.commercial!==true;
+    if(r.commercial===true&&r.licenseActive!==true){location.assign('/dashboard/license');return}
     $('user-badge').textContent=currentUser+' · '+currentRole;
     $('auth-screen').hidden=true;$('app-shell').hidden=false;
     document.querySelectorAll<HTMLButtonElement>('[data-view="users"],[data-view="mail"],[data-view="directory"]').forEach(b=>b.hidden=currentRole!=='Administrator');
