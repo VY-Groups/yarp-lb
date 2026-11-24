@@ -84,7 +84,12 @@ jobs:
         env:
           GITHUB_ACTIONS: "true"
           RUNNER_OS: "Linux"
-        run: dotnet run --project tests/LinuxFleetRollingRecoveryTests/LinuxFleetRollingRecoveryTests.csproj --configuration Release
+        shell: bash
+        run: |
+          set -euo pipefail
+          export GATEWAYCORE_PRODUCT_DLL="$PWD/bin/Release/net10.0/GatewayCoreYarp.dll"
+          export GATEWAYCORE_PRODUCT_WORKDIR="$PWD"
+          dotnet run --project tests/LinuxFleetRollingRecoveryTests/LinuxFleetRollingRecoveryTests.csproj --configuration Release
       - name: Reject unsafe legacy-state cutover without modifying users or keys
         run: dotnet run --project tests/LegacyStateGuardTests/LegacyStateGuardTests.csproj --configuration Release
       - name: Verify real Control Center EC2 CI-only TLS safety and allowlist
