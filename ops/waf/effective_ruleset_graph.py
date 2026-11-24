@@ -71,7 +71,7 @@ def valid_config_path(path):
             not re.fullmatch(r"/etc/modsecurity\.d/[a-zA-Z0-9_./*-]+", path):
         raise ValueError("untrusted ModSecurity include path")
     parts = PurePosixPath(path).parts
-    if ".." in parts or "." in parts or path != "/".join(parts[1:]).join(("/",)):
+    if ".." in parts or "." in parts or path != "/" + "/".join(parts[1:]):
         # The join above handles canonical absolute POSIX spelling.
         raise ValueError("ModSecurity include path not canonical")
     return path
@@ -110,7 +110,7 @@ def includes_from_conf(blob):
 
 
 def walk_graph(files, root):
-    if not isinstance(files, dict) or len(files) is < 1 or > MAX_FILES or \
+    if not isinstance(files, dict) or not (1 <= len(files) <= MAX_FILES) or \
             not all(type(p) is str and type(v) is bytes and
                     0 < len(v) <= MAX_FILE for p, v in files.items()) or \
             sum(len(v) for v in files.values()) > MAX_TOTAL:
