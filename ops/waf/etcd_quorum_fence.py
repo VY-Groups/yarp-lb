@@ -191,6 +191,11 @@ class EtcdQuorumFence:
         lease = integer(kv.get("lease"))
         raw = base64.b64decode(kv.get("value", ""), validate=True)
         holder = valid_value(raw, names, revision, policy_digest)
+        # Use the time BEFORE the TTL round trip as the local lower
+        # bound for an expiry deadline. The final quorum decision must
+        # recheck every accepted member's remaining validity, including
+        # delays caused by any later slow/partitioned member.
+        ttl_query_started = time.monotonic()
         ttl = self._post(endpoint, "/v3/lease/timetolive",
                          {"ID": str(lease), "keys": False})
         if type(ttl) is not dict or integer(ttl.get("ID")) != lease:
@@ -204,7 +209,8 @@ class EtcdQuorumFence:
         if type(remain) is not int or type(granted) is not int or \
                 not MIN_TTL <= remain <= granted <= MAX_TTL:
             raise ValueError("expired, unbounded or nonrenewed etcd lease")
-        return member, (self.cluster_id, modified, lease, holder)
+        return member, (self.cluster_id, modified, lease, holder), \
+            ttl_query_started + remain
 
     def assert_current(self, names, revision, policy_digest, phase):
         if (type(names) is not tuple or len(names) != 2 or
@@ -230,11 +236,20 @@ class EtcdQuorumFence:
                 continue
         # Never count two endpoints which report the SAME etcd member identity
         # or disagree on the lease key's raft revision/holder/lease ID.
-        if len(accepted) < 2 or len({member for member, _ in accepted}) != \
+        if len(accepted) < 2 or len({member for member, _, _ in accepted}) != \
                 len(accepted):
             return False
-        states = {state for _, state in accepted}
+        states = {state for _, state, _ in accepted}
         if len(states) != 1:
+            return False
+        # A TTL that was fresh when the FIRST member responded may already
+        # have expired by the time the LAST peer times out. Never authorize
+        # on a stale majority. Keep a three-second minimum runway AFTER
+        # all quorum observations, and do not cache it for a later phase.
+        now = time.monotonic()
+        if any(type(deadline) not in (float, int) or
+               not deadline > now + MIN_TTL
+               for _, _, deadline in accepted):
             return False
         identity = next(iter(states))
         if self._identity is None:
