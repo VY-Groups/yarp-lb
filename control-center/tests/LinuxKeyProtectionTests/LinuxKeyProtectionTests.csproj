@@ -10,6 +10,7 @@
     <Compile Include="../../LinuxKeyProtection.cs" Link="LinuxKeyProtection.cs" />
     <Compile Include="../../LinuxDpRecoveryEvidence.cs" Link="LinuxDpRecoveryEvidence.cs" />
     <Compile Include="../../LinuxDpRecoveryFloor.cs" Link="LinuxDpRecoveryFloor.cs" />
+    <Compile Include="../../LinuxDpEncryptedSnapshot.cs" Link="LinuxDpEncryptedSnapshot.cs" />
     <Compile Include="../../../engines/GslbHealthContracts/PrivateKeyFileSecurity.cs" Link="PrivateKeyFileSecurity.cs" />
   </ItemGroup>
 </Project>
