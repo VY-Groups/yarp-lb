@@ -153,7 +153,7 @@ class TwoNodeQuiescenceTests(unittest.TestCase):
         a,b=self.receipt("gateway-a"),self.receipt("gateway-b")
         source=Path(self.keys["gateway-a"][1])
         reformatted=self.root/"different-newlines.pub"
-        reformatted.write_bytes(source.read_bytes().replace(b"\\n", b"\\r\\n"))
+        reformatted.write_bytes(source.read_bytes().replace(b"\n", b"\r\n"))
         reformatted.chmod(0o600)
         # The new file is a different inode and byte sequence, but the
         # same elliptic-curve public key. No duplicate witness authority.
