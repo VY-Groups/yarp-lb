@@ -698,18 +698,59 @@ try
         var deliveredHarness = Path.GetFullPath(Path.Combine(
             "..", "ops", "fleet", "linux_dp_real_restore_e2e.py"));
         Assert(File.Exists(deliveredHarness), "real pinned mTLS to .NET restore harness exists");
-        // Identify the runtime currently executing the real DP test rather
-        // than guessing /usr/bin/dotnet or inheriting an ambient DOTNET_ROOT.
-        // Both paths could select a DIFFERENT SDK/runtime from the one that
-        // produced the signed restore apphost in disposable GitHub CI.
-        // The receiver subsequently checks the canonical root ownership,
-        // write permissions and native host executable before process launch.
+        // Hosted SDK caches may be group-/other-writable for CI installation.
+        // NEVER relax the receiver's production filesystem requirements to
+        // accommodate that shared cache. Instead stage only this disposable
+        // runner's running .NET host, hostfxr and Microsoft.NETCore.App into
+        // a fresh, private 0700 tree, preserving executable bits for native
+        // files and forbidding a symlinked destination.
         var executingRuntimeDirectory =
             System.Runtime.InteropServices.RuntimeEnvironment.GetRuntimeDirectory();
-        var approvedDotnetRoot = Path.GetFullPath(Path.Combine(
+        var installedDotnetRoot = Path.GetFullPath(Path.Combine(
             executingRuntimeDirectory, "..", "..", ".."));
-        Assert(File.Exists(Path.Combine(approvedDotnetRoot, "dotnet")),
-            "approved currently executing .NET runtime host exists");
+        var approvedDotnetRoot = Path.Combine(root, "owner-private-net10-host");
+        Directory.CreateDirectory(approvedDotnetRoot, PrivateDir);
+        void PrivateRuntimeCopy(string input, string output)
+        {
+            Directory.CreateDirectory(output, PrivateDir);
+            foreach (var sourceFile in Directory.EnumerateFiles(input))
+            {
+                var destination = Path.Combine(output, Path.GetFileName(sourceFile));
+                File.Copy(sourceFile, destination, overwrite: false);
+                var mode = File.GetUnixFileMode(sourceFile);
+                var executable = (mode & (UnixFileMode.UserExecute |
+                    UnixFileMode.GroupExecute | UnixFileMode.OtherExecute)) != 0;
+                File.SetUnixFileMode(destination, PrivateFile |
+                    (executable ? UnixFileMode.UserExecute : 0));
+            }
+            foreach (var sourceDir in Directory.EnumerateDirectories(input))
+                PrivateRuntimeCopy(sourceDir, Path.Combine(
+                    output, Path.GetFileName(sourceDir)));
+        }
+        var sourceHost = Path.Combine(installedDotnetRoot, "dotnet");
+        Assert(File.Exists(sourceHost), "current .NET 10 runtime host exists");
+        var destinationHost = Path.Combine(approvedDotnetRoot, "dotnet");
+        File.Copy(sourceHost, destinationHost);
+        File.SetUnixFileMode(destinationHost,
+            PrivateFile | UnixFileMode.UserExecute);
+        var runtimeVersion = Path.GetFileName(Path.TrimEndingDirectorySeparator(
+            executingRuntimeDirectory));
+        var privateShared = Path.Combine(approvedDotnetRoot, "shared",
+            "Microsoft.NETCore.App", runtimeVersion);
+        PrivateRuntimeCopy(executingRuntimeDirectory, privateShared);
+        var sourceFxrRoot = Path.Combine(installedDotnetRoot, "host", "fxr");
+        var fxrVersions = Directory.GetDirectories(sourceFxrRoot)
+            .Where(name => Version.TryParse(Path.GetFileName(name), out var v)
+                && v.Major == Environment.Version.Major)
+            .OrderByDescending(name => Version.Parse(Path.GetFileName(name)))
+            .ToArray();
+        Assert(fxrVersions.Length > 0,
+            "installed .NET 10 hostfxr is available for private recovery fixture");
+        PrivateRuntimeCopy(fxrVersions[0], Path.Combine(approvedDotnetRoot,
+            "host", "fxr", Path.GetFileName(fxrVersions[0])));
+        Assert(File.Exists(destinationHost) &&
+            File.GetUnixFileMode(approvedDotnetRoot) == PrivateDir,
+            "disposable recovery runtime staged under private owner-only root");
         var transfer = new System.Diagnostics.ProcessStartInfo("python3")
         {
             UseShellExecute = false,
