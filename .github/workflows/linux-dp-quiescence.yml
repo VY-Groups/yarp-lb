@@ -70,6 +70,23 @@ jobs:
           dp.invoke_systemctl(dp.subprocess.run, "stop", unit)
           dp.invoke_systemctl(dp.subprocess.run, "mask", "--runtime", unit)
           if not dp.stopped_and_masked(dp.subprocess.run, unit):
+              # No private log or arbitrary systemd output. Fixed allowlist
+              # of service-state categories for this disposable CI unit only.
+              report = dp.invoke_systemctl(dp.subprocess.run, "show", unit,
+                  "--property=LoadState,ActiveState,SubState,MainPID,UnitFileState")
+              expected = {
+                  "LoadState":{"loaded","masked","not-found"},
+                  "ActiveState":{"inactive","active","failed"},
+                  "SubState":{"dead","running","failed"},
+                  "MainPID":{"0","1","other"},
+                  "UnitFileState":{"masked-runtime","masked","disabled",
+                                   "enabled","static","linked",""}
+              }
+              for line in report.splitlines():
+                  key, sep, value = line.partition("=")
+                  if sep and key in expected:
+                      print("DP_CI_SYSTEMD_" + key + "=" +
+                            (value if value in expected[key] else "other"))
               raise SystemExit("FAIL: actual systemd service not masked and inactive")
           print("PASS: real systemd writer stopped, runtime-masked and MainPID=0")
           PY
