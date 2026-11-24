@@ -32,7 +32,8 @@ public static class LinuxKeyProtection
         internal sealed record Settings(string Fleet, string NodeId, string ClusterId,
             long MinimumRaftRevision, Member[] Members, string Mode,
             string? WriterNode, long? LeaseId, long? WriterModRevision,
-            string CaPath, string ClientPfxPath, string ClientPasswordPath);
+            string CaPath, string ClientPfxPath, string ClientPasswordPath,
+            string ClientLeafSha256, string? WriterRecordSha256);
         private const int MaxXml = 8192;
         private const int MaxKeys = 512;
         private const int MaxReply = 6 * 1024 * 1024;
@@ -58,6 +59,8 @@ public static class LinuxKeyProtection
                 !UInt(config.ClusterId) || config.MinimumRaftRevision<1 ||
                 config.Members is null || config.Members.Length!=3 ||
                 config.Mode is not ("reader" or "writer") ||
+                config.ClientLeafSha256 is null ||
+                !Regex.IsMatch(config.ClientLeafSha256,@"\A[A-F0-9]{64}\z") ||
                 config.Members.Any(m => m is null || !UInt(m.MemberId) ||
                     m.LeafSha256 is null || !Regex.IsMatch(m.LeafSha256,@"\A[A-F0-9]{64}\z") ||
                     !Uri.TryCreate(m.Url,UriKind.Absolute,out var uri) ||
@@ -68,9 +71,12 @@ public static class LinuxKeyProtection
                 config.Members.Select(m=>m.MemberId).Distinct().Count()!=3 ||
                 config.Members.Select(m=>m.LeafSha256).Distinct().Count()!=3 ||
                 (config.Mode=="writer" && (config.WriterNode!=config.NodeId ||
-                    config.LeaseId is null or <=0 || config.WriterModRevision is null or <=0)) ||
+                    config.LeaseId is null or <=0 || config.WriterModRevision is null or <=0 ||
+                    config.WriterRecordSha256 is null ||
+                    !Regex.IsMatch(config.WriterRecordSha256,@"\A[A-F0-9]{64}\z"))) ||
                 (config.Mode=="reader" && (config.LeaseId is not null ||
-                    config.WriterModRevision is not null || config.WriterNode is not null)))
+                    config.WriterModRevision is not null || config.WriterNode is not null ||
+                    config.WriterRecordSha256 is not null)))
                 throw new InvalidOperationException("Invalid independent distributed key-ring inventory");
             prefix="/gatewaycore/linux-dp/runtime-ring/"+config.Fleet+"/";
             writerKey=B64("/gatewaycore/linux-dp/runtime-writer/"+config.Fleet);
@@ -153,7 +159,9 @@ public static class LinuxKeyProtection
             }
             finally {CryptographicOperations.ZeroMemory(secret);CryptographicOperations.ZeroMemory(pfx);}
             resources.Add(client);
-            if(!client.HasPrivateKey || client.RawData.AsSpan().SequenceEqual(active) ||
+            if(!client.HasPrivateKey ||
+                Convert.ToHexString(SHA256.HashData(client.RawData))!=config.ClientLeafSha256 ||
+                client.RawData.AsSpan().SequenceEqual(active) ||
                 client.RawData.AsSpan().SequenceEqual(previous))
                 throw new InvalidOperationException("Independent distributed TLS client identity required");
             var clients=new Dictionary<string,HttpClient>(StringComparer.Ordinal);
@@ -307,6 +315,69 @@ public static class LinuxKeyProtection
             }
         }
 
+        // The operator pins the SHA-256 of the exact independently issued
+        // authority record. Never acquire or learn a new writer epoch from
+        // a response. Reachable contradictory members veto the write.
+        private (Member Member,string Value) AttestWriter()
+        {
+            Member? selected=null;
+            string? approvedValue=null;
+            int votes=0;
+            foreach(var member in config.Members)
+            {
+                try
+                {
+                    using var doc=rpc(member,"/v3/kv/range",new {
+                        key=writerKey,serializable=false});
+                    var root=doc.RootElement;
+                    var revision=Header(root,member);
+                    if(!root.TryGetProperty("count",out var count)||Text(count)!="1" ||
+                        !root.TryGetProperty("kvs",out var items)||items.GetArrayLength()!=1)
+                        throw new InvalidOperationException("Pinned runtime writer epoch absent");
+                    var item=items[0];
+                    if(item.GetProperty("key").GetString()!=writerKey ||
+                        Positive(item.GetProperty("mod_revision"))!=config.WriterModRevision ||
+                        Positive(item.GetProperty("lease"))!=config.LeaseId ||
+                        Positive(item.GetProperty("mod_revision"))>revision ||
+                        Positive(item.GetProperty("version"))<1)
+                        throw new InvalidOperationException("Runtime writer epoch changed");
+                    var encoded=item.GetProperty("value").GetString()!;
+                    if(encoded.Length>4096)
+                        throw new InvalidOperationException("Unbounded writer authority record");
+                    var raw=Convert.FromBase64String(encoded);
+                    if(raw.Length is <1 or >2048 ||
+                        Convert.ToHexString(SHA256.HashData(raw))!=config.WriterRecordSha256)
+                        throw new InvalidOperationException("Runtime writer record differs from independent approval");
+                    using var record=JsonDocument.Parse(raw,new JsonDocumentOptions{MaxDepth=3});
+                    var value=record.RootElement;
+                    EnsureUnique(value);
+                    if(value.ValueKind!=JsonValueKind.Object||value.EnumerateObject().Count()!=7||
+                        value.GetProperty("schemaVersion").ValueKind!=JsonValueKind.Number||
+                        value.GetProperty("schemaVersion").GetInt32()!=1||
+                        value.GetProperty("kind").GetString()!="linux-dp"||
+                        value.GetProperty("senderNodeId").GetString()!=config.NodeId||
+                        value.GetProperty("receiverNodeId").GetString()==config.NodeId||
+                        !Regex.IsMatch(value.GetProperty("receiverNodeId").GetString()??"",
+                            @"\A[a-z0-9][a-z0-9_-]{1,47}\z")||
+                        value.GetProperty("revision").ValueKind!=JsonValueKind.Number||
+                        Positive(value.GetProperty("revision"))<1||
+                        !Regex.IsMatch(value.GetProperty("checkpointSha256").GetString()??"",
+                            @"\A[A-F0-9]{64}\z")||
+                        !Regex.IsMatch(value.GetProperty("holder").GetString()??"",
+                            @"\A[a-f0-9]{32}\z"))
+                        throw new InvalidOperationException("Writer record does not authorize this node");
+                    if(approvedValue is not null && approvedValue!=encoded)
+                        throw new InvalidOperationException("Runtime writer quorum disagrees");
+                    approvedValue=encoded;selected??=member;votes++;
+                }
+                catch(Exception ex) when(ex is HttpRequestException or IOException or OperationCanceledException)
+                { /* Unreachable member does not count as a vote. */ }
+            }
+            if(votes<2||selected is null||approvedValue is null)
+                throw new InvalidOperationException("Runtime writer lacks independent quorum");
+            return (selected,approvedValue);
+        }
+
         public void StoreElement(XElement element,string friendlyName)
         {
             lock(sync)
@@ -318,6 +389,7 @@ public static class LinuxKeyProtection
                 // An actual new ciphertext write is conditional on the exact
                 // independently provisioned lease and mod revision in one Raft txn.
                 // Revocation/epoch replacement makes the compare fail.
+                var (member,approvedValue)=AttestWriter();
                 var item=B64(prefix+name);
                 var body=new {
                     compare=new object[] {
@@ -325,13 +397,14 @@ public static class LinuxKeyProtection
                             modRevision=config.WriterModRevision!.Value.ToString(CultureInfo.InvariantCulture)},
                         new {result="EQUAL",target="LEASE",key=writerKey,
                             lease=config.LeaseId!.Value.ToString(CultureInfo.InvariantCulture)},
+                        new {result="EQUAL",target="VALUE",key=writerKey,value=approvedValue},
                         new {result="EQUAL",target="CREATE",key=item,createRevision="0"}},
                     success=new[]{new {requestPut=new {key=item,value=Convert.ToBase64String(raw)}}},
                     failure=Array.Empty<object>()};
                 // Never retry ambiguous mutations. The transaction itself
                 // is linearizable and cannot succeed in a minority.
-                using var doc=rpc(config.Members[0],"/v3/kv/txn",body);
-                var revision=Header(doc.RootElement,config.Members[0]);
+                using var doc=rpc(member,"/v3/kv/txn",body);
+                var revision=Header(doc.RootElement,member);
                 if(!doc.RootElement.TryGetProperty("succeeded",out var succeeded)||
                     succeeded.ValueKind!=JsonValueKind.True)
                     throw new InvalidOperationException("Distributed writer epoch or key creation refused");

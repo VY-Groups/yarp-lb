@@ -5,6 +5,7 @@ The fixture uses distinct TLS leaves and independent private state roots.
 It does not enable etcd RBAC or claim independently housed physical hosts.
 """
 import base64
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -55,8 +56,8 @@ def run(root, endpoints, cluster, ca, ids, addr, post, checked):
     # This is fixture provisioning, not automated production secret delivery.
     wrap_a = pfx_for("wrap-a", wrapping_crt, wrapping_key)
     wrap_b = pfx_for("wrap-b", wrapping_crt, wrapping_key)
-    client_a = pfx_for("tls-a", *ids["writer"][:2])
-    client_b = pfx_for("tls-b", *ids["reader"][:2])
+    client_a = (*pfx_for("tls-a", *ids["writer"][:2]), ids["writer"][2])
+    client_b = (*pfx_for("tls-b", *ids["reader"][:2]), ids["reader"][2])
     Path(ca).chmod(0o600)
     writer_cert, writer_key = ids["writer"][:2]
 
@@ -85,7 +86,10 @@ def run(root, endpoints, cluster, ca, ids, addr, post, checked):
         kv=current["kvs"][0]
         if int(kv["lease"])!=lease:
             raise RuntimeError("fixture epoch mismatch")
-        return lease,int(kv["mod_revision"])
+        raw=base64.b64decode(kv["value"],validate=True)
+        if raw!=record.encode("ascii"):
+            raise RuntimeError("fixture epoch record mismatch")
+        return lease,int(kv["mod_revision"]),hashlib.sha256(raw).hexdigest().upper()
 
     def configuration(label,node,mode,client,epoch=None):
         path=provision/(label+".json")
@@ -95,7 +99,9 @@ def run(root, endpoints, cluster, ca, ids, addr, post, checked):
             for item in endpoints],"Mode":mode,"WriterNode":node if epoch else None,
             "LeaseId":epoch[0] if epoch else None,
             "WriterModRevision":epoch[1] if epoch else None,
-            "CaPath":ca,"ClientPfxPath":client[0],"ClientPasswordPath":client[1]}
+            "CaPath":ca,"ClientPfxPath":client[0],"ClientPasswordPath":client[1],
+            "ClientLeafSha256":client[2],
+            "WriterRecordSha256":epoch[2] if epoch else None}
         return private_file(path,json.dumps(document,separators=(",",":")))
 
     def execute(node,config,wrapping,operation,expected=0,cookie=None):
@@ -125,6 +131,14 @@ def run(root, endpoints, cluster, ca, ids, addr, post, checked):
     epoch_a=issue("node-a")
     writer_a=configuration("writer-a","node-a","writer",client_a,epoch_a)
     reader_b=configuration("reader-b","node-b","reader",client_b)
+    wrong_epoch=configuration("wrong-record","node-a","writer",client_a,
+                              (epoch_a[0],epoch_a[1],"0"*64))
+    execute("a",wrong_epoch,wrap_a,"rotate",expected=5)
+    if inventory():
+        raise RuntimeError("mismatched authority record published a key")
+    wrong_client=configuration("wrong-client","node-a","writer",
+                               (client_a[0],client_a[1],client_b[2]),epoch_a)
+    execute("a",wrong_client,wrap_a,"rotate",expected=4)
     execute("a",writer_a,wrap_a,"rotate")
     original=inventory()
     if len(original)!=1:

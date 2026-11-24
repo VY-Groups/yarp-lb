@@ -1404,25 +1404,44 @@ try
         var members=Enumerable.Range(1,3).Select(i=>
             new LinuxKeyProtection.DistributedRingRepository.Member(
                 "https://127.0.0."+i+":2379/",new string((char)('0'+i),64),i.ToString())).ToArray();
+        var writerRecord=System.Text.Encoding.UTF8.GetBytes(
+            "{\"schemaVersion\":1,\"kind\":\"linux-dp\",\"senderNodeId\":\"node-a\",\"receiverNodeId\":\"node-b\",\"revision\":43,\"checkpointSha256\":\""+
+            new string('A',64)+"\",\"holder\":\""+new string('a',32)+"\"}");
+        var approvedRecord=Convert.ToBase64String(writerRecord);
         var settings=new LinuxKeyProtection.DistributedRingRepository.Settings(
             "fleet-ci","node-a","999",1,members,"writer","node-a",456,90,
-            "unused","unused","unused");
+            "unused","unused","unused",new string('F',64),
+            Convert.ToHexString(SHA256.HashData(writerRecord)));
         var records=new Dictionary<string,string>();
-        bool authorized=true;
+        bool authorized=true, revokeAtCommit=false, wrongRecord=false;
+        int writeCalls=0;
         long revision=100;
         System.Text.Json.JsonDocument Rpc(LinuxKeyProtection.DistributedRingRepository.Member member,
             string endpoint,object body)
         {
             using var request=System.Text.Json.JsonDocument.Parse(System.Text.Json.JsonSerializer.Serialize(body));
             var header=new {cluster_id="999",member_id=member.MemberId,revision=revision.ToString()};
+            if(endpoint=="/v3/kv/range"&&!request.RootElement.TryGetProperty("range_end",out _))
+            {
+                var key=request.RootElement.GetProperty("key").GetString();
+                var receivedRecord=wrongRecord?Convert.ToBase64String(
+                    System.Text.Encoding.UTF8.GetBytes("wrong approval")):approvedRecord;
+                return System.Text.Json.JsonDocument.Parse(System.Text.Json.JsonSerializer.Serialize(new {
+                    header,count="1",kvs=new[]{new {key,value=receivedRecord,version="1",
+                        mod_revision="90",lease="456"}}}));
+            }
             if(endpoint=="/v3/kv/range")
                 return System.Text.Json.JsonDocument.Parse(System.Text.Json.JsonSerializer.Serialize(new {
                     header,count=records.Count.ToString(),kvs=records.Select(x=>new {
                         key=x.Key,value=x.Value,version="1",mod_revision=revision.ToString()})}));
             var compares=request.RootElement.GetProperty("compare").EnumerateArray().ToArray();
-            Assert(compares.Length==3&&compares[0].GetProperty("modRevision").GetString()=="90"&&
-                compares[1].GetProperty("lease").GetString()=="456",
-                "real DP repository mutation carries exact lease and revision CAS");
+            Assert(compares.Length==4&&compares[0].GetProperty("modRevision").GetString()=="90"&&
+                compares[1].GetProperty("lease").GetString()=="456"&&
+                compares[2].GetProperty("target").GetString()=="VALUE"&&
+                compares[2].GetProperty("value").GetString()==approvedRecord,
+                "real DP repository mutation carries exact lease, revision and approved record CAS");
+            writeCalls++;
+            if(revokeAtCommit)authorized=false;
             var put=request.RootElement.GetProperty("success")[0].GetProperty("requestPut");
             var inserted=authorized&&records.TryAdd(put.GetProperty("key").GetString()!,
                 put.GetProperty("value").GetString()!);
@@ -1440,7 +1459,8 @@ try
         var probe=writer.GetRequiredService<IDataProtectionProvider>().CreateProtector("distributed-probe");
         var cookie=probe.Protect("distributed-cookie");
         using var distributedReader=new LinuxKeyProtection.DistributedRingRepository(
-            settings with {Mode="reader",NodeId="node-b",WriterNode=null,LeaseId=null,WriterModRevision=null},
+            settings with {Mode="reader",NodeId="node-b",WriterNode=null,LeaseId=null,WriterModRevision=null,
+                WriterRecordSha256=null},
             cert,null,Rpc);
         var readers=new ServiceCollection();
         readers.AddDataProtection().SetApplicationName("distributed-fixture")
@@ -1453,10 +1473,15 @@ try
         Assert(Throws(()=>readProvider.GetRequiredService<IKeyManager>().CreateNewKey(
             DateTimeOffset.UtcNow,DateTimeOffset.UtcNow.AddDays(30))),
             "distributed reader refuses explicit key writes");
-        authorized=false;
+        wrongRecord=true;
         Assert(Throws(()=>writer.GetRequiredService<IKeyManager>().CreateNewKey(
-            DateTimeOffset.UtcNow,DateTimeOffset.UtcNow.AddDays(30)))&&records.Count==1,
-            "revoked distributed writer cannot publish another encrypted key");
+            DateTimeOffset.UtcNow,DateTimeOffset.UtcNow.AddDays(30)))&&writeCalls==1,
+            "mismatched independently pinned writer record never invokes mutation");
+        wrongRecord=false;
+        revokeAtCommit=true;
+        Assert(Throws(()=>writer.GetRequiredService<IKeyManager>().CreateNewKey(
+            DateTimeOffset.UtcNow,DateTimeOffset.UtcNow.AddDays(30)))&&records.Count==1&&writeCalls==2,
+            "revocation after writer attestation cannot publish another encrypted key");
     }
     Set(LinuxKeyProtection.DistributedRingSetting,null);
     await ProductLinuxStartupSmoke.RunAsync();
