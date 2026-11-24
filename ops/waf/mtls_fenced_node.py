@@ -11,6 +11,8 @@ import hashlib
 import hmac
 import http.client
 import json
+import os
+import stat
 from pathlib import Path
 import re
 import socket
@@ -27,6 +29,26 @@ NODE = re.compile(r"[a-z0-9][a-z0-9_-]{1,47}\Z", re.ASCII)
 ROUTE = "/v1/fenced-waf-node"
 MAX_INPUT = 512
 MAX_OUTPUT = 4096
+JOURNAL_NAME = re.compile(
+    r"rev-([1-9][0-9]{0,19})-(activate|rollback)\\.(intent|receipt)\\Z",
+    re.ASCII)
+
+
+def journal_object(raw):
+    if type(raw) is not bytes or not 0 < len(raw) <= 8192:
+        raise ValueError("unsafe bounded WAF node journal")
+    def unique(pairs):
+        result = {}
+        for key, val in pairs:
+            if key in result:
+                raise ValueError("duplicate WAF journal field")
+            result[key] = val
+        return result
+    return json.loads(raw.decode("utf-8", "strict"), object_pairs_hook=unique,
+                      parse_constant=lambda _: (_ for _ in ()).throw(
+                          ValueError("nonfinite node journal")))
+
+
 
 
 def strict_json(raw):
@@ -89,6 +111,94 @@ class FencedAgent:
             raise ValueError("unapproved WAF baseline or ruleset")
         self.baseline = before["mode"]
         self.image = before["imageId"]
+        self._check_recovery_journals()
+
+    def _check_recovery_journals(self):
+        """A crash-uncertain intent MUST block any subsequent mutation.
+
+        These are local service-owned process journals, not an etcd fence or
+        durable external WORM attestation. A separately authorized operator
+        must reconcile a pending intent before bringing the host back.
+        """
+        directory = os.open(self.dir, os.O_RDONLY | os.O_DIRECTORY |
+                            os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            names = os.listdir(directory)
+            if len(names) > 513:
+                raise ValueError("unbounded node recovery journal inventory")
+            entries = {}
+            for name in names:
+                if name == ".signed-waf-rollout.lock":
+                    continue
+                match = JOURNAL_NAME.fullmatch(name)
+                if not match:
+                    raise ValueError("unexpected private WAF node journal")
+                fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW |
+                             os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=directory)
+                try:
+                    before = os.fstat(fd)
+                    if (not stat.S_ISREG(before.st_mode) or
+                            before.st_uid != os.geteuid() or
+                            before.st_nlink != 1 or
+                            stat.S_IMODE(before.st_mode) & 0o077 or
+                            not 0 < before.st_size <= 8192):
+                        raise ValueError("unsafe node recovery receipt inode")
+                    with os.fdopen(fd, "rb") as handle:
+                        fd = -1
+                        data = handle.read(8193)
+                        after = os.fstat(handle.fileno())
+                    fields = ("st_dev", "st_ino", "st_size",
+                              "st_mtime_ns", "st_ctime_ns")
+                    if (len(data) != before.st_size or
+                            any(getattr(before, field) != getattr(after, field)
+                                for field in fields)):
+                        raise ValueError("node journal changed during read")
+                    record = journal_object(data)
+                    if type(record) is not dict:
+                        raise ValueError("malformed node journal record")
+                    entries[name] = record
+                finally:
+                    if fd >= 0:
+                        os.close(fd)
+            # Do not mistake an incomplete fsynced intent for a proven
+            # rollback, and never auto-replay it after a hard process death.
+            if sorted(os.listdir(directory)) != sorted(names):
+                raise ValueError("WAF node journal inventory changed")
+            for name, intent in entries.items():
+                match = JOURNAL_NAME.fullmatch(name)
+                revision, kind, extension = match.groups()
+                if extension == "receipt":
+                    continue
+                receipt = entries.get(name.removesuffix(".intent") + ".receipt")
+                expected = {"schemaVersion", "nodeId", "nodeIds",
+                            "revision", "policySha256", "rulesetSha256",
+                            "operation", "mutationMayHaveStarted"}
+                if (type(intent) is not dict or set(intent) != expected or
+                        type(intent.get("schemaVersion")) is not int or
+                        intent["schemaVersion"] != 1 or
+                        intent.get("nodeId") != self.node_id or
+                        intent.get("nodeIds") != list(self.node_ids) or
+                        type(intent.get("revision")) is not int or
+                        intent["revision"] != int(revision) or
+                        intent.get("operation") != kind or
+                        intent.get("mutationMayHaveStarted") is not True or
+                        type(intent.get("policySha256")) is not str or
+                        not HEX.fullmatch(intent["policySha256"]) or
+                        type(intent.get("rulesetSha256")) is not str or
+                        not HEX.fullmatch(intent["rulesetSha256"]) or
+                        type(receipt) is not dict or
+                        set(receipt) != expected | {"result", "mode"} or
+                        receipt.get("result") != "verified" or
+                        receipt.get("mode") not in local.MODES or
+                        any(receipt.get(field) != intent[field]
+                            for field in expected)):
+                    raise ValueError("unresolved or altered WAF mutation journal")
+            if any(name.endswith(".receipt") and
+                   name.removesuffix(".receipt") + ".intent" not in entries
+                   for name in entries):
+                raise ValueError("orphan WAF receipt without approved intent")
+        finally:
+            os.close(directory)
 
     def _attest(self, phase):
         if self.fence.assert_current(self.node_ids, self.revision,
@@ -172,6 +282,7 @@ class FencedAgent:
                     # The lock remains held through Docker apply, verification
                     # and durable receipt; missing lease still fails closed.
                     with local.operator_lock(self.dir):
+                        self._check_recovery_journals()
                         return self._apply(mode)
         raise ValueError("unknown or unapproved node operation")
 
