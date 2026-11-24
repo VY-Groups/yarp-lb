@@ -4,6 +4,11 @@ on:
     paths:
       - "ops/release/**"
       - ".github/workflows/issue48-frozen-candidate.yml"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/issue48-frozen-candidate.yml"
+      - "tests/WafEtcd/real_dp_shipping_cutover.py"
   workflow_dispatch:
 permissions:
   contents: read
@@ -17,10 +22,13 @@ jobs:
           persist-credentials: false
       - run: python3 -m unittest discover -s ops/release/tests -p 'test_*.py' -v
   frozen-gate:
-    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     needs: contract
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 50
+    permissions:
+      contents: read
+      actions: write
     steps:
       - uses: actions/checkout@v4
         with:
@@ -33,7 +41,7 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$EXACT_SHA"
-          python3 ops/release/assess_issue48.py --repo "$GITHUB_REPOSITORY" --sha "$EXACT_SHA" --out artifacts/issue48/evidence.json
+          python3 ops/release/dispatch_issue48.py --repo "$GITHUB_REPOSITORY" --sha "$EXACT_SHA" --out artifacts/issue48/evidence.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -98,7 +106,7 @@ jobs:
           .\control-center\tests\WindowsServiceAcceptance\VERIFY-WINDOWS-SCM.ps1 -CandidateAppDirectory (Resolve-Path 'extracted/app').Path
           .\control-center\tests\WindowsServiceAcceptance\VERIFY-WINDOWS-SCM.ps1 -Identity LocalService -CandidateAppDirectory (Resolve-Path 'extracted/app').Path
       - uses: actions/upload-artifact@v4
-        if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         with:
           name: gatewaycore-issue48-${{ matrix.rid }}-${{ github.sha }}
           path: artifacts/candidate/

@@ -22,7 +22,8 @@ jobs:
       - uses: actions/checkout@v4
       - name: Validate release verdict with synthetic negative tests
         run: python3 -m unittest discover -s ops/release/tests -p 'test_*.py' -v
-      - name: Compare all required GitHub Actions against exact PR head SHA
+      - name: Compare all required GitHub Actions against exact dispatched SHA
+        if: github.event_name == 'workflow_dispatch'
         env:
           GITHUB_TOKEN: ${{ github.token }}
           EXACT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
@@ -34,7 +35,7 @@ jobs:
             --repo "$REPOSITORY" --sha "$EXACT_SHA" \
             --out artifacts/release/evidence.json --deadline-seconds 900
       - name: Upload GO/NO-GO evidence (never deploy)
-        if: always()
+        if: always() && github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@v4
         with:
           name: v01-exact-commit-ci-release-evidence

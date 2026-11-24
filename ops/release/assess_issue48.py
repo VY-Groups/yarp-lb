@@ -12,6 +12,15 @@ from assess_ci import REQUIRED, evaluate
 
 # Match both the committed workflow file and display name. Never substitute
 # an old successful PR, similarly named workflow, or skipped check.
+BASELINE_PATHS = (
+    "capacity-oha-smoke.yml", "onprem-promtool.yml", "workflow-lint.yml",
+    "onprem-ops-contract.yml", "docker-0.1-ca.yml", "capacity-contract.yml",
+    "docker-0.1-redis.yml", "docker-0.1-integration.yml", "issue24-allocations.yml",
+    "control-center-ci.yml", "eod-750mbps-ci-canary.yml", "l7-acceptance.yml",
+    "gslb-acceptance.yml", "l4-acceptance.yml", "listener-isolation.yml",
+    "windows-ha-10x.yml",
+)
+BASELINE_REQUIRED = dict(zip(BASELINE_PATHS, REQUIRED, strict=True))
 DP_REQUIRED = {
     "windows-scm-acceptance.yml": "Windows SCM Data Protection restart acceptance",
     "windows-fleet-dp.yml": "Windows Data Protection shared fleet certificate acceptance",
@@ -40,20 +49,23 @@ def audit(payload, sha, repo):
         and r.get("event") in ("push","workflow_dispatch")
         and isinstance(r.get("head_repository"),dict)
         and r["head_repository"].get("full_name")==repo]
-    baseline=evaluate({"workflow_runs":runs},sha)
+    baseline=evaluate({"workflow_runs":[r for r in runs
+        if r.get("name")==BASELINE_REQUIRED.get(str(r.get("path","")).removeprefix(".github/workflows/"))
+        and str(r.get("path","")).startswith(".github/workflows/")]},sha)
     latest={}
     for run in runs:
         path=run.get("path","")
         if not isinstance(path,str) or not path.startswith(".github/workflows/"):
             continue
         filename=path.removeprefix(".github/workflows/")
-        if filename not in DP_REQUIRED or run.get("name")!=DP_REQUIRED[filename]:
+        required=BASELINE_REQUIRED | DP_REQUIRED
+        if filename not in required or run.get("name")!=required[filename]:
             continue
         key=(str(run.get("created_at") or ""),int(run.get("run_attempt") or 1),int(run.get("id") or 0))
         if filename not in latest or key>latest[filename][0]:
             latest[filename]=(key,run)
     checks={}
-    for filename in DP_REQUIRED:
+    for filename in (BASELINE_REQUIRED | DP_REQUIRED):
         item=latest.get(filename,(None,{}))[1]
         checks[filename]={"status":item.get("status","MISSING"),"conclusion":item.get("conclusion"),
             "run_id":item.get("id"),"url":item.get("html_url")}
