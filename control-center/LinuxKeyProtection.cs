@@ -78,7 +78,8 @@ public static class LinuxKeyProtection
         return path;
     }
 
-    private static X509Certificate2 LoadRsaProtector(string pfxEnv, string passwordFileEnv)
+    private static X509Certificate2 LoadRsaProtector(
+        string pfxEnv, string passwordFileEnv, bool decryptionOnlyPrevious = false)
     {
         var path = SecretPath(pfxEnv);
         var passwordPath = SecretPath(passwordFileEnv);
@@ -118,7 +119,8 @@ public static class LinuxKeyProtection
                 (usage[0].KeyUsages & X509KeyUsageFlags.KeyEncipherment) == 0 ||
                 constraints.Length != 1 || constraints[0].CertificateAuthority ||
                 cert.NotBefore.ToUniversalTime() > DateTime.UtcNow ||
-                cert.NotAfter.ToUniversalTime() <= DateTime.UtcNow.AddDays(1))
+                (!decryptionOnlyPrevious &&
+                 cert.NotAfter.ToUniversalTime() <= DateTime.UtcNow.AddDays(1)))
                 throw new InvalidOperationException(
                     "Linux Data Protection requires a valid RSA >=2048 leaf wrapping certificate with explicit keyEncipherment usage and a private key");
             return cert;
@@ -351,10 +353,16 @@ public static class LinuxKeyProtection
         var oldPassword = Environment.GetEnvironmentVariable("YARP_LINUX_DP_OLD_CERT_PASSWORD_FILE");
         if (string.IsNullOrEmpty(old) != string.IsNullOrEmpty(oldPassword))
             throw new InvalidOperationException("Old PFX and its password file must be specified together");
+        // Historic wrapping certificates are decrypt-only. Their
+        // expiration must prohibit NEW key encryption, but not invalidate
+        // already-issued cookies that depend on an encrypted XML key whose
+        // original recipient was that certificate. The old key must still
+        // be RSA, private, non-CA, keyEncipherment and strictly provisioned.
         X509Certificate2? previous = null;
         if (!string.IsNullOrEmpty(old))
             previous = LoadRsaProtector("YARP_LINUX_DP_OLD_CERT_PFX_PATH",
-                "YARP_LINUX_DP_OLD_CERT_PASSWORD_FILE");
+                "YARP_LINUX_DP_OLD_CERT_PASSWORD_FILE",
+                decryptionOnlyPrevious: true);
 
         // Require the configured identities to cover ALL persisted recipient
         // certificates BEFORE admitting any service traffic. A new active
