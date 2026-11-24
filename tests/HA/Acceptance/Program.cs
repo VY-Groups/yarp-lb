@@ -29,6 +29,8 @@ var processes = new List<Process>();
 var outputReaders = new List<Task>();
 var checks = new List<object>();
 var sampleRows = new ConcurrentQueue<(string Phase,long StartUtcMs,long EndUtcMs,int Status,string Error)>();
+var gracefulRows = new ConcurrentQueue<(double StartMs,double EndMs,long StartUtcMs,long EndUtcMs,int Status,string Gateway,string Error)>();
+var gracefulMarkers = new List<object>();
 using var client = new HttpClient(new SocketsHttpHandler { UseProxy = false,
     PooledConnectionLifetime = TimeSpan.FromSeconds(2) }) { Timeout = TimeSpan.FromSeconds(8) };
 
@@ -252,14 +254,15 @@ try
     // unready -> wait until ingress routes solely to the survivor -> gracefully
     // shut down Kestrel. SIGTERM on Linux enters the same host-stop lifecycle.
     // A plain SIGTERM with no prior drain is NOT asserted zero loss.
-    var gracefulStatuses = new ConcurrentQueue<(double AtMs,int Status,string Gateway)>();
     using var gracefulCancel = new CancellationTokenSource();
     var gracefulOrigin = Stopwatch.GetTimestamp();
     var gracefulWorkers = Enumerable.Range(0,16).Select(async _ =>
     {
         while (!gracefulCancel.IsCancellationRequested)
         {
-            int status=0; string selected="?";
+            int status=0; string selected="?"; string error="";
+            var startMs=Stopwatch.GetElapsedTime(gracefulOrigin).TotalMilliseconds;
+            var utcStart=DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             try
             {
                 using var response=await client.GetAsync("http://127.0.0.1:19080/api/identity",gracefulCancel.Token);
@@ -268,14 +271,18 @@ try
                     ? headers.FirstOrDefault() ?? "?" : "?";
             }
             catch(OperationCanceledException) when (gracefulCancel.IsCancellationRequested) { break; }
-            catch(Exception ex) when (ex is HttpRequestException or TaskCanceledException or IOException) { }
-            gracefulStatuses.Enqueue((Stopwatch.GetElapsedTime(gracefulOrigin).TotalMilliseconds,status,selected));
+            catch(Exception ex) when (ex is HttpRequestException or TaskCanceledException or IOException)
+            { error=ex.GetType().Name; }
+            var utcEnd=DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            gracefulRows.Enqueue((startMs,Stopwatch.GetElapsedTime(gracefulOrigin).TotalMilliseconds,utcStart,utcEnd,status,selected,error));
+            sampleRows.Enqueue(("graceful",utcStart,utcEnd,status,error));
             try { await Task.Delay(20,gracefulCancel.Token); }
             catch(OperationCanceledException) { break; }
         }
     }).ToArray();
     await Task.Delay(1250);
     var gracefulDrainStart=Stopwatch.GetElapsedTime(gracefulOrigin).TotalMilliseconds;
+    gracefulMarkers.Add(new {phase="drain-requested",atMs=gracefulDrainStart,utcMs=DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()});
     using (var drainReply=await client.PostAsync("http://127.0.0.1:18080/lab/drain",null))
         drainReply.EnsureSuccessStatusCode();
     await WaitFor("gateway 1 readiness drops",()=>Responds("http://127.0.0.1:18080/lab/ping",503));
@@ -291,6 +298,7 @@ try
         return true;
     },20);
     var gracefulReadyMs=Stopwatch.GetElapsedTime(gracefulOrigin).TotalMilliseconds;
+    gracefulMarkers.Add(new {phase="ingress-converged",atMs=gracefulReadyMs,utcMs=DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()});
     var gracefulStopKind = "readiness-withdrawal-and-host-stop";
     if (OperatingSystem.IsLinux())
     {
@@ -317,13 +325,17 @@ try
             "http://127.0.0.1:18080/lab/graceful-stop",null);
         gracefulStop.EnsureSuccessStatusCode();
     }
+    gracefulMarkers.Add(new {phase="stop-dispatched",atMs=Stopwatch.GetElapsedTime(gracefulOrigin).TotalMilliseconds,utcMs=DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()});
     using(var graceTimeout=new CancellationTokenSource(TimeSpan.FromSeconds(20)))
         await gateway1.WaitForExitAsync(graceTimeout.Token);
+    gracefulMarkers.Add(new {phase="gateway-exited",atMs=Stopwatch.GetElapsedTime(gracefulOrigin).TotalMilliseconds,utcMs=DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()});
     await Task.Delay(1500);
     gracefulCancel.Cancel();
     await Task.WhenAll(gracefulWorkers);
-    var gracefulArray=gracefulStatuses.ToArray();
+    var gracefulArray=gracefulRows.ToArray();
     var gracefulFailures=gracefulArray.Where(x=>x.Status!=200).ToArray();
+    Console.WriteLine("GRACEFUL_STATUS_COUNTS "+JsonSerializer.Serialize(gracefulArray.GroupBy(x=>x.Status)
+        .Select(g=>new {status=g.Key,count=g.Count()})));
     Require(gracefulArray.Length>=100,"graceful lifecycle measured >=100 requests");
     Require(gracefulFailures.Length==0,
         $"pre-drained graceful host stop caused zero HTTP errors: observed {gracefulFailures.Length}");
@@ -560,6 +572,11 @@ finally
             await sampleFile.WriteLineAsync(string.Join(",",
                 x.Phase,x.StartUtcMs,x.EndUtcMs,x.Status,x.Error));
     }
+    // Preserve actual drain request/response evidence on failures as well as successes.
+    // Do not modify request timeouts, request counts or zero-error acceptance.
+    await File.WriteAllTextAsync(Path.Combine(artifacts,"graceful-request-timeline.json"),
+        JsonSerializer.Serialize(new {markers=gracefulMarkers,requests=gracefulRows.OrderBy(x=>x.StartMs)
+            .Select(x=>new {x.StartMs,x.EndMs,x.StartUtcMs,x.EndUtcMs,x.Status,x.Gateway,x.Error})}));
     await File.WriteAllTextAsync(Path.Combine(artifacts,"ha-results.json"),
         JsonSerializer.Serialize(new { passed=success,checks,finishedUtc=DateTimeOffset.UtcNow },
             new JsonSerializerOptions {WriteIndented=true }));
