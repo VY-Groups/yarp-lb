@@ -82,3 +82,26 @@ Owner must complete independent service role admission and
 cross-service staged rotation/rollback before software #48 is
 declared completed. Real two-host/customer environment verification
 and SELinux host acceptance remain exclusively under #36.
+
+
+### Unit-file precedence matters
+
+A systemd `mask --runtime` command exiting zero **does not** prove
+the effective unit is masked. Some administrator-installed unit files
+under `/etc/systemd/system` can take precedence over the runtime
+`/run/systemd/system` mask on the target manager. This was observed
+in the real Ubuntu CI fixture: the actual service had
+`ActiveState=inactive` and `MainPID=0` but still reported
+`UnitFileState=disabled` after `mask --runtime` and daemon reload.
+The witness correctly refused to sign that false fence.
+
+The supported issuance path checks the **effective** `UnitFileState`,
+`LoadState`, active/sub state and PID through the actual manager
+after a fresh daemon reload. A packaged vendor unit with a lower
+precedence definition can be runtime-masked; an incompatible custom
+`/etc` unit is **NOT SUPPORTED** for this method and must use a
+separately reviewed fail-closed host fencing implementation. Do not
+substitute `mask --force`, rewrite existing administrator units, or
+treat `disabled` as equivalent to `masked`. Even a signed witness
+cannot protect against authorized administrator changes after issuance;
+this remains an explicit operational/authority integration limit.
