@@ -134,3 +134,7 @@ fencing, actual service-identity ACLs, Windows DPAPI-to-fleet migration,
 a timed multi-node rotation and RHEL 9 SELinux/systemd. These are additional
 #48 acceptance gates and must not be silently reassigned to physical #36.
 This transport never claims production GO or closes #48 alone.
+
+## Remote sender authority requirement
+
+Remote serving now requires the explicit nonloopback option plus all independent quorum arguments: `--fleet-quorum-inventory`, `--fleet`, `--sender-node-id`, `--receiver-node-id`, `--recovery-revision`, `--checkpoint-sha256`, `--etcd-ca`, `--etcd-certificate`, `--etcd-private-key`. The earlier example must include these arguments. Supply a separately approved read-only etcd identity and checkpoint digest. The listener pins the recovery epoch before binding and rechecks it on every authenticated GET. It serializes fenced responses and bounds chunks by remaining lease runway. This is not continuous revocation monitoring during a response, live replication or writer promotion. The new TLS test uses synthetic quorum decisions; real distributed fault acceptance remains required.
