@@ -61,6 +61,11 @@ catch (Exception ex) when (ex is ArgumentException or InvalidOperationException 
     System.Text.Json.JsonException or System.Xml.XmlException)
 {
     // Never print filesystem paths, private keys, auth cookies or XML bodies.
-    Console.Error.WriteLine("FAIL: offline encrypted DP snapshot/restore refused");
+    // Only an internally authored fixed phase label is allowed in CI.
+    // Do not print arbitrary exception messages: OS errors can contain paths.
+    var phase = ex is InvalidOperationException &&
+                ex.Message.StartsWith("Encrypted snapshot stage ", StringComparison.Ordinal)
+        ? ex.Message : "preflight-or-restore";
+    Console.Error.WriteLine("FAIL: offline encrypted DP snapshot/restore refused at " + phase);
     return 1;
 }
