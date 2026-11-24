@@ -70,30 +70,24 @@ def tree_hash(folder):
     digest = hashlib.sha256()
     digest.update(b"GatewayCore.LinuxDp.PublishedRestoreBundle.v1\n")
     for rel, path, before in sorted(files):
-        raw = wire.read_private_path(str(path), MAX_SINGLE_FILE) if (
-            before.st_uid == os.geteuid() and
-            not stat.S_IMODE(before.st_mode) & 0o077) else None
-        if raw is None:
-            # Root-controlled deployment files may intentionally be world
-            # readable, but must remain immutable to the service identity.
-            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
-            try:
-                start = os.fstat(fd)
-                if (start.st_dev, start.st_ino, start.st_size, start.st_mtime_ns,
-                    start.st_ctime_ns) != (before.st_dev, before.st_ino,
-                    before.st_size, before.st_mtime_ns, before.st_ctime_ns):
-                    raise ValueError("recovery bundle changed during inspection")
-                with os.fdopen(fd, "rb") as stream:
-                    fd = -1
-                    raw = stream.read(MAX_SINGLE_FILE + 1)
-            finally:
-                if fd >= 0:
-                    os.close(fd)
-            after = os.stat(path, follow_symlinks=False)
-            if (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns,
-                after.st_ctime_ns) != (before.st_dev, before.st_ino,
-                before.st_size, before.st_mtime_ns, before.st_ctime_ns):
-                raise ValueError("recovery bundle changed during hash")
+        # Read an inode opened with O_NOFOLLOW, and compare both metadata
+        # snapshots. Root-owned read-only deployed libraries may be 0644.
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            start = os.fstat(fd)
+            fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
+            if any(getattr(start, item) != getattr(before, item) for item in fields):
+                raise ValueError("recovery bundle changed during inspection")
+            with os.fdopen(fd, "rb") as stream:
+                fd = -1
+                raw = stream.read(MAX_SINGLE_FILE + 1)
+                after = os.fstat(stream.fileno())
+                if any(getattr(after, item) != getattr(before, item)
+                       for item in fields):
+                    raise ValueError("recovery bundle changed during read")
+        finally:
+            if fd >= 0:
+                os.close(fd)
         if len(raw) != before.st_size:
             raise ValueError("incomplete offline tool bundle")
         name = rel.encode("utf-8", "strict")
