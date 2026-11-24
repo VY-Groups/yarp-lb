@@ -13,6 +13,7 @@ import secrets
 import subprocess
 import sys
 import time
+from real_dp_shipping_cutover import Cutover
 
 FLEET = "fleet-dotnet-ci"
 PREFIX = "/gatewaycore/linux-dp/runtime-ring/" + FLEET + "/"
@@ -236,32 +237,35 @@ def run(root, endpoints, cluster, ca, ids, addr, post, checked):
     execute("b",reader_b,wrap_b,"rotate",expected=5)
     execute("b",reader_b,wrap_b,"product-reader-bootstrap",expected=1,
             product_args=["bootstrap"])
-    rpc("/v3/lease/revoke",{"ID":str(epoch_a[0])})
-    execute("a",writer_a,wrap_a,"rotate",expected=5)
-    if inventory()!=original:
-        raise RuntimeError("revoked writer or reader altered encrypted ring")
-
-    # Independently authorize a new epoch. Keep old config to prove stale
-    # authority cannot be reused after a role change.
-    epoch_b=issue("node-b")
-    # Use the independently approved writer TLS leaf for this new writer.
-    # Its production RBAC reassignment is NOT exercised by this fixture.
-    writer_b=configuration("writer-b","node-b","writer",client_a,epoch_b)
-    reader_a=configuration("reader-a","node-a","reader",client_b)
-    execute("a",writer_a,wrap_a,"rotate",expected=5)
-    time.sleep(1.1)
-    execute("b",writer_b,wrap_b,"rotate")
-    rotated=inventory()
-    if len(rotated)!=2 or any(rotated.get(k)!=v for k,v in original.items()):
-        raise RuntimeError("new epoch failed append-only rotation")
-    new=execute("b",writer_b,wrap_b,"mint")
-    def key_id(token):
-        return base64.urlsafe_b64decode(token+"="*((-len(token))%4))[4:20]
-    if key_id(new)==key_id(old):
-        raise RuntimeError("new distributed cookie did not use rotated key")
-    for cookie in (old,new):
-        execute("a",reader_a,wrap_a,"verify",cookie=cookie)
-        execute("b",writer_b,wrap_b,"verify",cookie=cookie)
+    with Cutover(state/"shipping-cutover",product,wrap_a,wrap_b,writer_a,reader_b) as live:
+        live.drain_a()
+        rpc("/v3/lease/revoke",{"ID":str(epoch_a[0])})
+        execute("a",writer_a,wrap_a,"rotate",expected=5)
+        if inventory()!=original:
+            raise RuntimeError("revoked writer or reader altered encrypted ring")
+    
+        # Independently authorize a new epoch. Keep old config to prove stale
+        # authority cannot be reused after a role change.
+        epoch_b=issue("node-b")
+        # Use the independently approved writer TLS leaf for this new writer.
+        # Its production RBAC reassignment is NOT exercised by this fixture.
+        writer_b=configuration("writer-b","node-b","writer",client_a,epoch_b)
+        reader_a=configuration("reader-a","node-a","reader",client_b)
+        execute("a",writer_a,wrap_a,"rotate",expected=5)
+        time.sleep(1.1)
+        execute("b",writer_b,wrap_b,"rotate")
+        rotated=inventory()
+        if len(rotated)!=2 or any(rotated.get(k)!=v for k,v in original.items()):
+            raise RuntimeError("new epoch failed append-only rotation")
+        new=execute("b",writer_b,wrap_b,"mint")
+        def key_id(token):
+            return base64.urlsafe_b64decode(token+"="*((-len(token))%4))[4:20]
+        if key_id(new)==key_id(old):
+            raise RuntimeError("new distributed cookie did not use rotated key")
+        for cookie in (old,new):
+            execute("a",reader_a,wrap_a,"verify",cookie=cookie)
+            execute("b",writer_b,wrap_b,"verify",cookie=cookie)
+        live.rejoin(reader_a,writer_b)
     # The shipping operator command stages a future key without changing
     # the currently usable cookie generation. The test uses an active lease.
     import datetime
