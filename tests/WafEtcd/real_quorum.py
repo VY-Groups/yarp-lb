@@ -56,7 +56,13 @@ def certs(folder):
         ext = folder / (subject + ".ext")
         server = subject.startswith("ci")
         ext.write_text(
-            "extendedKeyUsage=" + ("serverAuth" if server else "clientAuth") +
+            # etcd's embedded HTTP-to-gRPC gateway establishes its own
+            # outbound TLS client connection to the server. The disposable
+            # etcd server identity therefore requires BOTH X.509 usages;
+            # reader/writer identities remain clientAuth-only, and
+            # client certificate validation stays explicitly enabled.
+            "extendedKeyUsage=" +
+            ("serverAuth,clientAuth" if server else "clientAuth") +
             "\nkeyUsage=digitalSignature,keyEncipherment\n" +
             ("subjectAltName=IP:127.0.0.1,DNS:" + subject + "\n" if server else ""),
             encoding="ascii")
