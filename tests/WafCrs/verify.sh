@@ -133,10 +133,6 @@ if [[ -n "${WAF_IMAGE:-}" && "$WAF_IMAGE" != "$selected_digest" ]]; then
 fi
 export WAF_IMAGE="$selected_digest"
 printf '%s\n' "$WAF_IMAGE" > "$DIR/waf-selected-image.txt"
-# Observe the *running* Nginx entrypoint and the complete effective CRS
-# Include graph, then require exact canonical bytes to agree with the
-# independent pinned container inventory. Do not dump raw configs to CI.
-python3 ops/waf/effective_ruleset_graph.py --container "$waf_id"
 assert_same_image() {
   local id
   id="$(docker compose -f "$COMPOSE" ps --quiet waf)"
@@ -183,6 +179,9 @@ if [[ "$ready" != "1" ]]; then
 fi
 grep -q 'YARP-WAF-CI-BENIGN' "$DIR/benign-body.txt"
 echo "PASS: benign HTTP request proxied through ModSecurity CRS"
+# Read the *ready* pinned Nginx/ModSecurity configuration and hash its
+# effective CRS include chain. Never race container startup or export files.
+python3 ops/waf/effective_ruleset_graph.py --container "$waf_id"
 # Check a small, explicitly selected benign request corpus while CRS is in
 # blocking mode. The backend returns only metadata and never reflects payloads.
 assert_benign_post() {
