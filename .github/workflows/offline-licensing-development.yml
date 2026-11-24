@@ -1,0 +1,24 @@
+name: Offline commercial license verifier (development)
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'src/GatewayCore.Licensing/**'
+      - 'tests/OfflineLicensing/**'
+      - '.github/workflows/offline-licensing-development.yml'
+permissions:
+  contents: read
+jobs:
+  verify:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2022]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - run: dotnet run --project tests/OfflineLicensing/OfflineLicensing.csproj --configuration Release
