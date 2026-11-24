@@ -230,8 +230,10 @@ def verify_two_receipts(fence, source_wire, destination_wire, *,
             not getattr(fence, "_identity", None) or
             fence.remaining_seconds() < 10):
         raise ValueError("fresh authenticated recovery epoch required")
-    if owner_private(sender_key) == owner_private(receiver_key):
-        raise ValueError("same signing key may not witness two independent nodes")
+    if (owner_private(sender_key) == owner_private(receiver_key) or
+            hashlib.sha256(wire.read_private_path(sender_key, 8192)).digest() ==
+            hashlib.sha256(wire.read_private_path(receiver_key, 8192)).digest()):
+        raise ValueError("same public signing identity cannot witness two nodes")
     first = verify_receipt(source_wire, sender_key, fence, fence.sender,
                            sender_units, clock=clock, runner=runner)
     second = verify_receipt(destination_wire, receiver_key, fence, fence.receiver,
