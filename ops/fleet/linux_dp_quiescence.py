@@ -147,6 +147,11 @@ def issue(fence, node_id, units, signing_key, *,
         invoke_systemctl(runner, "stop", unit)
         STAGE = "mask-registered-writer"
         invoke_systemctl(runner, "mask", "--runtime", unit)
+        # A unit file may remain cached as "disabled" even when a runtime
+        # /dev/null mask symlink was created. The service manager itself
+        # must reload and confirm its EFFECTIVE masked state; successful
+        # systemctl exit alone must never count as writer fencing.
+        invoke_systemctl(runner, "daemon-reload")
         STAGE = "verify-masked-inactive"
         if not stopped_and_masked(runner, unit):
             raise ValueError("writer remains active or can restart")
