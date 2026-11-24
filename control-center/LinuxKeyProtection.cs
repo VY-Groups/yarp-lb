@@ -244,7 +244,10 @@ public static class LinuxKeyProtection
         const string protectedNs = "http://schemas.asp.net/2015/03/dataProtection";
         const string xmldsigNs = "http://www.w3.org/2000/09/xmldsig#";
         const int maximumKeyFiles = 512;
-        var keys = Directory.EnumerateFiles(keyDirectory, "key-*.xml")
+        // The ASP.NET Core FileSystemXmlRepository imports every top-level
+        // *.xml file, not only files beginning with "key-". The custody
+        // inventory must inspect that SAME complete set before startup.
+        var keys = Directory.EnumerateFiles(keyDirectory, "*.xml")
             .Take(maximumKeyFiles + 1).ToArray();
         if (keys.Length > maximumKeyFiles)
             throw new InvalidOperationException("Historic encrypted key-ring inventory is unbounded");
@@ -266,6 +269,16 @@ public static class LinuxKeyProtection
                         XmlResolver = null,
                         MaxCharactersInDocument = 1024 * 1024
                     });
+                    // Revocation XML has no encrypted key recipient;
+                    // key XML MUST carry one or more approved recipients.
+                    if (reader.MoveToContent() != XmlNodeType.Element ||
+                        reader.NamespaceURI.Length != 0 ||
+                        (reader.LocalName != "key" &&
+                         reader.LocalName != "revocation"))
+                        throw new InvalidOperationException(
+                            "Unexpected XML in Data Protection key repository");
+                    if (reader.LocalName == "revocation")
+                        continue;
                     var envelopeDepth = -1;
                     var recipientCount = 0;
                     while (reader.Read())
@@ -353,11 +366,8 @@ public static class LinuxKeyProtection
         var oldPassword = Environment.GetEnvironmentVariable("YARP_LINUX_DP_OLD_CERT_PASSWORD_FILE");
         if (string.IsNullOrEmpty(old) != string.IsNullOrEmpty(oldPassword))
             throw new InvalidOperationException("Old PFX and its password file must be specified together");
-        // Historic wrapping certificates are decrypt-only. Their
-        // expiration must prohibit NEW key encryption, but not invalidate
-        // already-issued cookies that depend on an encrypted XML key whose
-        // original recipient was that certificate. The old key must still
-        // be RSA, private, non-CA, keyEncipherment and strictly provisioned.
+        // Expired historic RSA recipients remain decrypt-only; a new
+        // certificate must always be currently valid for new-key encryption.
         X509Certificate2? previous = null;
         if (!string.IsNullOrEmpty(old))
             previous = LoadRsaProtector("YARP_LINUX_DP_OLD_CERT_PFX_PATH",
