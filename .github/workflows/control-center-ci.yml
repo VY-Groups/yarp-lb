@@ -7,6 +7,9 @@ on:
     paths:
       - "control-center/**"
       - "ops/acceptance/**"
+      - "ops/fleet/linux_dp_real_restore_e2e.py"
+      - "ops/fleet/linux_dp_receive_restore.py"
+      - "ops/fleet/linux_dp_mtls_transport.py"
       - "tests/CI/branding/**"
       - ".github/workflows/control-center-ci.yml"
       - "tests/E2E/peer_delta_http.py"
@@ -15,6 +18,9 @@ on:
     paths:
       - "control-center/**"
       - "ops/acceptance/**"
+      - "ops/fleet/linux_dp_real_restore_e2e.py"
+      - "ops/fleet/linux_dp_receive_restore.py"
+      - "ops/fleet/linux_dp_mtls_transport.py"
       - "tests/CI/branding/**"
       - ".github/workflows/control-center-ci.yml"
       - "tests/E2E/peer_delta_http.py"

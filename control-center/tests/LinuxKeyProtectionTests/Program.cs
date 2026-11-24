@@ -683,6 +683,150 @@ try
             LinuxDpRecoveryEvidence.ComputeInventoryDigest(
                 Path.Combine(backupRoot,"data-protection-keys"))==inventoryBeforeCommit,
             "real CLI restores P-256-signed ciphertext into only an absent isolated key ring");
+
+        // End-to-end software acceptance must execute the ACTUAL published
+        // signed .NET restore after an actual OpenSSL mutual-TLS transfer,
+        // not only separate transport/restore tests or a mock Python process.
+        var deliveredState = Path.Combine(root, "pinned-mtls-restored-state");
+        var deliveredInbox = Path.Combine(root, "pinned-mtls-receiver-inbox");
+        Directory.CreateDirectory(deliveredState, PrivateDir);
+        Directory.CreateDirectory(deliveredInbox, PrivateDir);
+        var deliveredApphostRoot = Path.GetFullPath(Path.Combine(
+            "tools", "LinuxDpEncryptedSnapshot", "bin", "Release", "net10.0"));
+        var deliveredApphost = Path.Combine(deliveredApphostRoot, "LinuxDpEncryptedSnapshot");
+        Assert(File.Exists(deliveredApphost), "real signed restore apphost exists after CLI build");
+        var deliveredHarness = Path.GetFullPath(Path.Combine(
+            "..", "ops", "fleet", "linux_dp_real_restore_e2e.py"));
+        Assert(File.Exists(deliveredHarness), "real pinned mTLS to .NET restore harness exists");
+        // Hosted SDK caches may be group-/other-writable for CI installation.
+        // NEVER relax the receiver's production filesystem requirements to
+        // accommodate that shared cache. Instead stage only this disposable
+        // runner's running .NET host, hostfxr and Microsoft.NETCore.App into
+        // a fresh, private 0700 tree, preserving executable bits for native
+        // files and forbidding a symlinked destination.
+        var executingRuntimeDirectory =
+            System.Runtime.InteropServices.RuntimeEnvironment.GetRuntimeDirectory();
+        var installedDotnetRoot = Path.GetFullPath(Path.Combine(
+            executingRuntimeDirectory, "..", "..", ".."));
+        var approvedDotnetRoot = Path.Combine(root, "owner-private-net10-host");
+        Directory.CreateDirectory(approvedDotnetRoot, PrivateDir);
+        void PrivateRuntimeCopy(string input, string output)
+        {
+            Directory.CreateDirectory(output, PrivateDir);
+            foreach (var sourceFile in Directory.EnumerateFiles(input))
+            {
+                var destination = Path.Combine(output, Path.GetFileName(sourceFile));
+                File.Copy(sourceFile, destination, overwrite: false);
+                var mode = File.GetUnixFileMode(sourceFile);
+                var executable = (mode & (UnixFileMode.UserExecute |
+                    UnixFileMode.GroupExecute | UnixFileMode.OtherExecute)) != 0;
+                File.SetUnixFileMode(destination, PrivateFile |
+                    (executable ? UnixFileMode.UserExecute : 0));
+            }
+            foreach (var sourceDir in Directory.EnumerateDirectories(input))
+                PrivateRuntimeCopy(sourceDir, Path.Combine(
+                    output, Path.GetFileName(sourceDir)));
+        }
+        var sourceHost = Path.Combine(installedDotnetRoot, "dotnet");
+        Assert(File.Exists(sourceHost), "current .NET 10 runtime host exists");
+        var destinationHost = Path.Combine(approvedDotnetRoot, "dotnet");
+        File.Copy(sourceHost, destinationHost);
+        File.SetUnixFileMode(destinationHost,
+            PrivateFile | UnixFileMode.UserExecute);
+        var runtimeVersion = Path.GetFileName(Path.TrimEndingDirectorySeparator(
+            executingRuntimeDirectory));
+        var privateShared = Path.Combine(approvedDotnetRoot, "shared",
+            "Microsoft.NETCore.App", runtimeVersion);
+        PrivateRuntimeCopy(executingRuntimeDirectory, privateShared);
+        var sourceFxrRoot = Path.Combine(installedDotnetRoot, "host", "fxr");
+        var fxrVersions = Directory.GetDirectories(sourceFxrRoot)
+            .Where(name => Version.TryParse(Path.GetFileName(name), out var v)
+                && v.Major == Environment.Version.Major)
+            .OrderByDescending(name => Version.Parse(Path.GetFileName(name)))
+            .ToArray();
+        Assert(fxrVersions.Length > 0,
+            "installed .NET 10 hostfxr is available for private recovery fixture");
+        PrivateRuntimeCopy(fxrVersions[0], Path.Combine(approvedDotnetRoot,
+            "host", "fxr", Path.GetFileName(fxrVersions[0])));
+        Assert(File.Exists(destinationHost) &&
+            File.GetUnixFileMode(approvedDotnetRoot) == PrivateDir,
+            "disposable recovery runtime staged under private owner-only root");
+        var transfer = new System.Diagnostics.ProcessStartInfo("python3")
+        {
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true
+        };
+        foreach (var (flag, value) in new[] {
+            ("--source-root", snapshotVault),
+            ("--label", "rev43"),
+            ("--checkpoint", generatedManifest),
+            ("--trusted-public-key", trustedPublicPath),
+            ("--minimum-revision-file", revisionFloorPath),
+            ("--state-root", deliveredState),
+            ("--inbox", deliveredInbox),
+            ("--restore-bundle", deliveredApphostRoot),
+            ("--dotnet-runtime-root", approvedDotnetRoot)
+        })
+        {
+            transfer.ArgumentList.Add(flag);
+            transfer.ArgumentList.Add(value);
+        }
+        transfer.ArgumentList.Insert(0, deliveredHarness);
+        using (var realTransfer = System.Diagnostics.Process.Start(transfer)
+            ?? throw new Exception("FAIL: actual pinned mutual-TLS receiver did not start"))
+        {
+            if (!realTransfer.WaitForExit(180000))
+            {
+                realTransfer.Kill(entireProcessTree: true);
+                throw new Exception("FAIL: real encrypted DP network-to-restore test timeout");
+            }
+            // Only print an allowlisted, source-owned diagnostic stage, never
+            // exception messages, trust paths, TLS keys, XML, cookies or
+            // unbounded subprocess stderr/stdout from the recovery harness.
+            var privateDiagnostic = realTransfer.StandardError.ReadToEnd();
+            if (realTransfer.ExitCode != 0)
+            {
+                var stage = System.Text.RegularExpressions.Regex.Match(
+                    privateDiagnostic,
+                    @"FAIL: real pinned mTLS to \.NET signed DP restore at (startup|linux-check|private-xml-archive|disposable-openssl-identities|pinned-mtls-server-start|trusted-dotnet-bundle-inspection|mutual-tls-receive-and-signed-dotnet-restore|restored-archive-identity|reject-duplicate|receiver-(?:platform-and-operator-approval|private-recovery-directories|independent-trust-custody|pinned-complete-dotnet-bundle|pinned-mtls-fetch|atomic-received-archive|independent-checkpoint-staging|approved-dotnet-runtime|signed-dotnet-restore-subprocess|post-execution-bundle-integrity|restored-private-ring-integrity|signed-dotnet-exit-(?:1|131|134|150|other)))");
+                Console.WriteLine("PINNED_DP_TRANSFER_FAILURE_STAGE=" +
+                    (stage.Success ? stage.Groups[1].Value : "unclassified"));
+            }
+            Assert(realTransfer.ExitCode == 0,
+                "real pinned TLS transfer plus signed .NET 10 offline restore accepted");
+        }
+        Assert(LinuxDpRecoveryEvidence.ComputeInventoryDigest(
+            Path.Combine(deliveredState,"data-protection-keys")) == inventoryBeforeCommit,
+            "pinned mTLS receiver preserved actual P-256-verified ciphertext inventory");
+        // Temporarily bind the fresh receiver process to the actual signed
+        // manifest and committed floor. Restore exact previous environment
+        // values before the existing negative/failure tests resume.
+        var previousRecoveryValues = new[] {
+            LinuxDpRecoveryEvidence.ManifestEnv, LinuxDpRecoveryEvidence.PublicKeyEnv,
+            LinuxDpRecoveryEvidence.MinimumRevisionEnv,
+            LinuxDpRecoveryEvidence.MinimumRevisionFileEnv,
+            LinuxDpRecoveryEvidence.RequireEvidenceEnv
+        }.ToDictionary(key => key, key => Environment.GetEnvironmentVariable(key));
+        try
+        {
+            Set(LinuxDpRecoveryEvidence.ManifestEnv, generatedManifest);
+            Set(LinuxDpRecoveryEvidence.PublicKeyEnv, trustedPublicPath);
+            Set(LinuxDpRecoveryEvidence.MinimumRevisionEnv, null);
+            Set(LinuxDpRecoveryEvidence.MinimumRevisionFileEnv, revisionFloorPath);
+            Set(LinuxDpRecoveryEvidence.RequireEvidenceEnv, "true");
+            Assert(VerifyInFreshProcess(deliveredState, "OnPremLinuxDpIntegration.v1",
+                    "session-probe", encrypted, "sensitive-session-value-123") == 0,
+                "real pinned mTLS recovery preserves original authenticated cookie in fresh OS process");
+        }
+        finally
+        {
+            foreach (var item in previousRecoveryValues)
+                Set(item.Key, item.Value);
+        }
+        Assert(!File.Exists(Path.Combine(deliveredInbox, "rev43", "ring", "private.key")),
+            "network DP snapshot contains no private wrapping-key file");
+
         Assert(RunSnapshot("restore","--archive",archivePath,
                 "--state-root",backupRoot,
                 "--checkpoint",generatedManifest,
