@@ -8,6 +8,7 @@ import copy
 import json
 from pathlib import Path
 import tempfile
+import time
 import unittest
 from unittest import mock
 import etcd_quorum_fence as fence
@@ -151,6 +152,30 @@ class EtcdQuorumTests(unittest.TestCase):
         self.assertFalse(self.check("before-apply-node-a"))
         self.kvs={}
         self.assertTrue(self.check("rollback-node-a"))
+
+    def test_late_member_cannot_resurrect_earlier_expiring_majority(self):
+        # Each early member reports TTL=4, which appears valid at receipt.
+        # A third honest but slow member costs >1 s: by the FINAL quorum
+        # decision the earlier leases have <3 s runway and must be refused.
+        self.ttls={
+            "127.0.0.1":ttl_response(ttl=4,granted=12),
+            "127.0.0.2":ttl_response(ttl=4,granted=12),
+            "127.0.0.3":ttl_response(ttl=12,granted=12),
+        }
+        original=self.f._read_member
+        def slow_third(endpoint,*args):
+            if endpoint[0]=="127.0.0.3":
+                time.sleep(1.25)
+            return original(endpoint,*args)
+        with mock.patch.object(self.f,"_read_member",side_effect=slow_third):
+            self.assertFalse(self.check())
+            self.assertIsNone(self.f._identity)
+            # A genuinely long enough lease may still be accepted after
+            # the same network delay; do not make quorum permanently dead.
+            self.ttls={f"127.0.0.{n}":ttl_response(ttl=12,granted=12)
+                       for n in (1,2,3)}
+            self.assertTrue(self.check())
+            self.assertTrue(self.check("before-apply-node-a"))
 
     def test_expired_or_short_ttl_fails_closed_and_never_uses_cached_approval(self):
         self.assertTrue(self.check())
