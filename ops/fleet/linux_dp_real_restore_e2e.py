@@ -18,6 +18,8 @@ import threading
 import linux_dp_mtls_transport as transport
 import linux_dp_receive_restore as receiver
 
+STAGE = "startup"
+
 
 def openssl(*args):
     proc = subprocess.run(["openssl", *args], stdin=subprocess.DEVNULL,
@@ -61,17 +63,22 @@ def identities(root):
 
 
 def integration(args):
+    global STAGE
+    STAGE = "linux-check"
     if not sys.platform.startswith("linux"):
         raise ValueError("Linux is required for real Data Protection crypto acceptance")
     # Same actual independent P-256 checkpoint and protected RSA-wrapped
     # XML that have already passed their own .NET acceptance in the parent.
+    STAGE = "private-xml-archive"
     payload = transport.build_bundle(args.source_root, args.label, args.checkpoint)
     with tempfile.TemporaryDirectory(prefix="dp-real-mtls-net10-") as folder:
         root = Path(folder)
         root.chmod(0o700)
+        STAGE = "disposable-openssl-identities"
         ca, identities_map = identities(root)
         server_cert, server_key, server_pin = identities_map["sender"]
         client_cert, client_key, client_pin = identities_map["receiver"]
+        STAGE = "pinned-mtls-server-start"
         with transport.make_server(
             "127.0.0.1", 0, payload, args.label, client_pin,
             ca, server_cert, server_key) as server:
@@ -80,6 +87,7 @@ def integration(args):
                                       daemon=True)
             worker.start()
             try:
+                STAGE = "trusted-dotnet-bundle-inspection"
                 request = argparse.Namespace(
                     approved_offline=True,
                     server_url="https://127.0.0.1:" + str(server.server_port),
@@ -92,12 +100,15 @@ def integration(args):
                     restore_bundle_sha256=receiver.tree_hash(args.restore_bundle),
                     trusted_public_key=args.trusted_public_key,
                     minimum_revision_file=args.minimum_revision_file)
+                STAGE = "mutual-tls-receive-and-signed-dotnet-restore"
                 returned = receiver.restore_once(request)
+                STAGE = "restored-archive-identity"
                 if returned != os.path.join(args.inbox, args.label):
                     raise ValueError("signed recovery staged under wrong identity")
                 # Re-sending to the same label must not overwrite the archive
                 # or a live/restored Data Protection ring. This is a genuine
                 # TLS fetch, not an in-memory fake.
+                STAGE = "reject-duplicate"
                 try:
                     receiver.restore_once(request)
                 except ValueError:
@@ -121,7 +132,9 @@ def main(argv=None):
     except (OSError, ValueError, TypeError, subprocess.SubprocessError):
         # Do not leak even synthetic TLS keys, auth cookies, origin host,
         # local source paths or private exception text into public CI.
-        print("FAIL: real pinned mTLS to .NET signed DP restore acceptance",
+        # Fixed source-authored stages only; never echo exception text or
+        # trust paths. Keep diagnostic stable in customer-safe CI logs.
+        print("FAIL: real pinned mTLS to .NET signed DP restore at " + STAGE,
               file=sys.stderr)
         return 1
     print("PASS: actual pinned mTLS plus signed .NET restore, duplicate refused")
