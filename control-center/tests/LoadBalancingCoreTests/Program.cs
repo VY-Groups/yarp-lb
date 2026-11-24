@@ -152,6 +152,20 @@ Check(EjectionBudget.Allowed(5,40,1)==2,"five-way pool ejection ceiling");
 Check(EjectionBudget.Allowed(5,80,2)==3,"reserve wins over max percent");
 Check(EjectionBudget.Allowed(1,100,1)==0,"sole healthy candidate not ejected by passive policy");
 Check(EjectionBudget.Allowed(5,100,0)==5,"full ejection is explicit zero-reserve opt-in");
+// Regression: simultaneous active probe failure during Windows HA warmup
+// must not reserve a passive cooldown on a node with no confirmed survivor.
+Check(!EjectionBudget.EligibleForReserve(true,false,false,false,false),"unknown or unhealthy active state cannot supply a reserve");
+Check(EjectionBudget.EligibleForReserve(true,true,false,false,false),"healthy active non-draining peer supplies reserve");
+Check(!EjectionBudget.EligibleForReserve(true,true,true,false,false),"passively ejected peer is not a reserve");
+Check(!EjectionBudget.EligibleForReserve(true,true,false,true,false),"draining peer is not a reserve");
+Check(!EjectionBudget.EligibleForReserve(true,true,false,false,true),"concurrently reserved peer is not a reserve");
+Check(EjectionBudget.EligibleForReserve(false,false,false,false,false),"passive-only pool may count unknown active state");
+Check(!EjectionBudget.CanReserve(1,0,0,1,false),"both active probes down: no passive cooldown");
+Check(!EjectionBudget.CanReserve(1,0,0,1,true),"sole eligible survivor cannot be passively ejected");
+Check(EjectionBudget.CanReserve(1,0,1,1,true),"one confirmed alternative permits a bounded ejection");
+Check(!EjectionBudget.CanReserve(1,1,1,1,true),"existing pending or live passive reservation consumes cap");
+Check(!EjectionBudget.CanReserve(1,0,1,2,true),"actual reserve must satisfy configured minimum");
+Check(EjectionBudget.CanReserve(1,0,0,0,true),"explicit zero reserve preserves operator opt-in");
 foreach (var bad in new[] {0,-1,101})
 {
     var rejected=false;
