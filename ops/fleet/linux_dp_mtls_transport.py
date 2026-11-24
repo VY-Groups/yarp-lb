@@ -16,7 +16,7 @@ import io
 import os
 from pathlib import Path
 import re
-import socket
+import shutil
 import ssl
 import stat
 import sys
@@ -119,8 +119,13 @@ def read_snapshot(source_root, label, checkpoint):
                     not all(XML_NAME.fullmatch(n) for n in names):
                 raise ValueError("unexpected encrypted snapshot entries")
             payload = {}
+            total = 0
             for name in names:
-                payload[name] = private_file(name, fd, MAX_XML)
+                item = private_file(name, fd, MAX_XML)
+                total += len(item)
+                if total > MAX_BUNDLE - MAX_MANIFEST - 8192:
+                    raise ValueError("encrypted snapshot exceeds bounded relay budget")
+                payload[name] = item
             if sorted(os.listdir(fd)) != names:
                 raise ValueError("snapshot inventory changed during read")
         finally:
@@ -224,7 +229,8 @@ def stage_received(dest_root, label, blob):
         final = os.path.join(dest_root, label)
         if os.path.lexists(final):
             raise ValueError("encrypted recovery label already exists")
-        with tempfile.TemporaryDirectory(prefix=".dp-recv-", dir=dest_root) as staging:
+        staging = tempfile.mkdtemp(prefix=".dp-recv-", dir=dest_root)
+        try:
             os.chmod(staging, PRIVATE_DIRECTORY)
             ring = os.path.join(staging, "ring")
             os.mkdir(ring, PRIVATE_DIRECTORY)
@@ -238,9 +244,12 @@ def stage_received(dest_root, label, blob):
                 finally:
                     os.close(fd)
             publish_no_replace(staging, final)
-            # TemporaryDirectory cleanup sees an absent source after publish.
+            # The source directory no longer exists after an atomic publish.
             os.fsync(root_fd)
             return final
+        finally:
+            if os.path.lexists(staging):
+                shutil.rmtree(staging)
     finally:
         os.close(root_fd)
 
