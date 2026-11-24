@@ -31,9 +31,7 @@ internal sealed class CommercialLicenseRuntime : BackgroundService
         {
             try
             {
-                current = store.Inspect(DateTimeOffset.UtcNow);
-                state = current?.Validity.ToString().ToLowerInvariant() ?? "unactivated";
-                if (current?.Allows("l7") == true) Volatile.Write(ref admittedTraffic, 1);
+                ApplyVerified(store.Inspect(DateTimeOffset.UtcNow));
             }
             catch (Exception e) when (e is IOException or CryptographicException or InvalidDataException or
                 FormatException or JsonException or UnauthorizedAccessException or ArgumentException or InvalidOperationException)
@@ -41,6 +39,21 @@ internal sealed class CommercialLicenseRuntime : BackgroundService
                 current = null;
                 state = "unavailable";
             }
+        }
+    }
+
+    // An explicit signed downgrade takes effect immediately, unlike an
+    // unexpected expiry/state fault. Existing in-flight requests are not aborted.
+    private void ApplyVerified(VerifiedLicense? license)
+    {
+        current = license;
+        state = license?.Validity.ToString().ToLowerInvariant() ?? "unactivated";
+        if (license is null || license.Validity == LicenseValidity.NotYetValid)
+            Volatile.Write(ref admittedTraffic, 0);
+        else if (license.Validity == LicenseValidity.Active)
+        {
+            Volatile.Write(ref admittedTraffic, license.Allows("l7") ? 1 : 0);
+            if (!license.Allows("l7")) state = "feature-restricted";
         }
     }
 
@@ -76,7 +89,9 @@ internal sealed class CommercialLicenseRuntime : BackgroundService
         {
             var result = revoke ? store.ImportRevocation(bytes, DateTimeOffset.UtcNow)
                 : store.Import(bytes, DateTimeOffset.UtcNow);
-            Refresh();
+            // Apply the exact committed result; do not depend on a second
+            // disk read that could fail and accidentally retain old admission.
+            ApplyVerified(result);
             return result;
         }
     }

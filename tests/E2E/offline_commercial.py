@@ -79,6 +79,20 @@ def main():
             check(renewed["revision"] == 2, "actual offline renewal advances revision")
             admin.request("POST", "/admin/api/license/import", {"file":first}, expect=400)
             eventually(anonymous, "/fixture/check", "e2e-origin:/check")
+            request = root/"downgrade.gcr"
+            request.write_text(admin.request("GET", "/admin/api/license/request")["file"], encoding="ascii")
+            downgraded = issue("--ci-downgrade", request, root/"downgrade.lic")
+            restricted = admin.request("POST", "/admin/api/license/import", {"file":downgraded})
+            check(restricted["state"] == "feature-restricted" and not restricted["trafficAdmitted"],
+                  "signed active downgrade removes L7 admission immediately")
+            admin.request("GET", "/admin/api/state", expect=402)
+            anonymous.request("GET", "/fixture/check", expect=503)
+            request = root/"upgrade.gcr"
+            request.write_text(admin.request("GET", "/admin/api/license/request")["file"], encoding="ascii")
+            upgraded = issue("--ci-upgrade", request, root/"upgrade.lic")
+            restored = admin.request("POST", "/admin/api/license/import", {"file":upgraded})
+            check(restored["revision"] == 4 and restored["trafficAdmitted"], "signed upgrade restores L7 admission")
+            eventually(anonymous, "/fixture/check", "e2e-origin:/check")
             revoked = issue("--ci-revoke", renewed["allocationId"], root/"revocation.gcv")
             state = admin.request("POST", "/admin/api/license/revoke", {"file":revoked})
             check(state["state"] == "revoked" and not state["active"], "actual offline revocation denies management")

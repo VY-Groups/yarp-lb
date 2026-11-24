@@ -19,7 +19,7 @@ if (args.Length == 2 && args[0] == "--ci-trust")
     File.WriteAllBytes(args[1], JsonSerializer.SerializeToUtf8Bytes(keys));
     return;
 }
-if (args.Length >= 2 && args[0] is "--ci-authority" or "--ci-issue" or "--ci-revoke")
+if (args.Length >= 2 && args[0] is "--ci-authority" or "--ci-issue" or "--ci-revoke" or "--ci-downgrade" or "--ci-upgrade")
 {
     if (Environment.GetEnvironmentVariable("CI") != "true" ||
         Environment.GetEnvironmentVariable("GITHUB_ACTIONS") != "true" || !OperatingSystem.IsLinux())
@@ -54,14 +54,21 @@ if (args.Length >= 2 && args[0] is "--ci-authority" or "--ci-issue" or "--ci-rev
     try { signer.ImportPkcs8PrivateKey(privateKey, out _); }
     finally { CryptographicOperations.ZeroMemory(privateKey); }
     var authority = new OfflineIssuer(ledgerPath, signer, "test-1");
-    var file = args[0] switch
+    if (args[0] is "--ci-downgrade" or "--ci-upgrade")
     {
-        "--ci-issue" => authority.Issue(File.ReadAllBytes(args[2]), "ci-dc", DateTimeOffset.UtcNow),
+        authority.RenewSubscription(new Subscription("ci-license", "ci-customer", "ci-deployment", "standard",
+            1, 1, DateTimeOffset.UtcNow.AddDays(2).ToUnixTimeSeconds(),
+            args[0] == "--ci-downgrade" ? new[] {"monitoring"} : new[] {"l7", "tls", "monitoring"}),
+            DateTimeOffset.UtcNow);
+    }
+    var fixtureEnvelope = args[0] switch
+    {
+        "--ci-issue" or "--ci-downgrade" or "--ci-upgrade" => authority.Issue(File.ReadAllBytes(args[2]), "ci-dc", DateTimeOffset.UtcNow),
         "--ci-revoke" => authority.Revoke(args[2], DateTimeOffset.UtcNow),
         _ => throw new ArgumentException("Invalid CI command.")
     };
     using var output = new FileStream(args[3], FileMode.CreateNew, FileAccess.Write, FileShare.None);
-    output.Write(file);
+    output.Write(fixtureEnvelope);
     return;
 }
 var model = new JsonObject
