@@ -121,10 +121,16 @@ def run_checked(argv, env=None):
 class DockerComposeProvider:
     """Fixed WAF service, pinned image and loopback HTTP acceptance only."""
 
-    def __init__(self, compose, image, health_url, runner=run_checked):
+    def __init__(self, compose, image, health_url, runner=run_checked,
+                 project_name=None):
         self.compose = Path(compose)
         self.image = image
         self.runner = runner
+        if (project_name is not None and
+                (type(project_name) is not str or
+                 not re.fullmatch(r"[a-z0-9][a-z0-9_-]{2,45}", project_name))):
+            raise ValueError("invalid pinned WAF Compose project identity")
+        self.project_name = project_name
         self._snapshot = None
         if (not self.compose.is_absolute() or self.compose.is_symlink() or
                 not self.compose.is_file() or
@@ -181,9 +187,12 @@ class DockerComposeProvider:
             if mode not in MODES:
                 raise ValueError("invalid WAF mode")
             env["WAF_MODE"] = MODES[mode]
-        return self.runner(["docker", "compose", "--project-directory",
-                            str(self.compose.parent), "-f",
-                            str(self.frozen_compose), *args], env=env)
+        command = ["docker", "compose", "--project-directory",
+                   str(self.compose.parent)]
+        if self.project_name is not None:
+            command.extend(["--project-name", self.project_name])
+        command.extend(["-f", str(self.frozen_compose), *args])
+        return self.runner(command, env=env)
 
     def image_and_config(self, mode):
         config = strict_json(self.command("config", "--format", "json", mode=mode))
