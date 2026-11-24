@@ -1212,7 +1212,19 @@ try
     Assert(Throws(()=>{using var _=Provider(state);}),
         "incomplete previous certificate rotation config is refused");
     Set("YARP_LINUX_DP_OLD_CERT_PASSWORD_FILE",second.PasswordFile);
-    using(var service=Provider(state))
+    // The general 'state' fixture still contains encrypted keys written by
+    // first, which is no longer accessible after the earlier damaged-PFX
+    // negative. That ring MUST now fail at startup even when replacement
+    // and second are otherwise valid: the unrecoverable first recipient
+    // cannot be silently abandoned, invalidating its original sessions.
+    Assert(Throws(()=>{using var _=Provider(state);}),
+        "mixed ring cannot silently retire a third historic certificate");
+    // Validate current+previous overlap on a clean, separate ring instead
+    // of weakening that new fail-closed invariant to preserve an old fixture.
+    var overlapState=Path.Combine(root,"rotation-overlap-clean-state");
+    Set("YARP_CONTROL_PLANE_DIR",overlapState);
+    LinuxKeyProtection.InitializeStateDirectory();
+    using(var service=Provider(overlapState))
     {
         var dp=service.GetRequiredService<IDataProtectionProvider>()
             .CreateProtector("session-probe");
