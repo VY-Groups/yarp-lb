@@ -39,7 +39,7 @@ function editOrganization(){if(currentRole!=='Administrator')return show('Admini
 }
 
 const show=(message:string,error=false)=>{const el=$('notice');el.hidden=false;el.className='notice'+(error?' error':'');el.textContent=message;setTimeout(()=>{el.hidden=true},8000)};
-async function api(url:string,method='GET',body?:any,signal?:AbortSignal){const opts:RequestInit={method,credentials:'same-origin',headers:{},signal,cache:'no-store'};if(method!=='GET'){(opts.headers as Obj)['Content-Type']='application/json';(opts.headers as Obj)['X-CSRF-Token']=csrf;opts.body=JSON.stringify(body??{})}const generation=authGeneration;const r=await fetch(url,opts);if(generation!==authGeneration)throw Error('Management session changed. Outdated response ignored.');if(r.status===428){showLogin(false);void initSession();throw Error('Please accept the Privacy Policy to continue.')}if(r.status===401){if(!['/admin/api/session','/admin/api/login','/admin/api/bootstrap','/admin/api/login/verify'].includes(url)){if(!$('app-shell').hidden){showLogin(false);$('auth-message').textContent='Your administrator session has expired or was invalidated. Sign in again. No security settings were changed.'}throw Error('Administrator session expired; please sign in again')}throw Error('Authentication failed. Check your credentials or verification code.')}if(r.status===403){let stepUp=false;try{stepUp=(await r.json()).signIn==='/admin/oidc/start'}catch{}if(stepUp)throw Error('Fresh enterprise authentication required. Sign out, then sign in with Enterprise SSO / passkey. Retry only after reviewing the change.');throw Error('Access denied. This action requires an authorized role or valid CSRF token.')}if(!r.ok){let e='HTTP '+r.status;try{e=(await r.json()).error??e}catch{}throw Error(e)}const json=await r.json();if(generation!==authGeneration)throw Error('Management session changed. Outdated response ignored.');return json}
+async function api(url:string,method='GET',body?:any,signal?:AbortSignal){const opts:RequestInit={method,credentials:'same-origin',headers:{},signal,cache:'no-store'};if(method!=='GET'){(opts.headers as Obj)['Content-Type']='application/json';(opts.headers as Obj)['X-CSRF-Token']=csrf;opts.body=JSON.stringify(body??{})}const generation=authGeneration;const r=await fetch(url,opts);if(generation!==authGeneration)throw Error('Management session changed. Outdated response ignored.');if(r.status===428){showLogin(false);void initSession();throw Error('Please accept the Privacy Policy to continue.')}if(r.status===401){if(!['/admin/api/session','/admin/api/login','/admin/api/bootstrap','/admin/api/login/verify'].includes(url)){if(!$('app-shell').hidden||!$('privacy-screen').hidden){showLogin(false);$('auth-message').textContent='Your administrator session has expired or was invalidated. Sign in again. No security settings were changed.'}throw Error('Administrator session expired; please sign in again')}throw Error('Authentication failed. Check your credentials or verification code.')}if(r.status===403){let stepUp=false;try{stepUp=(await r.json()).signIn==='/admin/oidc/start'}catch{}if(stepUp)throw Error('Fresh enterprise authentication required. Sign out, then sign in with Enterprise SSO / passkey. Retry only after reviewing the change.');throw Error('Access denied. This action requires an authorized role or valid CSRF token.')}if(!r.ok){let e='HTTP '+r.status;try{e=(await r.json()).error??e}catch{}throw Error(e)}const json=await r.json();if(generation!==authGeneration)throw Error('Management session changed. Outdated response ignored.');return json}
 async function reload(){if(dirty&&!confirm('Discard unsaved changes and reload?'))return;try{data=await api('/admin/api/state');dirty=false;render();void refreshGatewayReadiness();show('Latest configuration loaded')}catch(e){show(String(e),true)}}
 function edit(){dirty=true;render()}
 async function save(){
@@ -500,15 +500,20 @@ $('privacy-accept').onclick=async()=>{
   const button=$('privacy-accept') as HTMLButtonElement;
   if(button.disabled)return;
   button.disabled=true;
+  const decline=$('privacy-decline') as HTMLButtonElement;
+  const signout=$('privacy-signout') as HTMLButtonElement;
+  decline.disabled=true;signout.disabled=true;
+  $('privacy-message').textContent='';
   try{await api('/admin/api/privacy/accept','POST',{version:privacyVersion});await initSession()}
   catch(e){$('privacy-message').textContent=String(e)}
-  finally{button.disabled=false}
+  finally{button.disabled=false;decline.disabled=false;signout.disabled=false}
 };
 $('privacy-decline').onclick=()=>{$('privacy-message').textContent='Please accept the Privacy Policy to continue using GatewayCore. You can review it again or sign out.'};
 $('privacy-signout').onclick=()=>{$('logout').click()};
 void initSession();
 
 async function initSession(){
+  const generation=authGeneration;
   try {
     const r=await api('/admin/api/session');
     if(!r.authenticated){showLogin(!r.initialized);return}
@@ -525,9 +530,9 @@ async function initSession(){
     else if(topologyResponse?.status!=='design-confirmed')view='setup';
     updateTopologyNavigation();
     await reload();
-  } catch(err){$('privacy-screen').hidden=true;$('auth-message').textContent=String(err);$('auth-screen').hidden=false;$('app-shell').hidden=true}
+  } catch(err){if(generation!==authGeneration)return;$('privacy-screen').hidden=true;$('auth-message').textContent=String(err);$('auth-screen').hidden=false;$('app-shell').hidden=true}
 }
-function showLogin(first:boolean){$('privacy-screen').hidden=true;privacyVersion='';authGeneration++;readinessGeneration++;readinessAbort?.abort();readinessAbort=null;gatewayReadyLabel='● Backend readiness not checked';gatewayReadyWarn=true;csrf='';currentRole='';currentUser='';federatedOidcSession=false;otpChallenge='';view='setup';viewHistory=[];lastRenderedView='setup';
+function showLogin(first:boolean){$('privacy-screen').hidden=true;privacyVersion='';const dialog=$('modal') as HTMLDialogElement;if(dialog.open)dialog.close();$('modal-fields').innerHTML='';authGeneration++;readinessGeneration++;readinessAbort?.abort();readinessAbort=null;gatewayReadyLabel='● Backend readiness not checked';gatewayReadyWarn=true;csrf='';currentRole='';currentUser='';federatedOidcSession=false;otpChallenge='';view='setup';viewHistory=[];lastRenderedView='setup';
  dirty=false;data={name:'GatewayCore',gateway:'unknown',time:'',routes:{},clusters:{},disabled:{},mode:'Local testing',telemetry:'',revision:''};
  probes=[];orgProfile=null;topologyResponse=null;topologyDraft=null;topologyStep=0;topologyChecks=[];topologyWarnings=[];
  $('content').innerHTML='';$('user-badge').textContent='';$('notice').hidden=true;

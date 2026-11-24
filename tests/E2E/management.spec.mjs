@@ -22,6 +22,16 @@ test('browser: bootstrap, navigation, onboarding, websites, route edit, users an
   await page.locator('#privacy-accept').click();
   await expect(page.locator('#app-shell')).toBeVisible();
   await expect(page.locator('#user-badge')).toContainText('browseradmin');
+  const accepted=await page.evaluate(async()=>await (await fetch('/admin/api/session')).json());
+  expect(accepted.privacyAccepted).toBe(true);
+  const receipt=(await page.context().cookies()).find(c=>c.name==='GatewayCorePrivacy');
+  expect(receipt?.httpOnly).toBe(true);
+  expect(receipt?.sameSite).toBe('Strict');
+  // A client-side flag or forged receipt must never unlock a protected API.
+  await page.context().addCookies([{...receipt,value:'forged-policy-receipt'}]);
+  expect(await page.evaluate(async()=> (await fetch('/admin/api/state')).status)).toBe(428);
+  await page.context().addCookies([receipt]);
+  expect(await page.evaluate(async()=> (await fetch('/admin/api/state')).status)).toBe(200);
 
   await test.step('Setup Center page shows live setup state',async()=>{
     await page.locator('button.nav[data-view="setup"]').click();
@@ -277,6 +287,11 @@ test('browser: bootstrap, navigation, onboarding, websites, route edit, users an
     await page.locator('#auth-password').fill('Browser-secret-long-4096!');
     await page.locator('#auth-submit').click();
     await expect(page.locator('#privacy-screen')).toBeVisible();
+    // The former valid acknowledgement is bound to the former login's
+    // security token. Even the same username cannot replay it.
+    await page.context().addCookies([receipt]);
+    expect(await page.evaluate(async()=> (await fetch('/admin/api/state')).status)).toBe(428);
+    expect(await page.evaluate(async()=> (await (await fetch('/admin/api/session')).json()).privacyAccepted)).toBe(false);
     await page.locator('#privacy-accept').click();
     await expect(page.locator('#app-shell')).toBeVisible();
   });

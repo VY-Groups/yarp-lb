@@ -7,3 +7,5 @@ API clients must GET /admin/api/session, review privacyText and explicitly POST 
 The technical notice is not a jurisdiction-specific compliance certification. The deploying organization must review retention, recipients, contact details and legal requirements before production. Existing frozen release artifacts do not include this feature. Full CI and independent review are required before freezing a new candidate.
 
 Real API and Chromium tests exercise decline, acceptance, stale versions, missing CSRF, direct API blocking and session refresh. Disposable test clients explicitly acknowledge the current notice; there is no production bypass.
+
+Additional browser checks verify the receipt is HttpOnly and SameSite=Strict, tampering does not grant access, and a previously valid receipt cannot unlock a new login. The API test also checks anonymous acceptance refusal, public notice availability, an audit event and absence of side effects from blocked writes. A 401 on the policy screen returns to sign-in; a 428 clears stale management state, closes any open editor and reloads the session notice. No mutation is automatically retried.

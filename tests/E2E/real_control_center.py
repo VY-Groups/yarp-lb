@@ -602,6 +602,8 @@ def acceptance(base:str,https_base:str,origin_port:int):
     anonymous=Client(base)
     check(not anonymous.session()["initialized"],"clean state requires bootstrap")
     check("<html" in anonymous.request("GET","/dashboard"),"real dashboard HTML served")
+    check("Privacy Policy" in anonymous.request("GET","/dashboard/privacy"),"standalone privacy notice is accessible before login")
+    anonymous.request("POST","/admin/api/privacy/accept",{"version":"forged"},expect=401)
     check("function" in anonymous.request("GET","/dashboard/app.js"),"real browser JavaScript served")
     check(anonymous.request("GET","/admin/api/users",expect=401)=="","anonymous users endpoint remains 401")
     anonymous.request("POST","/admin/api/users",{"username":"unauth"},expect=401)
@@ -621,6 +623,9 @@ def acceptance(base:str,https_base:str,origin_port:int):
     check(not admin.session(accept_privacy=False)["privacyAccepted"],"invalid acceptance leaves access locked")
     eventually(anonymous,"/fixture/check","e2e-origin:/check")
     check(admin.session()["privacyAccepted"],"explicit current-policy acceptance unlocks management")
+    check(not admin.request("GET","/admin/api/inventory"),"blocked pre-acceptance mutation had no effect")
+    check(any(row.get("action")=="PRIVACY_POLICY_ACCEPTED" for row in admin.request("GET","/admin/api/audit")),
+          "explicit acceptance is recorded in the management audit")
     admin.request("POST","/admin/api/bootstrap",{"username":"other","password":"Another-very-long-secret!","email":"a@example.invalid"},expect=409)
     check(len(admin.request("GET","/admin/api/users"))==1,"admin user listing")
     admin.request("POST","/admin/api/users",{"username":"operator_e2e","role":"Operator","password":"Operator-secret-long!","email":"operator@example.invalid"},csrf=False,expect=403)

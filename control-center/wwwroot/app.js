@@ -88,7 +88,7 @@ async function api(url, method = 'GET', body, signal) { const opts = { method, c
     throw Error('Please accept the Privacy Policy to continue.');
 } if (r.status === 401) {
     if (!['/admin/api/session', '/admin/api/login', '/admin/api/bootstrap', '/admin/api/login/verify'].includes(url)) {
-        if (!$('app-shell').hidden) {
+        if (!$('app-shell').hidden || !$('privacy-screen').hidden) {
             showLogin(false);
             $('auth-message').textContent = 'Your administrator session has expired or was invalidated. Sign in again. No security settings were changed.';
         }
@@ -1125,6 +1125,11 @@ $('privacy-accept').onclick = async () => {
     if (button.disabled)
         return;
     button.disabled = true;
+    const decline = $('privacy-decline');
+    const signout = $('privacy-signout');
+    decline.disabled = true;
+    signout.disabled = true;
+    $('privacy-message').textContent = '';
     try {
         await api('/admin/api/privacy/accept', 'POST', { version: privacyVersion });
         await initSession();
@@ -1134,12 +1139,15 @@ $('privacy-accept').onclick = async () => {
     }
     finally {
         button.disabled = false;
+        decline.disabled = false;
+        signout.disabled = false;
     }
 };
 $('privacy-decline').onclick = () => { $('privacy-message').textContent = 'Please accept the Privacy Policy to continue using GatewayCore. You can review it again or sign out.'; };
 $('privacy-signout').onclick = () => { $('logout').click(); };
 void initSession();
 async function initSession() {
+    const generation = authGeneration;
     try {
         const r = await api('/admin/api/session');
         if (!r.authenticated) {
@@ -1170,6 +1178,8 @@ async function initSession() {
         await reload();
     }
     catch (err) {
+        if (generation !== authGeneration)
+            return;
         $('privacy-screen').hidden = true;
         $('auth-message').textContent = String(err);
         $('auth-screen').hidden = false;
@@ -1179,6 +1189,10 @@ async function initSession() {
 function showLogin(first) {
     $('privacy-screen').hidden = true;
     privacyVersion = '';
+    const dialog = $('modal');
+    if (dialog.open)
+        dialog.close();
+    $('modal-fields').innerHTML = '';
     authGeneration++;
     readinessGeneration++;
     readinessAbort?.abort();
