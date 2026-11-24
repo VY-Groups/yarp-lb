@@ -166,6 +166,52 @@ class TwoNodeQuiescenceTests(unittest.TestCase):
                 receiver_units=("gatewaycore.service",),
                 clock=lambda:NOW,runner=self.run_child)
 
+    def test_non_p256_oid_inside_foreign_spki_never_counts_as_identity(self):
+        # A non-P256 public-key SubjectPublicKeyInfo can contain P-256 OID
+        # bytes in arbitrary public-key material. Scanning for OID substrings
+        # (instead of strict DER AlgorithmIdentifier) falsely accepts it.
+        p384 = self.root/"wrong-curve.key"
+        subprocess.run(["openssl","ecparam","-name","secp384r1",
+                        "-genkey","-noout","-out",str(p384)],
+                       check=True,timeout=15,stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL)
+        p384.chmod(0o600)
+        output = subprocess.run([gate.OPENSSL,"pkey","-in",str(p384),
+                                 "-pubout","-outform","DER"],
+                                check=True,capture_output=True,timeout=15).stdout
+        self.assertNotEqual(len(output), 91)
+        oid=bytes.fromhex("06082A8648CE3D030107")
+        # Even artificially embedding a second curve OID in a foreign
+        # point's material cannot satisfy the canonical P-256 structure.
+        contaminated=output[:-len(oid)]+oid
+        self.assertIn(oid, contaminated)
+        with self.assertRaises(ValueError):
+            gate._validated_p256_spki(
+                SimpleNamespace(returncode=0,stdout=contaminated))
+        with self.assertRaises(ValueError):
+            gate.issue(self.fence,"gateway-a",("gatewaycore.service",),
+                       str(p384),runner=self.run_child,clock=lambda:NOW)
+        self.assertEqual(self.commands,[],
+                         "foreign-curve keys cannot stop production units")
+
+    def test_malformed_spki_and_duplicate_point_encoding_refused(self):
+        private=self.keys["gateway-a"][0]
+        generated=subprocess.run([gate.OPENSSL,"pkey","-in",private,
+                                  "-pubout","-outform","DER"],
+                                 check=True,capture_output=True,timeout=15).stdout
+        self.assertEqual(len(generated), 91)
+        self.assertEqual(
+            gate._validated_p256_spki(
+                SimpleNamespace(returncode=0,stdout=generated)),
+            __import__("hashlib").sha256(generated).digest())
+        for untrusted in (generated+b"\\x00",generated[1:],
+                          generated.replace(b"\\x03\\x42\\x00\\x04",
+                                            b"\\x03\\x42\\x01\\x04",1)):
+            with self.subTest(value=len(untrusted)):
+                with self.assertRaises(ValueError):
+                    gate._validated_p256_spki(
+                        SimpleNamespace(returncode=0,stdout=untrusted))
+
     def test_no_quorum_refuses_before_any_systemd_change(self):
         self.fence.allowed=False
         with self.assertRaises(ValueError):
