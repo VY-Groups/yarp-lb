@@ -242,7 +242,10 @@ public static class LinuxKeyProtection
         const string protectedNs = "http://schemas.asp.net/2015/03/dataProtection";
         const string xmldsigNs = "http://www.w3.org/2000/09/xmldsig#";
         const int maximumKeyFiles = 512;
-        var keys = Directory.EnumerateFiles(keyDirectory, "key-*.xml")
+        // The ASP.NET Core FileSystemXmlRepository imports every top-level
+        // *.xml file, not only files beginning with "key-". The custody
+        // inventory must inspect that SAME complete set before startup.
+        var keys = Directory.EnumerateFiles(keyDirectory, "*.xml")
             .Take(maximumKeyFiles + 1).ToArray();
         if (keys.Length > maximumKeyFiles)
             throw new InvalidOperationException("Historic encrypted key-ring inventory is unbounded");
@@ -264,6 +267,16 @@ public static class LinuxKeyProtection
                         XmlResolver = null,
                         MaxCharactersInDocument = 1024 * 1024
                     });
+                    // Revocation XML has no encrypted key recipient;
+                    // key XML MUST carry one or more approved recipients.
+                    if (reader.MoveToContent() != XmlNodeType.Element ||
+                        reader.NamespaceURI.Length != 0 ||
+                        (reader.LocalName != "key" &&
+                         reader.LocalName != "revocation"))
+                        throw new InvalidOperationException(
+                            "Unexpected XML in Data Protection key repository");
+                    if (reader.LocalName == "revocation")
+                        continue;
                     var envelopeDepth = -1;
                     var recipientCount = 0;
                     while (reader.Read())
