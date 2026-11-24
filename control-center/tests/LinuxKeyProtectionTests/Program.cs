@@ -650,6 +650,16 @@ try
                 process.Kill(entireProcessTree:true);
                 throw new Exception("FAIL: encrypted snapshot CLI exceeded timeout");
             }
+            var childError=process.StandardError.ReadToEnd();
+            if(process.ExitCode!=0)
+            {
+                // The child's fixed, sanitized stage is the only data
+                // permitted into public CI. Never echo raw stderr/paths/XML.
+                var stageMatch=System.Text.RegularExpressions.Regex.Match(childError,
+                    @"FAIL: offline encrypted DP snapshot/restore refused at (?:Encrypted snapshot stage )?(stage-init|copy-ciphertext|inventory-recheck|stage-fsync|atomic-publish|root-fsync|published-digest|preflight-or-restore)");
+                Console.WriteLine("SNAPSHOT_CLI_FAILURE_STAGE="+
+                    (stageMatch.Success?stageMatch.Groups[1].Value:"unclassified"));
+            }
             return process.ExitCode;
         }
         var snapshotVault=Path.Combine(root,"encrypted-snapshot-vault");
