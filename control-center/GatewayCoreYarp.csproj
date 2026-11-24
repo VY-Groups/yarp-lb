@@ -7,6 +7,7 @@
   </PropertyGroup>
   <PropertyGroup Condition="'$(GatewayCoreCommercial)' == 'true'">
     <DefineConstants>$(DefineConstants);GATEWAYCORE_COMMERCIAL</DefineConstants>
+    <WarningsAsErrors>$(WarningsAsErrors);ASP0016</WarningsAsErrors>
   </PropertyGroup>
   <ItemGroup Condition="'$(GatewayCoreCommercial)' == 'true'">
     <ProjectReference Include="../src/GatewayCore.Licensing/GatewayCore.Licensing.csproj" />

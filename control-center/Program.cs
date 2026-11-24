@@ -1214,9 +1214,9 @@ async Task<IResult> ImportCommercialLicense(HttpContext ctx, bool revoke)
         FormatException or JsonException or ArgumentException or InvalidOperationException or UnauthorizedAccessException)
     { return Results.BadRequest(new { error = "License import rejected or state unavailable; inspect current status and contact the issuer." }); }
 }
-app.MapPost("/admin/api/license/import", (HttpContext ctx) => ImportCommercialLicense(ctx, false))
+app.MapPost("/admin/api/license/import", (Delegate)(Func<HttpContext, Task<IResult>>)(ctx => ImportCommercialLicense(ctx, false)))
     .RequireAuthorization(policy => policy.RequireRole("Administrator"));
-app.MapPost("/admin/api/license/revoke", (HttpContext ctx) => ImportCommercialLicense(ctx, true))
+app.MapPost("/admin/api/license/revoke", (Delegate)(Func<HttpContext, Task<IResult>>)(ctx => ImportCommercialLicense(ctx, true)))
     .RequireAuthorization(policy => policy.RequireRole("Administrator"));
 #endif
 

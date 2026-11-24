@@ -55,13 +55,13 @@ public sealed class ApprovedJobExecutor(NpgsqlDataSource db, ECDsa signer, strin
             """,id) ?? throw new InvalidOperationException("Unknown subscription.");
         var committed=await Row("SELECT envelope FROM gc_issuer_results WHERE job_id=$1",jobId);
         if(committed is not null){await tx.CommitAsync();return (string?)committed[0];}
-        if((long)sub[7]!=(long)job[7]) throw new InvalidOperationException("Subscription changed; request new approval.");
+        if((long)sub[7]! != (long)job[7]!) throw new InvalidOperationException("Subscription changed; request new approval.");
         var terms=new Subscription(id,(string)sub[0]!, (string)sub[1]!, (string)sub[2]!,
             (int)sub[3]!, (int)sub[4]!, (long)sub[5]!, (string[])sub[6]!);
         // Existing allocations cannot silently switch to another signer.
         await Change("INSERT INTO gc_issuer_authority(subscription_id,key_id,public_key_hash) VALUES($1,$2,$3) ON CONFLICT DO NOTHING",id,keyId,keyHash);
         var authority=await Row("SELECT key_id,public_key_hash FROM gc_issuer_authority WHERE subscription_id=$1",id);
-        if(authority is null || (string)authority[0]!=keyId || (string)authority[1]!=keyHash)
+        if(authority is null || (string?)authority[0]!=keyId || (string?)authority[1]!=keyHash)
             throw new CryptographicException("Issuer authority mismatch; approved rotation required.");
 
         string? result=null;
@@ -92,7 +92,7 @@ public sealed class ApprovedJobExecutor(NpgsqlDataSource db, ECDsa signer, strin
             }
             else
             {
-                if(old[3] is not null || (string)old[1]!=site) throw new InvalidOperationException("Revoked allocation or unauthorized site transfer.");
+                if(old[3] is not null || (string?)old[1]!=site) throw new InvalidOperationException("Revoked allocation or unauthorized site transfer.");
                 allocation=(string)old[0]!;revision=checked((long)old[2]!+1);
             }
             var utc=now.ToUnixTimeSeconds();

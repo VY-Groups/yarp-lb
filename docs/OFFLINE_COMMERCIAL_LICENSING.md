@@ -51,3 +51,6 @@ Added a separate PostgreSQL-backed ASP.NET Core portal under tools/LicensePortal
 
 ## Database-backed approved signing path
 Added a separate PostgreSQL signing worker for independently approved jobs. It performs serialized seat/site allocation, exact request and terms-revision checks, transactional signed output storage, idempotent execution, offline revocation and approved subscription term changes. The portal has no signer key and only reads completed results. This is source committed and requires build/real PostgreSQL verification; company-side software credentials and permissions must be configured independently. The prototype does not claim resilient HA DB custody or MFA.
+
+### Real HTTP regression correction
+The Linux no-egress fixture reached the actual gateway and caught an ASP0016 route-handler overload defect: a Task<IResult> lambda selected RequestDelegate, silently discarding HTTP error/success results. The import and revoke routes now explicitly use the Delegate route-handler overload; commercial builds treat ASP0016 as an error. Existing expected HTTP statuses are unchanged. Repeat exact-head real-process acceptance required.
