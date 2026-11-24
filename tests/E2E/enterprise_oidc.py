@@ -3,6 +3,7 @@
 from __future__ import annotations
 import argparse
 import base64
+from copy import copy
 from contextlib import contextmanager
 import hashlib
 import json
@@ -337,11 +338,19 @@ def distributed_revocation(cwd,dll):
                 with patch.dict(os.environ,dict(shared,GATEWAY_OIDC_CONFIG_FILE=str(configs[0]))), gateway(cwd,dll,first,hp1,tls1):
                     with patch.dict(os.environ,dict(shared,GATEWAY_OIDC_CONFIG_FILE=str(configs[1]))), gateway(cwd,dll,second,hp2,tls2):
                         idp.gateway_origin=origin1
-                        a,_=browser(origin1,ctx);a.request("GET","/admin/oidc/start")
+                        a,jar_a=browser(origin1,ctx);a.request("GET","/admin/oidc/start")
                         idp.gateway_origin=origin2
-                        b,_=browser(origin2,ctx);b.request("GET","/admin/oidc/start")
+                        b,jar_b=browser(origin2,ctx);b.request("GET","/admin/oidc/start")
                         check(a.session()["authenticated"] and b.session()["authenticated"],
                             "two independent shipping gateways establish federated sessions")
+                        # Preserve actual pre-revocation cookie values in memory.
+                        # A rejected request can clear a browser jar, so using
+                        # the original jars later would create a false pass.
+                        old_a=[copy(c) for c in jar_a if c.name=="GatewayCoreYarpAdmin"]
+                        old_b=[copy(c) for c in jar_b if c.name=="GatewayCoreYarpAdmin"]
+                        check(bool(old_a) and bool(old_b),"retain real pre-logout session cookies")
+                        users_b=second/"state"/"admin-users.json"
+                        stale_users_b=users_b.read_bytes()
                         inventory=first/"state"/"inventory.json"
                         a.request("POST","/admin/api/inventory",{"id":"shared-fixture","name":"Shared fixture",
                             "type":"Service","address":"fixture.example.invalid","notes":"no external collector"})
@@ -393,12 +402,48 @@ def distributed_revocation(cwd,dll):
                                 except AssertionError:
                                     if time.monotonic()>=deadline: raise
                                     time.sleep(.25)
-                        fresh2,_=browser(origin2,ctx);fresh2.request("GET","/admin/oidc/start")
+                        fresh2,jar_fresh=browser(origin2,ctx);fresh2.request("GET","/admin/oidc/start")
                         check(fresh2.session()["authenticated"],"fresh authentication after durable authority recovery")
+                        new_b=[copy(c) for c in jar_fresh if c.name=="GatewayCoreYarpAdmin"]
+                        check(bool(new_b),"retain actual post-logout session cookie")
                         cli("DEL",cutoff_key)
                         check(not fresh2.session()["authenticated"],"missing authority record denies cookie")
                         backchannel(origin1,ctx,notice,503)
                         check(cli("EXISTS",cutoff_key)=="0","missing cutoff is never recreated implicitly")
+
+                # Both shipping gateway processes have exited. Simulate a
+                # restored older local account snapshot on B while the
+                # independently held durable cutoff remains authoritative.
+                # Restore only disposable fixture data, never a live service.
+                check(cli("SET",cutoff_key,str(stamp),"NX")=="OK",
+                    "fixture explicitly restores known-good durable cutoff")
+                restored=users_b.with_name("admin-users.fixture-restore")
+                write_private_fixture_file(restored,stale_users_b)
+                os.replace(restored,users_b)
+                stop_redis(redis_proc)
+                redis_proc=start_redis()
+                check(cli("GET",cutoff_key)==str(stamp),"cutoff survives second authority restart")
+                def replay(origin,cookies):
+                    client,jar=browser(origin,ctx)
+                    for cookie in cookies: jar.set_cookie(copy(cookie))
+                    return client
+                with patch.dict(os.environ,dict(shared,GATEWAY_OIDC_CONFIG_FILE=str(configs[0]))), gateway(cwd,dll,first,hp1,tls1):
+                    with patch.dict(os.environ,dict(shared,GATEWAY_OIDC_CONFIG_FILE=str(configs[1]))), gateway(cwd,dll,second,hp2,tls2):
+                        # A newer cookie must remain valid on B before the
+                        # negative probes, proving the restored node can
+                        # actually decrypt and authorize its persisted ring.
+                        check(replay(origin2,new_b).session()["authenticated"],
+                            "new cookie remains valid after gateway and authority restart with restored local account snapshot")
+                        check(not replay(origin1,old_a).session()["authenticated"],
+                            "original revoked cookie denied after issuer gateway restart")
+                        check(not replay(origin2,old_b).session()["authenticated"],
+                            "original revoked cookie denied on restored peer after gateway restart")
+                        revoked=replay(origin2,old_b)
+                        revoked.request("POST","/admin/api/inventory",
+                            {"id":"revoked-after-restart","name":"Forbidden","type":"Service",
+                             "address":"fixture.example.invalid","notes":"must not write"},expect=401)
+                        check(cli("GET",cutoff_key)==str(stamp),
+                            "old cookie replay cannot alter durable cutoff after restart")
             finally: stop_redis(redis_proc)
     print("DISTRIBUTED_OIDC_REVOCATION_HTTPS_SUCCESS",flush=True)
 
