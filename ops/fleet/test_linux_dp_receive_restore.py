@@ -90,6 +90,13 @@ class RecoveryTests(unittest.TestCase):
                                         invoke=self.fake_success)
         self.assertEqual(received,str(self.inbox/"rev8"))
         self.assertEqual(len(self.calls),1)
+        external_checkpoint = self.inbox/".rev8.signed-checkpoint.json"
+        self.assertTrue(external_checkpoint.is_file())
+        self.assertEqual(external_checkpoint.read_bytes(),
+                         b"NOT-A-VALID-P256-CHECKPOINT")
+        self.assertEqual(external_checkpoint.stat().st_mode & 0o077, 0)
+        self.assertTrue(recovery.disjoint(str(external_checkpoint),
+                                         str(self.inbox/"rev8")))
         with self.assertRaises(ValueError):
             recovery.restore_once(self.args,fetch=lambda *_:blob,
                                   invoke=self.fake_success)
