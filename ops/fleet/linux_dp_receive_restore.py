@@ -236,6 +236,7 @@ def restore_once(args, *, fetch=wire.fetch_pinned, stage=wire.stage_received,
     app = verify_restore_app(args.restore_bundle, args.restore_bundle_sha256)
     STAGE = "pinned-mtls-fetch"
     require_approved_authority(fence, "before-transfer")
+    require_signed_node_quiescence(proof, fence)
     binary = fetch(args.server_url, args.label, args.server_cert_sha256, args.ca,
                    args.certificate, args.private_key)
     if type(binary) is not bytes or len(binary) > wire.MAX_BUNDLE:
@@ -261,6 +262,7 @@ def restore_once(args, *, fetch=wire.fetch_pinned, stage=wire.stage_received,
                     fence.checkpoint_sha)):
             raise ValueError("received DP checkpoint differs from quorum epoch")
     require_approved_authority(fence, "after-transfer")
+    require_signed_node_quiescence(proof, fence)
     checkpoint = os.path.join(args.destination_root,
                               "." + args.label + ".signed-checkpoint.json")
     wire.safe_write(checkpoint, raw_checkpoint)
@@ -304,6 +306,7 @@ def restore_once(args, *, fetch=wire.fetch_pinned, stage=wire.stage_received,
         environment["DOTNET_ROOT_X64"] = runtime_root
     STAGE = "signed-dotnet-restore-subprocess"
     require_approved_authority(fence, "before-signed-restore")
+    require_signed_node_quiescence(proof, fence)
     restore_timeout = 180
     if fence is not None:
         # A 120s maximum etcd lease must NEVER authorize an unbounded 180s
@@ -349,6 +352,7 @@ def restore_once(args, *, fetch=wire.fetch_pinned, stage=wire.stage_received,
         os.close(directory)
     STAGE = "post-restore-quorum"
     require_approved_authority(fence, "after-signed-restore")
+    require_signed_node_quiescence(proof, fence)
     return received
 
 
