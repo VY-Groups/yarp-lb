@@ -3,7 +3,7 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main, feature/offline-commercial-licensing]
+    branches: [main, feature/offline-commercial-licensing, feature/commercial-fleet-proof]
     paths:
       - 'src/GatewayCore.Licensing/**'
       - 'src/CommercialEngine/**'

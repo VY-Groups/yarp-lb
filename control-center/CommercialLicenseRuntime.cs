@@ -130,6 +130,18 @@ internal sealed class CommercialLicenseRuntime : BackgroundService
         while (await timer.WaitForNextTickAsync(stoppingToken)) Refresh();
     }
 
+    internal static bool FleetRecoveryEndpoint(string method,PathString path)
+    {
+        if(method=="GET" && path=="/admin/api/fleet/rollouts")return true;
+        if(method!="POST" || path.Value is not string value)return false;
+        const string prefix="/admin/api/fleet/rollouts/";
+        const string suffix="/recover";
+        if(!value.StartsWith(prefix,StringComparison.OrdinalIgnoreCase) ||
+           !value.EndsWith(suffix,StringComparison.OrdinalIgnoreCase) ||
+           value.Length!=prefix.Length+32+suffix.Length)return false;
+        return FleetRolloutJournal.IsTransaction(value.Substring(prefix.Length,32));
+    }
+
     internal static bool RecoveryEndpoint(PathString path) =>
         path == "/admin/api/session" || path == "/admin/api/auth-methods" ||
         path == "/admin/api/bootstrap" || path == "/admin/api/login" ||

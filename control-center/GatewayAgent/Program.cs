@@ -11,7 +11,11 @@ using Microsoft.AspNetCore.Server.Kestrel.Https;
 #if GATEWAYCORE_COMMERCIAL
 if(EngineLicenseGate.VerifyReleaseOrExit(args,out var releaseExit)){Environment.ExitCode=releaseExit;return;}
 if(EngineLicenseGate.Command(args,out var licenseExit)){Environment.ExitCode=licenseExit;return;}
-using var engineLicense=EngineLicenseGate.Start("ha","fleet");
+// Local service operator can explicitly start an authenticated rollback-only
+// process even when normal startup is blocked by revoked/unreadable state.
+// This is never a remote setting and never grants deployment/service actions.
+var recoveryOnly=string.Equals(Environment.GetEnvironmentVariable("GATEWAYCORE_AGENT_RECOVERY_ONLY"),"true",StringComparison.Ordinal);
+using var engineLicense=recoveryOnly?null:EngineLicenseGate.Start("ha","fleet");
 #endif
 // Separate, least-privileged gateway-agent reference implementation.
 // Fail-closed: no trusted controller certificate = no remote access.
@@ -237,7 +241,9 @@ app.Use(async (ctx, next) =>
         (path.Equals("/agent/v1/config/rollback",StringComparison.OrdinalIgnoreCase) ||
          path.Equals("/agent/v1/engines/l4/config/rollback",StringComparison.OrdinalIgnoreCase) ||
          path.Equals("/agent/v1/engines/gslb/config/rollback",StringComparison.OrdinalIgnoreCase));
-    if(!rollback && (!engineLicense.Allows("ha") || !engineLicense.Allows("fleet") ||
+    var recoveryStatus=ctx.Request.Method=="GET" && path.Equals("/agent/v1/status",StringComparison.OrdinalIgnoreCase);
+    if(!rollback && !recoveryStatus &&
+        (recoveryOnly || engineLicense is null || !engineLicense.Allows("ha") || !engineLicense.Allows("fleet") ||
         (ctx.Request.Path.StartsWithSegments("/agent/v1/engines/l4") && !engineLicense.Allows("l4")) ||
         (ctx.Request.Path.StartsWithSegments("/agent/v1/engines/gslb") && !engineLicense.Allows("gslb"))))
     {ctx.Response.StatusCode=402;return;}
@@ -250,6 +256,7 @@ app.Use(async (ctx, next) =>
 // installation identity and exact persisted issuer envelope, never the TLS key.
 app.MapPost("/agent/v1/license/proof",(FleetLicenseChallenge input)=>
 {
+    if(engineLicense is null)return Results.StatusCode(402);
     try{return Results.Ok(new {proof=engineLicense.CreateFleetProof(input.Challenge)});}
     catch(Exception e) when(e is IOException or CryptographicException or InvalidDataException or
         JsonException or ArgumentException or InvalidOperationException or UnauthorizedAccessException or FormatException)

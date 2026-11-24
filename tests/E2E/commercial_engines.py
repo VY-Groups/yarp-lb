@@ -219,7 +219,37 @@ with tempfile.TemporaryDirectory(prefix="gc-engine-acceptance-") as td:
             else:raise AssertionError("Agent revocation import failed")
             time.sleep(4)
             proof_request(controller,origin,secrets.token_hex(32).upper(),expected=402)
+            def agent_call(method,path,data=None,expected=200,opener=controller):
+                body=None if data is None else json.dumps(data).encode()
+                req=urllib.request.Request(origin+path,data=body,method=method,headers={"Content-Type":"application/json"})
+                try:
+                    with opener.open(req,timeout=4) as response:status,result=response.status,response.read()
+                except urllib.error.HTTPError as exc:status,result=exc.code,exc.read()
+                assert status==expected,(path,status,result[:300])
+            agent_call("GET","/agent/v1/status")
+            agent_call("POST","/agent/v1/config/activate",{"transactionId":"rollout_"+"A"*24,"preparedRevision":"A"*64},expected=402)
+            agent_call("POST","/agent/v1/config/rollback",{"transactionId":"rollout_"+"A"*24},expected=403)
+            # Lab CA forbids config changes, so rollback must reach the
+            # existing disabled-config guard, not actually mutate a file.
+            last=processes[-1];last.terminate();last.wait(timeout=10)
+            rejected=run(agent,env=node_env,ok=False)
+            assert "Active engine feature entitlement required" in rejected.stderr
+            recovery_env=dict(node_env,GATEWAYCORE_AGENT_RECOVERY_ONLY="true")
+            restarted=subprocess.Popen(["dotnet",str(agent)],cwd=node,env=recovery_env,stdout=logs[-1],stderr=subprocess.STDOUT)
+            processes.append(restarted)
+            for _ in range(40):
+                try:
+                    agent_call("GET","/agent/v1/status")
+                    break
+                except (OSError,urllib.error.URLError):time.sleep(.25)
+            else:raise AssertionError("Rollback-only agent failed to start")
+            proof_request(controller,origin,secrets.token_hex(32).upper(),expected=402)
+            agent_call("POST","/agent/v1/config/prepare",{},expected=402)
+            agent_call("POST","/agent/v1/config/activate",{},expected=402)
+            agent_call("POST","/agent/v1/config/rollback",{"transactionId":"rollout_"+"A"*24},expected=403)
+            agent_call("GET","/agent/v1/status",expected=403,opener=client("untrusted-controller"))
             print("COMMERCIAL_REAL_TWO_AGENT_MTLS_SITE_PROOF_REVOCATION_PASS",flush=True)
+            print("COMMERCIAL_REVOKED_AGENT_ROLLBACK_ONLY_RESTART_PASS",flush=True)
         except Exception:
             for log in logs:log.flush();log.seek(0);print(log.read()[-5000:])
             raise
