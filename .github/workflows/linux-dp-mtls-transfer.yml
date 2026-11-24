@@ -1,0 +1,28 @@
+name: Offline Linux DP pinned mTLS transfer acceptance
+on:
+  push:
+    branches: [main, "feature/**"]
+    paths: ["ops/fleet/linux_dp_mtls_transport.py", "ops/fleet/test_linux_dp_mtls_transport.py", ".github/workflows/linux-dp-mtls-transfer.yml"]
+  pull_request:
+    paths: ["ops/fleet/linux_dp_mtls_transport.py", "ops/fleet/test_linux_dp_mtls_transport.py", ".github/workflows/linux-dp-mtls-transfer.yml"]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  pinned-mtls-relay:
+    name: Real loopback TLS mutual client/server certificate transfer, no-overwrite staging
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify real OpenSSL identities and stdlib mutual TLS transport
+        shell: bash
+        run: |
+          set -euo pipefail
+          openssl version
+          python3 -m unittest discover -s ops/fleet -p 'test_linux_dp_mtls_transport.py' -v
+      - name: Reject unauthorized external Python dependencies and compile source
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m py_compile ops/fleet/linux_dp_mtls_transport.py ops/fleet/test_linux_dp_mtls_transport.py
