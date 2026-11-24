@@ -46,6 +46,25 @@ class BoundedCorpusInputTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "symlink"):
                 gate.read_bounded_utf8(alias, gate.MAX_POLICY_BYTES)
 
+    def test_symlinked_parent_rejected_for_both_evidence_types(self):
+        with tempfile.TemporaryDirectory() as root:
+            base = Path(root)
+            actual = base / "actual"
+            actual.mkdir()
+            alias = base / "alias"
+            try:
+                alias.symlink_to(actual, target_is_directory=True)
+            except (OSError, NotImplementedError):
+                self.skipTest("directory symlinks unavailable")
+            for name, cap in (("policy.json", gate.MAX_POLICY_BYTES),
+                              ("corpus.csv", gate.MAX_CORPUS_BYTES)):
+                (actual / name).write_text("synthetic", encoding="utf-8")
+                with self.subTest(name=name), self.assertRaisesRegex(
+                        ValueError, "ancestor.*symlink"):
+                    gate.read_bounded_utf8(alias / name, cap)
+                self.assertEqual(gate.read_bounded_utf8(actual / name, cap),
+                                 "synthetic")
+
     @unittest.skipUnless(hasattr(os, "mkfifo") and hasattr(os, "O_NONBLOCK"),
                          "POSIX nonblocking FIFO opening required")
     def test_fifo_is_not_accepted_as_an_evidence_file(self):
