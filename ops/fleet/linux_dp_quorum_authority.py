@@ -258,6 +258,119 @@ class RecoveryLeaseIssuer(RecoveryFence):
             raise
 
 
+class RecoveryRevisionPublisher(RecoveryFence):
+    """Durable checkpoint publication with an atomic live-epoch CAS.
+
+    A separately authorized publisher may record an externally approved
+    recovery checkpoint. This is NOT a service promotion command or proof
+    that a signed .NET restore or traffic cutover has completed. The pointer
+    is never attached to the short-lived recovery lease. The verifier's
+    read-only identity must not have permission to mutate this namespace.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        fleet = self.key_name[len(KEY_PREFIX):]
+        self.pointer_name = "/gatewaycore/linux-dp/published/" + fleet
+        self.pointer_key = as_base64(self.pointer_name.encode("ascii"))
+
+    def _pointer_member(self, endpoint):
+        doc = self.client._post(endpoint, "/v3/kv/range",
+                                {"key": self.pointer_key, "serializable": False})
+        if type(doc) is not dict or type(doc.get("header")) is not dict:
+            raise ValueError("untrusted published checkpoint response")
+        header = doc["header"]
+        if (etcd.integer(header.get("cluster_id")) != self.client.cluster_id or
+                etcd.integer(header.get("member_id")) != endpoint[3]):
+            raise ValueError("published checkpoint member identity mismatch")
+        head_revision = etcd.integer(header.get("revision"))
+        if doc.get("count", "0") in ("0", 0) and doc.get("kvs") in (None, []):
+            return (endpoint, (0, 0, None))
+        if (type(doc.get("kvs")) is not list or len(doc["kvs"]) != 1 or
+                etcd.integer(doc.get("count")) != 1):
+            raise ValueError("ambiguous published checkpoint")
+        kv = doc["kvs"][0]
+        if (type(kv) is not dict or
+                base64.b64decode(kv.get("key", ""), validate=True) !=
+                self.pointer_name.encode("ascii") or
+                kv.get("lease", "0") not in ("0", 0)):
+            raise ValueError("published checkpoint must be durable and namespaced")
+        mod = etcd.integer(kv.get("mod_revision"))
+        if mod > head_revision or etcd.integer(kv.get("version")) < 1:
+            raise ValueError("stale published checkpoint metadata")
+        raw = base64.b64decode(kv.get("value", ""), validate=True)
+        record = etcd.strict_json(raw)
+        if (type(record) is not dict or set(record) != {
+                "schemaVersion", "kind", "revision", "checkpointSha256",
+                "senderNodeId", "receiverNodeId", "recoveryModRevision"} or
+                type(record["schemaVersion"]) is not int or
+                record["schemaVersion"] != 1 or record["kind"] != RECOVERY_KIND):
+            raise ValueError("invalid durable recovery pointer")
+        pinned_identity(record["senderNodeId"], record["receiverNodeId"],
+                        record["revision"], record["checkpointSha256"])
+        if (type(record["recoveryModRevision"]) is not int or
+                not 0 < record["recoveryModRevision"] < mod):
+            raise ValueError("invalid durable recovery epoch")
+        return (endpoint, (mod, record["revision"], raw))
+
+    def _pointer_quorum(self):
+        reads = []
+        for endpoint in self.client.endpoints:
+            try:
+                reads.append(self._pointer_member(endpoint))
+            except (OSError, ssl.SSLError, TimeoutError, http.client.HTTPException):
+                continue
+        if (len(reads) < 2 or
+                len({endpoint[3] for endpoint, _ in reads}) != len(reads) or
+                len({value for _, value in reads}) != 1):
+            raise ValueError("published recovery pointer lacks consistent quorum")
+        return reads[0]
+
+    def publish_once(self):
+        """Do not retry ambiguous writes; reconcile the durable pointer first."""
+        if not self.current("preflight"):
+            raise ValueError("independent recovery publication authority refused")
+        endpoint, (prior_mod, prior_revision, _) = self._pointer_quorum()
+        if self.revision <= prior_revision:
+            raise ValueError("replayed or rolled-back recovery revision refused")
+        if not self.current("after-signed-restore") or self.remaining_seconds() <= 5:
+            raise ValueError("recovery publication epoch no longer authorized")
+        cluster, recovery_mod, lease, holder = self._identity
+        record = {"schemaVersion": 1, "kind": RECOVERY_KIND,
+                  "revision": self.revision, "checkpointSha256": self.checkpoint_sha,
+                  "senderNodeId": self.sender, "receiverNodeId": self.receiver,
+                  "recoveryModRevision": recovery_mod}
+        raw = json.dumps(record, sort_keys=True, separators=(",", ":")).encode("ascii")
+        # These compares and the durable write execute in ONE Raft txn.
+        # A revocation/regrant between the last read and the commit cannot
+        # authorize the stale holder, even if its local clock still has TTL.
+        compares = [
+            {"result": "EQUAL", "target": "MOD", "key": self.key,
+             "modRevision": str(recovery_mod)},
+            {"result": "EQUAL", "target": "LEASE", "key": self.key,
+             "lease": str(lease)},
+            {"result": "EQUAL", "target": "MOD" if prior_mod else "CREATE",
+             "key": self.pointer_key,
+             ("modRevision" if prior_mod else "createRevision"): str(prior_mod)}
+        ]
+        response = self.client._post(endpoint, "/v3/kv/txn", {
+            "compare": compares,
+            "success": [{"requestPut": {"key": self.pointer_key,
+                                        "value": as_base64(raw)}}],
+            "failure": []})
+        header = response.get("header") if type(response) is dict else None
+        if (type(header) is not dict or
+                etcd.integer(header.get("cluster_id")) != cluster or
+                etcd.integer(header.get("member_id")) != endpoint[3] or
+                response.get("succeeded") is not True):
+            raise ValueError("recovery publication CAS contested or unverified")
+        committed_mod = etcd.integer(header.get("revision"))
+        _, confirmed = self._pointer_quorum()
+        if confirmed != (committed_mod, self.revision, raw):
+            raise ValueError("recovery publication outcome requires reconciliation")
+        return record
+
+
 RUNTIME_PREFIX = "/gatewaycore/linux-dp/runtime-writer/"
 RING_PREFIX = "/gatewaycore/linux-dp/runtime-ring/"
 MAX_RUNTIME_XML = 8192

@@ -29,6 +29,8 @@ from urllib.parse import urlsplit
 import zipfile
 
 MAX_BUNDLE = 32 * 1024 * 1024
+TRANSFER_CHUNK_BYTES = 64 * 1024
+TRANSFER_RECHECK_SECONDS = 1.0
 MAX_XML = 1024 * 1024
 MAX_MANIFEST = 16384
 MAX_XML_FILES = 512
@@ -227,7 +229,7 @@ def publish_no_replace(staging, final):
         raise ValueError("encrypted transfer target already exists or cannot be published")
 
 
-def stage_received(dest_root, label, blob):
+def stage_received(dest_root, label, blob, *, authorize_publish=None):
     valid_label(label)
     entries = verify_bundle(blob)
     root_fd = private_directory(dest_root)
@@ -249,6 +251,11 @@ def stage_received(dest_root, label, blob):
                     os.fsync(fd)
                 finally:
                     os.close(fd)
+            # Check authorization after all potentially slow writes and
+            # fsyncs, immediately before the no-replace namespace commit.
+            # The private temporary directory is removed on a veto.
+            if authorize_publish is not None and authorize_publish() is not True:
+                raise ValueError("encrypted archive publication not authorized")
             publish_no_replace(staging, final)
             # The source directory no longer exists after an atomic publish.
             os.fsync(root_fd)
@@ -398,14 +405,38 @@ class SnapshotHandler(BaseHTTPRequestHandler):
         if deadline is None:
             self.wfile.write(data)
             return
-        # Bound writes by the pinned runway. A short reply cannot pass the
-        # receiver's exact length and digest verification.
-        for offset in range(0, len(data), 64 * 1024):
-            left = deadline - time.monotonic()
+        # Reattest the same epoch during the response, including before
+        # its final chunk. No ciphertext is written while an authority
+        # query is in flight; a delayed query cannot extend the original
+        # deadline. Bytes already transmitted cannot be recalled.
+        fence = self.server.transfer_fence
+        next_check = time.monotonic()
+        for offset in range(0, len(data), TRANSFER_CHUNK_BYTES):
+            chunk = data[offset:offset + TRANSFER_CHUNK_BYTES]
+            now = time.monotonic()
+            if now >= deadline:
+                return
+            if now >= next_check or offset + len(chunk) == len(data):
+                try:
+                    if fence.current("before-transfer") is not True:
+                        return
+                    remaining = fence.remaining_seconds()
+                    if (type(remaining) not in (int, float) or
+                            not math.isfinite(remaining) or remaining <= 5):
+                        return
+                    now = time.monotonic()
+                    deadline = min(deadline, now + remaining - 5)
+                    next_check = now + TRANSFER_RECHECK_SECONDS
+                except (OSError, ValueError, TypeError, http.client.HTTPException):
+                    return
+            left = min(deadline, next_check) - time.monotonic()
             if left <= 0:
                 return
-            self.connection.settimeout(min(15, left))
-            self.wfile.write(data[offset:offset + 64 * 1024])
+            self.connection.settimeout(left)
+            try:
+                self.wfile.write(chunk)
+            except (OSError, TimeoutError):
+                return
 
     def do_POST(self):
         self.send_error(405, "method not allowed")

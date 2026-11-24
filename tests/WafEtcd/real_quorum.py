@@ -444,6 +444,19 @@ def main():
                     not fresh_waf.assert_current(NODES, 7, P, "before-receipt") or
                     verifier.assert_current(NODES, 7, P, "before-receipt")):
                 raise RuntimeError("independent DP lease changed existing WAF epoch")
+            STAGE = "real-dp-durable-checkpoint-publication"
+            publisher = dp_recovery.RecoveryRevisionPublisher(
+                "fleet-ci", endpoints, cluster, ca, writer_cert, writer_key,
+                "gateway-a", "gateway-b", 43, P)
+            published = publisher.publish_once()
+            if published["revision"] != 43 or published["checkpointSha256"] != P:
+                raise RuntimeError("real DP durable publication mismatch")
+            try:
+                publisher.publish_once()
+            except ValueError:
+                pass
+            else:
+                raise RuntimeError("duplicate DP publication was accepted")
             STAGE = "real-dp-recovery-contested-cas"
             try:
                 dp_issuer.issue_once()
@@ -464,6 +477,18 @@ def main():
                 "fleet-ci", endpoints, cluster, ca, writer_cert, writer_key,
                 "gateway-a", "gateway-b", 43, P, ttl=120)
             dp_new_epoch = dp_new_issuer.issue_once()
+            # The durable pointer survives revocation and cannot be replayed
+            # even by a newly issued recovery epoch at the same revision.
+            STAGE = "real-dp-durable-pointer-survives-revocation"
+            fresh_publisher = dp_recovery.RecoveryRevisionPublisher(
+                "fleet-ci", endpoints, cluster, ca, writer_cert, writer_key,
+                "gateway-a", "gateway-b", 43, P)
+            try:
+                fresh_publisher.publish_once()
+            except ValueError:
+                pass
+            else:
+                raise RuntimeError("new lease permitted replay of durable revision")
             if dp_new_epoch["holder"] == dp_receipt["holder"] or \
                     dp_verifier.current("after-signed-restore"):
                 raise RuntimeError("DP recovery old epoch survived Raft lease rollover")

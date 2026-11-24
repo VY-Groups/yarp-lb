@@ -40,23 +40,35 @@ public static class WindowsFleetKeyProtection
         // A local DPAPI-wrapped XML key from a legacy install CANNOT be
         // carried to a different Windows node. Reject a mixed ring before
         // creating an apparently portable fleet provider.
-        RejectLegacyOrUnwrappedKeyRing(encryptedKeyDirectory);
         var active = LoadPinnedMachineCertificate(current);
-        X509Certificate2? prior = previous is null
-            ? null : LoadPinnedMachineCertificate(previous);
+        X509Certificate2? prior = null;
+        try
+        {
+            prior = previous is null ? null :
+                LoadPinnedMachineCertificate(previous, decryptionOnlyPrevious: true);
+            RejectLegacyOrUnwrappedKeyRing(encryptedKeyDirectory, active, prior);
+        }
+        catch
+        {
+            active.Dispose();
+            prior?.Dispose();
+            throw;
+        }
 
         // No fallback to DPAPI or plaintext when an explicitly configured
         // fleet certificate is missing, expired, unusable or untrusted.
         builder.ProtectKeysWithCertificate(active);
         if (prior is not null)
-            builder.UnprotectKeysWithAnyCertificate(prior);
+            builder.UnprotectKeysWithAnyCertificate(active, prior);
         return true;
     }
 
 
-    private static void RejectLegacyOrUnwrappedKeyRing(string? directory)
+    private static void RejectLegacyOrUnwrappedKeyRing(string? directory,
+        X509Certificate2 active, X509Certificate2? previous)
     {
         const string protectionNamespace = "http://schemas.asp.net/2015/03/dataProtection";
+        const string signatureNamespace = "http://www.w3.org/2000/09/xmldsig#";
         const int maximumXmlFiles = 512;
         const int maximumXmlBytes = 131072;
         if (string.IsNullOrWhiteSpace(directory) || !Path.IsPathFullyQualified(directory) ||
@@ -115,8 +127,15 @@ public static class WindowsFleetKeyProtection
                             "Windows fleet key XML identity mismatch or duplicate");
                 }
                 var wrappedSecrets = 0;
+                var recipientCount = 0;
+                var envelopeDepth = -1;
                 while (reader.Read())
                 {
+                    if (reader.NodeType == XmlNodeType.EndElement &&
+                        reader.LocalName == "encryptedSecret" &&
+                        reader.NamespaceURI == protectionNamespace &&
+                        reader.Depth == envelopeDepth)
+                        envelopeDepth = -1;
                     if (reader.NodeType != XmlNodeType.Element) continue;
                     if (reader.LocalName == "masterKey" ||
                         (isRevocation && reader.LocalName == "encryptedSecret"))
@@ -144,11 +163,48 @@ public static class WindowsFleetKeyProtection
                             throw new InvalidOperationException(
                                 "Windows fleet key XML is not from the approved certificate decryptor");
                         wrappedSecrets++;
+                        if (envelopeDepth != -1 || reader.IsEmptyElement)
+                            throw new InvalidOperationException("Invalid Windows fleet certificate envelope");
+                        envelopeDepth = reader.Depth;
+                    }
+                    else if (isKey && envelopeDepth >= 0 &&
+                        reader.Depth > envelopeDepth &&
+                        reader.LocalName == "X509Certificate" &&
+                        reader.NamespaceURI == signatureNamespace)
+                    {
+                        // Only compare public recipient certificates. Never
+                        // decrypt or export historic key material during scan.
+                        // ReadSubtree avoids skipping the outer reader's next
+                        // sibling/end element when reading certificate text.
+                        string encoded;
+                        using (var subtree = reader.ReadSubtree())
+                        {
+                            subtree.MoveToContent();
+                            encoded = subtree.ReadElementContentAsString();
+                        }
+                        if (encoded.Length is < 1 or > 16384)
+                            throw new InvalidOperationException("Invalid Windows fleet recipient certificate");
+                        byte[] recipient;
+                        try { recipient = Convert.FromBase64String(encoded); }
+                        catch (FormatException ex)
+                        {
+                            throw new InvalidOperationException("Malformed Windows fleet recipient certificate", ex);
+                        }
+                        try
+                        {
+                            if (!CryptographicOperations.FixedTimeEquals(recipient, active.RawData) &&
+                                (previous is null || !CryptographicOperations.FixedTimeEquals(
+                                    recipient, previous.RawData)))
+                                throw new InvalidOperationException(
+                                    "Historic Windows fleet wrapping certificate cannot be retired while its keys remain");
+                            recipientCount++;
+                        }
+                        finally { CryptographicOperations.ZeroMemory(recipient); }
                     }
                 }
-                if (isKey && wrappedSecrets != 1)
+                if (isKey && (wrappedSecrets != 1 || recipientCount is < 1 or > 4))
                     throw new InvalidOperationException(
-                        "Windows fleet key XML requires exactly one certificate-wrapped secret");
+                        "Windows fleet key XML requires one approved certificate-wrapped secret");
             }
             finally
             {
@@ -168,7 +224,8 @@ public static class WindowsFleetKeyProtection
         return raw.ToUpperInvariant();
     }
 
-    internal static X509Certificate2 LoadPinnedMachineCertificate(string thumbprint)
+    internal static X509Certificate2 LoadPinnedMachineCertificate(string thumbprint,
+        bool decryptionOnlyPrevious = false)
     {
         using var store = new X509Store(StoreName.My, StoreLocation.LocalMachine);
         store.Open(OpenFlags.ReadOnly | OpenFlags.OpenExistingOnly);
@@ -186,7 +243,7 @@ public static class WindowsFleetKeyProtection
 
         var now = DateTime.UtcNow;
         if (cert.NotBefore.ToUniversalTime() > now ||
-            cert.NotAfter.ToUniversalTime() <= now.AddDays(1))
+            (!decryptionOnlyPrevious && cert.NotAfter.ToUniversalTime() <= now.AddDays(1)))
             throw new InvalidOperationException(
                 "Windows Data Protection wrapping certificate is inactive or near expiry");
 

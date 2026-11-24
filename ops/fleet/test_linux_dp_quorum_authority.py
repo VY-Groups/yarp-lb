@@ -44,6 +44,10 @@ class RecoveryAuthorityTests(unittest.TestCase):
         self.holder = None
         self.grants = self.txns = self.revocations = 0
         self.issued = None
+        self.pointer = None
+        self.pointer_mod = 0
+        self.publication_race = False
+        self.publication_count = 0
 
         def fake_post(endpoint, resource, body):
             m = endpoint[3]
@@ -53,7 +57,16 @@ class RecoveryAuthorityTests(unittest.TestCase):
                 1 if self.forge_member == m else m), "revision":"100"}
             if resource == "/v3/kv/range":
                 self.assertIs(body["serializable"], False)
-                self.assertEqual(body["key"], self.issuer.key)
+                if body["key"] != self.issuer.key:
+                    self.assertEqual(body["key"], dp.as_base64(
+                        b"/gatewaycore/linux-dp/published/fleet-ci"))
+                    data = {"header": dict(header, revision=str(max(100,self.pointer_mod)))}
+                    if self.pointer is not None:
+                        data.update(count="1", kvs=[{
+                            "key": body["key"], "value": self.pointer,
+                            "mod_revision": str(self.pointer_mod), "version": "1"
+                        }])
+                    return data
                 data = {"header": header}
                 if self.active:
                     value = dict(self.issued)
@@ -75,6 +88,24 @@ class RecoveryAuthorityTests(unittest.TestCase):
                 self.assertEqual(body["TTL"], "120")
                 return {"ID":str(self.lease), "TTL":"120"}
             if resource == "/v3/kv/txn":
+                if len(body["compare"]) == 3:
+                    self.publication_count += 1
+                    lease_mod, lease_id, previous = body["compare"]
+                    self.assertEqual(lease_mod, {"result":"EQUAL", "target":"MOD",
+                        "key":self.issuer.key, "modRevision":"90"})
+                    self.assertEqual(lease_id, {"result":"EQUAL", "target":"LEASE",
+                        "key":self.issuer.key, "lease":str(self.lease)})
+                    put = body["success"][0]["requestPut"]
+                    self.assertEqual(put["key"], previous["key"])
+                    self.assertNotIn("lease", put)
+                    if self.publication_race:
+                        self.active = False
+                    if not self.active or self.pointer_mod != int(previous.get(
+                            "modRevision",previous.get("createRevision"))):
+                        return {"header":header,"succeeded":False}
+                    self.pointer = put["value"]
+                    self.pointer_mod = 101
+                    return {"header":dict(header, revision="101"),"succeeded":True}
                 self.txns += 1
                 self.assertEqual(body["compare"][0]["createRevision"],"0")
                 self.assertEqual(body["success"][0]["requestPut"]["lease"],
@@ -171,6 +202,39 @@ class RecoveryAuthorityTests(unittest.TestCase):
         self.ttl = 3
         self.assertFalse(self.issuer.current("before-signed-restore"))
         self.assertFalse(self.issuer.current("after-signed-restore"))
+
+    def publisher(self):
+        publisher = dp.RecoveryRevisionPublisher(*self.params)
+        publisher.client._post = self.issuer.client._post
+        return publisher
+
+    def test_durable_publication_is_atomically_bound_to_live_epoch(self):
+        self.issuer.issue_once()
+        publisher = self.publisher()
+        result = publisher.publish_once()
+        self.assertEqual(result["revision"],43)
+        self.assertEqual(result["checkpointSha256"],CHECKPOINT)
+        self.assertEqual(result["recoveryModRevision"],90)
+        self.assertEqual(self.publication_count,1)
+        self.assertEqual(json.loads(base64.b64decode(self.pointer)),result)
+        with self.assertRaises(ValueError):
+            publisher.publish_once()
+        self.assertEqual(self.publication_count,1)
+
+    def test_revocation_between_last_observation_and_cas_cannot_publish(self):
+        self.issuer.issue_once()
+        self.publication_race = True
+        with self.assertRaises(ValueError):
+            self.publisher().publish_once()
+        self.assertEqual(self.publication_count,1)
+        self.assertIsNone(self.pointer)
+
+    def test_partition_before_publication_never_calls_cas(self):
+        self.issuer.issue_once()
+        self.disconnected.update({2,3})
+        with self.assertRaises(ValueError):
+            self.publisher().publish_once()
+        self.assertEqual(self.publication_count,0)
 
     def test_runtime_append_is_atomic_and_create_only(self):
         name = "key-11111111-2222-3333-4444-555555555555.xml"
