@@ -203,6 +203,32 @@ def main():
                         last_class = type(exc).__name__
                     time.sleep(.5)
             if cluster is None:
+                # CI uses only disposable synthetic certificates and a
+                # random disposable cluster. Examine bounded Docker logs
+                # privately; output ONLY allowlisted error *categories*,
+                # never raw etcd logs, IPs, certificate paths or content.
+                categories = {
+                    "dial": ("failed to dial", "dial tcp", "connection refused"),
+                    "raft": ("raft", "leader", "election"),
+                    "dns": ("no such host", "lookup", "resolve"),
+                    "peer": ("rafthttp", "peer became active", "peer became inactive"),
+                    "tls": ("tls:", "certificate", "x509"),
+                    "cluster": ("cluster id mismatch", "member id mismatch"),
+                    "network": ("network is unreachable", "no route to host"),
+                    "bind": ("bind: address already in use",),
+                    "auth": ("authentication", "permission denied"),
+                }
+                for idx, item in enumerate(created):
+                    report = subprocess.run(
+                        ["docker","logs","--tail","200",item],
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                        stdin=subprocess.DEVNULL, timeout=8, check=False)
+                    raw = (report.stdout + report.stderr)[:16384].decode(
+                        "utf-8", "replace").lower()
+                    labels = sorted(name for name, needles in categories.items()
+                                    if any(token in raw for token in needles))
+                    print("ETCD_DISPOSABLE_MEMBER_DIAG_" + str(idx+1) + "=" +
+                          (",".join(labels) if labels else "none"), flush=True)
                 states=[]
                 for item in created:
                     try:
