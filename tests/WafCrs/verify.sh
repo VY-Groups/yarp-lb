@@ -484,4 +484,7 @@ write_corpus_report 1
 # Requires genuine container HTTP allow/block, after-activation inspection,
 # private audit receipts and rejection of tampered signed evidence.
 python3 tests/WafCrs/live_signed_rollout.py "$COMPOSE"
+# Bind an independently approved generated exception to a real CRS parser,
+# exact-route requests and native 920420 denials in a disposable second stack.
+python3 tests/WafCrs/live_signed_exception_acceptance.py "$COMPOSE"
 echo "WAF_CRS_LAB_PASS"
