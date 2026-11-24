@@ -4,6 +4,84 @@
 
 
 
+## New 24 November 2026 software evidence (not site qualification)
+
+These are independently reviewed software components plus new pending-review
+components; the support matrix does **not** declare the original #48 complete.
+
+- **Windows source-host migration:** approved and merged PR #516, separate
+  real Windows Server 2022 .NET 10 DPAPI LocalMachine -> RSA3072+ X.509
+  rewrap with the original authentication cookie still readable, original
+  DPAPI XML unchanged, no plaintext fallback or unsafe overwrite; only an
+  explicitly quiesced **offline** source machine may perform this operation.
+- **Two-node Linux writer receipts:** approved/merged PR #517 at
+  `be17b012ef8b178c57464cc01e7ab1c9d828a245` with actual Ubuntu
+  systemd stop/effective runtime mask and distinct P-256 signing identities,
+  exact-head 8/8 success and post-merge main 7/7 success.
+- **Cryptographic/service hardening:** approved/merged PR #518 at
+  `00b566a744cd7505344dca84a96b3f745f9f10d0`, exact-head 16/16
+  success, with strict canonical P-256 SPKI, safe systemd `KillMode`,
+  and real mTLS + signed .NET restore integration. The combined fixture's
+  quorum responses are deterministic; independent three-member etcd
+  integration is exercised by its separate CI suite.
+- **Bounded live authority during restore:** independently reviewed and
+  merged PR #519 at `e14fe8cc6df66fcdcace47178023325d454d37da`;
+  exact-head 8/8 and postmerge main 7/7 passed. An offline .NET child
+  process is checked against pinned quorum and independent node signatures
+  while running, with bounded HTTPS attestations and whole process-group
+  termination on lease loss, missing proof, error or deadline, including
+  after the leader exits. This does **not** implement automatic lease
+  renewal, active traffic drain or node promotion.
+- **Two-process rolling certificate and lost-key DR:** independently
+  reviewed and merged PR #520 at `8b1248e49f7c98542fa720bc3453b07fdb9b764e`,
+  with 14/14 exact-head workflows passing after #519 integration. The
+  disposable Ubuntu `LinuxFleetRollingRecoveryTests` exercises two
+  private state roots and real .NET OS processes, new/previous RSA PFX
+  overlap, actual new key and cookie GUID, cross-process old/new cookie
+  continuity, rollback preserving both decrypt identities, fail-closed
+  previous-key loss, private escrow restore and cross-app isolation.
+  This is same-runner software, not two physical hosts or live traffic
+  promotion.
+- **Fail-closed historic XML certificate retirement:** PR #521 implements
+  mandatory all-top-level-`*.xml` encrypted key recipient verification,
+  distinguishes revocation documents, prevents startup with missing old
+  recipient key/certificate and detects alternative-name historic XML.
+  The revised integrated head `255758293798196c8d19b146023f905c6ec5fd94`
+  passed 15/15 CI; independent re-review/merge pending.
+- **Expired historic decrypt-only identity:** stacked PR #522 tests
+  existing-cookie decryption with a previously valid but now-expired old
+  RSA certificate; current writer validity/secure PFX constraints remain
+  mandatory, and encrypted ring XML remains unchanged. Full combined-head
+  CI and independent review are mandatory before merging.
+
+**Still not proven:** independently housed host service identities, live
+non-interrupted traffic through concurrent issuer/receiver updates,
+source and receiver key-ring writer fencing throughout a rolling live
+cutover, quorum-protected durable revision-floor commit and promotion,
+offline escrow with backup-custody evidence for loss of all keys, and real
+RHEL enforcing SELinux/systemd. These are not hidden by CI success.
+Software implementation/CI gaps remain #48; physical/site acceptance
+only is #36. #48 is NOT ACCEPTED.
+
+## Certificate expiration during staged rotation (decrypt-only retention)
+
+An active Linux fleet wrapper requires a currently valid RSA encryption leaf,
+including its minimum remaining validity window. A *previous* RSA wrapper
+is not allowed to generate newly persisted keys, but may have expired
+while encrypted historical XML and authentication cookies remain live.
+The runtime must permit that previous certificate's private key for
+**decryption only**, retaining strict RSA/key-encipherment, non-CA,
+permissions, owner-only PFX and separate password checks. New key XML
+must use the current unexpired RSA recipient only.
+
+Do not delete an expired previous private PFX based solely on the public
+X.509 NotAfter timestamp. Retire it only after verified expiry/revocation
+of every session and backup depending on that XML key, followed by
+approved retention and attested data-destruction handling. An expired
+certificate is not authorized as the active new-key writer. Dispose
+only disposable test keys in CI; host service owners must keep custody
+and audit of historic decrypt identities.
+
 ## Latest automated evidence (2026-11-23; CI only)
 
 These runs exercise real processes on disposable GitHub-hosted runners. They update the rows below but do **not** qualify an operator-managed installation or production platform.
@@ -27,7 +105,7 @@ The supported/unsupported matrix is **unverified** until all rows below have act
 | Ubuntu 24.04 systemd | encrypted certificate-backed key ring | real headless restart, XML inspection, permissions, key loss/restore | CI PASS for encrypted ring, permissions and restart cookie continuity; customer VM key-loss/restore NOT RUN |
 | RHEL 9 systemd | encrypted certificate-backed key ring | SELinux enforcing, file contexts, headless restart and recovery | RHEL host NOT RUN; UBI 9 userspace suite passed, but host systemd/SELinux remain unqualified |
 | Linux container | explicit persistent encrypted volume and recovery material | restart/recreate with volume, fail closed without wrapper | NOT RUN |
-| Cross-machine shared fleet | explicitly provisioned shared encryption and key-ring identity | cookie continuity, staged rotation, rollback and partition | NOT RUN |
+| Cross-machine shared fleet | explicitly provisioned shared encryption and key-ring identity | cookie continuity, staged rotation, rollback and partition | Disposable two-process Linux CI rotation/rollback/lost-key rehearsal PASS; truly independent hosts, real traffic, quorum-controlled live promotion and partition still NOT RUN |
 
 ## Baseline and evidence capture
 
@@ -76,3 +154,7 @@ For **every case**, retain: source SHA, OS/runtime, disposable fixture SHA256, e
 ## Release decision and issue boundary
 
 A #48 software PASS requires merged implementation, Windows and Linux exact-head CI, real disposable service restart and negative tests, deterministic recovery/rotation/anti-rollback tests, supported-platform matrix, offline dependency/install/rollback instructions, and independent review. Any missing code or disposable-lab test stays **#48**. Only authorized physical site identity/PKI/HSM/backup restore and operational drills transfer to **#36**. Preserve Windows DPAPI defaults and existing L7/HA thresholds. Do not publish a release or declare production GO based on this matrix.
+
+## Opt-in Linux read-only fleet replica boundary
+
+Set `YARP_LINUX_DP_FLEET_REPLICA=true` on a provisioned secondary with a nonempty, previously approved encrypted key ring. Automatic key generation is disabled and the actual ASP.NET Core XML repository rejects explicit key creation and revocation writes. A replica can use existing shared keys to protect and unprotect sessions; the test checks byte-identical persistence after rejected mutations. `false` or absent preserves standalone behavior; other values fail closed. This mode does not make the filesystem read-only, authenticate future file changes, confer writer authority, or make local key activation a distributed transaction. Continuous independent writer fencing and coordinated traffic cutover remain required. Do not use an environment toggle as a promotion protocol.

@@ -1,0 +1,48 @@
+name: Real Windows DPAPI to fleet certificate migration
+on:
+  pull_request:
+    paths:
+      - "control-center/tools/WindowsDpFleetMigration/**"
+      - "control-center/tests/WindowsDpFleetMigrationTests/**"
+      - "control-center/WindowsStateProtection.cs"
+      - "control-center/WindowsFleetKeyProtection.cs"
+      - ".github/workflows/windows-dpapi-fleet-migration.yml"
+  push:
+    branches: [main]
+    paths:
+      - "control-center/tools/WindowsDpFleetMigration/**"
+      - "control-center/tests/WindowsDpFleetMigrationTests/**"
+      - "control-center/WindowsStateProtection.cs"
+      - "control-center/WindowsFleetKeyProtection.cs"
+      - ".github/workflows/windows-dpapi-fleet-migration.yml"
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  windows-offline-real-dpapi-rewrap:
+    runs-on: windows-2022
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+      - name: Publish independently invoked .NET 10 Windows migration executable
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          dotnet publish control-center/tools/WindowsDpFleetMigration/WindowsDpFleetMigration.csproj -c Release -o "$env:RUNNER_TEMP\offline-dp-migration"
+          if ($LASTEXITCODE -ne 0) { throw 'Offline .NET migration publishing failed' }
+          if (!(Test-Path "$env:RUNNER_TEMP\offline-dp-migration\WindowsDpFleetMigration.dll")) {
+            throw 'Published Windows DPAPI migration assembly missing'
+          }
+      - name: Real DPAPI LocalMachine to X509 rewrap and old-cookie continuity
+        shell: pwsh
+        env:
+          GITHUB_ACTIONS: "true"
+          RUNNER_OS: Windows
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $env:DP_MIGRATION_ASSEMBLY = "$env:RUNNER_TEMP\offline-dp-migration\WindowsDpFleetMigration.dll"
+          dotnet run --project control-center/tests/WindowsDpFleetMigrationTests/WindowsDpFleetMigrationTests.csproj --configuration Release
+          if ($LASTEXITCODE -ne 0) { throw 'Real Windows offline DPAPI migration acceptance failed' }

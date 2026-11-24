@@ -7,6 +7,11 @@ on:
     paths:
       - "control-center/**"
       - "ops/acceptance/**"
+      - "ops/fleet/linux_dp_real_restore_e2e.py"
+      - "ops/fleet/linux_dp_receive_restore.py"
+      - "ops/fleet/linux_dp_restore_watchdog.py"
+      - "ops/fleet/test_linux_dp_restore_watchdog.py"
+      - "ops/fleet/linux_dp_mtls_transport.py"
       - "tests/CI/branding/**"
       - ".github/workflows/control-center-ci.yml"
       - "tests/E2E/peer_delta_http.py"
@@ -15,6 +20,11 @@ on:
     paths:
       - "control-center/**"
       - "ops/acceptance/**"
+      - "ops/fleet/linux_dp_real_restore_e2e.py"
+      - "ops/fleet/linux_dp_receive_restore.py"
+      - "ops/fleet/linux_dp_restore_watchdog.py"
+      - "ops/fleet/test_linux_dp_restore_watchdog.py"
+      - "ops/fleet/linux_dp_mtls_transport.py"
       - "tests/CI/branding/**"
       - ".github/workflows/control-center-ci.yml"
       - "tests/E2E/peer_delta_http.py"
@@ -69,6 +79,12 @@ jobs:
       - name: Verify Linux production Data Protection RSA encryption and rotation
         if: runner.os == 'Linux'
         run: dotnet run --project tests/LinuxKeyProtectionTests/LinuxKeyProtectionTests.csproj --configuration Release
+      - name: Real two-process Linux fleet key rotation and lost-key recovery
+        if: runner.os == 'Linux'
+        env:
+          GITHUB_ACTIONS: "true"
+          RUNNER_OS: "Linux"
+        run: dotnet run --project tests/LinuxFleetRollingRecoveryTests/LinuxFleetRollingRecoveryTests.csproj --configuration Release
       - name: Reject unsafe legacy-state cutover without modifying users or keys
         run: dotnet run --project tests/LegacyStateGuardTests/LegacyStateGuardTests.csproj --configuration Release
       - name: Verify real Control Center EC2 CI-only TLS safety and allowlist

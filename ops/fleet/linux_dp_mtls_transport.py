@@ -13,6 +13,7 @@ import hashlib
 import hmac
 import http.client
 import io
+import math
 import os
 from pathlib import Path
 import re
@@ -22,11 +23,14 @@ import stat
 import sys
 import tempfile
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
 import zipfile
 
 MAX_BUNDLE = 32 * 1024 * 1024
+TRANSFER_CHUNK_BYTES = 64 * 1024
+TRANSFER_RECHECK_SECONDS = 1.0
 MAX_XML = 1024 * 1024
 MAX_MANIFEST = 16384
 MAX_XML_FILES = 512
@@ -225,7 +229,7 @@ def publish_no_replace(staging, final):
         raise ValueError("encrypted transfer target already exists or cannot be published")
 
 
-def stage_received(dest_root, label, blob):
+def stage_received(dest_root, label, blob, *, authorize_publish=None):
     valid_label(label)
     entries = verify_bundle(blob)
     root_fd = private_directory(dest_root)
@@ -247,6 +251,11 @@ def stage_received(dest_root, label, blob):
                     os.fsync(fd)
                 finally:
                     os.close(fd)
+            # Check authorization after all potentially slow writes and
+            # fsyncs, immediately before the no-replace namespace commit.
+            # The private temporary directory is removed on a veto.
+            if authorize_publish is not None and authorize_publish() is not True:
+                raise ValueError("encrypted archive publication not authorized")
             publish_no_replace(staging, final)
             # The source directory no longer exists after an atomic publish.
             os.fsync(root_fd)
@@ -359,6 +368,31 @@ class SnapshotHandler(BaseHTTPRequestHandler):
                 self.headers.get("Transfer-Encoding") is not None:
             self.send_error(404, "not found")
             return
+        # Serialize fenced transfers so a concurrent request cannot change
+        # the shared epoch observation while a response is being sent.
+        if not self.server.transfer_lock.acquire(blocking=False):
+            self.send_error(503, "transfer unavailable")
+            return
+        try:
+            deadline = None
+            fence = self.server.transfer_fence
+            if fence is not None:
+                try:
+                    if fence.current("before-transfer") is not True:
+                        raise ValueError("recovery authority refused")
+                    remaining = fence.remaining_seconds()
+                    if (type(remaining) not in (int, float) or
+                            not math.isfinite(remaining) or remaining <= 5):
+                        raise ValueError("insufficient recovery runway")
+                    deadline = time.monotonic() + remaining - 5
+                except (OSError, ValueError, TypeError, http.client.HTTPException):
+                    self.send_error(503, "transfer unavailable")
+                    return
+            self.send_snapshot(deadline)
+        finally:
+            self.server.transfer_lock.release()
+
+    def send_snapshot(self, deadline):
         data = self.server.encrypted_bundle
         self.send_response(200)
         self.send_header("Content-Type", CONTENT_TYPE)
@@ -367,27 +401,75 @@ class SnapshotHandler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.send_header("Connection", "close")
         self.end_headers()
-        self.wfile.write(data)
+        self.close_connection = True
+        if deadline is None:
+            self.wfile.write(data)
+            return
+        # Reattest the same epoch during the response, including before
+        # its final chunk. No ciphertext is written while an authority
+        # query is in flight; a delayed query cannot extend the original
+        # deadline. Bytes already transmitted cannot be recalled.
+        fence = self.server.transfer_fence
+        next_check = time.monotonic()
+        for offset in range(0, len(data), TRANSFER_CHUNK_BYTES):
+            chunk = data[offset:offset + TRANSFER_CHUNK_BYTES]
+            now = time.monotonic()
+            if now >= deadline:
+                return
+            if now >= next_check or offset + len(chunk) == len(data):
+                try:
+                    if fence.current("before-transfer") is not True:
+                        return
+                    remaining = fence.remaining_seconds()
+                    if (type(remaining) not in (int, float) or
+                            not math.isfinite(remaining) or remaining <= 5):
+                        return
+                    now = time.monotonic()
+                    deadline = min(deadline, now + remaining - 5)
+                    next_check = now + TRANSFER_RECHECK_SECONDS
+                except (OSError, ValueError, TypeError, http.client.HTTPException):
+                    return
+            left = min(deadline, next_check) - time.monotonic()
+            if left <= 0:
+                return
+            self.connection.settimeout(left)
+            try:
+                self.wfile.write(chunk)
+            except (OSError, TimeoutError):
+                return
 
     def do_POST(self):
         self.send_error(405, "method not allowed")
 
 
 def make_server(bind, port, bundle, label, approved_client, ca, cert, key,
-                allow_nonloopback=False):
-    if bind != "127.0.0.1" and not allow_nonloopback:
-        raise ValueError("remote listener requires explicit nonloopback opt-in")
+                allow_nonloopback=False, *, fence=None):
+    if bind != "127.0.0.1" and (not allow_nonloopback or fence is None):
+        raise ValueError("remote listener requires explicit opt-in and independent recovery quorum")
     if type(port) is not int or not 0 <= port <= 65535:
         raise ValueError("invalid pinned listener port")
     valid_label(label)
     approved_client = pin(approved_client)
     if type(bundle) is not bytes or not 0 < len(bundle) <= MAX_BUNDLE:
         raise ValueError("invalid encrypted transfer")
+    if fence is not None:
+        checkpoint = verify_bundle(bundle)["checkpoint.json"]
+        if (type(fence.checkpoint_sha) is not str or
+                not hmac.compare_digest(hashlib.sha256(checkpoint).hexdigest().upper(),
+                                        fence.checkpoint_sha) or
+                fence.current("preflight") is not True):
+            raise ValueError("snapshot is not authorized by independent recovery quorum")
+        remaining = fence.remaining_seconds()
+        if (type(remaining) not in (int, float) or
+                not math.isfinite(remaining) or remaining <= 5):
+            raise ValueError("insufficient recovery runway")
     srv = SnapshotServer((bind, port), SnapshotHandler)
     try:
         srv.approved_label = label
         srv.encrypted_bundle = bundle
         srv.client_pin = approved_client
+        srv.transfer_fence = fence
+        srv.transfer_lock = threading.Lock()
         # Keep the listening socket PLAINTEXT internally. Every accepted
         # peer is wrapped + handshaken only inside a bounded worker thread,
         # before BaseHTTPRequestHandler sees any request bytes.
@@ -439,6 +521,38 @@ def fetch_pinned(server_url, label, expected_server_pin, ca, cert, key):
         conn.close()
 
 
+def build_sender_fence(args):
+    """Read operator-provisioned authority, never the snapshot itself."""
+    names = ("fleet_quorum_inventory", "fleet", "sender_node_id",
+             "receiver_node_id", "recovery_revision", "checkpoint_sha256",
+             "etcd_ca", "etcd_certificate", "etcd_private_key")
+    values = [getattr(args, name, None) for name in names]
+    if all(value is None for value in values):
+        return None
+    if any(value is None for value in values):
+        raise ValueError("incomplete independent sender recovery authority")
+    import linux_dp_quorum_authority as authority
+    source = canonical_absolute(args.source_root)
+    for item in (args.fleet_quorum_inventory, args.etcd_ca,
+                 args.etcd_certificate, args.etcd_private_key):
+        item = canonical_absolute(item)
+        if os.path.commonpath((source, item)) == source:
+            raise ValueError("sender recovery authority overlaps snapshot source")
+    config = authority.etcd.strict_json(
+        read_private_path(args.fleet_quorum_inventory, 8192))
+    if (type(config) is not dict or set(config) !=
+            {"schemaVersion", "fleet", "clusterId", "endpoints"} or
+            type(config["schemaVersion"]) is not int or
+            config["schemaVersion"] != 1 or config["fleet"] != args.fleet or
+            type(config["endpoints"]) is not list):
+        raise ValueError("invalid independent sender quorum inventory")
+    return authority.RecoveryFence(
+        args.fleet, config["endpoints"], config["clusterId"],
+        args.etcd_ca, args.etcd_certificate, args.etcd_private_key,
+        args.sender_node_id, args.receiver_node_id, args.recovery_revision,
+        args.checkpoint_sha256)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="operation", required=True)
@@ -450,6 +564,11 @@ def main(argv=None):
     host.add_argument("--port", type=int, required=True)
     host.add_argument("--allow-nonloopback", action="store_true")
     host.add_argument("--client-cert-sha256", required=True)
+    for name in ("fleet-quorum-inventory", "fleet", "sender-node-id",
+                 "receiver-node-id", "checkpoint-sha256", "etcd-ca",
+                 "etcd-certificate", "etcd-private-key"):
+        host.add_argument("--" + name)
+    host.add_argument("--recovery-revision", type=int)
     receive = commands.add_parser("receive")
     receive.add_argument("--server-url", required=True)
     receive.add_argument("--server-cert-sha256", required=True)
@@ -462,11 +581,13 @@ def main(argv=None):
     args = parser.parse_args(argv)
     try:
         if args.operation == "serve":
+            fence = build_sender_fence(args)
             bundle = build_bundle(args.source_root, args.label, args.checkpoint)
             with make_server(args.listen, args.port, bundle, args.label,
                              args.client_cert_sha256, args.ca,
                              args.certificate, args.private_key,
-                             allow_nonloopback=args.allow_nonloopback) as server:
+                             allow_nonloopback=args.allow_nonloopback,
+                             fence=fence) as server:
                 print("PASS: pinned-mTLS encrypted read-only DP relay ready",
                       flush=True)
                 server.serve_forever(poll_interval=.25)

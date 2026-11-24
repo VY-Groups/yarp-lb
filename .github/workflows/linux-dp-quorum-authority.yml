@@ -1,0 +1,28 @@
+name: Linux DP independent recovery quorum contracts
+on:
+  push:
+    branches: [main, "feature/**"]
+    paths:
+      - "ops/fleet/linux_dp_quorum_authority.py"
+      - "ops/fleet/test_linux_dp_quorum_authority.py"
+      - ".github/workflows/linux-dp-quorum-authority.yml"
+  pull_request:
+    paths:
+      - "ops/fleet/linux_dp_quorum_authority.py"
+      - "ops/fleet/test_linux_dp_quorum_authority.py"
+      - ".github/workflows/linux-dp-quorum-authority.yml"
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  isolated-authority:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate strict signed-recovery lease identity and 2-of-3 CAS
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m py_compile ops/fleet/linux_dp_quorum_authority.py ops/fleet/test_linux_dp_quorum_authority.py
+          python3 -m unittest discover -s ops/fleet -p test_linux_dp_quorum_authority.py -v

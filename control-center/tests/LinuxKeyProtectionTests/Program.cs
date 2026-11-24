@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Xml.Linq;
 using Microsoft.AspNetCore.DataProtection;
+using Microsoft.AspNetCore.DataProtection.KeyManagement;
 using Microsoft.Extensions.DependencyInjection;
 
 static void Assert(bool condition, string message)
@@ -57,7 +58,8 @@ var previousEnv=new[] {
     LinuxDpRecoveryEvidence.ManifestEnv, LinuxDpRecoveryEvidence.PublicKeyEnv,
     LinuxDpRecoveryEvidence.MinimumRevisionEnv,
     LinuxDpRecoveryEvidence.MinimumRevisionFileEnv,
-    LinuxDpRecoveryEvidence.RequireEvidenceEnv
+    LinuxDpRecoveryEvidence.RequireEvidenceEnv,
+    LinuxKeyProtection.FleetReplicaSetting
 }.ToDictionary(k=>k,k=>Environment.GetEnvironmentVariable(k));
 void Set(string key,string? value) => Environment.SetEnvironmentVariable(key,value);
 // A hard link has a different pathname but the same backing inode; neither
@@ -80,7 +82,8 @@ void MakeHardLink(string existingFile, string additionalPath)
 }
 (string Pfx,string PasswordFile) CreateCertificate(string prefix,
     X509KeyUsageFlags? keyUsage=X509KeyUsageFlags.KeyEncipherment|X509KeyUsageFlags.DataEncipherment,
-    bool isCa=false, bool includeBasicConstraints=true)
+    bool isCa=false, bool includeBasicConstraints=true,
+    DateTimeOffset? notBefore=null, DateTimeOffset? notAfter=null)
 {
     using var rsa=RSA.Create(3072);
     var request=new CertificateRequest("CN=DP "+prefix,rsa,
@@ -89,8 +92,9 @@ void MakeHardLink(string existingFile, string additionalPath)
         request.CertificateExtensions.Add(new X509BasicConstraintsExtension(isCa,false,0,true));
     if(keyUsage is { } flags)
         request.CertificateExtensions.Add(new X509KeyUsageExtension(flags,true));
-    using var cert=request.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1),
-        DateTimeOffset.UtcNow.AddDays(30));
+    using var cert=request.CreateSelfSigned(
+        notBefore ?? DateTimeOffset.UtcNow.AddDays(-1),
+        notAfter ?? DateTimeOffset.UtcNow.AddDays(30));
     var pass=Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
     var pfx=Path.Combine(secrets,prefix+".pfx");
     var secret=Path.Combine(secrets,prefix+".password");
@@ -146,6 +150,7 @@ static bool Throws(Action action)
 }
 try
 {
+    Set(LinuxKeyProtection.FleetReplicaSetting,null);
     var first=CreateCertificate("first");
     var second=CreateCertificate("second");
     Set("YARP_CONTROL_PLANE_DIR",state);
@@ -233,6 +238,41 @@ try
         Assert(dp.Unprotect(encrypted)=="sensitive-session-value-123",
             "session value decrypts across a new service provider using persisted key ring");
     }
+    // Enforce the read-only replica boundary using real Data Protection
+    // repository persistence rather than a mocked writer.
+    var beforeReplica = keyFiles.ToDictionary(p=>p,p=>SHA256.HashData(File.ReadAllBytes(p)));
+    Set(LinuxKeyProtection.FleetReplicaSetting,"true");
+    using(var replica=Provider(state))
+    {
+        var dp=replica.GetRequiredService<IDataProtectionProvider>()
+            .CreateProtector("session-probe");
+        Assert(dp.Unprotect(encrypted)=="sensitive-session-value-123",
+            "read-only fleet replica decrypts an existing cookie");
+        var minted=dp.Protect("replica-cookie");
+        Assert(dp.Unprotect(minted)=="replica-cookie",
+            "fleet replica serves sessions with the existing key");
+        var manager=replica.GetRequiredService<IKeyManager>();
+        Assert(Throws(()=>manager.CreateNewKey(DateTimeOffset.UtcNow,
+                DateTimeOffset.UtcNow.AddDays(14))),
+            "explicit key creation is refused on a read-only replica");
+        Assert(Throws(()=>manager.RevokeAllKeys(DateTimeOffset.UtcNow)),
+            "explicit revocation writes are refused on a read-only replica");
+    }
+    var afterReplica = Directory.GetFiles(Path.Combine(state,"data-protection-keys"),"*.xml");
+    Assert(afterReplica.Length==beforeReplica.Count &&
+           afterReplica.All(p=>beforeReplica.TryGetValue(p,out var hash) &&
+               SHA256.HashData(File.ReadAllBytes(p)).SequenceEqual(hash)),
+        "replica operations leave all encrypted repository XML unchanged");
+    var emptyReplica = Path.Combine(root,"empty-read-only-fleet-replica");
+    Set("YARP_CONTROL_PLANE_DIR",emptyReplica);
+    LinuxKeyProtection.InitializeStateDirectory();
+    Assert(Throws(()=>{using var _=Provider(emptyReplica);}),
+        "empty fleet replica refuses startup rather than generating a key");
+    Set("YARP_CONTROL_PLANE_DIR",state);
+    Set(LinuxKeyProtection.FleetReplicaSetting,"TRUE");
+    Assert(Throws(()=>{using var _=Provider(state);}),
+        "ambiguous fleet replica setting fails closed");
+    Set(LinuxKeyProtection.FleetReplicaSetting,null);
     // Two distinct private state roots simulate separate on-prem Linux
     // instances. Provision only the same operator-approved wrapping identity
     // and a byte-for-byte copy of encrypted XML; never create plaintext keys
@@ -683,6 +723,150 @@ try
             LinuxDpRecoveryEvidence.ComputeInventoryDigest(
                 Path.Combine(backupRoot,"data-protection-keys"))==inventoryBeforeCommit,
             "real CLI restores P-256-signed ciphertext into only an absent isolated key ring");
+
+        // End-to-end software acceptance must execute the ACTUAL published
+        // signed .NET restore after an actual OpenSSL mutual-TLS transfer,
+        // not only separate transport/restore tests or a mock Python process.
+        var deliveredState = Path.Combine(root, "pinned-mtls-restored-state");
+        var deliveredInbox = Path.Combine(root, "pinned-mtls-receiver-inbox");
+        Directory.CreateDirectory(deliveredState, PrivateDir);
+        Directory.CreateDirectory(deliveredInbox, PrivateDir);
+        var deliveredApphostRoot = Path.GetFullPath(Path.Combine(
+            "tools", "LinuxDpEncryptedSnapshot", "bin", "Release", "net10.0"));
+        var deliveredApphost = Path.Combine(deliveredApphostRoot, "LinuxDpEncryptedSnapshot");
+        Assert(File.Exists(deliveredApphost), "real signed restore apphost exists after CLI build");
+        var deliveredHarness = Path.GetFullPath(Path.Combine(
+            "..", "ops", "fleet", "linux_dp_real_restore_e2e.py"));
+        Assert(File.Exists(deliveredHarness), "real pinned mTLS to .NET restore harness exists");
+        // Hosted SDK caches may be group-/other-writable for CI installation.
+        // NEVER relax the receiver's production filesystem requirements to
+        // accommodate that shared cache. Instead stage only this disposable
+        // runner's running .NET host, hostfxr and Microsoft.NETCore.App into
+        // a fresh, private 0700 tree, preserving executable bits for native
+        // files and forbidding a symlinked destination.
+        var executingRuntimeDirectory =
+            System.Runtime.InteropServices.RuntimeEnvironment.GetRuntimeDirectory();
+        var installedDotnetRoot = Path.GetFullPath(Path.Combine(
+            executingRuntimeDirectory, "..", "..", ".."));
+        var approvedDotnetRoot = Path.Combine(root, "owner-private-net10-host");
+        Directory.CreateDirectory(approvedDotnetRoot, PrivateDir);
+        void PrivateRuntimeCopy(string input, string output)
+        {
+            Directory.CreateDirectory(output, PrivateDir);
+            foreach (var sourceFile in Directory.EnumerateFiles(input))
+            {
+                var destination = Path.Combine(output, Path.GetFileName(sourceFile));
+                File.Copy(sourceFile, destination, overwrite: false);
+                var mode = File.GetUnixFileMode(sourceFile);
+                var executable = (mode & (UnixFileMode.UserExecute |
+                    UnixFileMode.GroupExecute | UnixFileMode.OtherExecute)) != 0;
+                File.SetUnixFileMode(destination, PrivateFile |
+                    (executable ? UnixFileMode.UserExecute : 0));
+            }
+            foreach (var sourceDir in Directory.EnumerateDirectories(input))
+                PrivateRuntimeCopy(sourceDir, Path.Combine(
+                    output, Path.GetFileName(sourceDir)));
+        }
+        var sourceHost = Path.Combine(installedDotnetRoot, "dotnet");
+        Assert(File.Exists(sourceHost), "current .NET 10 runtime host exists");
+        var destinationHost = Path.Combine(approvedDotnetRoot, "dotnet");
+        File.Copy(sourceHost, destinationHost);
+        File.SetUnixFileMode(destinationHost,
+            PrivateFile | UnixFileMode.UserExecute);
+        var runtimeVersion = Path.GetFileName(Path.TrimEndingDirectorySeparator(
+            executingRuntimeDirectory));
+        var privateShared = Path.Combine(approvedDotnetRoot, "shared",
+            "Microsoft.NETCore.App", runtimeVersion);
+        PrivateRuntimeCopy(executingRuntimeDirectory, privateShared);
+        var sourceFxrRoot = Path.Combine(installedDotnetRoot, "host", "fxr");
+        var fxrVersions = Directory.GetDirectories(sourceFxrRoot)
+            .Where(name => Version.TryParse(Path.GetFileName(name), out var v)
+                && v.Major == Environment.Version.Major)
+            .OrderByDescending(name => Version.Parse(Path.GetFileName(name)))
+            .ToArray();
+        Assert(fxrVersions.Length > 0,
+            "installed .NET 10 hostfxr is available for private recovery fixture");
+        PrivateRuntimeCopy(fxrVersions[0], Path.Combine(approvedDotnetRoot,
+            "host", "fxr", Path.GetFileName(fxrVersions[0])));
+        Assert(File.Exists(destinationHost) &&
+            File.GetUnixFileMode(approvedDotnetRoot) == PrivateDir,
+            "disposable recovery runtime staged under private owner-only root");
+        var transfer = new System.Diagnostics.ProcessStartInfo("python3")
+        {
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true
+        };
+        foreach (var (flag, value) in new[] {
+            ("--source-root", snapshotVault),
+            ("--label", "rev43"),
+            ("--checkpoint", generatedManifest),
+            ("--trusted-public-key", trustedPublicPath),
+            ("--minimum-revision-file", revisionFloorPath),
+            ("--state-root", deliveredState),
+            ("--inbox", deliveredInbox),
+            ("--restore-bundle", deliveredApphostRoot),
+            ("--dotnet-runtime-root", approvedDotnetRoot)
+        })
+        {
+            transfer.ArgumentList.Add(flag);
+            transfer.ArgumentList.Add(value);
+        }
+        transfer.ArgumentList.Insert(0, deliveredHarness);
+        using (var realTransfer = System.Diagnostics.Process.Start(transfer)
+            ?? throw new Exception("FAIL: actual pinned mutual-TLS receiver did not start"))
+        {
+            if (!realTransfer.WaitForExit(180000))
+            {
+                realTransfer.Kill(entireProcessTree: true);
+                throw new Exception("FAIL: real encrypted DP network-to-restore test timeout");
+            }
+            // Only print an allowlisted, source-owned diagnostic stage, never
+            // exception messages, trust paths, TLS keys, XML, cookies or
+            // unbounded subprocess stderr/stdout from the recovery harness.
+            var privateDiagnostic = realTransfer.StandardError.ReadToEnd();
+            if (realTransfer.ExitCode != 0)
+            {
+                var stage = System.Text.RegularExpressions.Regex.Match(
+                    privateDiagnostic,
+                    @"FAIL: real pinned mTLS to \.NET signed DP restore at (startup|linux-check|private-xml-archive|disposable-openssl-identities|independent-p256-node-cryptographic-fixtures|pinned-mtls-server-start|trusted-dotnet-bundle-inspection|mutual-tls-receive-and-signed-dotnet-restore|restored-archive-identity|reject-duplicate|receiver-(?:platform-and-operator-approval|private-recovery-directories|independent-trust-custody|independent-two-node-writer-quiescence|pinned-complete-dotnet-bundle|pinned-mtls-fetch|atomic-received-archive|independent-checkpoint-staging|approved-dotnet-runtime|signed-dotnet-restore-subprocess|post-execution-bundle-integrity|restored-private-ring-integrity|post-restore-quorum|signed-dotnet-exit-(?:1|131|134|150|other)))");
+                Console.WriteLine("PINNED_DP_TRANSFER_FAILURE_STAGE=" +
+                    (stage.Success ? stage.Groups[1].Value : "unclassified"));
+            }
+            Assert(realTransfer.ExitCode == 0,
+                "real pinned TLS transfer plus signed .NET 10 offline restore accepted");
+        }
+        Assert(LinuxDpRecoveryEvidence.ComputeInventoryDigest(
+            Path.Combine(deliveredState,"data-protection-keys")) == inventoryBeforeCommit,
+            "pinned mTLS receiver preserved actual P-256-verified ciphertext inventory");
+        // Temporarily bind the fresh receiver process to the actual signed
+        // manifest and committed floor. Restore exact previous environment
+        // values before the existing negative/failure tests resume.
+        var previousRecoveryValues = new[] {
+            LinuxDpRecoveryEvidence.ManifestEnv, LinuxDpRecoveryEvidence.PublicKeyEnv,
+            LinuxDpRecoveryEvidence.MinimumRevisionEnv,
+            LinuxDpRecoveryEvidence.MinimumRevisionFileEnv,
+            LinuxDpRecoveryEvidence.RequireEvidenceEnv
+        }.ToDictionary(key => key, key => Environment.GetEnvironmentVariable(key));
+        try
+        {
+            Set(LinuxDpRecoveryEvidence.ManifestEnv, generatedManifest);
+            Set(LinuxDpRecoveryEvidence.PublicKeyEnv, trustedPublicPath);
+            Set(LinuxDpRecoveryEvidence.MinimumRevisionEnv, null);
+            Set(LinuxDpRecoveryEvidence.MinimumRevisionFileEnv, revisionFloorPath);
+            Set(LinuxDpRecoveryEvidence.RequireEvidenceEnv, "true");
+            Assert(VerifyInFreshProcess(deliveredState, "OnPremLinuxDpIntegration.v1",
+                    "session-probe", encrypted, "sensitive-session-value-123") == 0,
+                "real pinned mTLS recovery preserves original authenticated cookie in fresh OS process");
+        }
+        finally
+        {
+            foreach (var item in previousRecoveryValues)
+                Set(item.Key, item.Value);
+        }
+        Assert(!File.Exists(Path.Combine(deliveredInbox, "rev43", "ring", "private.key")),
+            "network DP snapshot contains no private wrapping-key file");
+
         Assert(RunSnapshot("restore","--archive",archivePath,
                 "--state-root",backupRoot,
                 "--checkpoint",generatedManifest,
@@ -1068,7 +1252,19 @@ try
     Assert(Throws(()=>{using var _=Provider(state);}),
         "incomplete previous certificate rotation config is refused");
     Set("YARP_LINUX_DP_OLD_CERT_PASSWORD_FILE",second.PasswordFile);
-    using(var service=Provider(state))
+    // The general 'state' fixture still contains encrypted keys written by
+    // first, which is no longer accessible after the earlier damaged-PFX
+    // negative. That ring MUST now fail at startup even when replacement
+    // and second are otherwise valid: the unrecoverable first recipient
+    // cannot be silently abandoned, invalidating its original sessions.
+    Assert(Throws(()=>{using var _=Provider(state);}),
+        "mixed ring cannot silently retire a third historic certificate");
+    // Validate current+previous overlap on a clean, separate ring instead
+    // of weakening that new fail-closed invariant to preserve an old fixture.
+    var overlapState=Path.Combine(root,"rotation-overlap-clean-state");
+    Set("YARP_CONTROL_PLANE_DIR",overlapState);
+    LinuxKeyProtection.InitializeStateDirectory();
+    using(var service=Provider(overlapState))
     {
         var dp=service.GetRequiredService<IDataProtectionProvider>()
             .CreateProtector("session-probe");
@@ -1092,12 +1288,108 @@ try
             .CreateProtector("session-probe").Protect("before-rotation");
     Set("YARP_LINUX_DP_CERT_PFX_PATH",replacement.Pfx);
     Set("YARP_LINUX_DP_CERT_PASSWORD_FILE",replacement.PasswordFile);
+    Set("YARP_LINUX_DP_OLD_CERT_PFX_PATH",null);
+    Set("YARP_LINUX_DP_OLD_CERT_PASSWORD_FILE",null);
+    var previousRing = Directory.GetFiles(
+        Path.Combine(rotationState, "data-protection-keys"), "key-*.xml");
+    var beforeDenied = previousRing.ToDictionary(p=>p,p=>SHA256.HashData(File.ReadAllBytes(p)));
+    Assert(Throws(()=>{using var _=Provider(rotationState);}),
+        "new certificate alone must not start while historic XML still needs old private key");
+    Assert(previousRing.All(p=>SHA256.HashData(File.ReadAllBytes(p))
+            .SequenceEqual(beforeDenied[p])),
+        "blocked unsafe cert retirement never changes the encrypted key ring");
+    // The file-backed repository imports ALL top-level *.xml documents.
+    // A valid encrypted historic key under a nonstandard XML filename
+    // cannot bypass inventory/recipient validation or fall into a
+    // best-effort provider import after service startup.
+    var renamedState=Path.Combine(root,"renamed-historic-xml");
+    Set("YARP_CONTROL_PLANE_DIR",renamedState);
+    LinuxKeyProtection.InitializeStateDirectory();
+    var renamedXml=Path.Combine(renamedState,"data-protection-keys",
+        "legacy-historic-encrypted.xml");
+    File.Copy(previousRing.Single(),renamedXml);
+    File.SetUnixFileMode(renamedXml,PrivateFile);
+    var renamedBefore=SHA256.HashData(File.ReadAllBytes(renamedXml));
+    Assert(Throws(()=>{using var _=Provider(renamedState);}),
+        "nonstandard *.xml with real historic encrypted key fails closed before import");
+    Assert(SHA256.HashData(File.ReadAllBytes(renamedXml))
+            .SequenceEqual(renamedBefore),
+        "rejected nonstandard *.xml historical key remains byte-identical");
+    Set("YARP_CONTROL_PLANE_DIR",rotationState);
+    // Revocation XML is a repository document but deliberately contains no
+    // certificate-wrapped master key. The recipient scan skips revocation
+    // roots without inventing an empty encrypted-key requirement.
+    var revocationOnly=Path.Combine(root,"revocation-inventory");
+    Set("YARP_CONTROL_PLANE_DIR",revocationOnly);
+    LinuxKeyProtection.InitializeStateDirectory();
+    var revocationPath=Path.Combine(revocationOnly,"data-protection-keys",
+        "revocation-disposable.xml");
+    File.WriteAllText(revocationPath,"<revocation revocationDate=\"2026-01-01T00:00:00Z\" keyId=\"*\" />");
+    File.SetUnixFileMode(revocationPath,PrivateFile);
+    using(var revocationProvider=Provider(revocationOnly))
+        Assert(revocationProvider is not null,
+            "revocation-only top-level XML does not require a certificate recipient");
+    Set("YARP_CONTROL_PLANE_DIR",rotationState);
+    Set("YARP_LINUX_DP_OLD_CERT_PFX_PATH",first.Pfx);
+    Set("YARP_LINUX_DP_OLD_CERT_PASSWORD_FILE",first.PasswordFile);
+    Assert(Throws(()=>{using var _=Provider(rotationState);}),
+        "different but accessible previous wrapping certificate cannot masquerade as old recipient");
     Set("YARP_LINUX_DP_OLD_CERT_PFX_PATH",second.Pfx);
     Set("YARP_LINUX_DP_OLD_CERT_PASSWORD_FILE",second.PasswordFile);
     using(var provider=Provider(rotationState))
         Assert(provider.GetRequiredService<IDataProtectionProvider>()
             .CreateProtector("session-probe").Unprotect(beforeRotation)=="before-rotation",
             "old session decrypts with previous certificate during rotation overlap");
+    // A previously used RSA XML wrapper can expire after its active
+    // encryption lifetime but must remain usable *only for decryption*
+    // while pre-rotation cookies still exist. The current writer must be
+    // valid today and cannot opt out of its strict expiry requirements.
+    var expiredPrevious=CreateCertificate(
+        "expired-historic",notBefore:DateTimeOffset.UtcNow.AddDays(-70),
+        notAfter:DateTimeOffset.UtcNow.AddDays(-2));
+    var expiredRing=Path.Combine(root,"expired-historic-state");
+    Set("YARP_CONTROL_PLANE_DIR",expiredRing);
+    LinuxKeyProtection.InitializeStateDirectory();
+    string historicCookie;
+    using(var historicCert=X509CertificateLoader.LoadPkcs12(
+        File.ReadAllBytes(expiredPrevious.Pfx),
+        File.ReadAllText(expiredPrevious.PasswordFile).Trim(),
+        X509KeyStorageFlags.EphemeralKeySet))
+    {
+        // A legacy service encrypted its XML BEFORE certificate expiry.
+        // Reconstruct only the disposable encrypted XML on the runner
+        // using the same ASP.NET Core certificate-encryption primitive.
+        var historicServices=new ServiceCollection();
+        var historicBuilder=historicServices.AddDataProtection()
+            .SetApplicationName("OnPremLinuxDpIntegration.v1")
+            .PersistKeysToFileSystem(
+                new DirectoryInfo(Path.Combine(expiredRing,"data-protection-keys")));
+        historicBuilder.ProtectKeysWithCertificate(historicCert);
+        using var historicProvider=historicServices.BuildServiceProvider();
+        historicCookie=historicProvider.GetRequiredService<IDataProtectionProvider>()
+            .CreateProtector("session-probe").Protect("cookie-issued-before-expiry");
+    }
+    var historicFiles=Directory.GetFiles(Path.Combine(expiredRing,"data-protection-keys"),"key-*.xml");
+    Assert(historicFiles.Length>0,"historic encrypted certificate-wrapped key persisted");
+    var historicHashes=historicFiles.ToDictionary(p=>p,p=>SHA256.HashData(File.ReadAllBytes(p)));
+    Set("YARP_LINUX_DP_CERT_PFX_PATH",expiredPrevious.Pfx);
+    Set("YARP_LINUX_DP_CERT_PASSWORD_FILE",expiredPrevious.PasswordFile);
+    Set("YARP_LINUX_DP_OLD_CERT_PFX_PATH",null);
+    Set("YARP_LINUX_DP_OLD_CERT_PASSWORD_FILE",null);
+    Assert(Throws(()=>{using var _=Provider(expiredRing);}),
+        "expired previous wrapping certificate is NEVER accepted as current writer");
+    Set("YARP_LINUX_DP_CERT_PFX_PATH",replacement.Pfx);
+    Set("YARP_LINUX_DP_CERT_PASSWORD_FILE",replacement.PasswordFile);
+    Set("YARP_LINUX_DP_OLD_CERT_PFX_PATH",expiredPrevious.Pfx);
+    Set("YARP_LINUX_DP_OLD_CERT_PASSWORD_FILE",expiredPrevious.PasswordFile);
+    using(var reader=Provider(expiredRing))
+        Assert(reader.GetRequiredService<IDataProtectionProvider>()
+            .CreateProtector("session-probe").Unprotect(historicCookie)
+            =="cookie-issued-before-expiry",
+            "expired historic decrypt-only private certificate preserves authentication cookie");
+    Assert(historicFiles.All(p=>SHA256.HashData(File.ReadAllBytes(p))
+            .SequenceEqual(historicHashes[p])),
+        "historic encrypted key XML is not rewritten by decrypt-only retirement overlap");
     await ProductLinuxStartupSmoke.RunAsync();
     await SystemdServiceAcceptance.RunTerminationCleanupContractAsync();
     await SystemdServiceAcceptance.RunFromGitHubLinuxAsync();
