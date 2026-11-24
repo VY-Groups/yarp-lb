@@ -88,7 +88,7 @@ def invoke_systemctl(runner, *parts):
 def stopped_and_masked(runner, unit):
     report = invoke_systemctl(
         runner, "show", unit, "--property=LoadState,ActiveState,SubState,"
-        "MainPID,UnitFileState")
+        "MainPID,UnitFileState,KillMode")
     entries = {}
     for line in report.splitlines():
         key, sep, value = line.partition("=")
@@ -99,7 +99,11 @@ def stopped_and_masked(runner, unit):
             entries.get("ActiveState") == "inactive" and
             entries.get("SubState") == "dead" and
             entries.get("MainPID") == "0" and
-            entries.get("UnitFileState") in ("masked-runtime", "masked"))
+            entries.get("UnitFileState") in ("masked-runtime", "masked") and
+            # KillMode=process/none can strand child processes still writing
+            # keys even if systemd reports inactive and MainPID=0. Refuse
+            # those service configurations rather than signing a false fence.
+            entries.get("KillMode") in ("control-group", "mixed"))
 
 
 def require_private_p256_signer(private_key, *, runner=subprocess.run):
