@@ -154,6 +154,16 @@ class NodeTests(unittest.TestCase):
         self.assertIn("before-apply-node-a", fence.calls)
         self.assertIn("rollback-node-a", fence.calls)
 
+    def test_second_process_operator_lock_refuses_concurrent_mutation(self):
+        agent, client, fence, waf, _ = self.node("node-a")
+        with remote.local.operator_lock(agent.dir):
+            with self.assertRaises(ValueError):
+                client.apply("block")
+        self.assertEqual(waf.applies, [])
+        self.assertFalse((agent.dir/"rev-7-activate.intent").exists())
+        client.apply("block")
+        self.assertEqual(waf.applies, ["block"])
+
     def test_wrong_tls_pin_client_cert_and_node_identity_rejected(self):
         _, client, _, waf, url = self.node("node-a")
         client_cert, client_key, _ = self.cert["client"]
