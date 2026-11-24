@@ -7,6 +7,7 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="../../LinuxDpRecoveryEvidence.cs" Link="LinuxDpRecoveryEvidence.cs" />
+    <Compile Include="../../LinuxDpRecoveryFloor.cs" Link="LinuxDpRecoveryFloor.cs" />
     <Compile Include="../../../engines/GslbHealthContracts/PrivateKeyFileSecurity.cs" Link="PrivateKeyFileSecurity.cs" />
   </ItemGroup>
 </Project>
