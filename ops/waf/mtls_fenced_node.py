@@ -167,7 +167,12 @@ class FencedAgent:
                     self.provider.smoke(mode)
                     return True
                 if action == "apply":
-                    return self._apply(mode)
+                    # Protect this actual host's mutation window against a
+                    # second daemon/process, not merely threads in this server.
+                    # The lock remains held through Docker apply, verification
+                    # and durable receipt; missing lease still fails closed.
+                    with local.operator_lock(self.dir):
+                        return self._apply(mode)
         raise ValueError("unknown or unapproved node operation")
 
 
