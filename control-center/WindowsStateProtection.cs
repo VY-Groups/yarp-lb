@@ -33,6 +33,37 @@ public static class WindowsStateProtection
         return stateDirectory;
     }
 
+    /// <summary>
+    /// Verify the source/offline staging directory without creating it or
+    /// modifying existing ACLs. Reject ancestors traversing reparse points.
+    /// </summary>
+    public static void ValidateOfflineKeyRingDirectory(string path)
+    {
+        if (!OperatingSystem.IsWindows() || string.IsNullOrWhiteSpace(path) ||
+            !Path.IsPathFullyQualified(path) || !Directory.Exists(path))
+            throw new InvalidOperationException("Offline Windows key-ring directory must already exist");
+        RejectReparseAncestors(path);
+        ValidatePrivateDirectoryAcl(path);
+        foreach (var file in Directory.EnumerateFiles(path))
+            ValidatePrivateFile(file);
+    }
+
+    /// <summary>
+    /// Creates a NEW private offline staging directory; never alters an
+    /// existing directory or its ACLs as a side effect of migration.
+    /// </summary>
+    public static void CreateNewOfflinePrivateDirectory(string path)
+    {
+        if (!OperatingSystem.IsWindows() || string.IsNullOrWhiteSpace(path) ||
+            !Path.IsPathFullyQualified(path) || Directory.Exists(path) ||
+            File.Exists(path) || new DirectoryInfo(path).LinkTarget is not null)
+            throw new InvalidOperationException("Offline Windows staging directory must be absent");
+        var parent = Path.GetDirectoryName(Path.GetFullPath(path))
+            ?? throw new InvalidOperationException("Offline Windows staging parent missing");
+        ValidateOfflineKeyRingDirectory(parent);
+        EnsurePrivateDirectory(path);
+    }
+
     private static void EnsurePrivateDirectory(string path)
     {
         // Directory.CreateDirectory follows existing parent junctions and

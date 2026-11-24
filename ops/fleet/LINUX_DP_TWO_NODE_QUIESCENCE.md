@@ -145,8 +145,11 @@ The real remote receiver now calls
 It launches the approved, tree-hash-pinned restore executable in a new
 private POSIX process session, keeps stdout/stderr suppressed, and requires
 fresh majority-quorum `before-signed-restore` reads and **both** original
-P-256 signed writer receipts at a bounded one-second cadence while the
-subprocess is alive. It never extends the independently approved epoch.
+P-256 signed writer receipts between bounded subprocess waits. Each
+running-process Raft/receipt probe has an additional **three-second hard
+supervisor budget**; a stuck HTTPS/quorum read fails closed and terminates
+the entire restore process group rather than delaying cancellation until
+sequential etcd member socket timeouts have elapsed. It never extends the independently approved epoch.
 
 A majority-veto, changed Raft lease identity, expired signature, insufficient
 runway, killed child, nonzero exit or watchdog deadline stops the entire

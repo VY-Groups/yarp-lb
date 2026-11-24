@@ -6,6 +6,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 import linux_dp_restore_watchdog as watchdog
 
@@ -99,6 +100,47 @@ class RealRestoreSupervisorTests(unittest.TestCase):
             self.run_code(code, limit=.25)
         time.sleep(2.1)
         self.assertFalse(marker.exists(), "timed-out .NET process kept running")
+
+    def test_blocking_real_quorum_read_cannot_keep_restore_running(self):
+        # A partitioned member may hang inside sequential HTTPS reads.
+        # The parent must kill the child by a fixed independent deadline,
+        # not block waiting for all TLS and etcd socket timeouts.
+        marker = self.root/"stale-partition-process-wrote"
+        code = ("import time; from pathlib import Path; time.sleep(1.3); " +
+                "Path(" + repr(str(marker)) + ").write_text('wrong')")
+
+        class SlowAuthority(Authority):
+            def current(self, phase):
+                self.calls.append(phase)
+                if len(self.calls) >= 2:
+                    time.sleep(4)
+                return True
+
+        fence = SlowAuthority()
+        with mock.patch.object(watchdog, "ATTEST_TIMEOUT_SECONDS", .2), \
+             mock.patch.object(watchdog, "CHECK_INTERVAL", .2):
+            started = time.monotonic()
+            with self.assertRaises(ValueError):
+                self.run_code(code, fence, limit=10)
+            self.assertLess(time.monotonic() - started, 1.0)
+        time.sleep(1.3)
+        self.assertFalse(marker.exists(),
+                         "TLS/etcd timeout left signed restore running")
+        self.assertGreaterEqual(len(fence.calls), 2)
+
+    def test_escaped_child_cannot_outlive_successful_direct_restore(self):
+        # A helper whose parent exits normally is still in the restore
+        # session/process group. Neither success nor failure may allow that
+        # helper to continue writing after receipt validation.
+        marker = self.root/"orphan-after-parent-success"
+        helper = ("import time; from pathlib import Path; time.sleep(1); " +
+                  "Path(" + repr(str(marker)) + ").write_text('wrong')")
+        parent = ("import subprocess,sys;subprocess.Popen(" +
+                  "[sys.executable,'-c'," + repr(helper) + "])")
+        self.assertEqual(self.run_code(parent), 0)
+        time.sleep(1.25)
+        self.assertFalse(marker.exists(),
+                         "direct restore exit left descendant key writer alive")
 
     def test_missing_or_nonfinite_lease_is_fail_closed(self):
         for value in (0, -1, float("nan"), float("inf")):
