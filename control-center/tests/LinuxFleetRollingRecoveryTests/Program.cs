@@ -67,7 +67,7 @@ static int Child(string[] a)
             // Only the designated writer explicitly rotates. All other
             // instances are readers until the encrypted ring is replicated.
             provider.GetRequiredService<IKeyManager>().CreateNewKey(
-                DateTimeOffset.UtcNow.AddSeconds(-2),
+                DateTimeOffset.UtcNow.AddSeconds(1),
                 DateTimeOffset.UtcNow.AddDays(14));
             return 0;
         }
@@ -245,9 +245,20 @@ try
                              "key-*.xml").Length == before + 1,
           "rotation added precisely one new encrypted key without replacing old keys");
     ReplicateOnlyNewEncryptedKeys(nodeA, nodeB);
+    // An explicitly issued key does not become the active encrypting key
+    // until its scheduled activation has elapsed on independently restarted
+    // service instances.
+    Thread.Sleep(TimeSpan.FromSeconds(2));
     var mintNew = RunChild("mint", nodeA, nextA, oldA, AppName, "new-session");
     Check(mintNew.Exit == 0 && !string.IsNullOrEmpty(mintNew.Output),
           "new session minted after rotation in a fresh service process");
+    var oldPayload = Microsoft.AspNetCore.WebUtilities.WebEncoders.Base64UrlDecode(
+        mintOld.Output);
+    var newPayload = Microsoft.AspNetCore.WebUtilities.WebEncoders.Base64UrlDecode(
+        mintNew.Output);
+    Check(oldPayload.Length >= 20 && newPayload.Length >= 20 &&
+          !oldPayload.AsSpan(4, 16).SequenceEqual(newPayload.AsSpan(4, 16)),
+          "new session is protected by an actually different rotated DP key");
     foreach (var (state, now, old) in new[] {
         (nodeA, nextA, oldA), (nodeB, nextB, oldB)
     })
