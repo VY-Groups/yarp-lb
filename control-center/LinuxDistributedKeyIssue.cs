@@ -41,12 +41,15 @@ internal static class LinuxDistributedKeyIssue
             using var provider=services.BuildServiceProvider();
             var repo=provider.GetRequiredService<IXmlRepository>() as LinuxKeyProtection.DistributedRingRepository
                 ?? throw new InvalidOperationException("Distributed storage is mandatory");
-            var manager=provider.GetRequiredService<IKeyManager>();
             var now=DateTimeOffset.UtcNow;
             if(args[1]=="bootstrap")
             {
                 repo.RequireEmptyRing();
                 activation=now;
+                var manager=provider.GetRequiredService<IKeyManager>();
+                manager.CreateNewKey(activation,activation.AddDays(90));
+                Console.WriteLine("PASS: fenced distributed key issued");
+                return 0;
             }
             else
             {
@@ -57,6 +60,10 @@ internal static class LinuxDistributedKeyIssue
                 // expire, or schedule multiple competing future generations.
                 try
                 {
+                    // Resolve the key manager only after holding the fleet
+                    // slot so its first key-ring read cannot predate another
+                    // operator's completed stage operation.
+                    var manager=provider.GetRequiredService<IKeyManager>();
                     if(activation<now.AddHours(48)||activation>now.AddDays(7))
                         throw new InvalidOperationException("Activation outside coordinated staging window");
                     var keys=manager.GetAllKeys();
@@ -78,9 +85,6 @@ internal static class LinuxDistributedKeyIssue
                 Console.WriteLine("PASS: fenced distributed key issued");
                 return 0;
             }
-            manager.CreateNewKey(activation,activation.AddDays(90));
-            Console.WriteLine("PASS: fenced distributed key issued");
-            return 0;
         }
         catch(Exception)
         {
