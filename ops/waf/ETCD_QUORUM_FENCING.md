@@ -80,15 +80,35 @@ without a valid lease.
 python3 -m unittest discover -s ops/waf -p test_etcd_quorum_fence.py -v
 \`\`\`
 
-Checks simulate three distinct members, linearizable reads, TTLs,
-one-member network partition, loss of two members, duplicate member ID,
-wrong cluster, forged/changed value, expired lease and authority epoch
-replacement. CI can therefore prove the **contract and fail-closed client
-behavior** without claiming to have formed a real raft cluster.
+The synthetic tests simulate three distinct members, linearizable
+reads, TTLs, a delayed late member crossing an earlier lease's expiry
+deadline, one-member and two-member partitions, duplicate member IDs,
+wrong cluster, tampering, revoked/expired lease and authority epoch
+replacement. The verifier uses *current monotonic time at the final
+quorum decision* so stale early answers cannot authorize mutation.
+
+In addition, `.github/workflows/waf-etcd-quorum.yml` now runs
+`tests/WafEtcd/real_quorum.py` against **three actual disposable
+etcd v3.6 Raft processes** using a pinned upstream OCI digest, distinct
+loopback-published client TLS endpoints, isolated Docker peer network,
+temporary independently issued client/server PKI, live quorum
+linearizable reads, actual server-side compare-and-swap, lease
+revocation and a real 2-of-3 member outage. The test also verifies
+that a competing CAS cannot change the active lease's creation/modification
+revision, version, value or lease ID. The embedded etcd HTTP/gRPC
+gateway requires server identities capable of both clientAuth and
+serverAuth for its *internal* TLS connection; the disposable member
+certificates therefore include both usages, while separate reader/writer
+certificates remain clientAuth-only. The real CI test never exports
+private keys or etcd logs.
+
+These are **multiple processes on one disposable hosted Linux runner**,
+not separate physical hosts or customer key custody, a production
+quorum service, a remotely authenticated WAF agent rollout or a
+production partition drill.
 
 **Still required under #51 before closure:** an independently reviewed
-lease-grant/CAS/renew authority with persistent writer fencing, real
-three-member etcd cluster network-partition and loss-of-quorum test,
+lease-grant/CAS/renew authority with persistent writer fencing, independently operated real three-host etcd cluster network-partition test,
 separate mutually authenticated **remote WAF node adapters which ALSO reject
 fenced controllers at the mutation boundary**, two-node transactional
 rollback with crash recovery, signed exception rendering/expiry/rollback,
