@@ -405,7 +405,20 @@ def main():
             dp_issuer = dp_recovery.RecoveryLeaseIssuer(
                 "fleet-ci", endpoints, cluster, ca, writer_cert, writer_key,
                 "gateway-a", "gateway-b", 43, P, ttl=120)
-            dp_receipt = dp_issuer.issue_once()
+            try:
+                dp_receipt = dp_issuer.issue_once()
+            except (OSError, ValueError, KeyError, TypeError,
+                    http.client.HTTPException, ssl.SSLError):
+                # Only hardcoded source phase names leave the disposable
+                # runner. Never echo etcd responses, tokens, private trust
+                # paths or dynamic exception strings.
+                stages = {"preflight", "read-absent-quorum",
+                          "grant-new-lease", "validate-lease-grant",
+                          "compare-and-swap", "validate-cas-header",
+                          "verify-live-quorum"}
+                STAGE = "real-dp-cas-" + (
+                    dp_issuer.phase if dp_issuer.phase in stages else "unclassified")
+                raise
             if (dp_receipt["checkpointSha256"] != P or
                     dp_receipt["leaseId"] <= 0 or
                     dp_receipt["senderNodeId"] != "gateway-a" or
