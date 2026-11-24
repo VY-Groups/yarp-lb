@@ -4,6 +4,51 @@
 
 
 
+## New 24 November 2026 software evidence (not site qualification)
+
+These are independently reviewed software components plus new pending-review
+components; the support matrix does **not** declare the original #48 complete.
+
+- **Windows source-host migration:** approved and merged PR #516, separate
+  real Windows Server 2022 .NET 10 DPAPI LocalMachine -> RSA3072+ X.509
+  rewrap with the original authentication cookie still readable, original
+  DPAPI XML unchanged, no plaintext fallback or unsafe overwrite; only an
+  explicitly quiesced **offline** source machine may perform this operation.
+- **Two-node Linux writer receipts:** approved/merged PR #517 at
+  `be17b012ef8b178c57464cc01e7ab1c9d828a245` with actual Ubuntu
+  systemd stop/effective runtime mask and distinct P-256 signing identities,
+  exact-head 8/8 success and post-merge main 7/7 success.
+- **Cryptographic/service hardening:** approved/merged PR #518 at
+  `00b566a744cd7505344dca84a96b3f745f9f10d0`, exact-head 16/16
+  success, with strict canonical P-256 SPKI, safe systemd `KillMode`,
+  and real mTLS + signed .NET restore integration. The combined fixture's
+  quorum responses are deterministic; independent three-member etcd
+  integration is exercised by its separate CI suite.
+- **Bounded live authority during restore:** unmerged PR #519 at
+  `24400e5d94997804729f5975a60253d3c00945d6`, exact-head
+  7/7 success. An offline .NET child process is checked against pinned
+  quorum and independent node signatures while running, with process-group
+  kill on lost lease, bad proof, error or deadline. This is **not** an
+  automatic lease-renewal, traffic-drain or promotion protocol.
+- **Two-process rolling certificate and lost-key DR:** unmerged PR #520
+  introduces `LinuxFleetRollingRecoveryTests` on disposable Ubuntu:
+  two independent owner-private state roots, separate real .NET 10 child
+  processes, old/new PFX overlap, explicit new key and cookie key ID,
+  original/new authentication continuity on both instances, rollback
+  retaining both decryption identities, fail-closed lost old private key,
+  protected escrow restore and cross-tenant rejection. Dedicated run
+  `45352889771` PASSED after the C# entrypoint compile fix;
+  additional exact-head and independent reviewer gates remain.
+
+**Still not proven:** independently housed host service identities, live
+non-interrupted traffic through concurrent issuer/receiver updates,
+source and receiver key-ring writer fencing throughout a rolling live
+cutover, quorum-protected durable revision-floor commit and promotion,
+offline escrow with backup-custody evidence for loss of all keys, and real
+RHEL enforcing SELinux/systemd. These are not hidden by CI success.
+Software implementation/CI gaps remain #48; physical/site acceptance
+only is #36. #48 is NOT ACCEPTED.
+
 ## Certificate expiration during staged rotation (decrypt-only retention)
 
 An active Linux fleet wrapper requires a currently valid RSA encryption leaf,
@@ -46,7 +91,7 @@ The supported/unsupported matrix is **unverified** until all rows below have act
 | Ubuntu 24.04 systemd | encrypted certificate-backed key ring | real headless restart, XML inspection, permissions, key loss/restore | CI PASS for encrypted ring, permissions and restart cookie continuity; customer VM key-loss/restore NOT RUN |
 | RHEL 9 systemd | encrypted certificate-backed key ring | SELinux enforcing, file contexts, headless restart and recovery | RHEL host NOT RUN; UBI 9 userspace suite passed, but host systemd/SELinux remain unqualified |
 | Linux container | explicit persistent encrypted volume and recovery material | restart/recreate with volume, fail closed without wrapper | NOT RUN |
-| Cross-machine shared fleet | explicitly provisioned shared encryption and key-ring identity | cookie continuity, staged rotation, rollback and partition | NOT RUN |
+| Cross-machine shared fleet | explicitly provisioned shared encryption and key-ring identity | cookie continuity, staged rotation, rollback and partition | Disposable two-process Linux CI rotation/rollback/lost-key rehearsal PASS; truly independent hosts, real traffic, quorum-controlled live promotion and partition still NOT RUN |
 
 ## Baseline and evidence capture
 
