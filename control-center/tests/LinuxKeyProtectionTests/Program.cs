@@ -735,7 +735,7 @@ try
             {
                 var stage = System.Text.RegularExpressions.Regex.Match(
                     privateDiagnostic,
-                    @"FAIL: real pinned mTLS to \.NET signed DP restore at (startup|linux-check|private-xml-archive|disposable-openssl-identities|pinned-mtls-server-start|trusted-dotnet-bundle-inspection|mutual-tls-receive-and-signed-dotnet-restore|restored-archive-identity|reject-duplicate)");
+                    @"FAIL: real pinned mTLS to \.NET signed DP restore at (startup|linux-check|private-xml-archive|disposable-openssl-identities|pinned-mtls-server-start|trusted-dotnet-bundle-inspection|mutual-tls-receive-and-signed-dotnet-restore|restored-archive-identity|reject-duplicate|receiver-(?:platform-and-operator-approval|private-recovery-directories|independent-trust-custody|pinned-complete-dotnet-bundle|pinned-mtls-fetch|atomic-received-archive|approved-dotnet-runtime|signed-dotnet-restore-subprocess|post-execution-bundle-integrity|restored-private-ring-integrity))");
                 Console.WriteLine("PINNED_DP_TRANSFER_FAILURE_STAGE=" +
                     (stage.Success ? stage.Groups[1].Value : "unclassified"));
             }
