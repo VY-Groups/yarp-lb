@@ -227,4 +227,47 @@ finally
 {
     foreach (var path in nodeDirs.Append(issuerDir)) if (Directory.Exists(path)) Directory.Delete(path, true);
 }
+var package = Path.Combine(Path.GetTempPath(), "gc-package-" + Guid.NewGuid().ToString("N"));
+try
+{
+    Directory.CreateDirectory(package);
+    var assembly = Path.Combine(package, "GatewayCoreYarp.dll");
+    var contents = Encoding.UTF8.GetBytes("disposable binary fixture");
+    File.WriteAllBytes(assembly, contents);
+    using var releaseSigner = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+    var releaseVerifier = new ReleaseIntegrityVerifier(new Dictionary<string, byte[]>
+    { ["release-test"] = releaseSigner.ExportSubjectPublicKeyInfo() });
+    var commit = new string('a', 40);
+    var manifestPath = Path.Combine(package, ReleaseIntegrityVerifier.ManifestName);
+    var fileHash = Convert.ToHexString(SHA256.HashData(contents));
+    void Manifest(string path, ECDsa releaseKey)
+    {
+        var payload = JsonSerializer.SerializeToUtf8Bytes(new
+        {
+            schemaVersion = 1, product = "GatewayCore", sourceCommit = commit,
+            files = new[] { new { path, size = contents.Length, sha256 = fileHash } }
+        });
+        var prefix = "GCM1.release-test." + B64(payload);
+        File.WriteAllText(manifestPath, prefix + "." + B64(releaseKey.SignData(Encoding.ASCII.GetBytes(prefix),
+            HashAlgorithmName.SHA256, DSASignatureFormat.IeeeP1363FixedFieldConcatenation)), Encoding.ASCII);
+    }
+    Manifest("GatewayCoreYarp.dll", releaseSigner);
+    Check(releaseVerifier.Verify(package, commit) == commit, "independently signed release inventory");
+    File.WriteAllBytes(assembly, Encoding.UTF8.GetBytes("modified binary fixture!!"));
+    Reject(() => releaseVerifier.Verify(package, commit), "modified packaged binary");
+    File.WriteAllBytes(assembly, contents);
+    var extra = Path.Combine(package, "injected.dll");
+    File.WriteAllText(extra, "unexpected");
+    Reject(() => releaseVerifier.Verify(package, commit), "injected package file");
+    File.Delete(extra);
+    Reject(() => releaseVerifier.Verify(package, new string('b', 40)), "different release commit");
+    Manifest("../GatewayCoreYarp.dll", releaseSigner);
+    Reject(() => releaseVerifier.Verify(package, commit), "signed traversal path");
+    Manifest("GatewayCoreYarp.dll", signer);
+    Reject(() => releaseVerifier.Verify(package, commit), "license signing key is not release trust");
+    Manifest("GatewayCoreYarp.dll", releaseSigner);
+    File.Delete(assembly);
+    Reject(() => releaseVerifier.Verify(package, commit), "missing package binary");
+}
+finally { if (Directory.Exists(package)) Directory.Delete(package, true); }
 Console.WriteLine("OFFLINE_LICENSE_VERIFIER_ACCEPTANCE_PASS");

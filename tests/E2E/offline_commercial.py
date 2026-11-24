@@ -14,7 +14,8 @@ from real_control_center import Client, backend, check, eventually, gateway, ope
 def main():
     if os.environ.get("CI") != "true" or os.environ.get("GITHUB_ACTIONS") != "true":
         raise SystemExit("Disposable CI only")
-    check(sorted(os.listdir("/sys/class/net")) == ["lo"], "network namespace contains only loopback")
+    interfaces = subprocess.check_output(["ip", "-o", "link", "show"], text=True).splitlines()
+    check(len(interfaces) == 1 and ": lo:" in interfaces[0], "network namespace contains only loopback")
     check(not subprocess.check_output(["ip", "route"], text=True).strip(), "no external network route")
     authority = Path(sys.argv[1]).resolve()
     cwd = Path("control-center").resolve()
@@ -40,7 +41,7 @@ def main():
         with gateway(cwd, dll, root, listen) as base:
             anonymous = Client(base)
             check("License Center" in anonymous.request("GET", "/dashboard/license"), "real License Center HTML")
-            check("license/import" in anonymous.request("GET", "/dashboard/license.js"), "real license frontend script")
+            check("/admin/api/license/" in anonymous.request("GET", "/dashboard/license.js"), "real license frontend script")
             anonymous.request("GET", "/admin/api/license/status", expect=401)
             anonymous.request("GET", "/fixture/check", expect=503)
             admin = Client(base)
