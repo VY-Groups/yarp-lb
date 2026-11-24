@@ -15,6 +15,12 @@ if (!OperatingSystem.IsLinux())
     Console.WriteLine("SKIP: Linux-specific filesystem/DAPI tests on non-Linux host");
     return;
 }
+if (args.Length>0 && args[0]=="--candidate-smoke")
+{
+    if(args.Length!=2) Environment.Exit(2);
+    await ProductLinuxStartupSmoke.RunAsync(args[1]);
+    return;
+}
 if (args.Length>0 && args[0]=="--distributed-real")
 {
     Environment.Exit(DistributedRealAcceptance.Run(args));
