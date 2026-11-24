@@ -46,6 +46,11 @@ jobs:
           set -euo pipefail
           dotnet build control-center/GatewayCoreYarp.csproj --configuration Release
           test -s control-center/bin/Release/net10.0/GatewayCoreYarp.dll
+      - name: Compile offline encrypted snapshot CLI before runtime acceptance
+        shell: bash
+        run: |
+          set -euo pipefail
+          dotnet build control-center/tools/LinuxDpEncryptedSnapshot/LinuxDpEncryptedSnapshot.csproj --configuration Release
       - name: Run real encrypted key-ring and signed restore tests in UBI9 .NET 10 SDK
         shell: bash
         run: |
