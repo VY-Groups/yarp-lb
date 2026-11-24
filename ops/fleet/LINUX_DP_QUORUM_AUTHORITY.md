@@ -64,9 +64,22 @@ python3 -m unittest discover -s ops/fleet \
   -p test_linux_dp_quorum_authority.py -v
 ```
 
-The tests use a mocked etcd transport to exercise all negative
-conditions without contacting real infrastructure. They **do not**
-prove the physical cluster, real operator PKI custody or .NET restore.
-CI is `.github/workflows/linux-dp-quorum-authority.yml`; the original
-component-level Linux Data Protection and real signed TLS restore
-acceptance remain independent requirements.
+The fast Python tests use a mocked etcd transport for deliberate
+split-brain, stale TTL, bad member/leaf pin, conflicting checkpoint,
+namespace mismatch and CAS-replay fault injection. In addition,
+`.github/workflows/waf-etcd-quorum.yml` starts an actual disposable
+three-process etcd TLS Raft cluster; its extended `real_quorum.py`
+executes **this DP authority** against those real endpoints, including
+CAS write, separate read-only mTLS verifier, competing lease rejection,
+revocation, epoch rollover and proof that a DP lease does not modify the
+unrelated WAF lease. These real tests are required, not replaceable by
+synthetic JSON assertions.
+
+Neither disposable CI harness proves independently housed customer
+servers, a production issuer/private-key store, external signer
+custody, .NET receiver promotion or physical partition recovery.
+`.github/workflows/linux-dp-quorum-authority.yml` separately
+runs the synthetic contracts; the original key encryption, signed
+restore, and Windows/Ubuntu service acceptance remain mandatory.
+The actual receiver has **not** yet been wired to require this lease
+at all recovery phases.
