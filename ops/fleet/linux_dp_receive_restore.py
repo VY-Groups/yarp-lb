@@ -241,6 +241,19 @@ def restore_once(args, *, fetch=wire.fetch_pinned, stage=wire.stage_received,
                    args.certificate, args.private_key)
     if type(binary) is not bytes or len(binary) > wire.MAX_BUNDLE:
         raise ValueError("untrusted encrypted transfer")
+    # The authenticated network response is still untrusted. Check the
+    # exact checkpoint and fresh receiver authority before publishing
+    # anything into the durable, non-overwriting archive namespace.
+    STAGE = "received-checkpoint-and-authority"
+    bundle_checkpoint = wire.verify_bundle(binary)["checkpoint.json"]
+    if fence is not None:
+        if (type(fence.checkpoint_sha) is not str or
+                not hmac.compare_digest(
+                    hashlib.sha256(bundle_checkpoint).hexdigest().upper(),
+                    fence.checkpoint_sha)):
+            raise ValueError("received DP checkpoint differs from quorum epoch")
+    require_approved_authority(fence, "after-transfer")
+    require_signed_node_quiescence(proof, fence)
     STAGE = "atomic-received-archive"
     received = stage(str(args.destination_root), args.label, binary)
     # .NET treats the parent of --archive as an untrusted state root and
@@ -252,17 +265,10 @@ def restore_once(args, *, fetch=wire.fetch_pinned, stage=wire.stage_received,
     STAGE = "independent-checkpoint-staging"
     raw_checkpoint = wire.read_private_path(
         os.path.join(received, "checkpoint.json"), wire.MAX_MANIFEST)
-    if fence is not None:
-        # A sender's mTLS cert cannot authorize an unrelated P-256 signed
-        # recovery checkpoint. The actual signed .NET restore also verifies
-        # signature and independent monotonic revision before installation.
-        if (type(fence.checkpoint_sha) is not str or
-                not hmac.compare_digest(
-                    hashlib.sha256(raw_checkpoint).hexdigest().upper(),
-                    fence.checkpoint_sha)):
-            raise ValueError("received DP checkpoint differs from quorum epoch")
-    require_approved_authority(fence, "after-transfer")
-    require_signed_node_quiescence(proof, fence)
+    # The staged bytes must still match the inspected response. The
+    # independent .NET signature/inventory check remains mandatory.
+    if not hmac.compare_digest(raw_checkpoint, bundle_checkpoint):
+        raise ValueError("staged DP checkpoint differs from approved response")
     checkpoint = os.path.join(args.destination_root,
                               "." + args.label + ".signed-checkpoint.json")
     wire.safe_write(checkpoint, raw_checkpoint)
