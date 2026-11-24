@@ -83,7 +83,7 @@ class SignedExceptionRendererTests(unittest.TestCase):
                          dt.datetime(2026, 11, 30, 9, tzinfo=dt.timezone.utc)):
             with self.subTest(time=str(observed)), self.assertRaises(ValueError):
                 renderer.render(valid, observed)
-        self.assertIn(b"@lt 179603", renderer.render(valid, NOW))
+        self.assertIn(b"@lt 1796029200", renderer.render(valid, NOW))
 
     def test_private_directory_and_link_or_existing_output_are_rejected(self):
         self.private.chmod(0o755)
