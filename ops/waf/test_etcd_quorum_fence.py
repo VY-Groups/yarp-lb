@@ -21,7 +21,7 @@ H="a"*32
 def endpoints():
     return [
         {"url":f"https://127.0.0.{n}:2379",
-         "leafSha256":str(n)*64}
+         "leafSha256":str(n)*64, "memberId":n}
         for n in (1,2,3)
     ]
 
@@ -204,6 +204,25 @@ class EtcdQuorumTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             fence.EtcdQuorumFence("fleet-a",endpoints(),999,
                                  str(self.ca),str(self.cert),str(self.key))
+
+
+    def test_tls_leaf_must_be_bound_to_exact_preapproved_raft_member_id(self):
+        self.kvs["127.0.0.3"] = range_response(2)
+        # A different pinned endpoint must not count the first two's
+        # member identity as its own even with consistent lease content.
+        self.assertFalse(self.check())
+        self.kvs = {}
+        self.assertTrue(self.check())
+        bad = endpoints()
+        bad[1]["memberId"] = bad[0]["memberId"]
+        with self.assertRaises(ValueError):
+            fence.EtcdQuorumFence("fleet-a", bad, 999,
+                                 str(self.ca), str(self.cert), str(self.key))
+        bad = endpoints()
+        bad[0].pop("memberId")
+        with self.assertRaises(ValueError):
+            fence.EtcdQuorumFence("fleet-a", bad, 999,
+                                 str(self.ca), str(self.cert), str(self.key))
 
     def test_invalid_response_schema_not_a_valid_member_vote(self):
         for change in (
