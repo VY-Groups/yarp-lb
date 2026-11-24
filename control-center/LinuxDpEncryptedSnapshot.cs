@@ -3,7 +3,6 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Xml;
-using System.Xml.Linq;
 using GatewayCore.Gslb.Contracts;
 using Microsoft.Win32.SafeHandles;
 
@@ -205,31 +204,59 @@ public static class LinuxDpEncryptedSnapshot
 
     private static void CheckCiphertextOnly(string filename, byte[] bytes)
     {
-        string xml;
-        try { xml = new UTF8Encoding(false, true).GetString(bytes); }
-        catch (DecoderFallbackException ex)
-        {
-            throw new InvalidOperationException("Invalid encrypted XML character encoding", ex);
-        }
-        using var reader = XmlReader.Create(new StringReader(xml), new XmlReaderSettings {
+        // Use the same bounded forward-only XML constraints as the
+        // production LinuxKeyProtection key-ring reader. The previously
+        // used XDocument materialized decrypted-looking XML text into
+        // managed strings; it also rejected legitimate wrapped metadata.
+        // No master key, request body or certificate secret is materialized.
+        const string protectionNamespace =
+            "http://schemas.asp.net/2015/03/dataProtection";
+        using var data = new MemoryStream(bytes, writable: false);
+        using var reader = XmlReader.Create(data, new XmlReaderSettings {
             DtdProcessing = DtdProcessing.Prohibit,
             XmlResolver = null,
             MaxCharactersInDocument = MaximumFileBytes
         });
-        var document = XDocument.Load(reader);
-        if (document.Root is null)
-            throw new InvalidOperationException("Encrypted XML root missing");
-        if (document.Root.DescendantsAndSelf().Any(element =>
-                element.Name.LocalName is "masterKey" or "secret"))
-            throw new InvalidOperationException("Plaintext Data Protection key rejected");
-        if (filename.StartsWith("key-", StringComparison.Ordinal))
-        {
-            if (document.Root.Name.LocalName != "key" ||
-                !document.Descendants().Any(element => element.Name.LocalName == "encryptedSecret"))
-                throw new InvalidOperationException("Encrypted wrapping envelope missing");
-        }
-        else if (document.Root.Name.LocalName != "revocation")
+        if (reader.MoveToContent() != XmlNodeType.Element ||
+            reader.NamespaceURI.Length != 0)
+            throw new InvalidOperationException("Encrypted XML root invalid");
+        var isKey = reader.LocalName == "key";
+        var isRevocation = reader.LocalName == "revocation";
+        if (!isKey && !isRevocation)
             throw new InvalidOperationException("Unexpected Data Protection XML type");
+        if (isKey)
+        {
+            if (!Guid.TryParseExact(reader.GetAttribute("id"), "D", out var id) ||
+                !string.Equals(filename, "key-" + id.ToString("D") + ".xml",
+                    StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException("Encrypted key filename/GUID mismatch");
+        }
+        else if (!filename.StartsWith("revocation-", StringComparison.Ordinal))
+            throw new InvalidOperationException("Unexpected revocation XML filename");
+
+        var wrappedCount = 0;
+        while (reader.Read())
+        {
+            if (reader.NodeType != XmlNodeType.Element) continue;
+            if (reader.LocalName == "masterKey" ||
+                (isRevocation && reader.LocalName == "encryptedSecret"))
+                throw new InvalidOperationException("Plaintext/unexpected DP key XML rejected");
+            if (isKey && reader.LocalName == "encryptedSecret")
+            {
+                if (reader.NamespaceURI != protectionNamespace)
+                    throw new InvalidOperationException("Foreign wrapped-secret namespace rejected");
+                var decryptor = reader.GetAttribute("decryptorType")?
+                    .Split(',', StringSplitOptions.TrimEntries);
+                if (decryptor is null || decryptor.Length < 2 ||
+                    decryptor[0] !=
+                        "Microsoft.AspNetCore.DataProtection.XmlEncryption.EncryptedXmlDecryptor" ||
+                    decryptor[1] != "Microsoft.AspNetCore.DataProtection")
+                    throw new InvalidOperationException("Unknown wrapped key decryptor rejected");
+                wrappedCount++;
+            }
+        }
+        if (isKey && wrappedCount != 1)
+            throw new InvalidOperationException("Exactly one approved encryptedSecret required");
     }
 
     private static void ValidatePrivate(string directory)
