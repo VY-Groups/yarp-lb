@@ -44,6 +44,10 @@ public static class LinuxKeyProtection
         private readonly object sync = new();
         private readonly string prefix, writerKey;
         private long floor;
+        private bool requireEmptyRing;
+        private Member? scheduledIssueMember;
+        private long? scheduledIssueLease;
+        private string? scheduledIssueValue;
 
         internal DistributedRingRepository(Settings settings, X509Certificate2 current,
             X509Certificate2? historic, Func<Member,string,object,JsonDocument>? testRpc = null)
@@ -378,6 +382,85 @@ public static class LinuxKeyProtection
             return (selected,approvedValue);
         }
 
+        // Used only by the explicit bootstrap command. The range-wide
+        // CREATE comparison is checked inside the actual Raft write, so
+        // competing first-key commands cannot both initialize the ring.
+        internal void RequireEmptyRing()
+        {
+            lock(sync)
+            {
+                if(config.Mode!="writer" || GetAllElements().Count!=0)
+                    throw new InvalidOperationException("Distributed bootstrap requires an empty ring");
+                requireEmptyRing=true;
+            }
+        }
+
+        // Scheduled rotations use a short distributed reservation. The lease
+        // is attached to a fleet-wide key and the actual new-key transaction
+        // compares that exact reservation, so two operator processes cannot
+        // both pass a local ring precheck and publish different future keys.
+        internal void AcquireScheduledIssueSlot()
+        {
+            lock(sync)
+            {
+                if(config.Mode!="writer" || scheduledIssueLease is not null)
+                    throw new InvalidOperationException("Scheduled key issue slot is unavailable");
+                var (member,approvedValue)=AttestWriter();
+                using var grant=rpc(member,"/v3/lease/grant",new {TTL="120"});
+                var lease=Positive(grant.RootElement.GetProperty("ID"));
+                if(lease==config.LeaseId || Text(grant.RootElement.GetProperty("TTL"))!="120")
+                    throw new InvalidOperationException("Invalid scheduled issue lease");
+                var key=B64("/gatewaycore/linux-dp/scheduled-issue/"+config.Fleet);
+                var value=Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
+                var body=new {
+                    compare=new object[] {
+                        new {result="EQUAL",target="MOD",key=writerKey,
+                            modRevision=config.WriterModRevision!.Value.ToString(CultureInfo.InvariantCulture)},
+                        new {result="EQUAL",target="LEASE",key=writerKey,
+                            lease=config.LeaseId!.Value.ToString(CultureInfo.InvariantCulture)},
+                        new {result="EQUAL",target="VALUE",key=writerKey,value=approvedValue},
+                        new {result="EQUAL",target="CREATE",key,createRevision="0"}},
+                    success=new[]{new {requestPut=new {key,value,lease=lease.ToString(CultureInfo.InvariantCulture)}}},
+                    failure=Array.Empty<object>()};
+                using var response=rpc(member,"/v3/kv/txn",body);
+                _=Header(response.RootElement,member);
+                if(response.RootElement.TryGetProperty("succeeded",out var succeeded)&&
+                    succeeded.ValueKind==JsonValueKind.False)
+                {
+                    try { using var _=rpc(member,"/v3/lease/revoke",new {ID=lease.ToString(CultureInfo.InvariantCulture)}); }
+                    catch(Exception ex) when(ex is HttpRequestException or IOException or OperationCanceledException) { }
+                    throw new InvalidOperationException("Another scheduled key issuance owns the fleet slot");
+                }
+                if(!response.RootElement.TryGetProperty("succeeded",out succeeded)||
+                    succeeded.ValueKind!=JsonValueKind.True)
+                    throw new InvalidOperationException("Scheduled issue reservation outcome requires reconciliation");
+                scheduledIssueMember=member;
+                scheduledIssueLease=lease;
+                scheduledIssueValue=value;
+            }
+        }
+
+        internal void ReleaseScheduledIssueSlot()
+        {
+            lock(sync)
+            {
+                if(scheduledIssueMember is null||scheduledIssueLease is null)return;
+                try
+                {
+                    using var _=rpc(scheduledIssueMember,"/v3/lease/revoke",new {
+                        ID=scheduledIssueLease.Value.ToString(CultureInfo.InvariantCulture)});
+                }
+                catch(Exception ex) when(ex is HttpRequestException or IOException or OperationCanceledException)
+                { /* The 120-second lease bounds an uncertain release. */ }
+                finally
+                {
+                    scheduledIssueMember=null;
+                    scheduledIssueLease=null;
+                    scheduledIssueValue=null;
+                }
+            }
+        }
+
         public void StoreElement(XElement element,string friendlyName)
         {
             lock(sync)
@@ -391,14 +474,26 @@ public static class LinuxKeyProtection
                 // Revocation/epoch replacement makes the compare fail.
                 var (member,approvedValue)=AttestWriter();
                 var item=B64(prefix+name);
+                var compares=new List<object> {
+                    new {result="EQUAL",target="MOD",key=writerKey,
+                        modRevision=config.WriterModRevision!.Value.ToString(CultureInfo.InvariantCulture)},
+                    new {result="EQUAL",target="LEASE",key=writerKey,
+                        lease=config.LeaseId!.Value.ToString(CultureInfo.InvariantCulture)},
+                    new {result="EQUAL",target="VALUE",key=writerKey,value=approvedValue},
+                    new {result="EQUAL",target="CREATE",key=item,createRevision="0"}};
+                if(requireEmptyRing)
+                    compares.Add(new {result="EQUAL",target="CREATE",key=B64(prefix),
+                        range_end=B64(prefix[..^1]+"0"),createRevision="0"});
+                if(scheduledIssueLease is not null)
+                {
+                    var slot=B64("/gatewaycore/linux-dp/scheduled-issue/"+config.Fleet);
+                    compares.Add(new {result="EQUAL",target="LEASE",key=slot,
+                        lease=scheduledIssueLease.Value.ToString(CultureInfo.InvariantCulture)});
+                    compares.Add(new {result="EQUAL",target="VALUE",key=slot,
+                        value=scheduledIssueValue});
+                }
                 var body=new {
-                    compare=new object[] {
-                        new {result="EQUAL",target="MOD",key=writerKey,
-                            modRevision=config.WriterModRevision!.Value.ToString(CultureInfo.InvariantCulture)},
-                        new {result="EQUAL",target="LEASE",key=writerKey,
-                            lease=config.LeaseId!.Value.ToString(CultureInfo.InvariantCulture)},
-                        new {result="EQUAL",target="VALUE",key=writerKey,value=approvedValue},
-                        new {result="EQUAL",target="CREATE",key=item,createRevision="0"}},
+                    compare=compares,
                     success=new[]{new {requestPut=new {key=item,value=Convert.ToBase64String(raw)}}},
                     failure=Array.Empty<object>()};
                 // Never retry ambiguous mutations. The transaction itself
