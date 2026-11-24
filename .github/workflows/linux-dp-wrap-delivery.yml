@@ -1,0 +1,29 @@
+name: Linux DP node-bound wrapping-key delivery
+on:
+  push:
+    branches: [main]
+    paths:
+      - "ops/fleet/linux_dp_wrap_delivery.py"
+      - "ops/fleet/test_linux_dp_wrap_delivery.py"
+      - "ops/fleet/linux_dp_mtls_transport.py"
+      - ".github/workflows/linux-dp-wrap-delivery.yml"
+  pull_request:
+    paths:
+      - "ops/fleet/linux_dp_wrap_delivery.py"
+      - "ops/fleet/test_linux_dp_wrap_delivery.py"
+      - "ops/fleet/linux_dp_mtls_transport.py"
+      - ".github/workflows/linux-dp-wrap-delivery.yml"
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  openssl:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Real OpenSSL recipient-specific authenticated delivery
+        run: |
+          set -euo pipefail
+          python3 -m py_compile ops/fleet/linux_dp_wrap_delivery.py
+          python3 -m unittest discover -s ops/fleet -p test_linux_dp_wrap_delivery.py -v
