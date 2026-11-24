@@ -148,7 +148,8 @@ class MatchedCapacityEvidenceTests(unittest.TestCase):
         for edit in (
             {"windowCount":1}, {"windowSeconds":30},
             {"headroom":0.0},{"maxP99Ms":0},
-            {"peakBodyGbps":0},{"concurrency":True},
+            {"peakBodyGbps":0},{"peakBodyGbps":0.1},
+            {"peakBodyGbps":0.499999999},{"concurrency":True},
             {"httpVersion":"2","keepalive":False},
             {"allowedHttpStatus":[200,403]},
             {"wafImageDigest":"unversioned"},
