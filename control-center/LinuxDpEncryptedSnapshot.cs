@@ -83,7 +83,14 @@ public static class LinuxDpEncryptedSnapshot
         {
             // Fixed stage IDs are safe for public CI; never print source paths,
             // certificate material, XML, cookies or arbitrary exception text.
-            throw new InvalidOperationException("Encrypted snapshot stage " + stage, e);
+            var safeStage = stage;
+            if (stage == "copy-ciphertext" &&
+                e is InvalidOperationException copyError &&
+                copyError.Message is "Encrypted snapshot copy read" or
+                    "Encrypted snapshot copy validate-xml" or
+                    "Encrypted snapshot copy write")
+                safeStage = copyError.Message.Replace("Encrypted snapshot copy ", "copy-");
+            throw new InvalidOperationException("Encrypted snapshot stage " + safeStage, e);
         }
         finally
         {
@@ -160,12 +167,16 @@ public static class LinuxDpEncryptedSnapshot
                     ch is not ('-' or '_' or '.')))
                 throw new InvalidOperationException("Unexpected file in encrypted key-ring snapshot");
 
-            var raw = PrivateKeyFileSecurity.ReadPrivateFileBytes(
-                path, "Encrypted DP XML snapshot entry", MaximumFileBytes,
-                requireSingleLink: true);
+            byte[]? raw = null;
+            var copyStage = "read";
             try
             {
+                raw = PrivateKeyFileSecurity.ReadPrivateFileBytes(
+                    path, "Encrypted DP XML snapshot entry", MaximumFileBytes,
+                    requireSingleLink: true);
+                copyStage = "validate-xml";
                 CheckCiphertextOnly(name, raw);
+                copyStage = "write";
                 var output = Path.Combine(destination, name);
                 using var stream = new FileStream(output, new FileStreamOptions {
                     Mode = FileMode.CreateNew,
@@ -177,7 +188,18 @@ public static class LinuxDpEncryptedSnapshot
                 stream.Write(raw);
                 stream.Flush(flushToDisk: true);
             }
-            finally { CryptographicOperations.ZeroMemory(raw); }
+            catch (Exception ex) when (ex is InvalidDataException or
+                InvalidOperationException or IOException or UnauthorizedAccessException or
+                System.Xml.XmlException)
+            {
+                // Only fixed source-code stage names, no filenames, XML or
+                // exception text may reach public CI.
+                throw new InvalidOperationException("Encrypted snapshot copy " + copyStage, ex);
+            }
+            finally
+            {
+                if (raw is not null) CryptographicOperations.ZeroMemory(raw);
+            }
         }
     }
 
