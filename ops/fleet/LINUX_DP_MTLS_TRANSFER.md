@@ -54,7 +54,13 @@ The server serves exactly one read-only
 \`GET /v1/linux-dp-snapshot/rev43\` resource. TLS requires an approved client
 certificate and does **not** accept a caller-provided snapshot label, POST,
 directory traversal, redirects, transfer encoding or unbounded payloads.
-It has no logging of private paths or credentials. Deploy behind tightly
+It has no logging of private paths or credentials. Its unauthenticated
+TLS handshake runs **off the accept loop** in a maximum of eight bounded
+workers with a **four-second pre-authentication timeout**; stalled handshakes
+are closed without monopolizing subsequent legitimate mTLS clients.
+A malicious flood can still saturate a finite listener, so apply the
+independent network ACLs and connection-rate limits required at the site.
+Deploy behind tightly
 scoped network ACLs, never on the public gateway ingress. Remote listening
 requires explicit \`--allow-nonloopback\`.
 
