@@ -30,7 +30,7 @@ ROUTE = "/v1/fenced-waf-node"
 MAX_INPUT = 512
 MAX_OUTPUT = 4096
 JOURNAL_NAME = re.compile(
-    r"rev-([1-9][0-9]{0,19})-(activate|rollback)\\.(intent|receipt)\\Z",
+    r"rev-([1-9][0-9]{0,19})-(activate|rollback)\.(intent|receipt)\Z",
     re.ASCII)
 
 
