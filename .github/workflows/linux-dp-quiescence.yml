@@ -69,6 +69,7 @@ jobs:
           unit = "gatewaycore-dp-quiescence-ci.service"
           dp.invoke_systemctl(dp.subprocess.run, "stop", unit)
           dp.invoke_systemctl(dp.subprocess.run, "mask", "--runtime", unit)
+          dp.invoke_systemctl(dp.subprocess.run, "daemon-reload")
           if not dp.stopped_and_masked(dp.subprocess.run, unit):
               # No private log or arbitrary systemd output. Fixed allowlist
               # of service-state categories for this disposable CI unit only.
