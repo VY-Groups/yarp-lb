@@ -129,7 +129,11 @@ def main():
             ports = [open_port() for _ in range(3)]
         try:
             STAGE = "private-etcd-network"
-            docker("network", "create", "--internal", network)
+            # The three Raft peers use their own disposable bridge.
+            # Host-only 127.0.0.1 published TLS ports must remain reachable
+            # by the independent Python verifier; Docker --internal can
+            # block its host-port DNAT path on some hosted runners.
+            docker("network", "create", network)
             net_created = True
             peers = ",".join(f"ci{i}=http://ci{i}:2380" for i in (1, 2, 3))
             STAGE = "three-etcd-processes"
@@ -185,10 +189,20 @@ def main():
                     last_class = type(exc).__name__
                     time.sleep(.5)
             if cluster is None:
-                STAGE = "cluster-readiness-" + (last_class if last_class in {
-                    "ConnectionRefusedError", "SSLCertVerificationError",
-                    "SSLError", "TimeoutError", "RuntimeError", "KeyError",
-                    "ValueError", "ConnectionResetError", "OSError"} else "unknown")
+                states=[]
+                for item in created:
+                    try:
+                        states.append(docker("inspect", "--format",
+                            "{{.State.Running}}", item, timeout=5))
+                    except (RuntimeError, subprocess.SubprocessError):
+                        states.append("gone")
+                if states != ["true", "true", "true"]:
+                    STAGE = "etcd-container-not-running"
+                else:
+                    STAGE = "cluster-readiness-" + (last_class if last_class in {
+                        "ConnectionRefusedError", "SSLCertVerificationError",
+                        "SSLError", "TimeoutError", "RuntimeError", "KeyError",
+                        "ValueError", "ConnectionResetError", "OSError"} else "unknown")
                 raise RuntimeError("three-member etcd leader never became ready")
             endpoints = [
                 {"url":f"https://127.0.0.1:{port}",
