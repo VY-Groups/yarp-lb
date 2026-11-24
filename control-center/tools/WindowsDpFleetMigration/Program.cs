@@ -4,7 +4,9 @@ using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Xml;
 using System.Xml.Linq;
+using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.DataProtection.XmlEncryption;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 
 /// <summary>
@@ -63,7 +65,8 @@ public static class WindowsDpOfflineFleetMigration
     }
 
     private static void Rewrap(XDocument document, string filename,
-                               CertificateXmlEncryptor encryptor)
+                               CertificateXmlEncryptor encryptor,
+                               EncryptedXmlDecryptor decryptor)
     {
         var root = document.Root ??
             throw new InvalidOperationException("Legacy key XML has no root");
@@ -94,7 +97,7 @@ public static class WindowsDpOfflineFleetMigration
         Stage = "certificate-xml-encrypt";
         var wrapped = encryptor.Encrypt(plain);
         Stage = "certificate-roundtrip-decrypt";
-        var recovered = new EncryptedXmlDecryptor().Decrypt(wrapped.EncryptedElement);
+        var recovered = decryptor.Decrypt(wrapped.EncryptedElement);
         if (!XNode.DeepEquals(plain, recovered))
             throw new InvalidOperationException("Portable X.509 rewrap failed self-check");
         Stage = "certificate-decryptor-type";
@@ -154,6 +157,15 @@ public static class WindowsDpOfflineFleetMigration
             certificateThumbprint, "approved offline migration certificate");
         using var cert = WindowsFleetKeyProtection.LoadPinnedMachineCertificate(thumbprint);
         var encryptor = new CertificateXmlEncryptor(cert, NullLoggerFactory.Instance);
+        // A bare EncryptedXmlDecryptor only searches the implicit user store
+        // on some Windows environments. This approved machine-store leaf
+        // must be supplied through the SAME ASP.NET Data Protection
+        // decryption options used by the actual fleet provider; never
+        // weaken the self-check or accept an unavailable private key.
+        var services = new ServiceCollection();
+        services.AddDataProtection().UnprotectKeysWithAnyCertificate(cert);
+        using var cryptoServices = services.BuildServiceProvider();
+        var decryptor = new EncryptedXmlDecryptor(cryptoServices);
         Stage = "inventory";
         var files = Directory.EnumerateFiles(source, "*.xml",
             SearchOption.TopDirectoryOnly)
@@ -187,7 +199,7 @@ public static class WindowsDpOfflineFleetMigration
                     if (document.Root?.Name == "key")
                     {
                         Stage = "dpapi-to-cert-rewrap";
-                        Rewrap(document, name, encryptor);
+                        Rewrap(document, name, encryptor, decryptor);
                     }
                     else if (document.Root?.Name != "revocation" ||
                              document.Root.Descendants().Any(x =>
