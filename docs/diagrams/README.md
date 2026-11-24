@@ -21,6 +21,7 @@ Start here to understand the product, its trust boundaries and its engineering w
 | [06 — HA, DR & key protection](06-recovery.md) | Active-active routing, site failover, backup/restore, Windows/Linux key protection |
 | [07 — Build, test & release](07-delivery.md) | PR dependency chain, exact-head CI, release and physical acceptance |
 | [08 — CI workflow catalog](08-ci-index.md) | Individual workflow job graphs generated from pinned YAML |
+| [09 — Installation and config-as-code](09-installation.md) | Windows/Linux testing, onboarding, offline GitOps planning and Kubernetes import |
 | [Company authority atlas](https://github.com/VY-Groups/gatewaycore-license-authority/tree/docs/visual-authority-atlas/docs/diagrams) | Issuance, billing, approval, PostgreSQL, recovery and independent signing |
 
 ## One picture of the whole system

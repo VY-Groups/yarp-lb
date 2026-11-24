@@ -131,7 +131,8 @@ L --> D{"Result"}
 D -->|Within quota| OK["Forward"]
 D -->|Cap reached| R["429"]
 D -->|Unavailable / uncertain| F["503; no local fallback"]
-A <-. "signed bounded counter snapshots; telemetry only" .-> B
+A -. "signed bounded counter snapshots; telemetry only" .-> B
+B -. "reciprocal telemetry" .-> A
 ```
 
 The Redis experiment is not a v1 HA dependency, distributed session store, or safe automatic replica promotion solution.
