@@ -147,6 +147,7 @@ class RecoveryLeaseIssuer(RecoveryFence):
         if type(ttl) is not int or not MIN_ISSUE_TTL <= ttl <= MAX_ISSUE_TTL:
             raise ValueError("invalid approved DP lease bound")
         self.ttl = ttl
+        self.phase = "preflight"
 
     def _empty(self, endpoint):
         doc = self.client._post(endpoint, "/v3/kv/range",
@@ -171,6 +172,7 @@ class RecoveryLeaseIssuer(RecoveryFence):
             pass
 
     def issue_once(self):
+        self.phase = "read-absent-quorum"
         reachable = []
         for endpoint in self.client.endpoints:
             try:
@@ -182,11 +184,13 @@ class RecoveryLeaseIssuer(RecoveryFence):
             reachable.append(endpoint)
         if len(reachable) < 2:
             raise ValueError("authenticated DP recovery quorum unavailable")
+        self.phase = "grant-new-lease"
         endpoint = reachable[0]
         grant = self.client._post(endpoint, "/v3/lease/grant",
                                   {"TTL": str(self.ttl)})
         if type(grant) is not dict:
             raise ValueError("etcd lease grant missing")
+        self.phase = "validate-lease-grant"
         lease = etcd.integer(grant.get("ID"))
         lifetime = grant.get("TTL")
         if type(lifetime) is str and lifetime.isdecimal():
@@ -202,23 +206,27 @@ class RecoveryLeaseIssuer(RecoveryFence):
         value = as_base64(json.dumps(record, sort_keys=True,
                        separators=(",", ":")).encode("ascii"))
         try:
+            self.phase = "compare-and-swap"
             txn = self.client._post(endpoint, "/v3/kv/txn", {
                 "compare": [{"result":"EQUAL", "target":"CREATE",
                              "key":self.key, "createRevision":"0"}],
                 "success": [{"requestPut":{"key":self.key, "value":value,
                                            "lease":str(lease)}}],
                 "failure": []})
+            self.phase = "validate-cas-header"
             header = txn.get("header") if type(txn) is dict else None
             if (type(header) is not dict or
                     etcd.integer(header.get("cluster_id")) != self.client.cluster_id or
                     etcd.integer(header.get("member_id")) != endpoint[3] or
                     txn.get("succeeded") is not True):
                 raise ValueError("DP recovery CAS contested or unverified")
+            self.phase = "verify-live-quorum"
             if self.current("preflight") is not True or (
                     self._identity is None or
                     self._identity[2] != lease or
                     self._identity[3] != nonce):
                 raise ValueError("issued recovery lease not majority-confirmed")
+            self.phase = "complete"
             return {"schemaVersion":1, "kind":RECOVERY_KIND,
                     "senderNodeId":self.sender, "receiverNodeId":self.receiver,
                     "revision":self.revision,
