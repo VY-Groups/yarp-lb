@@ -179,6 +179,9 @@ if [[ "$ready" != "1" ]]; then
 fi
 grep -q 'YARP-WAF-CI-BENIGN' "$DIR/benign-body.txt"
 echo "PASS: benign HTTP request proxied through ModSecurity CRS"
+# Read the *ready* pinned Nginx/ModSecurity configuration and hash its
+# effective CRS include chain. Never race container startup or export files.
+python3 ops/waf/effective_ruleset_graph.py --container "$waf_id"
 # Check a small, explicitly selected benign request corpus while CRS is in
 # blocking mode. The backend returns only metadata and never reflects payloads.
 assert_benign_post() {

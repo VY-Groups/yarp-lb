@@ -85,6 +85,60 @@ p95/p99/CPU, policy rollback on hosts, physical failover, or #51 closure.
 Real environment acceptance stays under #36.
 
 
+## Runtime effective ModSecurity include graph evidence (not image trust)
+
+\`ops/waf/effective_ruleset_graph.py\` is an additional **fail-closed,
+read-only** runtime check for the pinned Nginx/ModSecurity CRS Docker image.
+It requires one unambiguous enabled ModSecurity entrypoint found in
+\`nginx -T\`, reads existing \`/etc/modsecurity.d\` config files only through
+bounded Docker execution (no shell), and resolves actual static \`Include\`
+directives and narrowly scoped one-directory \`*.conf\` globs. It rejects
+path traversal, unapproved aliases, arbitrary symlinked rule subtrees,
+missing/cyclic/duplicate includes, unresolved optional/dynamic directives, absent critical
+930/941/942 attack families, and anomaly evaluation that occurs before its
+setup/attack rules.
+
+The reviewed pinned Docker image uses exactly one known alias:
+`/etc/modsecurity.d/owasp-crs` must resolve to `/opt/owasp-crs`.
+The runtime inspector checks that exact pair and refuses any other symlink
+under `/etc/modsecurity.d`; it follows only this verified alias to enumerate
+the effective .conf files. Empty non-CRS wrapper files can be present in the
+image, but empty real CRS rule files remain prohibited. These exceptions
+are image-layout compatibility rules, not an operator-authorized writable
+filesystem or arbitrary symlink permission.
+
+The required set of included CRS file bytes is re-hashed using the same
+canonical domain as \`runtime_ruleset_inventory.py\`. The result must match
+the separately observed, bounded Docker-copied CRS inventory. Hashing file
+bytes by itself is insufficient: a missing or disabled include can give an
+apparently valid but unused CRS inventory. This check strengthens observed
+include reachability rather than merely hashing files on disk. Run only
+on a disposable immutable-reviewed image, or on an independently authorized
+running WAF node, with a literal container ID:
+
+\`\`\`sh
+python3 -m unittest discover -s ops/waf -p test_effective_ruleset_graph.py -v
+python3 ops/waf/effective_ruleset_graph.py --container \
+  <A_VERIFIED_LITERAL_DOCKER_CONTAINER_HEX_ID>
+\`\`\`
+
+The existing WAF Docker CI now runs the actual live graph gate **before**
+benign/malicious request acceptance. It never uploads or prints raw Nginx
+configuration, ModSecurity content, private request bodies, credentials or
+runtime paths. It prints only a synthetic/pass/fail signal and the canonical
+rule digest. External Nginx distributions whose graph cannot be resolved
+must explicitly remain unsupported until the graph parser is reviewed and
+compatible. Do not bypass a failed check by trusting an image tag alone.
+
+**Scope limitation:** Even real include-graph reachability does not certify
+the upstream image signing chain, complete evaluation of all possible
+conditional Nginx location overrides, tenant origin isolation, native WAF
+event custody, reviewer-signed policy ownership, future rule updates,
+cross-node fencing/rollback, per-route customer FP/FN rates or actual
+Windows/Linux sustained throughput. The externally managed WAF remains
+optional integration; this gate alone does not close #51 and does not
+satisfy the physical site test under #36.
+
 ## Two-node fenced transaction core (software candidate; not production fleet)
 
 \`ops/waf/two_node_transaction.py\` implements a security-oriented,
