@@ -280,11 +280,27 @@ def main():
                         "etcd-http-504", "etcd-http-999", "etcd-http-oversized"
                     } else "unknown")
                 raise RuntimeError("three-member etcd leader never became ready")
-            endpoints = [
-                {"url":f"https://127.0.0.1:{port}",
-                 "leafSha256":ids["ci"+str(i)][2]}
-                for i, port in enumerate(ports, 1)
-            ]
+            # In the disposable CI cluster, discover the real identities
+            # independently using linearizable TLS requests. Production
+            # endpoints must instead be supplied with preapproved member IDs
+            # from the independently operated etcd inventory.
+            endpoints = []
+            for i, port in enumerate(ports, 1):
+                observed = post(("127.0.0.1", port),
+                                ("/v3/kv/range",
+                                 {"key": keybase, "serializable": False}),
+                                ca, writer_cert, writer_key)
+                header = observed.get("header", {})
+                if str(header.get("cluster_id")) != str(cluster):
+                    raise RuntimeError("etcd endpoint changed approved cluster")
+                member_id = quorum.integer(header.get("member_id"))
+                endpoints.append({
+                    "url": f"https://127.0.0.1:{port}",
+                    "leafSha256": ids["ci" + str(i)][2],
+                    "memberId": member_id
+                })
+            if len({item["memberId"] for item in endpoints}) != 3:
+                raise RuntimeError("duplicate live Raft identity across TLS endpoints")
             verifier = quorum.EtcdQuorumFence(
                 "fleet-ci", endpoints, cluster, ca, reader_cert, reader_key)
             value = {"schemaVersion":1,"kind":"waf",
