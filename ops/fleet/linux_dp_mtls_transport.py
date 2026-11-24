@@ -162,6 +162,7 @@ def verify_bundle(blob):
     if type(blob) is not bytes or not blob or len(blob) > MAX_BUNDLE:
         raise ValueError("invalid encrypted DP wire bundle size")
     entries = {}
+    seen_names = set()
     total = 0
     try:
         with zipfile.ZipFile(io.BytesIO(blob), "r", allowZip64=False) as zipdata:
@@ -172,8 +173,10 @@ def verify_bundle(blob):
                 if (name != "checkpoint.json" and not
                         (name.startswith("ring/") and XML_NAME.fullmatch(name[5:]))):
                     raise ValueError("unexpected archive member path")
-                if name in entries or (info.external_attr >> 16) & 0o170000 != stat.S_IFREG:
+                if name.casefold() in seen_names or \
+                        (info.external_attr >> 16) & 0o170000 != stat.S_IFREG:
                     raise ValueError("linked, aliased or duplicate archive member")
+                seen_names.add(name.casefold())
                 if info.compress_type != zipfile.ZIP_STORED or info.flag_bits & 1:
                     raise ValueError("compressed or encrypted wire member refused")
                 limit = MAX_MANIFEST if name == "checkpoint.json" else MAX_XML
