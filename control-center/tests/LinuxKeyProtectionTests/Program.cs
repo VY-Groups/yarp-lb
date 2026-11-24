@@ -727,8 +727,18 @@ try
                 realTransfer.Kill(entireProcessTree: true);
                 throw new Exception("FAIL: real encrypted DP network-to-restore test timeout");
             }
-            // Never emit raw customer data or subprocess stderr/stdout; this
-            // test uses disposable TLS keys and only reports exit validity.
+            // Only print an allowlisted, source-owned diagnostic stage, never
+            // exception messages, trust paths, TLS keys, XML, cookies or
+            // unbounded subprocess stderr/stdout from the recovery harness.
+            var privateDiagnostic = realTransfer.StandardError.ReadToEnd();
+            if (realTransfer.ExitCode != 0)
+            {
+                var stage = System.Text.RegularExpressions.Regex.Match(
+                    privateDiagnostic,
+                    @"FAIL: real pinned mTLS to \.NET signed DP restore at (startup|linux-check|private-xml-archive|disposable-openssl-identities|pinned-mtls-server-start|trusted-dotnet-bundle-inspection|mutual-tls-receive-and-signed-dotnet-restore|restored-archive-identity|reject-duplicate)");
+                Console.WriteLine("PINNED_DP_TRANSFER_FAILURE_STAGE=" +
+                    (stage.Success ? stage.Groups[1].Value : "unclassified"));
+            }
             Assert(realTransfer.ExitCode == 0,
                 "real pinned TLS transfer plus signed .NET 10 offline restore accepted");
         }
