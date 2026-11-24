@@ -142,6 +142,78 @@ class RealRestoreSupervisorTests(unittest.TestCase):
         self.assertFalse(marker.exists(),
                          "direct restore exit left descendant key writer alive")
 
+    def test_slow_attestation_cannot_extend_caller_deadline(self):
+        marker = self.root/"write-after-caller-budget"
+        code = ("import time; from pathlib import Path; time.sleep(.8); " +
+                "Path(" + repr(str(marker)) + ").write_text('wrong')")
+
+        class SlowAuthority(Authority):
+            def current(self, phase):
+                self.calls.append(phase)
+                if len(self.calls) >= 2:
+                    time.sleep(1.5)
+                return True
+
+        fence = SlowAuthority()
+        with mock.patch.object(watchdog, "CHECK_INTERVAL", .1):
+            with self.assertRaises(ValueError):
+                self.run_code(code, fence, limit=.35)
+        time.sleep(.9)
+        self.assertGreaterEqual(len(fence.calls), 2)
+        self.assertFalse(marker.exists(),
+                         "recheck let writer outlive caller deadline")
+
+    def test_slow_attestation_cannot_extend_original_lease_runway(self):
+        marker = self.root/"write-after-lease-budget"
+        code = ("import time; from pathlib import Path; time.sleep(.8); " +
+                "Path(" + repr(str(marker)) + ").write_text('wrong')")
+
+        class SlowAuthority(Authority):
+            def current(self, phase):
+                self.calls.append(phase)
+                if len(self.calls) >= 2:
+                    time.sleep(1.5)
+                    self.remaining = 60.0
+                return True
+
+        fence = SlowAuthority(remaining=watchdog.MIN_RUNWAY_SECONDS + .35)
+        with mock.patch.object(watchdog, "CHECK_INTERVAL", .1):
+            with self.assertRaises(ValueError):
+                self.run_code(code, fence, limit=10)
+        time.sleep(.9)
+        self.assertGreaterEqual(len(fence.calls), 2)
+        self.assertFalse(marker.exists(),
+                         "late recheck extended original lease runway")
+
+    def test_post_attestation_cannot_leave_descendant_writer_alive(self):
+        marker = self.root/"write-during-post-attestation"
+        helper = ("import time; from pathlib import Path; time.sleep(.5); " +
+                  "Path(" + repr(str(marker)) + ").write_text('wrong')")
+        parent = ("import subprocess,sys;subprocess.Popen(" +
+                  "[sys.executable,'-c'," + repr(helper) + "])")
+
+        class SlowPostAuthority(Authority):
+            def current(self, phase):
+                self.calls.append(phase)
+                if phase == "after-signed-restore":
+                    time.sleep(1.2)
+                return True
+
+        self.assertEqual(self.run_code(parent, SlowPostAuthority()), 0)
+        self.assertFalse(marker.exists(),
+                         "orphan wrote during final authority check")
+
+    def test_post_attestation_must_finish_within_caller_deadline(self):
+        class SlowPostAuthority(Authority):
+            def current(self, phase):
+                self.calls.append(phase)
+                if phase == "after-signed-restore":
+                    time.sleep(1)
+                return True
+
+        with self.assertRaises(ValueError):
+            self.run_code("pass", SlowPostAuthority(), limit=.4)
+
     def test_missing_or_nonfinite_lease_is_fail_closed(self):
         for value in (0, -1, float("nan"), float("inf")):
             with self.subTest(remaining=value):

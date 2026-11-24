@@ -38,7 +38,7 @@ def _attest(fence, verify_receipts, phase):
     return remaining
 
 
-def _attest_during_restore(fence, verify_receipts, phase):
+def _attest_during_restore(fence, verify_receipts, phase, deadline):
     # Do not let blocking TLS / Raft member reads stall cancellation of an
     # already-running restore. This thread only checks; the parent owns the
     # process and the clock. A stale result never authorizes another attempt.
@@ -52,12 +52,17 @@ def _attest_during_restore(fence, verify_receipts, phase):
         else:
             response.put((True, remaining))
 
+    timeout = min(ATTEST_TIMEOUT_SECONDS, deadline - time.monotonic())
+    if timeout <= 0:
+        raise ValueError("bounded signed restore deadline exhausted")
     thread = threading.Thread(target=check, daemon=True)
     thread.start()
     try:
-        approved, remaining = response.get(timeout=ATTEST_TIMEOUT_SECONDS)
+        approved, remaining = response.get(timeout=timeout)
     except queue.Empty:
         raise ValueError("bounded signed restore quorum reattestation timed out") from None
+    if time.monotonic() >= deadline:
+        raise ValueError("bounded signed restore deadline exhausted during attestation")
     if not approved:
         raise ValueError("signed restore quorum or writer attestation veto")
     return remaining
@@ -94,33 +99,38 @@ def run_fenced_restore(command, environment, fence, verify_receipts,
     # Authenticate immediately before creating the process, not only at the
     # earlier receiver preflight or snapshot transfer boundaries.
     remaining = _attest(fence, verify_receipts, "before-signed-restore")
-    if limit_seconds + MIN_RUNWAY_SECONDS > remaining:
-        limit_seconds = max(1.0, remaining - MIN_RUNWAY_SECONDS)
+    # Pin the original authorization runway and caller budget. A subsequent
+    # attestation may shorten this deadline but must never extend it.
     begun = time.monotonic()
+    deadline = begun + min(limit_seconds, remaining - MIN_RUNWAY_SECONDS)
     process = spawn(command, shell=False, stdin=subprocess.DEVNULL,
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                     env=environment, start_new_session=True)
+    group_cleaned = False
     try:
         while True:
-            left = min(limit_seconds - (time.monotonic() - begun),
-                       fence.remaining_seconds() - MIN_RUNWAY_SECONDS)
+            deadline = min(deadline, time.monotonic() +
+                           fence.remaining_seconds() - MIN_RUNWAY_SECONDS)
+            left = deadline - time.monotonic()
             if left <= 0:
                 raise ValueError("bounded signed restore deadline exhausted")
             try:
                 result = process.wait(timeout=min(CHECK_INTERVAL, left))
             except subprocess.TimeoutExpired:
                 _attest_during_restore(
-                    fence, verify_receipts, "before-signed-restore")
+                    fence, verify_receipts, "before-signed-restore", deadline)
                 continue
+            # Stop residual writers immediately when the leader exits,
+            # BEFORE a potentially blocking post-restore authority check.
+            _kill_group(process)
+            group_cleaned = True
             if result != 0:
                 raise ValueError("independent signed .NET snapshot restore refused")
-            # The caller will perform its own post-restore quorum check,
-            # encrypted-ring validation, and binary hash verification.
+            deadline = min(deadline, time.monotonic() +
+                           fence.remaining_seconds() - MIN_RUNWAY_SECONDS)
             _attest_during_restore(
-                fence, verify_receipts, "after-signed-restore")
+                fence, verify_receipts, "after-signed-restore", deadline)
             return result
-    except BaseException:
-        _kill_group(process)
-        raise
     finally:
-        _kill_group(process)
+        if not group_cleaned:
+            _kill_group(process)
