@@ -59,6 +59,7 @@ class TwoNodeQuiescenceTests(unittest.TestCase):
             self.keys[node]=(str(private),str(public))
         self.fence=FakeFence()
         self.state="masked-inactive"
+        self.kill_mode="control-group"
         self.commands=[]
 
     def run_child(self, args, **kwargs):
@@ -72,7 +73,8 @@ class TwoNodeQuiescenceTests(unittest.TestCase):
                 "active" if self.state=="active" else "inactive")+
                 "\nSubState="+("running" if self.state=="active" else "dead")+
                 "\nMainPID="+("123" if self.state=="active" else "0")+
-                "\nUnitFileState=masked-runtime\n")
+                "\nUnitFileState=masked-runtime\n"+
+                "KillMode="+self.kill_mode+"\n")
             return SimpleNamespace(returncode=0,stdout=data.encode("ascii"))
         return SimpleNamespace(returncode=0,stdout=b"")
 
@@ -211,6 +213,23 @@ class TwoNodeQuiescenceTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     gate._validated_p256_spki(
                         SimpleNamespace(returncode=0,stdout=untrusted))
+
+    def test_unsafe_killmode_fails_closed_before_signing_quiescence(self):
+        # systemd may report inactive / MainPID=0 when KillMode=process
+        # strands worker children: that is not proof of a stopped writer.
+        for mode in ("process", "none", "unknown", ""):
+            with self.subTest(killmode=mode):
+                self.kill_mode=mode
+                self.assertFalse(gate.stopped_and_masked(
+                    self.run_child, "gatewaycore.service"))
+                with self.assertRaises(ValueError):
+                    self.receipt("gateway-a")
+        self.kill_mode="mixed"
+        self.assertTrue(gate.stopped_and_masked(
+            self.run_child, "gatewaycore.service"))
+        self.kill_mode="control-group"
+        self.assertTrue(gate.stopped_and_masked(
+            self.run_child, "gatewaycore.service"))
 
     def test_no_quorum_refuses_before_any_systemd_change(self):
         self.fence.allowed=False
