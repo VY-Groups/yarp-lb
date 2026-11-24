@@ -73,7 +73,8 @@ with tempfile.TemporaryDirectory(prefix="gc-fleet-raft-") as tmp:
             p.write_text(json.dumps(doc));p.chmod(0o600)
             return p
         writer=config("writer");reader=config("reader")
-        one="rollout_"+"A"*24;two="rollout_"+"B"*24
+        # The real interrupted-transaction fixture reserves A*24. Never reuse a completed ID.
+        one="rollout_"+"6"*24;two="rollout_"+"7"*24
         def contender(tx):
             p=subprocess.run(["dotnet",str(fixture),"acquire",str(writer),tx,"0"],capture_output=True,text=True,timeout=30)
             return tx,p
