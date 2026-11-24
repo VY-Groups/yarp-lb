@@ -59,6 +59,10 @@ int Invoke(string[] arguments)
             "init","source-acl","target-parent-acl",
             "approved-certificate","inventory","create-private-stage",
             "read-original","parse-original","dpapi-to-cert-rewrap",
+            "legacy-envelope-validation","dpapi-xml-decrypt",
+            "certificate-xml-encrypt","certificate-roundtrip-decrypt",
+            "certificate-decryptor-type","certificate-secret-replacement",
+            "certificate-encrypted-xml-verify",
             "write-private-encrypted","validate-staged-acl",
             "verify-source-inventory","atomic-publish",
             "verify-published-acl","complete"
