@@ -24,21 +24,35 @@ components; the support matrix does **not** declare the original #48 complete.
   and real mTLS + signed .NET restore integration. The combined fixture's
   quorum responses are deterministic; independent three-member etcd
   integration is exercised by its separate CI suite.
-- **Bounded live authority during restore:** unmerged PR #519 at
-  `24400e5d94997804729f5975a60253d3c00945d6`, exact-head
-  7/7 success. An offline .NET child process is checked against pinned
-  quorum and independent node signatures while running, with process-group
-  kill on lost lease, bad proof, error or deadline. This is **not** an
-  automatic lease-renewal, traffic-drain or promotion protocol.
-- **Two-process rolling certificate and lost-key DR:** unmerged PR #520
-  introduces `LinuxFleetRollingRecoveryTests` on disposable Ubuntu:
-  two independent owner-private state roots, separate real .NET 10 child
-  processes, old/new PFX overlap, explicit new key and cookie key ID,
-  original/new authentication continuity on both instances, rollback
-  retaining both decryption identities, fail-closed lost old private key,
-  protected escrow restore and cross-tenant rejection. Dedicated run
-  `45352889771` PASSED after the C# entrypoint compile fix;
-  additional exact-head and independent reviewer gates remain.
+- **Bounded live authority during restore:** independently reviewed and
+  merged PR #519 at `e14fe8cc6df66fcdcace47178023325d454d37da`;
+  exact-head 8/8 and postmerge main 7/7 passed. An offline .NET child
+  process is checked against pinned quorum and independent node signatures
+  while running, with bounded HTTPS attestations and whole process-group
+  termination on lease loss, missing proof, error or deadline, including
+  after the leader exits. This does **not** implement automatic lease
+  renewal, active traffic drain or node promotion.
+- **Two-process rolling certificate and lost-key DR:** independently
+  reviewed and merged PR #520 at `8b1248e49f7c98542fa720bc3453b07fdb9b764e`,
+  with 14/14 exact-head workflows passing after #519 integration. The
+  disposable Ubuntu `LinuxFleetRollingRecoveryTests` exercises two
+  private state roots and real .NET OS processes, new/previous RSA PFX
+  overlap, actual new key and cookie GUID, cross-process old/new cookie
+  continuity, rollback preserving both decrypt identities, fail-closed
+  previous-key loss, private escrow restore and cross-app isolation.
+  This is same-runner software, not two physical hosts or live traffic
+  promotion.
+- **Fail-closed historic XML certificate retirement:** PR #521 implements
+  mandatory all-top-level-`*.xml` encrypted key recipient verification,
+  distinguishes revocation documents, prevents startup with missing old
+  recipient key/certificate and detects alternative-name historic XML.
+  The revised integrated head `255758293798196c8d19b146023f905c6ec5fd94`
+  passed 15/15 CI; independent re-review/merge pending.
+- **Expired historic decrypt-only identity:** stacked PR #522 tests
+  existing-cookie decryption with a previously valid but now-expired old
+  RSA certificate; current writer validity/secure PFX constraints remain
+  mandatory, and encrypted ring XML remains unchanged. Full combined-head
+  CI and independent review are mandatory before merging.
 
 **Still not proven:** independently housed host service identities, live
 non-interrupted traffic through concurrent issuer/receiver updates,
@@ -48,6 +62,25 @@ offline escrow with backup-custody evidence for loss of all keys, and real
 RHEL enforcing SELinux/systemd. These are not hidden by CI success.
 Software implementation/CI gaps remain #48; physical/site acceptance
 only is #36. #48 is NOT ACCEPTED.
+
+## Certificate expiration during staged rotation (decrypt-only retention)
+
+An active Linux fleet wrapper requires a currently valid RSA encryption leaf,
+including its minimum remaining validity window. A *previous* RSA wrapper
+is not allowed to generate newly persisted keys, but may have expired
+while encrypted historical XML and authentication cookies remain live.
+The runtime must permit that previous certificate's private key for
+**decryption only**, retaining strict RSA/key-encipherment, non-CA,
+permissions, owner-only PFX and separate password checks. New key XML
+must use the current unexpired RSA recipient only.
+
+Do not delete an expired previous private PFX based solely on the public
+X.509 NotAfter timestamp. Retire it only after verified expiry/revocation
+of every session and backup depending on that XML key, followed by
+approved retention and attested data-destruction handling. An expired
+certificate is not authorized as the active new-key writer. Dispose
+only disposable test keys in CI; host service owners must keep custody
+and audit of historic decrypt identities.
 
 ## Latest automated evidence (2026-11-23; CI only)
 

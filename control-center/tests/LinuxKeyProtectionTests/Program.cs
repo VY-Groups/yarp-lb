@@ -80,7 +80,8 @@ void MakeHardLink(string existingFile, string additionalPath)
 }
 (string Pfx,string PasswordFile) CreateCertificate(string prefix,
     X509KeyUsageFlags? keyUsage=X509KeyUsageFlags.KeyEncipherment|X509KeyUsageFlags.DataEncipherment,
-    bool isCa=false, bool includeBasicConstraints=true)
+    bool isCa=false, bool includeBasicConstraints=true,
+    DateTimeOffset? notBefore=null, DateTimeOffset? notAfter=null)
 {
     using var rsa=RSA.Create(3072);
     var request=new CertificateRequest("CN=DP "+prefix,rsa,
@@ -89,8 +90,9 @@ void MakeHardLink(string existingFile, string additionalPath)
         request.CertificateExtensions.Add(new X509BasicConstraintsExtension(isCa,false,0,true));
     if(keyUsage is { } flags)
         request.CertificateExtensions.Add(new X509KeyUsageExtension(flags,true));
-    using var cert=request.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1),
-        DateTimeOffset.UtcNow.AddDays(30));
+    using var cert=request.CreateSelfSigned(
+        notBefore ?? DateTimeOffset.UtcNow.AddDays(-1),
+        notAfter ?? DateTimeOffset.UtcNow.AddDays(30));
     var pass=Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
     var pfx=Path.Combine(secrets,prefix+".pfx");
     var secret=Path.Combine(secrets,prefix+".password");
@@ -1300,6 +1302,56 @@ try
         Assert(provider.GetRequiredService<IDataProtectionProvider>()
             .CreateProtector("session-probe").Unprotect(beforeRotation)=="before-rotation",
             "old session decrypts with previous certificate during rotation overlap");
+    // A previously used RSA XML wrapper can expire after its active
+    // encryption lifetime but must remain usable *only for decryption*
+    // while pre-rotation cookies still exist. The current writer must be
+    // valid today and cannot opt out of its strict expiry requirements.
+    var expiredPrevious=CreateCertificate(
+        "expired-historic",notBefore:DateTimeOffset.UtcNow.AddDays(-70),
+        notAfter:DateTimeOffset.UtcNow.AddDays(-2));
+    var expiredRing=Path.Combine(root,"expired-historic-state");
+    Set("YARP_CONTROL_PLANE_DIR",expiredRing);
+    LinuxKeyProtection.InitializeStateDirectory();
+    string historicCookie;
+    using(var historicCert=X509CertificateLoader.LoadPkcs12(
+        File.ReadAllBytes(expiredPrevious.Pfx),
+        File.ReadAllText(expiredPrevious.PasswordFile).Trim(),
+        X509KeyStorageFlags.EphemeralKeySet))
+    {
+        // A legacy service encrypted its XML BEFORE certificate expiry.
+        // Reconstruct only the disposable encrypted XML on the runner
+        // using the same ASP.NET Core certificate-encryption primitive.
+        var historicServices=new ServiceCollection();
+        var historicBuilder=historicServices.AddDataProtection()
+            .SetApplicationName("OnPremLinuxDpIntegration.v1")
+            .PersistKeysToFileSystem(
+                new DirectoryInfo(Path.Combine(expiredRing,"data-protection-keys")));
+        historicBuilder.ProtectKeysWithCertificate(historicCert);
+        using var historicProvider=historicServices.BuildServiceProvider();
+        historicCookie=historicProvider.GetRequiredService<IDataProtectionProvider>()
+            .CreateProtector("session-probe").Protect("cookie-issued-before-expiry");
+    }
+    var historicFiles=Directory.GetFiles(Path.Combine(expiredRing,"data-protection-keys"),"key-*.xml");
+    Assert(historicFiles.Length>0,"historic encrypted certificate-wrapped key persisted");
+    var historicHashes=historicFiles.ToDictionary(p=>p,p=>SHA256.HashData(File.ReadAllBytes(p)));
+    Set("YARP_LINUX_DP_CERT_PFX_PATH",expiredPrevious.Pfx);
+    Set("YARP_LINUX_DP_CERT_PASSWORD_FILE",expiredPrevious.PasswordFile);
+    Set("YARP_LINUX_DP_OLD_CERT_PFX_PATH",null);
+    Set("YARP_LINUX_DP_OLD_CERT_PASSWORD_FILE",null);
+    Assert(Throws(()=>{using var _=Provider(expiredRing);}),
+        "expired previous wrapping certificate is NEVER accepted as current writer");
+    Set("YARP_LINUX_DP_CERT_PFX_PATH",replacement.Pfx);
+    Set("YARP_LINUX_DP_CERT_PASSWORD_FILE",replacement.PasswordFile);
+    Set("YARP_LINUX_DP_OLD_CERT_PFX_PATH",expiredPrevious.Pfx);
+    Set("YARP_LINUX_DP_OLD_CERT_PASSWORD_FILE",expiredPrevious.PasswordFile);
+    using(var reader=Provider(expiredRing))
+        Assert(reader.GetRequiredService<IDataProtectionProvider>()
+            .CreateProtector("session-probe").Unprotect(historicCookie)
+            =="cookie-issued-before-expiry",
+            "expired historic decrypt-only private certificate preserves authentication cookie");
+    Assert(historicFiles.All(p=>SHA256.HashData(File.ReadAllBytes(p))
+            .SequenceEqual(historicHashes[p])),
+        "historic encrypted key XML is not rewritten by decrypt-only retirement overlap");
     await ProductLinuxStartupSmoke.RunAsync();
     await SystemdServiceAcceptance.RunTerminationCleanupContractAsync();
     await SystemdServiceAcceptance.RunFromGitHubLinuxAsync();
