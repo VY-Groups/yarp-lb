@@ -14,6 +14,11 @@ assert "'GatewayCore.ApplicationCategory'" not in ui
 assert 'Set up your GatewayCore gateway' not in ui
 assert '<strong>GatewayCore</strong>' not in html
 assert 'data-organization-name' in html
+privacy=html.split('<section id="privacy-screen"',1)[1].split('</section>',1)[0]
+assert '<strong data-organization-name>GatewayCore</strong>' in privacy
+assert 'ManagementPrivacyPolicy.cs' in installer
+assert 'ManagementPrivacyPolicy.cs' in (p/'PRECHECK.ps1').read_text()
+assert (p/'ManagementPrivacyPolicy.cs').is_file()
 assert 'Organization profile' in ui
 assert "multiTenantIsolation = false" in api
 assert (p/'tests/MockHttpBackend/Program.cs').is_file()
