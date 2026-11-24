@@ -93,10 +93,19 @@ It requires one unambiguous enabled ModSecurity entrypoint found in
 \`nginx -T\`, reads existing \`/etc/modsecurity.d\` config files only through
 bounded Docker execution (no shell), and resolves actual static \`Include\`
 directives and narrowly scoped one-directory \`*.conf\` globs. It rejects
-path traversal, aliases, symlinked rule subtrees, missing/cyclic/duplicate
-includes, unresolved optional/dynamic directives, absent critical
+path traversal, unapproved aliases, arbitrary symlinked rule subtrees,
+missing/cyclic/duplicate includes, unresolved optional/dynamic directives, absent critical
 930/941/942 attack families, and anomaly evaluation that occurs before its
 setup/attack rules.
+
+The reviewed pinned Docker image uses exactly one known alias:
+`/etc/modsecurity.d/owasp-crs` must resolve to `/opt/owasp-crs`.
+The runtime inspector checks that exact pair and refuses any other symlink
+under `/etc/modsecurity.d`; it follows only this verified alias to enumerate
+the effective .conf files. Empty non-CRS wrapper files can be present in the
+image, but empty real CRS rule files remain prohibited. These exceptions
+are image-layout compatibility rules, not an operator-authorized writable
+filesystem or arbitrary symlink permission.
 
 The required set of included CRS file bytes is re-hashed using the same
 canonical domain as \`runtime_ruleset_inventory.py\`. The result must match
