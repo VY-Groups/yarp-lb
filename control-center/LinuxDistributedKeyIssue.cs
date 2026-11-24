@@ -50,15 +50,33 @@ internal static class LinuxDistributedKeyIssue
             }
             else
             {
+                repo.AcquireScheduledIssueSlot();
+                bool keyWriteStarted=false;
                 // Allow existing nodes time to refresh their cached key rings.
                 // Do not issue a key that activates after all existing keys
                 // expire, or schedule multiple competing future generations.
-                if(activation<now.AddHours(48)||activation>now.AddDays(7))
-                    throw new InvalidOperationException("Activation outside coordinated staging window");
-                var keys=manager.GetAllKeys();
-                if(!keys.Any(k=>!k.IsRevoked&&k.ActivationDate<=now&&k.ExpirationDate>activation) ||
-                    keys.Any(k=>!k.IsRevoked&&k.ActivationDate>now))
-                    throw new InvalidOperationException("Existing ring cannot safely stage another key");
+                try
+                {
+                    if(activation<now.AddHours(48)||activation>now.AddDays(7))
+                        throw new InvalidOperationException("Activation outside coordinated staging window");
+                    var keys=manager.GetAllKeys();
+                    if(!keys.Any(k=>!k.IsRevoked&&k.ActivationDate<=now&&k.ExpirationDate>activation) ||
+                        keys.Any(k=>!k.IsRevoked&&k.ActivationDate>now))
+                        throw new InvalidOperationException("Existing ring cannot safely stage another key");
+                    keyWriteStarted=true;
+                    manager.CreateNewKey(activation,activation.AddDays(90));
+                    repo.ReleaseScheduledIssueSlot();
+                }
+                catch
+                {
+                    // Before the key write, releasing is safe. Once the
+                    // mutation starts, keep the short lease on ambiguity so
+                    // a competing operator must wait and reconcile first.
+                    if(!keyWriteStarted)repo.ReleaseScheduledIssueSlot();
+                    throw;
+                }
+                Console.WriteLine("PASS: fenced distributed key issued");
+                return 0;
             }
             manager.CreateNewKey(activation,activation.AddDays(90));
             Console.WriteLine("PASS: fenced distributed key issued");
