@@ -789,7 +789,7 @@ try
             {
                 var stage = System.Text.RegularExpressions.Regex.Match(
                     privateDiagnostic,
-                    @"FAIL: real pinned mTLS to \.NET signed DP restore at (startup|linux-check|private-xml-archive|disposable-openssl-identities|pinned-mtls-server-start|trusted-dotnet-bundle-inspection|mutual-tls-receive-and-signed-dotnet-restore|restored-archive-identity|reject-duplicate|receiver-(?:platform-and-operator-approval|private-recovery-directories|independent-trust-custody|pinned-complete-dotnet-bundle|pinned-mtls-fetch|atomic-received-archive|independent-checkpoint-staging|approved-dotnet-runtime|signed-dotnet-restore-subprocess|post-execution-bundle-integrity|restored-private-ring-integrity|signed-dotnet-exit-(?:1|131|134|150|other)))");
+                    @"FAIL: real pinned mTLS to \.NET signed DP restore at (startup|linux-check|private-xml-archive|disposable-openssl-identities|independent-p256-node-cryptographic-fixtures|pinned-mtls-server-start|trusted-dotnet-bundle-inspection|mutual-tls-receive-and-signed-dotnet-restore|restored-archive-identity|reject-duplicate|receiver-(?:platform-and-operator-approval|private-recovery-directories|independent-trust-custody|independent-two-node-writer-quiescence|pinned-complete-dotnet-bundle|pinned-mtls-fetch|atomic-received-archive|independent-checkpoint-staging|approved-dotnet-runtime|signed-dotnet-restore-subprocess|post-execution-bundle-integrity|restored-private-ring-integrity|post-restore-quorum|signed-dotnet-exit-(?:1|131|134|150|other)))");
                 Console.WriteLine("PINNED_DP_TRANSFER_FAILURE_STAGE=" +
                     (stage.Success ? stage.Groups[1].Value : "unclassified"));
             }

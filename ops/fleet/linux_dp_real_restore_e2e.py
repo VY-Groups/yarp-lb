@@ -8,13 +8,17 @@ No automatic production key transfer, release or service promotion.
 """
 import argparse
 import hashlib
+import json
 import os
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import threading
+import time
+from types import SimpleNamespace
 
+import linux_dp_quiescence as quiescence
 import linux_dp_mtls_transport as transport
 import linux_dp_receive_restore as receiver
 
@@ -62,6 +66,61 @@ def identities(root):
     return str(ca), out
 
 
+class DisposableEpochFence:
+    """Test-only quorum phase oracle: never a real Raft/host acceptance."""
+
+    sender, receiver = "gateway-a", "gateway-b"
+    _identity = (999, 90, 456, "a" * 32)
+    client = SimpleNamespace(fleet="fleet-disposable")
+
+    def __init__(self, checkpoint):
+        raw = Path(checkpoint).read_bytes()
+        doc = json.loads(raw)
+        self.revision = doc["Revision"]
+        self.checkpoint_sha = hashlib.sha256(raw).hexdigest().upper()
+        self.deadline = time.monotonic() + 110
+        self.phases = []
+
+    def remaining_seconds(self):
+        return max(0.0, self.deadline - time.monotonic())
+
+    def current(self, phase):
+        self.phases.append(phase)
+        return self.remaining_seconds() > 10
+
+
+def disposable_systemctl(command, **kwargs):
+    """Synthetic systemd only; separate CI job checks the real manager."""
+    if command[0] != quiescence.SYSTEMCTL:
+        return subprocess.run(command, **kwargs)
+    if "show" in command:
+        return SimpleNamespace(returncode=0, stdout=(
+            "LoadState=masked\nActiveState=inactive\nSubState=dead\n"
+            "MainPID=0\nUnitFileState=masked-runtime\n"
+            "KillMode=control-group\n").encode("ascii"))
+    return SimpleNamespace(returncode=0, stdout=b"")
+
+
+def disposable_node_witnesses(root, fence):
+    receipts = {}
+    units = ("gatewaycore.service",)
+    for node in (fence.sender, fence.receiver):
+        signing = root / (node + ".signing.pem")
+        public = root / (node + ".trust.pub")
+        receipt = root / (node + ".quiescence")
+        openssl("ecparam", "-name", "prime256v1", "-genkey", "-noout",
+                "-out", str(signing))
+        openssl("pkey", "-in", str(signing), "-pubout", "-out", str(public))
+        signing.chmod(0o600)
+        public.chmod(0o600)
+        payload = quiescence.issue(
+            fence, node, units, str(signing), runner=disposable_systemctl)
+        receipt.write_bytes(payload)
+        receipt.chmod(0o600)
+        receipts[node] = (str(receipt), str(public))
+    return receipts
+
+
 def integration(args):
     global STAGE
     STAGE = "linux-check"
@@ -78,6 +137,12 @@ def integration(args):
         ca, identities_map = identities(root)
         server_cert, server_key, server_pin = identities_map["sender"]
         client_cert, client_key, client_pin = identities_map["receiver"]
+        STAGE = "independent-p256-node-cryptographic-fixtures"
+        fence = DisposableEpochFence(args.checkpoint)
+        witnesses = disposable_node_witnesses(root, fence)
+        # The synthetic service manager above never claims actual two-host
+        # admission. Only the P-256 signature, epoch, and composed .NET
+        # restoration path are real in this disposable integration.
         STAGE = "pinned-mtls-server-start"
         with transport.make_server(
             "127.0.0.1", 0, payload, args.label, client_pin,
@@ -100,9 +165,22 @@ def integration(args):
                     restore_bundle_sha256=receiver.tree_hash(args.restore_bundle),
                     dotnet_runtime_root=args.dotnet_runtime_root,
                     trusted_public_key=args.trusted_public_key,
-                    minimum_revision_file=args.minimum_revision_file)
+                    minimum_revision_file=args.minimum_revision_file,
+                    sender_quiescence_receipt=witnesses[fence.sender][0],
+                    receiver_quiescence_receipt=witnesses[fence.receiver][0],
+                    sender_quiescence_public_key=witnesses[fence.sender][1],
+                    receiver_quiescence_public_key=witnesses[fence.receiver][1],
+                    sender_writer_units=["gatewaycore.service"],
+                    receiver_writer_units=["gatewaycore.service"])
                 STAGE = "mutual-tls-receive-and-signed-dotnet-restore"
-                returned = receiver.restore_once(request)
+                fence.phases.clear()
+                returned = receiver.restore_once(request, fence=fence)
+                if fence.phases != [
+                        "preflight", "before-transfer", "after-transfer",
+                        "before-signed-restore", "after-signed-restore"]:
+                    raise ValueError("not all quorum phases were called on real .NET recovery")
+                # Both receipt signatures were actually checked at every
+                # quorum boundary, not only once before starting the socket.
                 STAGE = "restored-archive-identity"
                 if returned != os.path.join(args.inbox, args.label):
                     raise ValueError("signed recovery staged under wrong identity")
@@ -111,7 +189,7 @@ def integration(args):
                 # TLS fetch, not an in-memory fake.
                 STAGE = "reject-duplicate"
                 try:
-                    receiver.restore_once(request)
+                    receiver.restore_once(request, fence=fence)
                 except ValueError:
                     pass
                 else:
@@ -141,7 +219,8 @@ def main(argv=None):
         print("FAIL: real pinned mTLS to .NET signed DP restore at " + stage,
               file=sys.stderr)
         return 1
-    print("PASS: actual pinned mTLS plus signed .NET restore, duplicate refused")
+    print("PASS: actual pinned mTLS + independent P-256 node signatures + "
+          "bounded quorum-phase oracle + signed .NET restore; duplicate refused")
     return 0
 
 

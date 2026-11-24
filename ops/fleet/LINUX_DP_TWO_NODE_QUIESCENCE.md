@@ -33,7 +33,10 @@ approved DP recovery epoch before a nonloopback snapshot can be received.
 4. Each guard calls the **real** Linux systemd manager with an explicit,
    sorted, allowlisted unit list: stop, `mask --runtime`, then inspect
    `ActiveState=inactive`, `SubState=dead`, `MainPID=0`, masked
-   `UnitFileState`, and a present unit. After a fresh etcd quorum check,
+   `UnitFileState`, a present unit, and `KillMode=control-group` or
+   `KillMode=mixed`. `KillMode=process` or `none` can strand child
+   key-ring writers even when the main PID has exited, so such units must
+   be independently remediated before a receipt can be signed. After a fresh etcd quorum check,
    it creates an owner-only, new-only P-256 signature over the exact
    cluster/lease/holder, fleet, two node IDs, checkpoint SHA, revision,
    stopped units and at most 90 seconds of wall-clock validity.
@@ -105,3 +108,32 @@ substitute `mask --force`, rewrite existing administrator units, or
 treat `disabled` as equivalent to `masked`. Even a signed witness
 cannot protect against authorized administrator changes after issuance;
 this remains an explicit operational/authority integration limit.
+
+## Composed real cryptographic restore regression (PR #518)
+
+The disposable `LinuxKeyProtectionTests` now drives
+`linux_dp_real_restore_e2e.py` through the **same** source/receiver code
+path used by the remote receiver. It creates distinct genuine OpenSSL
+P-256 node signing keys, exact-epoch signed quiescence receipts, a private
+CA plus mutually authenticated TLS sender/receiver certificates, an
+actual certificate-wrapped key ring with an independent P-256 signed
+checkpoint, and executes the published **real .NET 10** signed restore.
+The test asserts all five recovery quorum phase callbacks, validates
+the original cookie in a fresh .NET process, and refuses duplicate
+non-overwriting restores.
+
+**Test boundary:** only node receipt signatures, encrypted mTLS transfer,
+snapshot verifier, original-cookie decrypt and execution are real. The
+quorum phase responses are a deterministic test oracle, not an actual
+three-member live etcd partition; systemd stop/mask responses are a
+test fixture, not two independent hosts. Those separate actual etcd and
+Ubuntu systemd tests remain mandatory. These tests may not be combined
+into a claim of certified site-level HA or automatic production promotion.
+
+P-256 signer public keys must have canonical uncompressed
+`prime256v1` DER SubjectPublicKeyInfo. A separate curve or SPKI with
+embedded matching OID bytes, compressed point, trailing bytes or
+malformed ASN.1 fails before any writer service changes. Writer units
+also require `KillMode=control-group` or `mixed`; merely stopped
+`MainPID=0` under `KillMode=process` or `none` is not proof that
+descendant key-ring writers stopped.

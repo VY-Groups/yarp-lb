@@ -100,6 +100,13 @@ jobs:
               mkdir -p /tmp/work/engines/GslbHealthContracts /tmp/work/ops
               cp -R /repo/control-center /tmp/work/
               cp -R /repo/ops/fleet /tmp/work/ops/
+              # Signed dual-node quiescence imports the *same* reusable
+              # domain-isolated etcd quorum verifier used on the real host.
+              # Include it, instead of weakening the authority check to make
+              # an incomplete isolated userspace fixture pass.
+              mkdir -p /tmp/work/ops/waf
+              cp /repo/ops/waf/etcd_quorum_fence.py /tmp/work/ops/waf/
+              PYTHONPATH=/tmp/work:/tmp/work/ops/fleet python3 -c "import linux_dp_quiescence"
               cp /repo/engines/GslbHealthContracts/PrivateKeyFileSecurity.cs \
                 /tmp/work/engines/GslbHealthContracts/PrivateKeyFileSecurity.cs
               printf "%s\n" "<configuration><packageSources><clear/></packageSources></configuration>" \

@@ -59,6 +59,7 @@ class TwoNodeQuiescenceTests(unittest.TestCase):
             self.keys[node]=(str(private),str(public))
         self.fence=FakeFence()
         self.state="masked-inactive"
+        self.kill_mode="control-group"
         self.commands=[]
 
     def run_child(self, args, **kwargs):
@@ -72,7 +73,8 @@ class TwoNodeQuiescenceTests(unittest.TestCase):
                 "active" if self.state=="active" else "inactive")+
                 "\nSubState="+("running" if self.state=="active" else "dead")+
                 "\nMainPID="+("123" if self.state=="active" else "0")+
-                "\nUnitFileState=masked-runtime\n")
+                "\nUnitFileState=masked-runtime\n"+
+                "KillMode="+self.kill_mode+"\n")
             return SimpleNamespace(returncode=0,stdout=data.encode("ascii"))
         return SimpleNamespace(returncode=0,stdout=b"")
 
@@ -165,6 +167,69 @@ class TwoNodeQuiescenceTests(unittest.TestCase):
                 sender_units=("gatewaycore.service",),
                 receiver_units=("gatewaycore.service",),
                 clock=lambda:NOW,runner=self.run_child)
+
+    def test_non_p256_oid_inside_foreign_spki_never_counts_as_identity(self):
+        # A non-P256 public-key SubjectPublicKeyInfo can contain P-256 OID
+        # bytes in arbitrary public-key material. Scanning for OID substrings
+        # (instead of strict DER AlgorithmIdentifier) falsely accepts it.
+        p384 = self.root/"wrong-curve.key"
+        subprocess.run(["openssl","ecparam","-name","secp384r1",
+                        "-genkey","-noout","-out",str(p384)],
+                       check=True,timeout=15,stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL)
+        p384.chmod(0o600)
+        output = subprocess.run([gate.OPENSSL,"pkey","-in",str(p384),
+                                 "-pubout","-outform","DER"],
+                                check=True,capture_output=True,timeout=15).stdout
+        self.assertNotEqual(len(output), 91)
+        oid=bytes.fromhex("06082A8648CE3D030107")
+        # Even artificially embedding a second curve OID in a foreign
+        # point's material cannot satisfy the canonical P-256 structure.
+        contaminated=output[:-len(oid)]+oid
+        self.assertIn(oid, contaminated)
+        with self.assertRaises(ValueError):
+            gate._validated_p256_spki(
+                SimpleNamespace(returncode=0,stdout=contaminated))
+        with self.assertRaises(ValueError):
+            gate.issue(self.fence,"gateway-a",("gatewaycore.service",),
+                       str(p384),runner=self.run_child,clock=lambda:NOW)
+        self.assertEqual(self.commands,[],
+                         "foreign-curve keys cannot stop production units")
+
+    def test_malformed_spki_and_duplicate_point_encoding_refused(self):
+        private=self.keys["gateway-a"][0]
+        generated=subprocess.run([gate.OPENSSL,"pkey","-in",private,
+                                  "-pubout","-outform","DER"],
+                                 check=True,capture_output=True,timeout=15).stdout
+        self.assertEqual(len(generated), 91)
+        self.assertEqual(
+            gate._validated_p256_spki(
+                SimpleNamespace(returncode=0,stdout=generated)),
+            __import__("hashlib").sha256(generated).digest())
+        for untrusted in (generated + bytes([0]), generated[1:],
+                          generated.replace(bytes.fromhex("03420004"),
+                                            bytes.fromhex("03420104"), 1)):
+            with self.subTest(value=len(untrusted)):
+                with self.assertRaises(ValueError):
+                    gate._validated_p256_spki(
+                        SimpleNamespace(returncode=0,stdout=untrusted))
+
+    def test_unsafe_killmode_fails_closed_before_signing_quiescence(self):
+        # systemd may report inactive / MainPID=0 when KillMode=process
+        # strands worker children: that is not proof of a stopped writer.
+        for mode in ("process", "none", "unknown", ""):
+            with self.subTest(killmode=mode):
+                self.kill_mode=mode
+                self.assertFalse(gate.stopped_and_masked(
+                    self.run_child, "gatewaycore.service"))
+                with self.assertRaises(ValueError):
+                    self.receipt("gateway-a")
+        self.kill_mode="mixed"
+        self.assertTrue(gate.stopped_and_masked(
+            self.run_child, "gatewaycore.service"))
+        self.kill_mode="control-group"
+        self.assertTrue(gate.stopped_and_masked(
+            self.run_child, "gatewaycore.service"))
 
     def test_no_quorum_refuses_before_any_systemd_change(self):
         self.fence.allowed=False
