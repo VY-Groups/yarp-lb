@@ -133,6 +133,10 @@ if [[ -n "${WAF_IMAGE:-}" && "$WAF_IMAGE" != "$selected_digest" ]]; then
 fi
 export WAF_IMAGE="$selected_digest"
 printf '%s\n' "$WAF_IMAGE" > "$DIR/waf-selected-image.txt"
+# Observe the *running* Nginx entrypoint and the complete effective CRS
+# Include graph, then require exact canonical bytes to agree with the
+# independent pinned container inventory. Do not dump raw configs to CI.
+python3 ops/waf/effective_ruleset_graph.py --container "$waf_id"
 assert_same_image() {
   local id
   id="$(docker compose -f "$COMPOSE" ps --quiet waf)"
