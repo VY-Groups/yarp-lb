@@ -324,6 +324,26 @@ class RecoveryAuthorityTests(unittest.TestCase):
                 dp.RuntimeWriterHandoff(old,successor,receipt).replace_once()
             revoke.assert_called_once_with(successor.client.endpoints[0],789)
 
+    def test_runtime_handoff_ambiguous_empty_response_preserves_successor_grant(self):
+        old=dp.RuntimeWriterLeaseIssuer(*self.params)
+        successor=dp.RuntimeWriterLeaseIssuer(*self.params[:6],
+            SENDER,RECEIVER,44,CHECKPOINT)
+        receipt={"schemaVersion":1,"kind":"linux-dp","senderNodeId":SENDER,
+                 "receiverNodeId":RECEIVER,"revision":43,
+                 "checkpointSha256":CHECKPOINT,"holder":"a"*32,
+                 "leaseId":456,"raftModRevision":90}
+        old._identity=(999,90,456,"a"*32)
+        with mock.patch.object(old,"current",return_value=True), \
+                mock.patch.object(old,"remaining_seconds",return_value=90), \
+                mock.patch.object(successor.client,"_post",side_effect=[
+                    {"ID":"789","TTL":"120"},
+                    {"header":{"cluster_id":"999","member_id":"1","revision":"101"},
+                     "responses":[]}]), \
+                mock.patch.object(successor,"_revoke") as revoke:
+            with self.assertRaisesRegex(ValueError,"ambiguous runtime handoff"):
+                dp.RuntimeWriterHandoff(old,successor,receipt).replace_once()
+            revoke.assert_not_called()
+
     def test_disallowed_phase_and_identity_fail_without_network(self):
         self.assertFalse(self.issuer.current("before-transfer"))
         self.assertFalse(self.issuer.current("emergency-override"))

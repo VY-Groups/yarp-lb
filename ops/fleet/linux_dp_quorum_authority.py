@@ -544,8 +544,10 @@ class RuntimeWriterHandoff:
                 etcd.integer(header.get("cluster_id")) != self.expected[0] or
                 etcd.integer(header.get("member_id")) != endpoint[3]):
             raise ValueError("ambiguous runtime handoff: reconcile independently")
-        if response.get("succeeded") is False or (
-                "succeeded" not in response and response.get("responses",[]) == []):
+        # Only an explicit failed compare proves that the successor lease is
+        # unused. A missing/malformed result may follow a committed request;
+        # preserve the grant and require reconciliation in that case.
+        if response.get("succeeded") is False:
             new._revoke(endpoint,lease)
             raise ValueError("runtime handoff CAS contested")
         if response.get("succeeded") is not True:
