@@ -214,7 +214,22 @@ def observe(container_id):
         links = run_bounded(["docker", "exec", container_id, "find", ROOT,
                              "-type", "l"], max_bytes=MAX_LISTING)
         if links.strip():
-            raise ValueError("symlinked ModSecurity rule path")
+            entries = links.decode("utf-8", "strict").splitlines()
+            if len(entries) > 16:
+                stage = "config-symlink-many"
+                raise ValueError("unexpected symlink inventory")
+            for entry in entries:
+                valid_config_path(entry)
+                root_link = entry in (ROOT + "/owasp-crs",
+                                      ROOT + "/owasp-crs/rules")
+                resolved = run_bounded(
+                    ["docker", "exec", container_id, "readlink", "-f", entry],
+                    max_bytes=512).decode("utf-8", "strict").strip()
+                area = ("opt" if resolved.startswith("/opt/") else
+                        "usr" if resolved.startswith("/usr/share/") else
+                        "etc" if resolved.startswith(ROOT + "/") else "other")
+                stage = "config-symlink-" + ("crs-" if root_link else "other-") + area
+                raise ValueError("unreviewed Docker image ModSecurity alias")
         filenames = names.splitlines()
         if len(filenames) > MAX_FILES or len(filenames) != len(set(filenames)):
             raise ValueError("oversized/duplicate WAF path inventory")
@@ -248,6 +263,11 @@ def main(argv=None):
         stages = {
             "nginx-command", "nginx-mode", "nginx-root-count",
             "nginx-root-path", "config-path-listing", "config-symlink-check",
+            "config-symlink-many",
+            "config-symlink-crs-opt", "config-symlink-crs-usr",
+            "config-symlink-crs-etc", "config-symlink-crs-other",
+            "config-symlink-other-opt", "config-symlink-other-usr",
+            "config-symlink-other-etc", "config-symlink-other-other",
             "read-actual-config-bytes", "graph-and-inventory"
         }
         stage = str(exc).removeprefix("Effective WAF graph rejected at ")
