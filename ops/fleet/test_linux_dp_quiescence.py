@@ -95,6 +95,46 @@ class TwoNodeQuiescenceTests(unittest.TestCase):
         self.assertIn("mask",self.commands[1])
         self.assertIn("show",self.commands[2])
 
+    def test_remote_receiver_requires_two_real_signed_node_receipts(self):
+        from types import SimpleNamespace
+        import linux_dp_receive_restore as receiver
+        inbox, state, app = (self.root/"inbox",self.root/"state",self.root/"app")
+        for directory in (inbox,state,app):
+            directory.mkdir(mode=0o700)
+        first = gate.issue(self.fence,"gateway-a",("gatewaycore.service",),
+                           self.keys["gateway-a"][0],
+                           runner=self.run_child)
+        second = gate.issue(self.fence,"gateway-b",("gatewaycore.service",),
+                            self.keys["gateway-b"][0],
+                            runner=self.run_child)
+        sender_receipt=self.root/"sender.receipt"
+        receiver_receipt=self.root/"receiver.receipt"
+        for path,payload in ((sender_receipt,first),
+                             (receiver_receipt,second)):
+            path.write_bytes(payload)
+            path.chmod(0o600)
+        args=SimpleNamespace(
+            destination_root=str(inbox),state_root=str(state),
+            restore_bundle=str(app),
+            sender_quiescence_receipt=str(sender_receipt),
+            receiver_quiescence_receipt=str(receiver_receipt),
+            sender_quiescence_public_key=self.keys["gateway-a"][1],
+            receiver_quiescence_public_key=self.keys["gateway-b"][1],
+            sender_writer_units=["gatewaycore.service"],
+            receiver_writer_units=["gatewaycore.service"])
+        proof=receiver.signed_node_quiescence(args,self.fence,loopback=False)
+        receiver.require_signed_node_quiescence(proof,self.fence)
+        receiver_receipt.write_bytes(b"forged signed witness")
+        receiver_receipt.chmod(0o600)
+        with self.assertRaises(ValueError):
+            # Proof files are read afresh at the actual request boundary;
+            # never accept stale already-read data for a NEW restore.
+            bad=receiver.signed_node_quiescence(args,self.fence,loopback=False)
+            receiver.require_signed_node_quiescence(bad,self.fence)
+        args.receiver_quiescence_receipt=None
+        with self.assertRaises(ValueError):
+            receiver.signed_node_quiescence(args,self.fence,loopback=False)
+
     def test_no_quorum_refuses_before_any_systemd_change(self):
         self.fence.allowed=False
         with self.assertRaises(ValueError):
