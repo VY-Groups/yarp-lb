@@ -125,6 +125,21 @@ def main(compose):
             if revision != 7 or not re.fullmatch(r"[A-F0-9]{64}", config_hash):
                 raise ValueError("cryptographically approved WAF configuration missing")
 
+            # Synthetic lab ONLY: the signed renderer correctly leaves its
+            # original candidate owner-only (0600). The unprivileged WAF
+            # process must be able to read the bind-mounted runtime file.
+            # Stage a digest-identical, read-only *synthetic* copy beneath
+            # a private 0700 host directory, never relax the signed original
+            # or stage real operator/customer exception policy this way.
+            signed_bytes = rendered.read_bytes()
+            if hashlib.sha256(signed_bytes).hexdigest().upper() != config_hash:
+                raise ValueError("signed rendered WAF candidate digest changed")
+            runtime_copy = root / "synthetic-runtime-loaded.conf"
+            runtime_copy.write_bytes(signed_bytes)
+            runtime_copy.chmod(0o644)
+            if hashlib.sha256(runtime_copy.read_bytes()).hexdigest().upper() != config_hash:
+                raise ValueError("staged synthetic WAF runtime digest mismatch")
+
             private_base = root / "compose.signed.yml"
             private_base.write_text(
                 original.replace(publish, '"127.0.0.1:18889:8080"'),
@@ -133,9 +148,9 @@ def main(compose):
             private_override.write_text(
                 "services:\n  waf:\n    volumes:\n"
                 "      - type: bind\n"
-                "        source: " + json.dumps(str(rendered)) + "\n"
+                "        source: " + json.dumps(str(runtime_copy)) + "\n"
                 "        target: /etc/modsecurity.d/owasp-crs/rules/"
-                "REQUEST-901-GATEWAYCORE-SIGNED-PKIX.conf\n"
+                "REQUEST-900-GATEWAYCORE-LAB-PKIX.conf\n"
                 "        read_only: true\n", encoding="utf-8")
             STAGE = "compose_fixture_generation"
             prefix = ["docker", "compose", "--project-directory", str(source.parent),
@@ -180,8 +195,9 @@ def main(compose):
                         cid = compose_run([*prefix, "ps", "--quiet", "waf"],
                                           env=env).strip()
                         conf = ("/etc/modsecurity.d/owasp-crs/rules/"
-                                "REQUEST-901-GATEWAYCORE-SIGNED-PKIX.conf")
-                        readable = subprocess.run(["docker", "exec", cid, "test", "-r", conf],
+                                "REQUEST-900-GATEWAYCORE-LAB-PKIX.conf")
+                        readable = subprocess.run(["docker", "exec", cid, "sh", "-c",
+                                                   'test -r "$1"', "sh", conf],
                                                   stdout=subprocess.DEVNULL,
                                                   stderr=subprocess.DEVNULL,
                                                   timeout=8, check=False).returncode == 0
