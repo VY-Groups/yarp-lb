@@ -1212,7 +1212,19 @@ try
     Assert(Throws(()=>{using var _=Provider(state);}),
         "incomplete previous certificate rotation config is refused");
     Set("YARP_LINUX_DP_OLD_CERT_PASSWORD_FILE",second.PasswordFile);
-    using(var service=Provider(state))
+    // The general 'state' fixture still contains encrypted keys written by
+    // first, which is no longer accessible after the earlier damaged-PFX
+    // negative. That ring MUST now fail at startup even when replacement
+    // and second are otherwise valid: the unrecoverable first recipient
+    // cannot be silently abandoned, invalidating its original sessions.
+    Assert(Throws(()=>{using var _=Provider(state);}),
+        "mixed ring cannot silently retire a third historic certificate");
+    // Validate current+previous overlap on a clean, separate ring instead
+    // of weakening that new fail-closed invariant to preserve an old fixture.
+    var overlapState=Path.Combine(root,"rotation-overlap-clean-state");
+    Set("YARP_CONTROL_PLANE_DIR",overlapState);
+    LinuxKeyProtection.InitializeStateDirectory();
+    using(var service=Provider(overlapState))
     {
         var dp=service.GetRequiredService<IDataProtectionProvider>()
             .CreateProtector("session-probe");
@@ -1236,6 +1248,52 @@ try
             .CreateProtector("session-probe").Protect("before-rotation");
     Set("YARP_LINUX_DP_CERT_PFX_PATH",replacement.Pfx);
     Set("YARP_LINUX_DP_CERT_PASSWORD_FILE",replacement.PasswordFile);
+    Set("YARP_LINUX_DP_OLD_CERT_PFX_PATH",null);
+    Set("YARP_LINUX_DP_OLD_CERT_PASSWORD_FILE",null);
+    var previousRing = Directory.GetFiles(
+        Path.Combine(rotationState, "data-protection-keys"), "key-*.xml");
+    var beforeDenied = previousRing.ToDictionary(p=>p,p=>SHA256.HashData(File.ReadAllBytes(p)));
+    Assert(Throws(()=>{using var _=Provider(rotationState);}),
+        "new certificate alone must not start while historic XML still needs old private key");
+    Assert(previousRing.All(p=>SHA256.HashData(File.ReadAllBytes(p))
+            .SequenceEqual(beforeDenied[p])),
+        "blocked unsafe cert retirement never changes the encrypted key ring");
+    // The file-backed repository imports ALL top-level *.xml documents.
+    // A valid encrypted historic key under a nonstandard XML filename
+    // cannot bypass inventory/recipient validation or fall into a
+    // best-effort provider import after service startup.
+    var renamedState=Path.Combine(root,"renamed-historic-xml");
+    Set("YARP_CONTROL_PLANE_DIR",renamedState);
+    LinuxKeyProtection.InitializeStateDirectory();
+    var renamedXml=Path.Combine(renamedState,"data-protection-keys",
+        "legacy-historic-encrypted.xml");
+    File.Copy(previousRing.Single(),renamedXml);
+    File.SetUnixFileMode(renamedXml,PrivateFile);
+    var renamedBefore=SHA256.HashData(File.ReadAllBytes(renamedXml));
+    Assert(Throws(()=>{using var _=Provider(renamedState);}),
+        "nonstandard *.xml with real historic encrypted key fails closed before import");
+    Assert(SHA256.HashData(File.ReadAllBytes(renamedXml))
+            .SequenceEqual(renamedBefore),
+        "rejected nonstandard *.xml historical key remains byte-identical");
+    Set("YARP_CONTROL_PLANE_DIR",rotationState);
+    // Revocation XML is a repository document but deliberately contains no
+    // certificate-wrapped master key. The recipient scan skips revocation
+    // roots without inventing an empty encrypted-key requirement.
+    var revocationOnly=Path.Combine(root,"revocation-inventory");
+    Set("YARP_CONTROL_PLANE_DIR",revocationOnly);
+    LinuxKeyProtection.InitializeStateDirectory();
+    var revocationPath=Path.Combine(revocationOnly,"data-protection-keys",
+        "revocation-disposable.xml");
+    File.WriteAllText(revocationPath,"<revocation revocationDate=\"2026-01-01T00:00:00Z\" keyId=\"*\" />");
+    File.SetUnixFileMode(revocationPath,PrivateFile);
+    using(var revocationProvider=Provider(revocationOnly))
+        Assert(revocationProvider is not null,
+            "revocation-only top-level XML does not require a certificate recipient");
+    Set("YARP_CONTROL_PLANE_DIR",rotationState);
+    Set("YARP_LINUX_DP_OLD_CERT_PFX_PATH",first.Pfx);
+    Set("YARP_LINUX_DP_OLD_CERT_PASSWORD_FILE",first.PasswordFile);
+    Assert(Throws(()=>{using var _=Provider(rotationState);}),
+        "different but accessible previous wrapping certificate cannot masquerade as old recipient");
     Set("YARP_LINUX_DP_OLD_CERT_PFX_PATH",second.Pfx);
     Set("YARP_LINUX_DP_OLD_CERT_PASSWORD_FILE",second.PasswordFile);
     using(var provider=Provider(rotationState))

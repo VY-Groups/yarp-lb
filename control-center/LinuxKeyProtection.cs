@@ -231,6 +231,120 @@ public static class LinuxKeyProtection
         }
     }
 
+    // Refuse silent retirement of a historic wrapping identity. ASP.NET Core
+    // can otherwise start with a valid new certificate while old persisted
+    // keys remain encrypted under a now-missing previous private key; old
+    // authentication cookies fail later, after traffic has been admitted.
+    // Inspection is read-only and never exports/decrypts a master key.
+    private static void RequireHistoricWrappingCertificates(
+        string keyDirectory, X509Certificate2 current, X509Certificate2? previous)
+    {
+        const string protectedNs = "http://schemas.asp.net/2015/03/dataProtection";
+        const string xmldsigNs = "http://www.w3.org/2000/09/xmldsig#";
+        const int maximumKeyFiles = 512;
+        // The ASP.NET Core FileSystemXmlRepository imports every top-level
+        // *.xml file, not only files beginning with "key-". The custody
+        // inventory must inspect that SAME complete set before startup.
+        var keys = Directory.EnumerateFiles(keyDirectory, "*.xml")
+            .Take(maximumKeyFiles + 1).ToArray();
+        if (keys.Length > maximumKeyFiles)
+            throw new InvalidOperationException("Historic encrypted key-ring inventory is unbounded");
+        var activeRecipient = current.RawData;
+        var historicRecipient = previous?.RawData;
+        try
+        {
+            foreach (var path in keys)
+            {
+                var bytes = PrivateKeyFileSecurity.ReadPrivateFileBytes(
+                    path, "Historic Data Protection encrypted XML", 1024 * 1024,
+                    requireSingleLink: true);
+                try
+                {
+                    using var stream = new MemoryStream(bytes, writable: false);
+                    using var reader = XmlReader.Create(stream, new XmlReaderSettings
+                    {
+                        DtdProcessing = DtdProcessing.Prohibit,
+                        XmlResolver = null,
+                        MaxCharactersInDocument = 1024 * 1024
+                    });
+                    // Revocation XML has no encrypted key recipient;
+                    // key XML MUST carry one or more approved recipients.
+                    if (reader.MoveToContent() != XmlNodeType.Element ||
+                        reader.NamespaceURI.Length != 0 ||
+                        (reader.LocalName != "key" &&
+                         reader.LocalName != "revocation"))
+                        throw new InvalidOperationException(
+                            "Unexpected XML in Data Protection key repository");
+                    if (reader.LocalName == "revocation")
+                        continue;
+                    var envelopeDepth = -1;
+                    var recipientCount = 0;
+                    while (reader.Read())
+                    {
+                        if (reader.NodeType == XmlNodeType.Element &&
+                            reader.LocalName == "encryptedSecret" &&
+                            reader.NamespaceURI == protectedNs)
+                        {
+                            if (envelopeDepth != -1)
+                                throw new InvalidOperationException(
+                                    "Ambiguous Data Protection certificate envelope");
+                            envelopeDepth = reader.Depth;
+                        }
+                        else if (reader.NodeType == XmlNodeType.EndElement &&
+                                 reader.LocalName == "encryptedSecret" &&
+                                 reader.NamespaceURI == protectedNs &&
+                                 reader.Depth == envelopeDepth)
+                        {
+                            envelopeDepth = -1;
+                        }
+                        else if (reader.NodeType == XmlNodeType.Element &&
+                                 reader.LocalName == "X509Certificate" &&
+                                 reader.NamespaceURI == xmldsigNs &&
+                                 envelopeDepth >= 0 &&
+                                 reader.Depth > envelopeDepth)
+                        {
+                            // This is the PUBLIC embedded recipient cert, not
+                            // the encrypted DP key or private wrapping PFX.
+                            var encoded = reader.ReadElementContentAsString();
+                            if (encoded.Length is < 1 or > 16384)
+                                throw new InvalidOperationException(
+                                    "Invalid bounded encrypted-key recipient");
+                            byte[] recipient;
+                            try { recipient = Convert.FromBase64String(encoded); }
+                            catch (FormatException)
+                            {
+                                throw new InvalidOperationException(
+                                    "Malformed encrypted-key recipient certificate");
+                            }
+                            try
+                            {
+                                if (!CryptographicOperations.FixedTimeEquals(
+                                        recipient, activeRecipient) &&
+                                    (historicRecipient is null ||
+                                     !CryptographicOperations.FixedTimeEquals(
+                                         recipient, historicRecipient)))
+                                    throw new InvalidOperationException(
+                                        "Historic Data Protection certificate cannot be retired while its keys remain");
+                                recipientCount++;
+                            }
+                            finally { CryptographicOperations.ZeroMemory(recipient); }
+                        }
+                    }
+                    if (recipientCount == 0 || recipientCount > 4)
+                        throw new InvalidOperationException(
+                            "Encrypted Data Protection key lacks approved public wrapping recipient");
+                }
+                finally { CryptographicOperations.ZeroMemory(bytes); }
+            }
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(activeRecipient);
+            if (historicRecipient is not null)
+                CryptographicOperations.ZeroMemory(historicRecipient);
+        }
+    }
+
     public static void Configure(IDataProtectionBuilder dataProtection, string rootDirectory)
     {
         if (!OperatingSystem.IsLinux())
@@ -244,18 +358,23 @@ public static class LinuxKeyProtection
         LinuxDpRecoveryEvidence.VerifyConfigured(keyDirectory);
         var current = LoadRsaProtector("YARP_LINUX_DP_CERT_PFX_PATH",
             "YARP_LINUX_DP_CERT_PASSWORD_FILE");
-        dataProtection.ProtectKeysWithCertificate(current);
         // Optional overlap only during planned protection certificate rotation.
         // Previously persisted XML keys still require the old private key.
         var old = Environment.GetEnvironmentVariable("YARP_LINUX_DP_OLD_CERT_PFX_PATH");
         var oldPassword = Environment.GetEnvironmentVariable("YARP_LINUX_DP_OLD_CERT_PASSWORD_FILE");
         if (string.IsNullOrEmpty(old) != string.IsNullOrEmpty(oldPassword))
             throw new InvalidOperationException("Old PFX and its password file must be specified together");
+        X509Certificate2? previous = null;
         if (!string.IsNullOrEmpty(old))
-        {
-            var previous = LoadRsaProtector("YARP_LINUX_DP_OLD_CERT_PFX_PATH",
+            previous = LoadRsaProtector("YARP_LINUX_DP_OLD_CERT_PFX_PATH",
                 "YARP_LINUX_DP_OLD_CERT_PASSWORD_FILE");
+
+        // Require the configured identities to cover ALL persisted recipient
+        // certificates BEFORE admitting any service traffic. A new active
+        // identity alone must not silently break previous auth sessions.
+        RequireHistoricWrappingCertificates(keyDirectory, current, previous);
+        dataProtection.ProtectKeysWithCertificate(current);
+        if (previous is not null)
             dataProtection.UnprotectKeysWithAnyCertificate(current, previous);
-        }
     }
 }
