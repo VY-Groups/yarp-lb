@@ -53,9 +53,16 @@ static int Child(string[] a)
     try
     {
         if (a.Length != 8 || a[0] != "child" ||
-            a[1] is not ("mint" or "verify" or "rotate") ||
+            a[1] is not ("mint" or "verify" or "rotate" or "fixture-sleep") ||
             (a[6] == "-" ^ a[7] == "-"))
             return 2;
+        if (a[1] == "fixture-sleep")
+        {
+            if (Environment.GetEnvironmentVariable("GITHUB_ACTIONS") != "true")
+                return 2;
+            Thread.Sleep(TimeSpan.FromSeconds(10));
+            return 0;
+        }
         Configure(a[2], a[3], a[4],
             a[6] == "-" ? null : a[6],
             a[7] == "-" ? null : a[7]);
@@ -153,6 +160,13 @@ static void ReplicateOnlyNewEncryptedKeys(string from, string to)
 
 static (int Exit, string Output) RunChild(
     string mode, string state, (string Pfx, string Password) current,
+    (string Pfx, string Password)? old, string app, params string[] stdin) =>
+    RunChildWithTimeout(TimeSpan.FromSeconds(60), mode, state, current, old,
+                        app, stdin);
+
+static (int Exit, string Output) RunChildWithTimeout(
+    TimeSpan timeout, string mode, string state,
+    (string Pfx, string Password) current,
     (string Pfx, string Password)? old, string app, params string[] stdin)
 {
     var start = new ProcessStartInfo("dotnet")
@@ -171,15 +185,31 @@ static (int Exit, string Output) RunChild(
         throw new InvalidOperationException("Cannot launch disposable fleet node");
     foreach (var value in stdin) process.StandardInput.WriteLine(value);
     process.StandardInput.Close();
-    var result = process.StandardOutput.ReadToEnd().Trim();
-    // Never surface the child stdout (it can contain a disposable cookie)
-    // or stderr; only expose fixed source-authored acceptance stage names.
-    if (!process.WaitForExit(60000))
+    // Start draining BOTH redirected pipes before waiting for the process.
+    // A synchronous ReadToEnd() can wait forever before a timeout is
+    // checked, and a full undrained stderr pipe can deadlock the child.
+    using var deadline = new CancellationTokenSource(timeout);
+    var stdout = process.StandardOutput.ReadToEndAsync(deadline.Token);
+    var stderr = process.StandardError.ReadToEndAsync(deadline.Token);
+    try
     {
-        process.Kill(entireProcessTree: true);
-        throw new InvalidOperationException("Disposable fleet node timed out");
+        process.WaitForExitAsync(deadline.Token).GetAwaiter().GetResult();
+        var output = stdout.WaitAsync(deadline.Token).GetAwaiter().GetResult();
+        _ = stderr.WaitAsync(deadline.Token).GetAwaiter().GetResult();
+        // Child stdout can hold an ephemeral cookie and stderr may hold
+        // private paths. Never echo either to public CI diagnostics.
+        return (process.ExitCode, output.Trim());
     }
-    return (process.ExitCode, result);
+    catch (OperationCanceledException) when (deadline.IsCancellationRequested)
+    {
+        if (!process.HasExited)
+        {
+            process.Kill(entireProcessTree: true);
+            process.WaitForExit();
+        }
+        throw new InvalidOperationException(
+            "Disposable fleet child timed out and was terminated");
+    }
 }
 
 if (args.Length > 0 && args[0] == "child")
@@ -212,6 +242,16 @@ try
     // Independent custody is an offline encrypted PFX escrow with separate
     // private files, not keys read from a restored application state root.
     var archivedOldB = CopyCert(oldA, escrow, "approved-old-recovery");
+    var timer = Stopwatch.StartNew();
+    var timeoutRejected = false;
+    try
+    {
+        RunChildWithTimeout(TimeSpan.FromMilliseconds(300),
+            "fixture-sleep", nodeA, oldA, null, AppName);
+    }
+    catch (InvalidOperationException) { timeoutRejected = true; }
+    Check(timeoutRejected && timer.Elapsed < TimeSpan.FromSeconds(4),
+        "hung separate-process child is killed by effective async deadline");
 
     foreach (var state in new[] {nodeA,nodeB})
     {
