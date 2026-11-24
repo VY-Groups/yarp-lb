@@ -450,6 +450,36 @@ try
         Assert(RunFloorCommit(unsignedFloorCandidate,revisionFloorPath)!=0 &&
             LinuxDpRecoveryFloor.ReadExternalFloor(keyDirectory,revisionFloorPath)==42,
             "unsigned recovery cannot advance independent floor");
+        var restoredSelfFloor=Path.Combine(state,"untrusted-recovery-floor.txt");
+        File.WriteAllText(restoredSelfFloor,"42\n");
+        File.SetUnixFileMode(restoredSelfFloor,PrivateFile);
+        Assert(RunFloorCommit(generatedManifest,restoredSelfFloor)!=0 &&
+            File.ReadAllText(restoredSelfFloor)=="42\n",
+            "backup-contained floor cannot authorize its own recovery high-water");
+        var linkedFloor=Path.Combine(secrets,"linked-floor.txt");
+        File.CreateSymbolicLink(linkedFloor,revisionFloorPath);
+        try
+        {
+            Assert(RunFloorCommit(generatedManifest,linkedFloor)!=0 &&
+                LinuxDpRecoveryFloor.ReadExternalFloor(keyDirectory,revisionFloorPath)==42,
+                "symbolic alias cannot advance trusted revision floor");
+        }
+        finally { File.Delete(linkedFloor); }
+        var protectedXml=keyFiles[0];
+        var originalXml=File.ReadAllBytes(protectedXml);
+        try
+        {
+            File.AppendAllText(protectedXml,"<!-- synthetic ring drift -->");
+            File.SetUnixFileMode(protectedXml,PrivateFile);
+            Assert(RunFloorCommit(generatedManifest,revisionFloorPath)!=0 &&
+                LinuxDpRecoveryFloor.ReadExternalFloor(keyDirectory,revisionFloorPath)==42,
+                "changed encrypted inventory cannot advance signed floor");
+        }
+        finally
+        {
+            File.WriteAllBytes(protectedXml,originalXml);
+            File.SetUnixFileMode(protectedXml,PrivateFile);
+        }
         Assert(RunFloorCommit(generatedManifest,revisionFloorPath)==0 &&
             LinuxDpRecoveryFloor.ReadExternalFloor(keyDirectory,revisionFloorPath)==43,
             "real verified offline coordinator durably commits signed 43 high-water");
