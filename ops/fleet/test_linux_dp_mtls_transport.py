@@ -10,7 +10,9 @@ from pathlib import Path
 import re
 import shutil
 import ssl
+import socket
 import stat
+import time
 import subprocess
 import tempfile
 import threading
@@ -180,6 +182,42 @@ class TransportTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             tx.make_server("0.0.0.0",0,bundle,"rev9",client_pin,
                            ca,server_cert,server_key)
+
+    def test_stalled_unauthenticated_tls_never_blocks_real_client(self):
+        ca,identities=self.identities()
+        server_cert,server_key,server_pin=identities["server"]
+        client_cert,client_key,client_pin=identities["client"]
+        bundle=tx.build_bundle(str(self.source),"rev9",str(self.checkpoint))
+        srv=tx.make_server("127.0.0.1",0,bundle,"rev9",client_pin,
+                           ca,server_cert,server_key)
+        thread=threading.Thread(target=srv.serve_forever,
+                                kwargs={"poll_interval":.02},daemon=True)
+        thread.start()
+        self.addCleanup(lambda: (srv.shutdown(),srv.server_close(),thread.join(5)))
+        stalled=socket.create_connection(("127.0.0.1",srv.server_port),timeout=2)
+        self.addCleanup(stalled.close)
+        # An unauthenticated peer opens TCP and intentionally never sends a
+        # TLS ClientHello. It must consume only its own bounded worker, not
+        # block the listening/accept loop or a legitimate mTLS recovery.
+        time.sleep(.15)
+        start=time.monotonic()
+        actual=tx.fetch_pinned("https://127.0.0.1:"+str(srv.server_port),
+                               "rev9",server_pin,ca,client_cert,client_key)
+        elapsed=time.monotonic()-start
+        self.assertEqual(actual,bundle)
+        self.assertLess(elapsed,3.0,"stalled pre-auth peer blocked legitimate relay")
+        # Verify the four-second pre-auth timeout actually releases the
+        # connection. No indefinite hidden TLS handshake can survive.
+        stalled.settimeout(6)
+        try:
+            response=stalled.recv(1)
+            self.assertEqual(response,b"")
+        except (ConnectionResetError,BrokenPipeError,OSError):
+            pass
+        # The same TLS listener remains functional after rejecting the peer.
+        self.assertEqual(
+            tx.fetch_pinned("https://127.0.0.1:"+str(srv.server_port),
+                            "rev9",server_pin,ca,client_cert,client_key),bundle)
 
     def test_invalid_cert_key_or_client_pin_cannot_start_relay(self):
         ca, identities=self.identities()
