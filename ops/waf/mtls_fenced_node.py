@@ -231,7 +231,7 @@ class NodeHandler(BaseHTTPRequestHandler):
         try:
             payload = strict_json(self.rfile.read(int(lengths[0])))
             result = self.server.agent.dispatch(payload)
-            self._reply(200, {"ok": True, "result": result})
+            self._reply(200, {"ok": True, "nodeId": self.server.agent.node_id, "result": result})
         except (OSError, ValueError, KeyError, TypeError, UnicodeError):
             # Never reveal a private rule, key path, device identity or payload.
             self._reply(409, {"ok": False})
@@ -257,7 +257,10 @@ def serve(agent, bind, port, ca, cert, key, client_pin, *, allow_nonloopback=Fal
 class RemoteNodeProvider:
     """The coordinator's no-shell, exact-operation, mutually pinned TLS adapter."""
 
-    def __init__(self, server_url, server_pin, ca, certificate, key):
+    def __init__(self, node_id, server_url, server_pin, ca, certificate, key):
+        if type(node_id) is not str or not NODE.fullmatch(node_id):
+            raise ValueError("approved WAF node ID required")
+        self.node_id = node_id
         u = urlsplit(server_url)
         if (u.scheme != "https" or not u.hostname or u.port is None or
                 not 0 < u.port <= 65535 or u.username or u.password or
@@ -300,7 +303,8 @@ class RemoteNodeProvider:
             if len(response) != length:
                 raise ValueError("incomplete WAF node response")
             record = strict_json(response)
-            if set(record) != {"ok", "result"} or record["ok"] is not True:
+            if (set(record) != {"ok", "nodeId", "result"} or
+                    record["ok"] is not True or record["nodeId"] != self.node_id):
                 raise ValueError("untrusted WAF node response")
             return record["result"]
         finally:
