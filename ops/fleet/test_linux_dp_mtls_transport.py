@@ -219,6 +219,54 @@ class TransportTests(unittest.TestCase):
             tx.fetch_pinned("https://127.0.0.1:"+str(srv.server_port),
                             "rev9",server_pin,ca,client_cert,client_key),bundle)
 
+
+    def test_all_handshake_workers_saturated_fail_closed_and_recover(self):
+        # Eight unauthenticated TCP peers are enough to fill all pre-auth
+        # handshake slots; a ninth must not create an unbounded worker.
+        # After the bounded handshake deadline, an authorized client must
+        # recover without a server restart.
+        ca, identities = self.identities()
+        server_cert, server_key, server_pin = identities["server"]
+        client_cert, client_key, client_pin = identities["client"]
+        bundle = tx.build_bundle(str(self.source), "rev9", str(self.checkpoint))
+        srv = tx.make_server("127.0.0.1", 0, bundle, "rev9", client_pin,
+                             ca, server_cert, server_key)
+        srv.handshake_timeout_seconds = 1
+        thread = threading.Thread(target=srv.serve_forever,
+                                  kwargs={"poll_interval": .02}, daemon=True)
+        thread.start()
+        self.addCleanup(lambda: (srv.shutdown(), srv.server_close(), thread.join(5)))
+        stalled = []
+        try:
+            for _ in range(srv.max_handshakes):
+                sock = socket.create_connection(("127.0.0.1", srv.server_port),
+                                                timeout=2)
+                stalled.append(sock)
+            # All unauthenticated handshakes must remain bounded by the
+            # explicitly configured semaphore and worker deadline.
+            time.sleep(.2)
+            self.assertEqual(srv.handshake_slots._value, 0)
+            overflow = socket.create_connection(("127.0.0.1", srv.server_port),
+                                                timeout=2)
+            try:
+                overflow.settimeout(2)
+                self.assertEqual(overflow.recv(1), b"")
+            except (ConnectionResetError, BrokenPipeError):
+                pass
+            finally:
+                overflow.close()
+            # Stalled handshakes time out, release every slot and permit
+            # a genuine pinned, mutually authenticated recovery request.
+            time.sleep(1.2)
+            self.assertEqual(srv.handshake_slots._value, srv.max_handshakes)
+            self.assertEqual(
+                tx.fetch_pinned("https://127.0.0.1:" + str(srv.server_port),
+                                "rev9", server_pin, ca, client_cert, client_key),
+                bundle)
+        finally:
+            for sock in stalled:
+                sock.close()
+
     def test_invalid_cert_key_or_client_pin_cannot_start_relay(self):
         ca, identities=self.identities()
         server_cert,server_key,_=identities["server"]
