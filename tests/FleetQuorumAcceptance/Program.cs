@@ -6,7 +6,8 @@ try
     using var quorum=FleetQuorum.Open(args[1],args[0]!="assert")??throw new InvalidOperationException();
     if(args[0]=="acquire")Console.WriteLine((await quorum.Acquire(args[2],epoch)).Epoch);
     else if(args[0]=="assert")await quorum.Assert(args[2],epoch);
-    else if(args[0]=="release")await quorum.Release(args[2],epoch);
+    else if(args[0]=="release")await quorum.Release(args[2],epoch,"rolled-back");
+    else if(args[0]=="wrong-outcome")await quorum.Release(args[2],epoch,"activated");
     else return 2;
     return 0;
 }

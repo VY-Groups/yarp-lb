@@ -20,7 +20,7 @@ internal sealed class FleetQuorum : IDisposable
     private readonly Peer[] peers;
     private readonly ulong cluster;
     private readonly X509Certificate2 ca,credential;
-    private readonly string key;
+    private readonly string key,namespaceKey;
     private readonly bool writable;
     internal string Scope { get; }
     internal static string DeploymentScope(string license,string customer,string deployment)=>
@@ -60,7 +60,8 @@ internal sealed class FleetQuorum : IDisposable
         if(!Hex(settings.Scope) || settings.Endpoints is not {Length:3})
             throw new InvalidDataException("Require one deployment scope and exactly three pinned members.");
         Scope=settings.Scope;this.writable=writable;cluster=Number(settings.ClusterId);
-        key=Base64("/gatewaycore/commercial-fleet/v1/"+Scope);
+        namespaceKey="/gatewaycore/commercial-fleet/v1/"+Scope;
+        key=Base64(namespaceKey);
         var endpoints=settings.Endpoints.Select(e=>
         {
             if(!Uri.TryCreate(e.Url,UriKind.Absolute,out var uri) || uri.Scheme!="https" ||
@@ -107,20 +108,22 @@ internal sealed class FleetQuorum : IDisposable
             throw new InvalidDataException("Pinned Raft identity mismatch.");
         return root.Clone();
     }
-    private async Task<(Peer Peer,Fence? State)?> ReadOne(Peer peer,CancellationToken token)
+    private string ReceiptKey(string tx)=>Base64(namespaceKey+"/completed/"+tx);
+    private async Task<(Peer Peer,Fence? State)?> ReadOne(Peer peer,string readKey,CancellationToken token)
     {
         try
         {
-            var root=await Post(peer,"/v3/kv/range",new {key,serializable=false},token);
+            var root=await Post(peer,"/v3/kv/range",new {key=readKey,serializable=false},token);
             if(!root.TryGetProperty("kvs",out var rows) || rows.GetArrayLength()==0)return (peer,null);
             if(rows.GetArrayLength()!=1)throw new InvalidDataException("Unexpected quorum key count.");
             var row=rows[0];
-            if(row.GetProperty("key").GetString()!=key ||
+            if(row.GetProperty("key").GetString()!=readKey ||
                 (row.TryGetProperty("lease",out var lease) && lease.ToString()!="0"))
                 throw new InvalidDataException("Unexpected key or expiring lease; persistent fencing required.");
             var tx=Encoding.ASCII.GetString(Convert.FromBase64String(row.GetProperty("value").GetString()!));
             var epoch=checked((long)Number(row.GetProperty("mod_revision")));
-            if(!Tx(tx) || Number(root.GetProperty("header").GetProperty("revision"))<(ulong)epoch ||
+            if(tx.Length is <1 or >120 || tx.Any(c=>c is < (char)33 or > (char)126) ||
+                Number(root.GetProperty("header").GetProperty("revision"))<(ulong)epoch ||
                 Number(row.GetProperty("version"))!=1)
                 throw new InvalidDataException("Invalid or overwritten transaction fence.");
             return (peer,new Fence(tx,epoch));
@@ -128,9 +131,9 @@ internal sealed class FleetQuorum : IDisposable
         catch(HttpRequestException){return null;}
         catch(OperationCanceledException) when(!token.IsCancellationRequested){return null;}
     }
-    private async Task<(Peer Peer,Fence? State)> Read(CancellationToken token)
+    private async Task<(Peer Peer,Fence? State)> Read(CancellationToken token,string? readKey=null)
     {
-        var answers=(await Task.WhenAll(peers.Select(p=>ReadOne(p,token)))).Where(x=>x.HasValue).Select(x=>x!.Value).ToArray();
+        var answers=(await Task.WhenAll(peers.Select(p=>ReadOne(p,readKey??key,token)))).Where(x=>x.HasValue).Select(x=>x!.Value).ToArray();
         if(answers.Length<2 || answers.Any(x=>x.State!=answers[0].State))
             throw new InvalidOperationException("No consistent authenticated Raft majority.");
         return answers[0];
@@ -141,7 +144,8 @@ internal sealed class FleetQuorum : IDisposable
         var before=await Read(token);
         if(before.State is not null)throw new InvalidOperationException("Another unresolved fleet transaction owns the quorum fence.");
         var result=await Post(before.Peer,"/v3/kv/txn",new {
-            compare=new[]{new {key,result="EQUAL",target="CREATE",createRevision="0"}},
+            compare=new[]{new {key,result="EQUAL",target="CREATE",createRevision="0"},
+                new {key=ReceiptKey(transaction),result="EQUAL",target="CREATE",createRevision="0"}},
             success=new[]{new {requestPut=new {key,value=Base64(transaction)}}},failure=Array.Empty<object>()},token);
         if(!result.TryGetProperty("succeeded",out var ok)||ok.ValueKind!=JsonValueKind.True)
             throw new InvalidOperationException("Competing quorum acquisition won.");
@@ -157,17 +161,38 @@ internal sealed class FleetQuorum : IDisposable
         if(observed.State!=new Fence(transaction,epoch))
             throw new InvalidOperationException("Transaction no longer owns the authenticated quorum fence.");
     }
-    internal async Task Release(string transaction,long epoch,CancellationToken token=default)
+    internal async Task Release(string transaction,long epoch,string outcome,CancellationToken token=default)
     {
-        if(!writable || !Tx(transaction)||epoch<1)throw new InvalidOperationException("Unauthorized quorum release.");
+        if(!writable || !Tx(transaction)||epoch<1 || outcome is not ("activated" or "rolled-back"))
+            throw new InvalidOperationException("Unauthorized quorum completion.");
+        var receiptKey=ReceiptKey(transaction);
+        var receipt=transaction+":"+epoch.ToString(CultureInfo.InvariantCulture)+":"+outcome;
+        async Task<bool> Completed()
+        {
+            var observed=await Read(token,receiptKey);
+            if(observed.State is null)return false;
+            if(observed.State.Transaction!=receipt)
+                throw new InvalidOperationException("Completion receipt differs from durable intent.");
+            return true;
+        }
+        // An atomic prior completion is idempotent after a lost response or
+        // process crash. Never touch a successor's active lock.
+        if(await Completed())return;
         var before=await Read(token);
-        if(before.State!=new Fence(transaction,epoch))throw new InvalidOperationException("Exact transaction ownership required for release.");
-        var result=await Post(before.Peer,"/v3/kv/txn",new {
+        if(before.State!=new Fence(transaction,epoch))
+        {
+            if(await Completed())return;
+            throw new InvalidOperationException("Exact transaction ownership required for release.");
+        }
+        _=await Post(before.Peer,"/v3/kv/txn",new {
             compare=new object[]{new {key,result="EQUAL",target="MOD",modRevision=epoch.ToString(CultureInfo.InvariantCulture)},
-                new {key,result="EQUAL",target="VALUE",value=Base64(transaction)}},
-            success=new[]{new {requestDeleteRange=new {key}}},failure=Array.Empty<object>()},token);
-        if(!result.TryGetProperty("succeeded",out var ok)||ok.ValueKind!=JsonValueKind.True)
-            throw new InvalidOperationException("Quorum release CAS failed; preserve journal.");
+                new {key,result="EQUAL",target="VALUE",value=Base64(transaction)},
+                new {key=receiptKey,result="EQUAL",target="CREATE",createRevision="0"}},
+            success=new object[]{new {requestPut=new {key=receiptKey,value=Base64(receipt)}},
+                new {requestDeleteRange=new {key}}},failure=Array.Empty<object>()},token);
+        // Even if another process won the exact same completion CAS, accept
+        // only the immutable same-epoch, same-outcome receipt.
+        if(!await Completed())throw new InvalidOperationException("Quorum completion not confirmed; preserve journal.");
     }
     public void Dispose()
     {foreach(var peer in peers)peer.Client.Dispose();credential.Dispose();ca.Dispose();}

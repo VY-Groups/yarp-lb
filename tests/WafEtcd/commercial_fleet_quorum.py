@@ -87,9 +87,13 @@ with tempfile.TemporaryDirectory(prefix="gc-fleet-raft-") as tmp:
         run("release",writer,loser,epoch,ok=False)
         run("acquire",writer,loser,epoch,ok=False)
         run("release",writer,tx,epoch)
+        run("acquire",writer,tx,epoch,ok=False)
         next_epoch=int(run("acquire",writer,loser,epoch))
         assert next_epoch>epoch
         run("assert",reader,tx,epoch,ok=False)
+        run("release",writer,tx,epoch)
+        run("wrong-outcome",writer,tx,epoch,ok=False)
+        run("assert",reader,loser,next_epoch)
         run("release",writer,loser,next_epoch)
         print("PASS: actual independent controller CAS race, exact owner release, monotonic epoch and stale rejection",flush=True)
         # Real product acceptance uses the same three-member quorum, not mocks.
@@ -97,6 +101,7 @@ with tempfile.TemporaryDirectory(prefix="gc-fleet-raft-") as tmp:
         subprocess.run([sys.executable,str(ROOT/"control-center/tests/EngineConfigSecurityTests/agent_crl_acceptance.py")],
             env=env,check=True,timeout=700)
         # Repeat quorum proof under actual 1/3 and 2/3 failures.
+        one="rollout_"+"C"*24;two="rollout_"+"D"*24
         epoch=int(run("acquire",writer,one,0))
         docker("stop","--time","1",containers[-1])
         run("assert",reader,one,epoch)
