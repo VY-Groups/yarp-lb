@@ -17,6 +17,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 [SupportedOSPlatform("windows")]
 public static class WindowsDpOfflineFleetMigration
 {
+    public static string Stage { get; private set; } = "init";
     private const int MaxFiles = 512;
     private const int MaxXmlBytes = 131072;
     private static readonly XNamespace ProtectionNs =
@@ -131,18 +132,22 @@ public static class WindowsDpOfflineFleetMigration
                               StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException("Offline source and output must be disjoint");
 
+        Stage = "source-acl";
         WindowsStateProtection.ValidateOfflineKeyRingDirectory(source);
         var targetParent = Path.GetDirectoryName(destination) ??
             throw new InvalidOperationException("Private destination parent absent");
+        Stage = "target-parent-acl";
         WindowsStateProtection.ValidateOfflineKeyRingDirectory(targetParent);
         if (Directory.Exists(destination) || File.Exists(destination) ||
             new DirectoryInfo(destination).LinkTarget is not null)
             throw new InvalidOperationException("Offline migration must never overwrite");
 
+        Stage = "approved-certificate";
         var thumbprint = WindowsFleetKeyProtection.ValidateThumbprint(
             certificateThumbprint, "approved offline migration certificate");
         using var cert = WindowsFleetKeyProtection.LoadPinnedMachineCertificate(thumbprint);
         var encryptor = new CertificateXmlEncryptor(cert, NullLoggerFactory.Instance);
+        Stage = "inventory";
         var files = Directory.EnumerateFiles(source, "*.xml",
             SearchOption.TopDirectoryOnly)
             .OrderBy(Path.GetFileName, StringComparer.OrdinalIgnoreCase).ToArray();
@@ -160,17 +165,23 @@ public static class WindowsDpOfflineFleetMigration
         var published = false;
         try
         {
+            Stage = "create-private-stage";
             WindowsStateProtection.CreateNewOfflinePrivateDirectory(staging);
             foreach (var path in files)
             {
                 var name = Path.GetFileName(path);
+                Stage = "read-original";
                 var raw = ReadBounded(path);
                 try
                 {
                     hashes.Add(name, SHA256.HashData(raw));
+                    Stage = "parse-original";
                     var document = Parse(raw);
                     if (document.Root?.Name == "key")
+                    {
+                        Stage = "dpapi-to-cert-rewrap";
                         Rewrap(document, name, encryptor);
+                    }
                     else if (document.Root?.Name != "revocation" ||
                              document.Root.Descendants().Any(x =>
                                  x.Name.LocalName is "masterKey" or "encryptedSecret") ||
@@ -182,12 +193,15 @@ public static class WindowsDpOfflineFleetMigration
                     var output = document.Root!.Name == "key"
                         ? Encoding.UTF8.GetBytes(document.ToString(
                             SaveOptions.DisableFormatting)) : raw.ToArray();
+                    Stage = "write-private-encrypted";
                     try { PrivateWrite(Path.Combine(staging, name), output); }
                     finally { CryptographicOperations.ZeroMemory(output); }
                 }
                 finally { CryptographicOperations.ZeroMemory(raw); }
             }
+            Stage = "validate-staged-acl";
             WindowsStateProtection.ValidateOfflineKeyRingDirectory(staging);
+            Stage = "verify-source-inventory";
             var finalNames = Directory.EnumerateFiles(source, "*.xml")
                 .Select(Path.GetFileName).OrderBy(x => x, StringComparer.OrdinalIgnoreCase)
                 .ToArray();
@@ -207,9 +221,12 @@ public static class WindowsDpOfflineFleetMigration
             }
             if (Directory.Exists(destination) || File.Exists(destination))
                 throw new InvalidOperationException("Offline destination was claimed concurrently");
+            Stage = "atomic-publish";
             Directory.Move(staging, destination);
             published = true;
+            Stage = "verify-published-acl";
             WindowsStateProtection.ValidateOfflineKeyRingDirectory(destination);
+            Stage = "complete";
             return files.Length;
         }
         finally
@@ -239,10 +256,12 @@ public static class Program
                               "source untouched, live promotion NOT authorized");
             return count > 0 ? 0 : 1;
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or
-            CryptographicException or XmlException or InvalidOperationException or
-            ArgumentException)
+        catch (Exception)
         {
+            // Only fixed source-authored stage names; no exception strings,
+            // service SID, certificates, plaintext, file paths or key IDs.
+            Console.Error.WriteLine(
+                "WIN_DP_MIGRATION_FAILURE_STAGE=" + WindowsDpOfflineFleetMigration.Stage);
             Console.Error.WriteLine(
                 "FAIL: offline DPAPI-to-certificate migration rejected; source remains unchanged");
             return 1;
