@@ -42,6 +42,20 @@ def compose_run(command, *, env, timeout=60):
     return result.stdout.decode("utf-8", "replace")
 
 
+def ready_get():
+    """Idempotent readiness probe; never replay synthetic POST requests."""
+    connection = http.client.HTTPConnection("127.0.0.1", PORT, timeout=5)
+    try:
+        connection.request("GET", "/", headers={"Connection": "close"})
+        response = connection.getresponse()
+        body = response.read(1024)
+        if response.read(1):
+            return False
+        return response.status == 200 and body.startswith(b"YARP-WAF-CI-BENIGN")
+    finally:
+        connection.close()
+
+
 def probe(path, case, mime="application/pkix-cert"):
     connection = http.client.HTTPConnection("127.0.0.1", PORT, timeout=5)
     try:
@@ -167,7 +181,7 @@ def main(compose):
                 STAGE = "compose_readiness"
                 for _ in range(80):
                     try:
-                        if probe("/", "signed-readiness", mime="application/json")[0] == 200:
+                        if ready_get():
                             break
                     except (ConnectionError, OSError, TimeoutError, http.client.HTTPException):
                         pass
@@ -237,6 +251,54 @@ def main(compose):
                     raise ValueError("native ModSecurity audit did not bind scoped 920420 denial")
                 print("PASS: signed P-256 exception loads in real CRS; exact URI only, "
                       "native 920420 denials retained outside approved scope")
+                # Restore the previously proven pinned disposable CRS include,
+                # removing the synthetic signed exception. This is a local
+                # parser/runtime rollback, NOT distributed signed fleet recovery.
+                STAGE = "restore_prior_pinned_waf_config"
+                live_cid = compose_run([*prefix, "ps", "--quiet", "waf"], env=env).strip()
+                original_image = compose_run(
+                    ["docker", "inspect", live_cid, "--format", "{{.Image}}"],
+                    env=env).strip()
+                baseline = ["docker", "compose", "--project-directory",
+                            str(source.parent), "--project-name",
+                            "gatewaycore-signed-exception-ci", "-f", str(private_base)]
+                compose_run([*baseline, "up", "--detach", "--no-deps",
+                             "--force-recreate", "waf"], env=env, timeout=90)
+                STAGE = "post_rollback_readiness"
+                for _ in range(80):
+                    try:
+                        if ready_get():
+                            break
+                    except (ConnectionError, OSError, TimeoutError,
+                            http.client.HTTPException):
+                        pass
+                    time.sleep(0.6)
+                else:
+                    raise ValueError("rolled-back WAF did not recover")
+                resumed_cid = compose_run([*baseline, "ps", "--quiet", "waf"],
+                                          env=env).strip()
+                resumed_image = compose_run(
+                    ["docker", "inspect", resumed_cid, "--format", "{{.Image}}"],
+                    env=env).strip()
+                if original_image != resumed_image:
+                    raise ValueError("WAF rollback changed the pinned container image")
+                STAGE = "post_rollback_request_verdicts"
+                if probe("/signed-pkix", "signed-rollback")[0] != 403:
+                    raise ValueError("signed exception still active after local rollback")
+                accepted, accepted_body = probe("/acceptance", "signed-baseline-restored")
+                if accepted != 200 or b'"accepted":true' not in accepted_body:
+                    raise ValueError("prior approved laboratory exclusion not restored")
+                native_log = compose_run([*baseline, "logs", "--no-color", "waf"],
+                                         env=env, timeout=25)
+                rollback_rule = []
+                for transaction in native.audit_transactions(native_log):
+                    if CASE.findall("\n".join(transaction["B"])) == ["signed-rollback"]:
+                        rollback_rule.append(bool(CRS_920420.search(
+                            "\n".join(transaction["H"]))))
+                if rollback_rule != [True]:
+                    raise ValueError("rollback 920420 native denial not bound to request")
+                print("PASS: pinned local WAF rollback removes signed exception, "
+                      "restores prior lab carve-out and preserves native CRS denials")
             finally:
                 compose_run([*prefix, "down", "--remove-orphans", "--volumes"],
                             env=env, timeout=60)
