@@ -39,22 +39,44 @@ def compose_exec(service, *args):
 def wait_ready():
     deadline = time.monotonic() + 90
     last = []
-    urls = ("http://127.0.0.1:18080/api/identity", "http://127.0.0.1:18081/api/identity")
+    gateways = ("gateway-a", "gateway-b")
+    ingress_urls = ("http://127.0.0.1:18080/api/identity", "http://127.0.0.1:18081/api/identity")
     while time.monotonic() < deadline:
         current = []
-        for url in urls:
+        for gateway in gateways:
+            try:
+                compose_exec(gateway, "curl", "-fsS", "--connect-timeout", "1", "--max-time", "2",
+                             "http://127.0.0.1:8080/gateway/health")
+                raw = compose_exec(gateway, "curl", "-fsS", "--connect-timeout", "1", "--max-time", "2",
+                                   "http://127.0.0.1:8080/api/identity")
+                node = json.loads(raw).get("node")
+                current.append({"gateway": gateway, "status": 200, "backend": node})
+                if node not in {"A", "B"}:
+                    current[-1]["status"] = 0
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired, json.JSONDecodeError, OSError) as error:
+                current.append({"gateway": gateway, "exception": repr(error)})
+        for url in ingress_urls:
             try:
                 code, body, _ = http(url)
-                current.append({"url": url, "status": code, "body": body[:250].decode(errors="replace")})
-            except (URLError, TimeoutError, ConnectionError, OSError) as error:
+                node = json.loads(body).get("node") if code == 200 else None
+                current.append({"url": url, "status": code, "backend": node})
+                if code == 200 and node not in {"A", "B"}:
+                    current[-1]["status"] = 0
+            except (URLError, TimeoutError, ConnectionError, OSError, json.JSONDecodeError) as error:
                 current.append({"url": url, "exception": repr(error)})
-        if all(row.get("status") == 200 for row in current):
+        if len(current) == len(gateways) + len(ingress_urls) and all(
+            row.get("status") == 200 for row in current
+        ):
+            RESULTS["observations"].append({
+                "ok": True,
+                "check": "both local gateways and both published ingress routes are ready",
+                "backends": sorted({row["backend"] for row in current if row.get("backend")}),
+            })
             return
         last = current
         time.sleep(1)
     RESULTS["observations"].append({"check": "readiness failures", "latest": last})
-    raise AssertionError("Published ingress endpoints not ready: " + repr(last))
-
+    raise AssertionError("Both gateways and published ingress endpoints not ready: " + repr(last))
 
 def request_samples(url, number, cert=None, allow_initial_failures=False):
     rows = []
