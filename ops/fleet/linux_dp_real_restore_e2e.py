@@ -95,9 +95,9 @@ def disposable_systemctl(command, **kwargs):
         return subprocess.run(command, **kwargs)
     if "show" in command:
         return SimpleNamespace(returncode=0, stdout=(
-            "LoadState=masked\\nActiveState=inactive\\nSubState=dead\\n"
-            "MainPID=0\\nUnitFileState=masked-runtime\\n"
-            "KillMode=control-group\\n").encode("ascii"))
+            "LoadState=masked\nActiveState=inactive\nSubState=dead\n"
+            "MainPID=0\nUnitFileState=masked-runtime\n"
+            "KillMode=control-group\n").encode("ascii"))
     return SimpleNamespace(returncode=0, stdout=b"")
 
 
