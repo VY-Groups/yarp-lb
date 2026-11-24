@@ -1,5 +1,33 @@
 # Platform support and Data Protection lifecycle
 
+## Current software acceptance snapshot — 2026-11-24
+
+The table below records the latest **verified software behavior**, and supersedes
+older incremental status statements later in this document. It does not declare
+a frozen release or close #48. Final candidate verification and actual customer-host
+acceptance (#36) are separate. Evidence links identify the exact run, not a
+claim about subsequent commits.
+
+| Mode | Verified software coverage | Explicit support boundary |
+| --- | --- | --- |
+| Windows Server 2022 x64, default DPAPI | Real SCM LocalSystem and LocalService start/restart, encrypted persistent XML and authenticated cookie continuity: [SCM run](https://github.com/VY-Groups/yarp-lb/actions/runs/45385303162). | Machine-bound LocalMachine scope; no copying DPAPI ciphertext between machines, no arbitrary domain service account or reboot qualification. |
+| Windows Server 2022 x64, opt-in certificate fleet | Machine-store RSA wrapping, approved historic decrypt-only identity and cookie continuity on isolated rings: [fleet run](https://github.com/VY-Groups/yarp-lb/actions/runs/45385303097). The offline DPAPI migration tool is implemented. | Single tenant only. Independent host custody, service private-key ACLs, remote delivery and fleet DR are not established by one-host fixtures. |
+| Ubuntu 24.04 x64, certificate-wrapped ring | .NET 10 production process, private filesystem, encrypted XML, rolling recovery and lost-key tests: [source run](https://github.com/VY-Groups/yarp-lb/actions/runs/45385303130), [rolling run](https://github.com/VY-Groups/yarp-lb/actions/runs/45385303165). The temporary systemd fixture uses the shipped template. | No production installer qualification or real-host key custody assertion. No plaintext or lab-mode fallback in production. |
+| Ubuntu 24.04 x64, opt-in distributed ring | Real three-member mTLS etcd authority, fenced writer, delivered recipient credentials, scheduled rotation and old/new cookies: [Raft run](https://github.com/VY-Groups/yarp-lb/actions/runs/45385303158). See [distributed runtime](../../ops/fleet/LINUX_DP_DISTRIBUTED_RUNTIME.md). | External RBAC, credential custody, approved role transition and independent revision floor are mandatory. Distributed local/AD account synchronization is not provided. |
+| RHEL family | [UBI 9 .NET 10 non-root userspace run](https://github.com/VY-Groups/yarp-lb/actions/runs/45385303312). | **RHEL host deployment is not qualified**. SELinux, host systemd, kernel and reboot require #36. |
+| Framework-dependent / self-contained installer | Existing source-staging instructions and CI service fixtures; a separate frozen-candidate workflow is under review in #541. | No final self-contained candidate artifact has yet been accepted. Do not represent the source-staging installer as a full offline binary installer. |
+| Containers, other OS releases, KMS/HSM integrations | Only documented fixture coverage; no production support assertion. | No production container image or independently qualified external KMS/HSM adapter; certificate wrapping is the selected implementation for #48. |
+
+The historical source runs above used main revision
+`a1fe6cd553eb73a39f69a8b94ce7db69fad89b7b`.
+The federated session restart and stale-account restore regression is now merged
+at `396d86ee07391fb6eefe5e505bf39f49da74737d`, with
+[real OIDC/Redis evidence](https://github.com/VY-Groups/yarp-lb/actions/runs/45385385609/job/138414833786).
+The combined shipping gateway and real distributed ring test is independently
+approved and passed on the earlier #542 revision, with fresh-head verification
+still required. This snapshot must not be used as the exact frozen-release
+acceptance verdict.
+
 This is a **tested-behavior matrix**, not a general OS certification or a
 production support commitment. CI builds the shipping project for Windows
 Server 2022 and Ubuntu 24.04 images; the Windows DPAPI and Ubuntu Linux key-ring
