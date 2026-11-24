@@ -52,6 +52,30 @@ using var sigterm = OperatingSystem.IsLinux()
     ? PosixSignalRegistration.Create(PosixSignal.SIGTERM, e => { e.Cancel = true; stop.Cancel(); })
     : null;
 using var forceTcpStop = new CancellationTokenSource();
+#if GATEWAYCORE_COMMERCIAL
+// A single watchdog cancels all in-flight TCP/UDP work, including idle or
+// blocked socket reads, on feature loss. An explicit restart is required
+// after recovery; existing connections must never resume on a new license.
+var entitlementLost=0;
+var licenseWatch=WatchEntitlement();
+async Task WatchEntitlement()
+{
+    using var timer=new PeriodicTimer(TimeSpan.FromMilliseconds(100));
+    try
+    {
+        while(await timer.WaitForNextTickAsync(stop.Token))
+        {
+            if(engineLicense.Allows("l4"))continue;
+            Interlocked.Exchange(ref entitlementLost,1);
+            Console.Error.WriteLine("L4_ENTITLEMENT_LOST: terminating established flows and listeners");
+            forceTcpStop.Cancel();
+            stop.Cancel();
+            return;
+        }
+    }
+    catch(OperationCanceledException) when(stop.IsCancellationRequested){}
+}
+#endif
 var activeTcp = new ConcurrentDictionary<long, Task>();
 long nextTcp = 0;
 var loops = new List<Task>();
@@ -84,8 +108,16 @@ finally
         await Task.WhenAny(all, Task.Delay(TimeSpan.FromSeconds(2)));
     }
     if (all.IsCompleted) await all;
+#if GATEWAYCORE_COMMERCIAL
+    stop.Cancel();
+    await licenseWatch;
+#endif
 }
+#if GATEWAYCORE_COMMERCIAL
+return Volatile.Read(ref entitlementLost)!=0?78:0;
+#else
 return 0;
+#endif
 
 async Task RunTcp(L4Listener cfg, CancellationToken token)
 {
@@ -186,6 +218,9 @@ async Task ProxyTcp(TcpClient downstream, L4Listener cfg, TcpTarget[] targets, l
         for (var i = 0; i < candidates.Length; i++)
         {
             if (stopToken.IsCancellationRequested) return;
+#if GATEWAYCORE_COMMERCIAL
+            if(!engineLicense.Allows("l4"))return;
+#endif
             var target = candidates[(int)((ulong)(chosen + i) % (ulong)candidates.Length)].Backend;
             var next = new TcpClient(AddressFamily.InterNetwork) { NoDelay = true };
             try
@@ -209,6 +244,9 @@ async Task ProxyTcp(TcpClient downstream, L4Listener cfg, TcpTarget[] targets, l
             var timeout = TimeSpan.FromSeconds(cfg.TcpIdleTimeoutSeconds);
             idle.CancelAfter(timeout);
             // Explicitly opt in only when the upstream knows and TRUSTS PROXY v1.
+#if GATEWAYCORE_COMMERCIAL
+            if(!engineLicense.Allows("l4"))return;
+#endif
             if (cfg.SendProxyProtocolV1)
             {
                 var source = (IPEndPoint)downstream.Client.RemoteEndPoint!;
@@ -226,7 +264,7 @@ async Task ProxyTcp(TcpClient downstream, L4Listener cfg, TcpTarget[] targets, l
         }
     }
 }
-static async Task Pump(Stream from, Stream to, Socket destination,
+async Task Pump(Stream from, Stream to, Socket destination,
     CancellationTokenSource idle, TimeSpan timeout)
 {
     var buffer = new byte[32_768];
@@ -236,6 +274,9 @@ static async Task Pump(Stream from, Stream to, Socket destination,
         {
             var count = await from.ReadAsync(buffer.AsMemory(), idle.Token);
             if (count == 0) break;
+#if GATEWAYCORE_COMMERCIAL
+            if(!engineLicense.Allows("l4")){idle.Cancel();break;}
+#endif
             idle.CancelAfter(timeout);
             await to.WriteAsync(buffer.AsMemory(0, count), idle.Token);
             idle.CancelAfter(timeout);
@@ -381,13 +422,16 @@ static async Task ProbeUdpTargets(L4Listener cfg, UdpTarget[] targets, Cancellat
     }
     catch (OperationCanceledException) when (token.IsCancellationRequested) { }
 }
-static async Task RelayUdpResponse(UdpSession session, Socket downstream, long idleMs, CancellationToken token)
+async Task RelayUdpResponse(UdpSession session, Socket downstream, long idleMs, CancellationToken token)
 {
     try
     {
         while (!token.IsCancellationRequested)
         {
             var reply = await session.Upstream.ReceiveAsync(token);
+#if GATEWAYCORE_COMMERCIAL
+            if(!engineLicense.Allows("l4"))break;
+#endif
             if (session.IsClosed || Environment.TickCount64 - Interlocked.Read(ref session.LastSeenMs) >= idleMs) break;
             await downstream.SendToAsync(reply.Buffer, SocketFlags.None, session.Client, token);
         }

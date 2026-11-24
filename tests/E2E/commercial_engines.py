@@ -25,8 +25,10 @@ def run(*args,env=None,ok=True):
     return result
 class Echo(socketserver.BaseRequestHandler):
     def handle(self):
-        data=self.request.recv(4096)
-        if data:self.request.sendall(data)
+        while True:
+            data=self.request.recv(4096)
+            if not data:return
+            self.request.sendall(data)
 class UdpEcho(socketserver.BaseRequestHandler):
     def handle(self):
         data,sock=self.request;sock.sendto(data,self.client_address)
@@ -95,20 +97,34 @@ with tempfile.TemporaryDirectory(prefix="gc-engine-acceptance-") as td:
                     if tcp_echo() and udp_echo():break
                     time.sleep(.2)
                 else:raise AssertionError("Licensed traffic failed")
-                run(fixture,"--ci-engine-revoke",key,request,revoke,"l4")
-                # Local state lock can transiently contend with the independent refresh.
-                for _ in range(10):
-                    imported=subprocess.run(["dotnet",str(l4),"--license-revoke",str(revoke)],env=env,capture_output=True)
-                    if imported.returncode==0:break
-                    time.sleep(.2)
-                else:raise AssertionError("Revocation import failed")
-                time.sleep(4)
-                assert not tcp_echo() and not udp_echo(),"revoked engine admitted new traffic"
-                print("COMMERCIAL_ENGINE_L4_TCP_UDP_REVOCATION_PASS",flush=True)
+                with socket.create_connection(("127.0.0.1",tp),timeout=2) as established, socket.create_connection(("127.0.0.1",tp),timeout=2) as idle:
+                    established.sendall(b"before")
+                    assert established.recv(6)==b"before"
+                    idle.sendall(b"warmup")
+                    assert idle.recv(6)==b"warmup"
+                    established.sendall(b"second")
+                    assert established.recv(6)==b"second","fixture must maintain established stream"
+                    run(fixture,"--ci-engine-revoke",key,request,revoke,"l4")
+                    for _ in range(10):
+                        imported=subprocess.run(["dotnet",str(l4),"--license-revoke",str(revoke)],env=env,capture_output=True)
+                        if imported.returncode==0:break
+                        time.sleep(.2)
+                    else:raise AssertionError("Revocation import failed")
+                    # Even an idle read must wake up and close, without requiring
+                    # any additional client bytes or the normal 300s idle timeout.
+                    assert process.wait(timeout=5)==78,"entitlement loss must stop the engine"
+                    def closed(sock):
+                        sock.settimeout(1)
+                        try:return sock.recv(1)==b""
+                        except (ConnectionResetError,ConnectionAbortedError,BrokenPipeError):return True
+                    assert closed(idle),"already-open idle TCP flow survived revocation"
+                    assert closed(established),"already-open active TCP flow survived revocation"
+                    assert not tcp_echo() and not udp_echo(),"revoked engine admitted new traffic"
+                print("COMMERCIAL_ENGINE_L4_ESTABLISHED_TCP_UDP_REVOCATION_PASS",flush=True)
             except Exception:
                 log.flush();log.seek(0);print(log.read()[-6000:]);raise
             finally:
-                process.terminate()
+                if process.poll() is None:process.terminate()
                 try:process.wait(timeout=10)
                 except subprocess.TimeoutExpired:process.kill();process.wait()
         result=run(l4,config,env=env,ok=False)
