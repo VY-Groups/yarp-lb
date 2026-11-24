@@ -21,7 +21,8 @@ import ssl
 import stat
 import sys
 import tempfile
-from http.server import BaseHTTPRequestHandler, HTTPServer
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
 import zipfile
 
@@ -290,10 +291,52 @@ def client_tls(ca, cert, key):
     return ctx
 
 
-class SnapshotServer(HTTPServer):
-    request_queue_size = 4
+class SnapshotServer(ThreadingHTTPServer):
+    """Never perform a TLS handshake inside the single accept loop.
+
+    A stalled unauthenticated socket can otherwise indefinitely block every
+    legitimate backup client, even though mutual TLS is later required.
+    Bound worker count and handshake wall time BEFORE HTTP parsing.
+    """
+    request_queue_size = 12
     allow_reuse_address = False
-    daemon_threads = False
+    daemon_threads = True
+    max_handshakes = 8
+    handshake_timeout_seconds = 4
+
+    def __init__(self, address, handler):
+        super().__init__(address, handler)
+        self.handshake_slots = threading.BoundedSemaphore(self.max_handshakes)
+
+    def process_request(self, request, client_address):
+        if not self.handshake_slots.acquire(blocking=False):
+            request.close()
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            request.close()
+            self.handshake_slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        secured = None
+        try:
+            request.settimeout(self.handshake_timeout_seconds)
+            secured = self.tls_context.wrap_socket(
+                request, server_side=True, do_handshake_on_connect=False)
+            # Only this bounded worker waits on pre-auth TLS. The accept
+            # loop can continue to dispatch a second legitimate client.
+            secured.do_handshake()
+            secured.settimeout(12)
+            super().process_request_thread(secured, client_address)
+        except (OSError, ssl.SSLError, TimeoutError):
+            if secured is not None:
+                secured.close()
+            else:
+                request.close()
+        finally:
+            self.handshake_slots.release()
 
 
 class SnapshotHandler(BaseHTTPRequestHandler):
@@ -345,7 +388,10 @@ def make_server(bind, port, bundle, label, approved_client, ca, cert, key,
         srv.approved_label = label
         srv.encrypted_bundle = bundle
         srv.client_pin = approved_client
-        srv.socket = server_tls(ca, cert, key).wrap_socket(srv.socket, server_side=True)
+        # Keep the listening socket PLAINTEXT internally. Every accepted
+        # peer is wrapped + handshaken only inside a bounded worker thread,
+        # before BaseHTTPRequestHandler sees any request bytes.
+        srv.tls_context = server_tls(ca, cert, key)
         return srv
     except BaseException:
         srv.server_close()
