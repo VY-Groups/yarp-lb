@@ -7,6 +7,11 @@ using System.Net.Http.Json;
 using Microsoft.AspNetCore.Server.Kestrel.Https;
 using GatewayCore.Gslb.Contracts;
 
+#if GATEWAYCORE_COMMERCIAL
+if(EngineLicenseGate.VerifyReleaseOrExit(args,out var releaseExit)){Environment.ExitCode=releaseExit;return;}
+if(EngineLicenseGate.Command(args,out var licenseExit)){Environment.ExitCode=licenseExit;return;}
+using var engineLicense=EngineLicenseGate.Start("gslb");
+#endif
 // One operator-configured service per observer instance.
 if (args.Length != 1) throw new ArgumentException("Expected an observer JSON configuration path");
 var config = System.Text.Json.JsonSerializer.Deserialize<ObserverConfig>(File.ReadAllText(args[0]))
@@ -138,6 +143,9 @@ using var client = new HttpClient(new SocketsHttpHandler { UseProxy = false, All
 using var slots = new SemaphoreSlim(8);
 app.MapGet("/ready", async (HttpContext context) =>
 {
+#if GATEWAYCORE_COMMERCIAL
+    if(!engineLicense.Allows("gslb"))return Results.StatusCode(503);
+#endif
     var challenge = context.Request.Headers["Gslb-Challenge"].ToString();
     if (context.Request.QueryString.HasValue || challenge.Length != 64 ||
         challenge.Any(ch => ch is not (>= '0' and <= '9' or >= 'A' and <= 'F')))
@@ -180,6 +188,10 @@ async Task PublishReports(CancellationToken token)
 {
     while (!token.IsCancellationRequested)
     {
+#if GATEWAYCORE_COMMERCIAL
+        if(!engineLicense.Allows("gslb"))
+        {await Task.Delay(TimeSpan.FromSeconds(1),token);continue;}
+#endif
         var observed = DateTimeOffset.UtcNow;
         var started = System.Diagnostics.Stopwatch.GetTimestamp();
         var verdict = "unknown";
@@ -199,6 +211,9 @@ async Task PublishReports(CancellationToken token)
 
         try
         {
+#if GATEWAYCORE_COMMERCIAL
+            if(!engineLicense.Allows("gslb"))continue;
+#endif
             var (epoch, sequence) = reportSequence!.Next();
             var report = new AgentHealthReport(AgentHealthReportContract.CurrentVersion,
                 config.AgentId!, AgentHealthReportContract.KeyId(signer),

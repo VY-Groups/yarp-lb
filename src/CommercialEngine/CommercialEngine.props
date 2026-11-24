@@ -1,0 +1,32 @@
+<Project>
+  <PropertyGroup Condition="'$(GatewayCoreCommercial)' == 'true'">
+    <DefineConstants>$(DefineConstants);GATEWAYCORE_COMMERCIAL</DefineConstants>
+  </PropertyGroup>
+  <ItemGroup Condition="'$(GatewayCoreCommercial)' == 'true'">
+    <ProjectReference Include="$(MSBuildThisFileDirectory)../GatewayCore.Licensing/GatewayCore.Licensing.csproj" />
+    <Compile Include="$(MSBuildThisFileDirectory)EngineLicenseGate.cs" Link="EngineLicenseGate.cs" />
+    <EmbeddedResource Include="$(GatewayCoreTrustFile)" LogicalName="GatewayCore.CommercialTrust" Condition="'$(GatewayCoreTrustFile)' != ''" />
+  </ItemGroup>
+  <Target Name="RequireEngineEntitlementTrust" BeforeTargets="PrepareForBuild" Condition="'$(GatewayCoreCommercial)' == 'true'">
+    <Error Condition="'$(GatewayCoreTrustFile)' == '' Or !Exists('$(GatewayCoreTrustFile)')" Text="Commercial engine requires pinned public trust." />
+  </Target>
+  <PropertyGroup Condition="'$(GatewayCoreReleasePackage)' == 'true'">
+    <DefineConstants>$(DefineConstants);GATEWAYCORE_RELEASE_PACKAGE</DefineConstants>
+  </PropertyGroup>
+  <ItemGroup Condition="'$(GatewayCoreReleasePackage)' == 'true'">
+    <Compile Include="$(MSBuildThisFileDirectory)../../control-center/CommercialReleaseIntegrity.cs" Link="CommercialReleaseIntegrity.cs" />
+    <EmbeddedResource Include="$(GatewayCoreReleaseTrustFile)" LogicalName="GatewayCore.ReleaseTrust" Condition="'$(GatewayCoreReleaseTrustFile)' != ''" />
+    <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
+      <_Parameter1>GatewayCoreReleaseSourceCommit</_Parameter1>
+      <_Parameter2>$(GatewayCoreReleaseSourceCommit)</_Parameter2>
+    </AssemblyAttribute>
+  </ItemGroup>
+  <Target Name="RequireEngineReleaseTrust" BeforeTargets="PrepareForBuild" Condition="'$(GatewayCoreReleasePackage)' == 'true'">
+    <Error Condition="'$(GatewayCoreCommercial)' != 'true'" Text="Engine release profile requires commercial licensing." />
+    <Error Condition="'$(GatewayCoreReleaseTrustFile)' == '' Or !Exists('$(GatewayCoreReleaseTrustFile)')" Text="Engine release requires independent release public trust." />
+    <Error Condition="$([System.Text.RegularExpressions.Regex]::IsMatch('$(GatewayCoreReleaseSourceCommit)', '^[0-9a-f]{40}\z')) != 'true'" Text="Engine release requires exact lowercase source commit." />
+  </Target>
+  <Target Name="PreventUnsignedCommercialEnginePublish" BeforeTargets="Publish" Condition="'$(GatewayCoreCommercial)' == 'true' And '$(GatewayCoreReleasePackage)' != 'true'">
+    <Error Text="Commercial engine publishing requires the signed release package profile." />
+  </Target>
+</Project>

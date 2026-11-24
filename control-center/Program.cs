@@ -23,6 +23,28 @@ using Microsoft.AspNetCore.Mvc;
 using System.Threading.RateLimiting;
 using Yarp.ReverseProxy.LoadBalancing;
 
+#if GATEWAYCORE_COMMERCIAL && GATEWAYCORE_RELEASE_PACKAGE
+// Release package inventory is checked before any local command, service,
+// listener, licensing state or other mutable runtime state is opened.
+try
+{
+    var verifiedSource = CommercialReleaseIntegrity.Verify();
+    if (args.Length == 1 && args[0] == "--verify-release")
+    {
+        Console.WriteLine("COMMERCIAL_RELEASE_INTEGRITY_PASS " + verifiedSource);
+        return;
+    }
+}
+catch (Exception ex) when (ex is IOException or CryptographicException or
+    InvalidDataException or JsonException or FormatException or ArgumentException or
+    InvalidOperationException or UnauthorizedAccessException)
+{
+    Console.Error.WriteLine("Commercial package integrity rejected: " + ex.GetType().Name);
+    Environment.ExitCode = 78;
+    return;
+}
+#endif
+
 // Explicit local operator command, never a remote management endpoint.
 // Handle before constructing any listener, audit worker or other hosted service.
 if(args.Length>0 && args[0]=="--linux-dp-key-issue")
@@ -46,6 +68,16 @@ if (OperatingSystem.IsWindows() && !ec2Lab)
     WindowsStateProtection.InitializeStateDirectory(Path.GetDirectoryName(privateDir)!, privateDir);
 if (!OperatingSystem.IsLinux() || ec2Lab)
     Directory.CreateDirectory(privateDir);
+#if GATEWAYCORE_COMMERCIAL
+var commercialLicense = new CommercialLicenseRuntime(Path.Combine(privateDir, "commercial-license"));
+if (args.Length == 1 && args[0] == "--license-init")
+{
+    commercialLicense.Initialize();
+    Console.WriteLine("Commercial installation identity provisioned. Sign in to export an activation request.");
+    return;
+}
+commercialLicense.Refresh();
+#endif
 var keyDir = Path.Combine(privateDir, "data-protection-keys");
 if (!OperatingSystem.IsLinux() || ec2Lab)
     Directory.CreateDirectory(keyDir);
@@ -63,6 +95,9 @@ if (auditOutboxPath is not null && externalAuditIntent is null)
 using var auditOutbox = auditOutboxPath is null ? null : new DurableAuditOutbox(auditOutboxPath, externalAuditIntent!);
 var localAudit = new LocalAdminAudit(Path.Combine(privateDir, "admin-audit.jsonl"), auditOutbox);
 var builder = WebApplication.CreateBuilder(args);
+#if GATEWAYCORE_COMMERCIAL
+builder.Services.AddHostedService<CommercialLicenseRuntime>(_ => commercialLicense);
+#endif
 // The SCM lifetime is activated only for a real Windows Service process.
 // Interactive/CI console runs retain their prior lifetime and startup path.
 // Do not alter DPAPI LocalMachine protection or create/migrate state here.
@@ -499,6 +534,23 @@ app.UseRouting();
 app.UseRateLimiter();
 app.UseAuthentication();
 app.UseAuthorization();
+#if GATEWAYCORE_COMMERCIAL
+app.Use(async (ctx, next) =>
+{
+    if (ctx.Request.Path.StartsWithSegments("/admin/api") &&
+        !CommercialLicenseRuntime.RecoveryEndpoint(ctx.Request.Path))
+    {
+        if (ctx.User.Identity?.IsAuthenticated != true) { ctx.Response.StatusCode = 401; return; }
+        if (!commercialLicense.Permits(ctx.Request.Path))
+        {
+            ctx.Response.StatusCode = 402;
+            await ctx.Response.WriteAsJsonAsync(new { error = "A valid GatewayCore license or feature entitlement is required.", code = "license_required" });
+            return;
+        }
+    }
+    await next();
+});
+#endif
 // Enforce acknowledgement on management APIs, not just browser navigation.
 app.Use(async (ctx, next) =>
 {
@@ -1174,12 +1226,42 @@ app.MapGet("/admin/api/session", (HttpContext ctx) => Results.Ok(new {
     role = ctx.User.FindFirst(ClaimTypes.Role)?.Value,
     csrf = ctx.User.FindFirst("csrf")?.Value,
     federatedOidc = oidcPolicy is not null && ctx.User.HasClaim(c => c.Type == EnterpriseOidcPolicy.SubjectClaim),
+#if GATEWAYCORE_COMMERCIAL
+    commercial = true,
+    licenseActive = commercialLicense.Allows("l7"),
+#endif
     privacyAccepted = ManagementPrivacyPolicy.Accepted(ctx),
     privacyVersion = ManagementPrivacyPolicy.Version,
     privacyText = ManagementPrivacyPolicy.Text,
     mode = "Local administrative test console — not certified for CA production"
 }));
 
+#if GATEWAYCORE_COMMERCIAL
+app.MapGet("/admin/api/license/status", () => Results.Ok(commercialLicense.Status())).RequireAuthorization();
+app.MapGet("/admin/api/license/request", () =>
+{
+    try { return Results.Ok(new { file = Encoding.ASCII.GetString(commercialLicense.Request()) }); }
+    catch (Exception) { return Results.Conflict(new { error = "Installation identity is unavailable; use approved local provisioning or recovery." }); }
+}).RequireAuthorization(policy => policy.RequireRole("Administrator"));
+async Task<IResult> ImportCommercialLicense(HttpContext ctx, bool revoke)
+{
+    try
+    {
+        var bytes = await CommercialLicenseRuntime.ReadUpload(ctx);
+        var result = commercialLicense.Import(bytes, revoke);
+        await Audit(Actor(ctx), revoke ? "LICENSE_REVOKED" : "LICENSE_IMPORTED",
+            new { result.LicenseId, result.AllocationId, result.Revision, validity = result.Validity.ToString() });
+        return Results.Ok(commercialLicense.Status());
+    }
+    catch (Exception e) when (e is IOException or CryptographicException or InvalidDataException or
+        FormatException or JsonException or ArgumentException or InvalidOperationException or UnauthorizedAccessException)
+    { return Results.BadRequest(new { error = "License import rejected or state unavailable; inspect current status and contact the issuer." }); }
+}
+app.MapPost("/admin/api/license/import", (Delegate)(Func<HttpContext, Task<IResult>>)(ctx => ImportCommercialLicense(ctx, false)))
+    .RequireAuthorization(policy => policy.RequireRole("Administrator"));
+app.MapPost("/admin/api/license/revoke", (Delegate)(Func<HttpContext, Task<IResult>>)(ctx => ImportCommercialLicense(ctx, true)))
+    .RequireAuthorization(policy => policy.RequireRole("Administrator"));
+#endif
 app.MapPost(ManagementPrivacyPolicy.AcceptancePath, async (HttpContext ctx, PrivacyAcceptanceInput input) =>
 {
     if (!string.Equals(input.Version, ManagementPrivacyPolicy.Version, StringComparison.Ordinal))
@@ -1688,6 +1770,10 @@ List<InventoryInput> ReadInventory() => File.Exists(inventoryPath)
 
 app.MapGet("/", () => Results.Redirect("/dashboard"));
 app.MapGet("/dashboard", () => Results.File(Path.Combine(root, "wwwroot", "index.html"), "text/html; charset=utf-8"));
+#if GATEWAYCORE_COMMERCIAL
+app.MapGet("/dashboard/license", () => Results.File(Path.Combine(root, "wwwroot", "license.html"), "text/html; charset=utf-8"));
+app.MapGet("/dashboard/license.js", () => Results.File(Path.Combine(root, "wwwroot", "license.js"), "text/javascript; charset=utf-8"));
+#endif
 app.MapGet("/dashboard/privacy", () => Results.Content(ManagementPrivacyPolicy.Page(), "text/html; charset=utf-8"));
 app.MapGet("/dashboard/app.js", () => Results.File(Path.Combine(root, "wwwroot", "app.js"), "text/javascript; charset=utf-8"));
 app.MapGet("/dashboard/style.css", () => Results.File(Path.Combine(root, "wwwroot", "style.css"), "text/css; charset=utf-8"));
@@ -2211,6 +2297,10 @@ app.MapPost("/admin/api/fleet", async (HttpContext ctx, FleetGateway row) =>
         var before = externalAuditIntent is null && oidcPolicy is null ? Array.Empty<byte>() : AuditStateBytes(fleetPath);
         var list = ReadFleet();
         if (list.Any(x => x.Id.Equals(row.Id, StringComparison.OrdinalIgnoreCase))) return Results.Conflict(new { error = "Duplicate gateway ID" });
+#if GATEWAYCORE_COMMERCIAL
+        if (!commercialLicense.AllowsFleetCount(list.Count + 1))
+            return Results.Json(new { error = "Licensed managed-gateway count exceeded or HA/fleet feature unavailable.", code = "license_node_limit" }, statusCode: 402);
+#endif
         list.Add(row);
         var proposed = JsonSerializer.SerializeToUtf8Bytes(list);
         var denied = await ConfirmAndWriteResourceMutation(ctx, fleetPath, before, proposed, "FLEET_REGISTER_INTENT", true);
@@ -2355,6 +2445,10 @@ app.MapPost("/admin/api/fleet/rollout/{changeId}", async (HttpContext ctx, strin
         gateways = ReadFleet();
         if (gateways.Count < 2 || gateways.Count > 20)
             return Results.Conflict(new { error = "Register at least two managed gateways; maximum 20" });
+#if GATEWAYCORE_COMMERCIAL
+        if (!commercialLicense.AllowsFleetCount(gateways.Count))
+            return Results.Json(new { error = "Licensed managed-gateway count exceeded or HA/fleet feature unavailable.", code = "license_node_limit" }, statusCode: 402);
+#endif
         var fleetDigest = FleetDigest();
         var proxy = new JsonObject { ["Routes"] = routes.DeepClone(), ["Clusters"] = clusters.DeepClone() };
         var signingKeyPath = Path.Combine(privateDir, "fleet-signing-private.pem");
@@ -2384,6 +2478,9 @@ app.MapPost("/admin/api/fleet/rollout/{changeId}", async (HttpContext ctx, strin
         var denied = await ConfirmStateMutation(ctx, logPath, Array.Empty<byte>(), initial, "FLEET_ROLLOUT_INTENT", true);
         if (denied is not null) return denied;
         async Task<bool> CurrentPlan() => await AuditActorCurrent(ctx, true) && !ctx.RequestAborted.IsCancellationRequested &&
+#if GATEWAYCORE_COMMERCIAL
+            commercialLicense.AllowsFleetCount(gateways.Count) &&
+#endif
             OnboardingApi.IsMultiGatewayDesign(privateDir) && FleetDigest() == fleetDigest &&
             File.Exists(changePath) && File.ReadAllBytes(changePath).AsSpan().SequenceEqual(changeBytes);
         if (!await CurrentPlan()) return Results.Conflict(new { error = "Rollout authorization or plan changed" });
@@ -2511,7 +2608,11 @@ app.MapCapabilityRegistry();
 app.MapOnboardingApi(privateDir,
     (ctx, path, before, proposed, operation, administratorOnly) =>
         ConfirmStateMutation(ctx, path, before, proposed, operation, administratorOnly),
-    WriteAuditedState, Audit);
+    WriteAuditedState, Audit
+#if GATEWAYCORE_COMMERCIAL
+    , commercialLicense.AllowsTopology
+#endif
+    );
 // Enforce onboarding state server-side; hiding navigation is never a security boundary.
 app.Use(async (ctx, next) =>
 {
@@ -2586,6 +2687,14 @@ app.MapOrganizationProfile(privateDir, Audit);
 app.MapTlsInventory();
 app.MapReverseProxy(proxyPipeline =>
 {
+#if GATEWAYCORE_COMMERCIAL
+    proxyPipeline.Use(async (context, next) =>
+    {
+        if (!commercialLicense.TrafficAdmitted)
+        { context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable; return; }
+        await next();
+    });
+#endif
     GatewayOpenTelemetry.UseProxyTelemetry(proxyPipeline, (context, elapsedMs) =>
     {
         var feature = context.Features.Get<Yarp.ReverseProxy.Model.IReverseProxyFeature>();

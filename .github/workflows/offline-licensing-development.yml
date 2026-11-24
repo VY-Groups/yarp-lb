@@ -1,0 +1,61 @@
+name: Offline commercial license verifier (development)
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'src/GatewayCore.Licensing/**'
+      - 'src/CommercialEngine/**'
+      - 'engines/**'
+      - 'tests/E2E/commercial_engines.py'
+      - 'tests/OfflineLicensing/**'
+      - 'tests/E2E/offline_commercial.py'
+      - 'tests/E2E/release_integrity.py'
+      - 'control-center/**'
+      - '.github/workflows/offline-licensing-development.yml'
+permissions:
+  contents: read
+jobs:
+  verify:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2022]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: dotnet run --project tests/OfflineLicensing/OfflineLicensing.csproj --configuration Release
+
+      - name: Compile commercial gateway against disposable public trust
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = Linux ]; then
+            dotnet run --project tests/OfflineLicensing/OfflineLicensing.csproj --configuration Release -- --ci-authority "$RUNNER_TEMP/commercial-ci-authority"
+            trust="$RUNNER_TEMP/commercial-ci-authority/public-trust.json"
+          else
+            trust="$RUNNER_TEMP/commercial-public-trust.json"
+            dotnet run --project tests/OfflineLicensing/OfflineLicensing.csproj --configuration Release -- --ci-trust "$trust"
+          fi
+          dotnet build control-center/GatewayCoreYarp.csproj --configuration Release -p:GatewayCoreCommercial=true -p:GatewayCoreTrustFile="$trust"
+      - name: Actual commercial gateway activation with no network except loopback
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo unshare --net -- bash -ec '
+            ip link set lo up
+            exec runuser -u "$1" -- env PATH="$2" DOTNET_ROOT="$3" CI=true GITHUB_ACTIONS=true python3 tests/E2E/offline_commercial.py "$4"
+          ' _ "$(id -un)" "$PATH" "$DOTNET_ROOT" "$RUNNER_TEMP/commercial-ci-authority"
+      - name: Published commercial package startup integrity
+        run: python tests/E2E/release_integrity.py
+      - name: Commercial independent engine feature acceptance
+        run: python tests/E2E/commercial_engines.py
+      - name: Remove disposable signing fixture
+        if: always() && runner.os == 'Linux'
+        shell: bash
+        run: rm -rf -- "$RUNNER_TEMP/commercial-ci-authority"

@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>License Center | GatewayCore</title>
+<link rel="stylesheet" href="/dashboard/style.css">
+</head>
+<body><main class="card license-card">
+<div class="auth-brand"><span class="mark" aria-hidden="true">G</span><div><strong>GatewayCore License Center</strong><small>OFFLINE COMMERCIAL ACTIVATION</small></div></div>
+<h1>Installation licensing</h1>
+<p>Activation and renewal use files transferred through your approved offline channel. No license-server connection is required.</p>
+<pre id="license-status" aria-live="polite">Checking license status…</pre>
+<section id="license-actions" hidden>
+<h2>1. Export activation request</h2><button id="license-request" class="ghost" type="button">Download activation request</button>
+<h2>2. Import issuer document</h2><label for="license-file">Signed license (.lic) or revocation (.gcv)</label>
+<input id="license-file" type="file" accept=".lic,.gcv">
+<div class="license-buttons"><button id="license-import" class="primary" type="button">Activate / renew</button><button id="license-revoke" class="ghost" type="button">Import revocation</button></div>
+</section>
+<p id="license-message" role="alert"></p>
+<div class="license-buttons"><a id="license-back" class="ghost" href="/dashboard" hidden>Open Control Center</a><button id="license-logout" class="ghost" type="button">Sign out</button></div>
+</main><script src="/dashboard/license.js" defer></script></body></html>

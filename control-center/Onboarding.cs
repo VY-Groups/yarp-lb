@@ -26,7 +26,8 @@ public static class OnboardingApi
 
     public static void MapOnboardingApi(this WebApplication app, string privateDir,
         Func<HttpContext, string, byte[], byte[], string, bool, Task<IResult?>> confirmMutation,
-        Action<string, byte[]> writeState, Func<string, string, object?, Task> audit)
+        Action<string, byte[]> writeState, Func<string, string, object?, Task> audit,
+        Func<OnboardingPlan, bool>? licenseAllows = null)
     {
         var statePath = Path.Combine(privateDir, "onboarding-topology.json");
         var backupDir = Path.Combine(privateDir, "onboarding-backups");
@@ -40,6 +41,8 @@ public static class OnboardingApi
         app.MapPost("/admin/api/onboarding/validate", (OnboardingInput input) =>
         {
             if (input.Plan == null) return Results.BadRequest(new { error = "Missing plan" });
+            if (licenseAllows is not null && !licenseAllows(input.Plan))
+                return Results.Json(new { error = "Topology exceeds current license entitlements.", code = "license_topology_limit" }, statusCode: 402);
             var issues = Validate(input.Plan, true);
             return Results.Ok(new { issues, warnings = Warnings(input.Plan), effect = "design-only" });
         }).RequireAuthorization(p => p.RequireRole("Administrator"));
@@ -55,6 +58,8 @@ public static class OnboardingApi
             await WriteGate.WaitAsync(http.RequestAborted);
             try
             {
+                if (licenseAllows is not null && !licenseAllows(input.Plan))
+                    return Results.Json(new { error = "Topology exceeds current license entitlements.", code = "license_topology_limit" }, statusCode: 402);
                 var before = File.Exists(statePath) ? File.ReadAllBytes(statePath) : Array.Empty<byte>();
                 var revision = File.Exists(statePath) ? Convert.ToHexString(SHA256.HashData(before)) : "EMPTY";
                 if (!string.Equals(input.ExpectedRevision, revision, StringComparison.Ordinal))
@@ -72,6 +77,8 @@ public static class OnboardingApi
                 var denied = await confirmMutation(http, statePath, before, proposed,
                     input.ConfirmDesign ? "TOPOLOGY_CONFIRM_INTENT" : "TOPOLOGY_DRAFT_INTENT", true);
                 if (denied is not null) return denied;
+                if (licenseAllows is not null && !licenseAllows(input.Plan))
+                    return Results.Json(new { error = "License changed during topology approval.", code = "license_topology_limit" }, statusCode: 402);
                 Directory.CreateDirectory(backupDir);
                 if (File.Exists(statePath))
                 {

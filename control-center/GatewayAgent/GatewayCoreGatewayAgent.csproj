@@ -7,4 +7,5 @@
   <ItemGroup>
     <Compile Include="../FleetConfigSignature.cs" Link="FleetConfigSignature.cs" /><Compile Include="../FleetSequenceState.cs" Link="FleetSequenceState.cs" />
   </ItemGroup>
+  <Import Project="../../src/CommercialEngine/CommercialEngine.props" />
 </Project>

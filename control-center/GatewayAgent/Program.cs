@@ -8,6 +8,11 @@ using System.Text;
 using System.Text.RegularExpressions;
 using Microsoft.AspNetCore.Server.Kestrel.Https;
 
+#if GATEWAYCORE_COMMERCIAL
+if(EngineLicenseGate.VerifyReleaseOrExit(args,out var releaseExit)){Environment.ExitCode=releaseExit;return;}
+if(EngineLicenseGate.Command(args,out var licenseExit)){Environment.ExitCode=licenseExit;return;}
+using var engineLicense=EngineLicenseGate.Start("ha","fleet");
+#endif
 // Separate, least-privileged gateway-agent reference implementation.
 // Fail-closed: no trusted controller certificate = no remote access.
 var builder = WebApplication.CreateBuilder(args);
@@ -225,6 +230,18 @@ app.Use(async (ctx, next) =>
         pinSetRevisionAudit.RecordRevision))
     { ctx.Response.StatusCode = StatusCodes.Status403Forbidden; return; }
     ctx.Response.Headers.CacheControl = "no-store";
+#if GATEWAYCORE_COMMERCIAL
+    // Permit authenticated rollback as a compensating safety operation.
+    var path=ctx.Request.Path.Value??"";
+    var rollback=ctx.Request.Method=="POST" &&
+        (path.Equals("/agent/v1/config/rollback",StringComparison.OrdinalIgnoreCase) ||
+         path.Equals("/agent/v1/engines/l4/config/rollback",StringComparison.OrdinalIgnoreCase) ||
+         path.Equals("/agent/v1/engines/gslb/config/rollback",StringComparison.OrdinalIgnoreCase));
+    if(!rollback && (!engineLicense.Allows("ha") || !engineLicense.Allows("fleet") ||
+        (ctx.Request.Path.StartsWithSegments("/agent/v1/engines/l4") && !engineLicense.Allows("l4")) ||
+        (ctx.Request.Path.StartsWithSegments("/agent/v1/engines/gslb") && !engineLicense.Allows("gslb"))))
+    {ctx.Response.StatusCode=402;return;}
+#endif
     await next();
 });
 

@@ -231,6 +231,10 @@ dialog{border-color:#4a607a;box-shadow:0 24px 85px rgba(0,0,0,.75)}
 .chip.warn{background:#443321;color:#f5cc8b}
 @media(max-width:750px){.peer-status-card{grid-template-columns:1fr;gap:12px}.peer-status-card>div+div{border:0;border-top:1px solid #35546a;padding:16px 0 0}}
 
+.license-card{width:min(820px,calc(100% - 32px));margin:24px auto;padding:clamp(20px,4vw,40px)}
+.license-card pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#101c2f;border:1px solid #3e5670;border-radius:9px;padding:18px;line-height:1.7}
+.license-buttons{display:flex;gap:12px;flex-wrap:wrap;margin:18px 0}
+#license-message{color:#f5cc8b}
 /* Server-versioned privacy acknowledgement and read-only notice. */
 .privacy-screen{min-height:100svh;display:grid;place-items:center;padding:24px;background:#0d1728}
 .privacy-card{width:min(840px,100%);margin:24px auto;padding:clamp(20px,4vw,40px);border:1px solid #3e5670;border-radius:16px;background:#142137;color:#f2f7ff;box-sizing:border-box}

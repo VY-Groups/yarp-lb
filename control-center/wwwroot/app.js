@@ -1163,6 +1163,11 @@ async function initSession() {
             return;
         }
         $('privacy-screen').hidden = true;
+        $('license-link').hidden = r.commercial !== true;
+        if (r.commercial === true && r.licenseActive !== true) {
+            location.assign('/dashboard/license');
+            return;
+        }
         $('user-badge').textContent = currentUser + ' · ' + currentRole;
         $('auth-screen').hidden = true;
         $('app-shell').hidden = false;
