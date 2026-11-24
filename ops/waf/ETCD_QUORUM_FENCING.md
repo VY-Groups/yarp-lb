@@ -10,9 +10,9 @@ from two_node_transaction import coordinate
 fence = EtcdQuorumFence(
     fleet="waf-fleet-primary",
     endpoints=[
-        {"url": "https://ETCD_MEMBER_A:2379", "leafSha256": "A"*64},
-        {"url": "https://ETCD_MEMBER_B:2379", "leafSha256": "B"*64},
-        {"url": "https://ETCD_MEMBER_C:2379", "leafSha256": "C"*64},
+        {"url": "https://ETCD_MEMBER_A:2379", "leafSha256": "A"*64, "memberId": 1001},
+        {"url": "https://ETCD_MEMBER_B:2379", "leafSha256": "B"*64, "memberId": 1002},
+        {"url": "https://ETCD_MEMBER_C:2379", "leafSha256": "C"*64, "memberId": 1003},
     ],
     cluster_id="APPROVED_ETCD_NUMERIC_CLUSTER_ID",
     ca="/private/etcd/ca.pem",
@@ -29,7 +29,7 @@ The production API uses the etcd **v3 HTTP JSON gateway** on three
 separately identified cluster members. Every member is accessed by direct
 HTTPS with CA/hostname validation, an explicitly pinned server leaf SHA-256,
 and a separately provisioned owner-private client certificate/key. Member
-URLs, server leaf fingerprints and returned member IDs must be distinct.
+URLs, server leaf fingerprints and **independently approved numeric `memberId` values** must be distinct. Every linearizable response must identify the exact member ID pinned to that endpoint and leaf certificate; swapping backend member identity behind a valid TLS pin fails closed. The sample 1001/1002/1003 values are placeholders only, not verified member IDs.
 A single API proxy, load-balancer alias, fake locally signed service or
 static JSON file cannot count as a three-member quorum.
 
