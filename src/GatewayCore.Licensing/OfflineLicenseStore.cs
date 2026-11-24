@@ -57,6 +57,23 @@ public sealed class OfflineLicenseStore
         return OfflineActivationRequest.Create(key);
     }
 
+    public byte[] CreateInstallationProof(string challenge,DateTimeOffset now)
+    {
+        if(challenge is not {Length:64} || challenge.Any(c=>!OfflineActivationRequest.IsHex(c)))
+            throw new ArgumentException("Invalid installation proof challenge.");
+        using var gate=Enter();
+        using var key=OpenKey();
+        var state=ReadState(key);
+        var effective=EffectiveTime(state,now);
+        var license=ReadLicense(state,key,effective);
+        if(license is null || license.SiteId is null || !license.Allows("ha") || !license.Allows("fleet"))
+            throw new CryptographicException("Active site-bound HA/fleet allocation required.");
+        if(effective.ToUnixTimeSeconds()>state.HighestUtc)
+            WriteState(key,state with {HighestUtc=effective.ToUnixTimeSeconds()});
+        return OfflineActivationRequest.Sign("GCP1."+OfflineActivationRequest.Encode(key.ExportSubjectPublicKeyInfo())+
+            "."+challenge+"."+OfflineActivationRequest.Encode(Convert.FromBase64String(state.License!)),key);
+    }
+
     public VerifiedLicense? Inspect(DateTimeOffset now)
     {
         using var gate = Enter();

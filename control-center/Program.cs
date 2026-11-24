@@ -22,6 +22,9 @@ using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.AspNetCore.Mvc;
 using System.Threading.RateLimiting;
 using Yarp.ReverseProxy.LoadBalancing;
+#if GATEWAYCORE_COMMERCIAL
+using GatewayCore.Licensing;
+#endif
 
 #if GATEWAYCORE_COMMERCIAL && GATEWAYCORE_RELEASE_PACKAGE
 // Release package inventory is checked before any local command, service,
@@ -2422,10 +2425,34 @@ app.MapPost("/admin/api/fleet/rollout/{changeId}", async (HttpContext ctx, strin
             return Results.Conflict(new { error = "Fleet signing key not provisioned" });
         var signingKeyPem = await File.ReadAllTextAsync(signingKeyPath, ctx.RequestAborted);
         var targets = new JsonArray();
+#if GATEWAYCORE_COMMERCIAL
+        var licensedPeers=new Dictionary<string,VerifiedLicense>(StringComparer.Ordinal);
+        async Task<VerifiedLicense> ReadPeer(FleetGateway row,HttpClient client)
+        {
+            var challenge=Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
+            using var response=await client.PostAsJsonAsync(new Uri(new Uri(row.Url),"agent/v1/license/proof"),
+                new {challenge},ctx.RequestAborted);
+            response.EnsureSuccessStatusCode();
+            var proof=JsonNode.Parse(await response.Content.ReadAsStringAsync(ctx.RequestAborted))?["proof"]?.GetValue<string>()
+                ?? throw new CryptographicException("Missing signed fleet allocation proof.");
+            return commercialLicense.VerifyPeerProof(proof,challenge);
+        }
+        async Task RequireSamePeer(FleetGateway row,HttpClient client)
+        {
+            var observed=await ReadPeer(row,client);
+            if(observed.PayloadSha256!=licensedPeers[row.Id].PayloadSha256 ||
+                observed.InstallationKeySha256!=licensedPeers[row.Id].InstallationKeySha256)
+                throw new CryptographicException("Peer entitlement changed during rollout.");
+            commercialLicense.ValidateFleetProofs(licensedPeers.Values.ToArray());
+        }
+#endif
         // Preflight every target before authorizing or dispatching any mutation.
         foreach (var row in gateways)
         {
             using var client = CreateFleetClient(row);
+#if GATEWAYCORE_COMMERCIAL
+            licensedPeers.Add(row.Id,await ReadPeer(row,client));
+#endif
             using var statusResponse = await client.GetAsync(new Uri(new Uri(row.Url), "agent/v1/status"), ctx.RequestAborted);
             statusResponse.EnsureSuccessStatusCode();
             var status = JsonNode.Parse(await statusResponse.Content.ReadAsStringAsync(ctx.RequestAborted));
@@ -2435,6 +2462,9 @@ app.MapPost("/admin/api/fleet/rollout/{changeId}", async (HttpContext ctx, strin
             targets.Add(new JsonObject { ["id"] = row.Id, ["originalRevision"] = revision,
                 ["prepareSent"] = false, ["activateSent"] = false, ["rollbackVerified"] = false });
         }
+#if GATEWAYCORE_COMMERCIAL
+        commercialLicense.ValidateFleetProofs(licensedPeers.Values.ToArray());
+#endif
         journal = new JsonObject { ["schema"] = 2, ["id"] = txId, ["changeId"] = changeId,
             ["initiator"] = Actor(ctx), ["createdUtc"] = DateTimeOffset.UtcNow.ToString("O"),
             ["status"] = "starting", ["fleetDigest"] = fleetDigest,
@@ -2464,6 +2494,9 @@ app.MapPost("/admin/api/fleet/rollout/{changeId}", async (HttpContext ctx, strin
             var signed = FleetConfigSignature.SignV2(signingKeyPem, txId, revision, proxy,
                 DateTimeOffset.UtcNow.AddMinutes(3).ToUnixTimeSeconds(), sequence);
             using var client = CreateFleetClient(row);
+#if GATEWAYCORE_COMMERCIAL
+            await RequireSamePeer(row,client);
+#endif
             target["prepareSent"] = true;
             FleetRolloutJournal.Log(logPath, journal, row.Id, "prepare", "dispatching");
             using var response = await client.PostAsJsonAsync(new Uri(new Uri(row.Url), "agent/v1/config/prepare"),
@@ -2485,6 +2518,9 @@ app.MapPost("/admin/api/fleet/rollout/{changeId}", async (HttpContext ctx, strin
             var row = gateways.Single(x => x.Id == target["id"]!.GetValue<string>());
             var prepared = target["preparedRevision"]!.GetValue<string>();
             using var client = CreateFleetClient(row);
+#if GATEWAYCORE_COMMERCIAL
+            await RequireSamePeer(row,client);
+#endif
             target["activateSent"] = true;
             FleetRolloutJournal.Log(logPath, journal, row.Id, "activate", "dispatching");
             using var response = await client.PostAsJsonAsync(new Uri(new Uri(row.Url), "agent/v1/config/activate"),

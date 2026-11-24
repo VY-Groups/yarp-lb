@@ -20,6 +20,9 @@ public sealed record VerifiedLicense(
     DateTimeOffset ExpiresAt, FrozenSet<string> Features, string PayloadSha256,
     LicenseValidity Validity)
 {
+    // Legacy schema 1 remains valid for standalone use. Managed fleets require
+    // issuer-signed schema 2 site identity.
+    public string? SiteId { get; init; }
     public bool Allows(string feature) => Validity == LicenseValidity.Active && Features.Contains(feature);
     public LicenseCheckpoint Checkpoint => new(LicenseId, AllocationId, CustomerId, DeploymentId, Revision, PayloadSha256);
 }
@@ -95,13 +98,16 @@ public sealed class OfflineLicenseVerifier
         using var document = JsonDocument.Parse(payload, new JsonDocumentOptions { MaxDepth = 4 });
         var root = document.RootElement;
         if (root.ValueKind != JsonValueKind.Object) throw new InvalidDataException("License payload must be an object.");
+        var schema = Integer(root,"schemaVersion",1,2);
         var seen = new HashSet<string>(StringComparer.Ordinal);
         foreach (var property in root.EnumerateObject())
-            if (!Fields.Contains(property.Name) || !seen.Add(property.Name))
+            if ((!Fields.Contains(property.Name) && !(schema==2 && property.Name=="siteId")) || !seen.Add(property.Name))
                 throw new InvalidDataException("Unexpected or duplicate license property.");
-        if (seen.Count != Fields.Count) throw new InvalidDataException("Missing license property.");
-        if (Integer(root, "schemaVersion", 1, 1) != 1 || String(root, "product") != "GatewayCore")
+        if (seen.Count != Fields.Count+(schema==2?1:0) || !Fields.All(seen.Contains) ||
+            (schema==2 && !seen.Contains("siteId"))) throw new InvalidDataException("Missing license property.");
+        if (String(root, "product") != "GatewayCore")
             throw new InvalidDataException("Unsupported product or schema.");
+        var siteId=schema==2?Id(root,"siteId"):null;
 
         var licenseId = Id(root, "licenseId");
         var customerId = Id(root, "customerId");
@@ -146,7 +152,28 @@ public sealed class OfflineLicenseVerifier
             now >= expires ? LicenseValidity.Expired : LicenseValidity.Active;
         return new(licenseId, customerId, deploymentId, allocationId, installationHash,
             edition, revision, maxNodes, maxSites, issued, notBefore, expires,
-            features.ToFrozenSet(StringComparer.Ordinal), digest, validity);
+            features.ToFrozenSet(StringComparer.Ordinal), digest, validity) { SiteId=siteId };
+    }
+
+    // GCP1 proves live possession of the installation private key for an
+    // issuer-signed site-bound entitlement. Caller supplies a fresh nonce
+    // for each authenticated endpoint/request; no proof is cacheable/reusable.
+    public VerifiedLicense VerifyInstallationProof(ReadOnlySpan<byte> proof,string expectedChallenge,DateTimeOffset now)
+    {
+        if(!ValidHash(expectedChallenge))throw new ArgumentException("Invalid proof challenge.");
+        var parts=OfflineActivationRequest.Split(proof,32768,5,"GCP1");
+        if(parts[2]!=expectedChallenge)throw new CryptographicException("Installation proof challenge mismatch.");
+        var publicKey=OfflineActivationRequest.Decode(parts[1],256);
+        using var key=ECDsa.Create();
+        key.ImportSubjectPublicKeyInfo(publicKey,out var read);
+        if(read!=publicKey.Length || key.ExportParameters(false).Curve.Oid.Value!=P256)
+            throw new CryptographicException("Invalid installation proof key.");
+        OfflineActivationRequest.VerifySignature(parts,key);
+        var license=Verify(OfflineActivationRequest.Decode(parts[3],MaxLicenseBytes),
+            Convert.ToHexString(SHA256.HashData(publicKey)),now);
+        if(license.SiteId is null || license.Validity!=LicenseValidity.Active)
+            throw new CryptographicException("Active site-bound license required.");
+        return license;
     }
 
     // Irreversible, allocation-specific revocation. A genuine offline node

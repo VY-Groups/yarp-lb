@@ -250,6 +250,7 @@ Check(verifier.Verify(file, binding, now).Allows("l7"), "trust keys defensively 
 Reject(() => verifier.Verify(Sign(Changed("customerId", "other-customer")), binding, now, valid.Checkpoint), "customer replacement");
 Reject(() => verifier.Verify(Sign(Changed("deploymentId", "other-deployment")), binding, now, valid.Checkpoint), "deployment replacement");
 
+FleetProofAcceptance.Run();
 var directory = Path.Combine(Path.GetTempPath(), "gc-license-" + Guid.NewGuid().ToString("N"));
 var directory2 = directory + "-second";
 try

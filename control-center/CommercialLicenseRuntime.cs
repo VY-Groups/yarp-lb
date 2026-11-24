@@ -8,6 +8,7 @@ using GatewayCore.Licensing;
 internal sealed class CommercialLicenseRuntime : BackgroundService
 {
     private readonly OfflineLicenseStore store;
+    private readonly OfflineLicenseVerifier verifier;
     private readonly object sync = new();
     private VerifiedLicense? current;
     private string state = "unavailable";
@@ -26,7 +27,8 @@ internal sealed class CommercialLicenseRuntime : BackgroundService
         if (stream.Length is < 1 or > 16384) throw new InvalidDataException("Invalid trust resource.");
         var keys = JsonSerializer.Deserialize<Dictionary<string, byte[]>>(stream)
             ?? throw new InvalidDataException("Missing issuer trust.");
-        store = new OfflineLicenseStore(directory, new OfflineLicenseVerifier(keys));
+        verifier = new OfflineLicenseVerifier(keys);
+        store = new OfflineLicenseStore(directory, verifier);
     }
 
     public void Initialize() => store.Initialize();
@@ -128,6 +130,24 @@ internal sealed class CommercialLicenseRuntime : BackgroundService
         path == "/admin/api/license/status" || path == "/admin/api/license/request" ||
         path == "/admin/api/license/import" || path == "/admin/api/license/revoke" ||
         path == "/admin/api/privacy/accept";
+
+    internal VerifiedLicense VerifyPeerProof(string proof,string challenge)
+    {
+        if(proof.Length>32768 || proof.Any(c=>c is < (char)33 or > (char)126))
+            throw new InvalidDataException("Invalid peer proof.");
+        return verifier.VerifyInstallationProof(Encoding.ASCII.GetBytes(proof),challenge,DateTimeOffset.UtcNow);
+    }
+
+    internal void ValidateFleetProofs(IReadOnlyList<VerifiedLicense> peers)
+    {
+        lock(sync)
+        {
+            // Consult exact persisted local state for a control-plane decision,
+            // not the continuity/admission cache.
+            var local=store.Inspect(DateTimeOffset.UtcNow)??throw new InvalidOperationException("Missing local license.");
+            FleetLicensePolicy.Validate(local,peers,DateTimeOffset.UtcNow);
+        }
+    }
 
     // Local controller cap; does not assert that every remote gateway has
     // a valid unique allocation or prove a global site count.

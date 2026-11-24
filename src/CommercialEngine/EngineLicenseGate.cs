@@ -112,6 +112,14 @@ internal sealed class EngineLicenseGate : IDisposable
             {Volatile.Write(ref snapshot,null);}
         }
     }
+    public string CreateFleetProof(string challenge)
+    {
+        lock(sync)
+        {
+            if(!Allows("ha")||!Allows("fleet"))throw new CryptographicException("Fleet entitlement unavailable.");
+            return System.Text.Encoding.ASCII.GetString(store.CreateInstallationProof(challenge,DateTimeOffset.UtcNow));
+        }
+    }
     public bool Allows(string feature)
     {
         var value=Volatile.Read(ref snapshot);
