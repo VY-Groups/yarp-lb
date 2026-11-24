@@ -98,6 +98,7 @@ def integration(args):
                     ca=ca, certificate=client_cert, private_key=client_key,
                     restore_bundle=args.restore_bundle,
                     restore_bundle_sha256=receiver.tree_hash(args.restore_bundle),
+                    dotnet_runtime_root=args.dotnet_runtime_root,
                     trusted_public_key=args.trusted_public_key,
                     minimum_revision_file=args.minimum_revision_file)
                 STAGE = "mutual-tls-receive-and-signed-dotnet-restore"
@@ -124,7 +125,7 @@ def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
     for name in ("source-root", "label", "checkpoint", "trusted-public-key",
                  "minimum-revision-file", "state-root", "inbox",
-                 "restore-bundle"):
+                 "restore-bundle", "dotnet-runtime-root"):
         p.add_argument("--" + name, required=True)
     args = p.parse_args(argv)
     try:
