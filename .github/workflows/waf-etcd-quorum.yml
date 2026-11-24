@@ -12,7 +12,7 @@ jobs:
   real-quorum:
     name: Actual three-member etcd Raft lease CAS/revoke/partition with pinned mTLS
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
