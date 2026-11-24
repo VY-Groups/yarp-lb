@@ -1,0 +1,88 @@
+name: Frozen main issue 48 candidate verification
+on:
+  pull_request:
+    paths:
+      - "ops/release/**"
+      - ".github/workflows/issue48-frozen-candidate.yml"
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  contract:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: python3 -m unittest discover -s ops/release/tests -p 'test_*.py' -v
+  frozen-gate:
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    needs: contract
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Verify all required exact-main CI runs
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          EXACT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXACT_SHA"
+          python3 ops/release/assess_issue48.py --repo "$GITHUB_REPOSITORY" --sha "$EXACT_SHA" --out artifacts/issue48/evidence.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: issue48-frozen-main-evidence
+          path: artifacts/issue48/
+          if-no-files-found: error
+  package:
+    needs: frozen-gate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2022
+            rid: win-x64
+          - os: ubuntu-24.04
+            rid: linux-x64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+      - name: Publish exact candidate, not a production installer
+        shell: bash
+        env:
+          EXACT_SHA: ${{ github.sha }}
+          RID: ${{ matrix.rid }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXACT_SHA"
+          dotnet publish control-center/GatewayCoreYarp.csproj -c Release -r "$RID" --self-contained true -p:PublishReadyToRun=false -o candidate/app
+          rm -f candidate/app/appsettings.json
+          test -f candidate/app/GatewayCoreYarp.dll
+          printf '%s\n' "$EXACT_SHA" > candidate/SOURCE_COMMIT.txt
+          cp ops/release/ISSUE48_CANDIDATE.md candidate/README.md
+      - name: Archive and verify candidate package
+        shell: bash
+        env:
+          RID: ${{ matrix.rid }}
+          EXACT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          python ops/release/package_candidate.py --root candidate --rid "$RID" --sha "$EXACT_SHA" --out artifacts/candidate
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gatewaycore-issue48-${{ matrix.rid }}-${{ github.sha }}
+          path: artifacts/candidate/
+          if-no-files-found: error
