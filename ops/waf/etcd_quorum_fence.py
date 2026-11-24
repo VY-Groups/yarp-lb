@@ -84,6 +84,8 @@ def endpoint_parts(endpoint):
     if type(endpoint) is not dict or set(endpoint) != {"url", "leafSha256"}:
         raise ValueError("explicit independent etcd member identity required")
     pin = endpoint["leafSha256"]
+    if type(endpoint["url"]) is not str:
+        raise ValueError("etcd member endpoint URL must be a string")
     u = urlsplit(endpoint["url"])
     if (type(pin) is not str or not HEX64.fullmatch(pin) or
             u.scheme != "https" or u.username or u.password or
@@ -113,8 +115,7 @@ def valid_value(raw, names, revision, policy_digest):
 class EtcdQuorumFence:
     """A fresh linearizable etcd read + lease TTL from 2 of 3 distinct members."""
 
-    def __init__(self, fleet, endpoints, cluster_id, ca, certificate, key,
-                 *, observer=None):
+    def __init__(self, fleet, endpoints, cluster_id, ca, certificate, key):
         if type(fleet) is not str or not ALIAS.fullmatch(fleet):
             raise ValueError("invalid fixed WAF fleet identity")
         if type(endpoints) is not list or len(endpoints) != 3:
@@ -132,9 +133,6 @@ class EtcdQuorumFence:
         self.ca = canonical_file(ca)
         self.cert = canonical_file(certificate)
         self.key = private_key(key)
-        # A test may inject a synthetic transport, never a success value
-        # or an authority bypass. Production uses the pinned TLS path.
-        self._observer = observer or self._read_member
 
     def _post(self, endpoint, resource, payload):
         hostname, port, pinned_sha = endpoint
@@ -225,7 +223,7 @@ class EtcdQuorumFence:
         accepted = []
         for endpoint in self.endpoints:
             try:
-                accepted.append(self._observer(endpoint, names, revision,
+                accepted.append(self._read_member(endpoint, names, revision,
                                                policy_digest))
             except (OSError, ValueError, KeyError, TypeError,
                     http.client.HTTPException, ssl.SSLError, OverflowError):
