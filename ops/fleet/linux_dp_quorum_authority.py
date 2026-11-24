@@ -10,7 +10,9 @@ identities in a real deployment. No local quorum/emergency override.
 import base64
 import hashlib
 import json
+import re
 import secrets
+import xml.etree.ElementTree as XML
 import ssl
 import time
 import http.client
@@ -254,3 +256,98 @@ class RecoveryLeaseIssuer(RecoveryFence):
         except Exception:
             self._revoke(endpoint, lease)
             raise
+
+
+RUNTIME_PREFIX = "/gatewaycore/linux-dp/runtime-writer/"
+RING_PREFIX = "/gatewaycore/linux-dp/runtime-ring/"
+MAX_RUNTIME_XML = 8192
+_KEY_NAME = re.compile(r"key-([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})\.xml\Z")
+_DP_NS = "{http://schemas.asp.net/2015/03/dataProtection}"
+_ENCRYPTOR = "Microsoft.AspNetCore.DataProtection.XmlEncryption.EncryptedXmlDecryptor"
+
+
+def validate_runtime_xml(name, raw):
+    """Accept bounded certificate-encrypted key XML, not plaintext or revocations.
+
+    Revocation needs its own coordinated admission policy; it is deliberately
+    not enabled by this append-only backend.
+    """
+    match = _KEY_NAME.fullmatch(name) if type(name) is str else None
+    if (not match or type(raw) is not bytes or not 0 < len(raw) <= MAX_RUNTIME_XML
+            or b"<!DOCTYPE" in raw.upper() or b"<!ENTITY" in raw.upper()
+            or b"\x00" in raw):
+        raise ValueError("invalid bounded runtime key record")
+    try:
+        raw.decode("utf-8", "strict")
+        root = XML.fromstring(raw)
+    except (UnicodeError, XML.ParseError) as exc:
+        raise ValueError("malformed runtime encrypted key") from exc
+    if root.tag != "key" or root.get("id") != match[1]:
+        raise ValueError("runtime key name and XML identity mismatch")
+    wraps = []
+    for element in root.iter():
+        local = element.tag.rsplit("}",1)[-1]
+        if local == "masterKey":
+            raise ValueError("plaintext runtime key rejected")
+        if local == "encryptedSecret":
+            if element.tag != _DP_NS + "encryptedSecret":
+                raise ValueError("foreign runtime key wrapper")
+            decryptor = [p.strip() for p in element.get("decryptorType","").split(",")]
+            if decryptor[:2] != [_ENCRYPTOR, "Microsoft.AspNetCore.DataProtection"]:
+                raise ValueError("unapproved runtime key wrapper")
+            wraps.append(element)
+    enc = "{http://www.w3.org/2001/04/xmlenc#}"
+    if (len(wraps) != 1 or
+            len(wraps[0].findall(".//" + enc + "EncryptedData")) != 1 or
+            not wraps[0].findall(".//" + enc + "CipherValue")):
+        raise ValueError("missing runtime certificate ciphertext envelope")
+
+
+class RuntimeWriterLeaseIssuer(RecoveryLeaseIssuer):
+    """Separate, bounded runtime-write epoch; no automatic renewal or promotion."""
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        fleet = self.client.fleet
+        self.key_name = RUNTIME_PREFIX + fleet
+        self.key = as_base64(self.key_name.encode("ascii"))
+
+
+class RuntimeEncryptedRingWriter(RecoveryFence):
+    """Actual encrypted XML append in the SAME Raft transaction as writer fence.
+
+    Dedicated write identity must be restricted to this fleet's runtime ring.
+    A runtime epoch is independently provisioned, separate from recovery.
+    No local XML write, fallback, lease stealing, or implicit renewal.
+    """
+    def __init__(self, *args, node_id, **kwargs):
+        super().__init__(*args, **kwargs)
+        if node_id != self.sender:
+            raise ValueError("only the designated runtime writer may append")
+        self.key_name = RUNTIME_PREFIX + self.client.fleet
+        self.key = as_base64(self.key_name.encode("ascii"))
+        self.ring_prefix = RING_PREFIX + self.client.fleet + "/"
+
+    def append_once(self, name, raw):
+        validate_runtime_xml(name, raw)
+        if not self.current("preflight") or self.remaining_seconds() <= 5:
+            raise ValueError("runtime key writer quorum unavailable")
+        cluster, modified, lease, _ = self._identity
+        item = as_base64((self.ring_prefix + name).encode("ascii"))
+        # The mutation itself is fenced, not a local write following a check.
+        # Compare CREATE=0 so a stale or competing writer cannot overwrite.
+        body = {"compare":[
+            {"result":"EQUAL","target":"MOD","key":self.key,
+             "modRevision":str(modified)},
+            {"result":"EQUAL","target":"LEASE","key":self.key,"lease":str(lease)},
+            {"result":"EQUAL","target":"CREATE","key":item,"createRevision":"0"}
+        ],"success":[{"requestPut":{"key":item,"value":as_base64(raw)}}],"failure":[]}
+        endpoint = self.client.endpoints[0]
+        # Deliberately no mutation retry after any ambiguous RPC outcome.
+        response = self.client._post(endpoint,"/v3/kv/txn",body)
+        header = response.get("header") if type(response) is dict else None
+        if (type(header) is not dict or
+                etcd.integer(header.get("cluster_id")) != cluster or
+                etcd.integer(header.get("member_id")) != endpoint[3] or
+                response.get("succeeded") is not True):
+            raise ValueError("runtime encrypted key append contested or unverified")
+        return etcd.integer(header.get("revision"))

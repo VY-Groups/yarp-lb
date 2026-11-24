@@ -92,3 +92,7 @@ runs the synthetic contracts; the original key encryption, signed
 restore, and Windows/Ubuntu service acceptance remain mandatory.
 The actual receiver has **not** yet been wired to require this lease
 at all recovery phases.
+
+## Runtime encrypted-key storage primitive
+
+The independent runtime-writer lease uses `/gatewaycore/linux-dp/runtime-writer/<fleet>` rather than the offline recovery namespace. `RuntimeEncryptedRingWriter.append_once` stores the bounded, structurally certificate-wrapped XML bytes under `/gatewaycore/linux-dp/runtime-ring/<fleet>/<key-name>` in an atomic Raft transaction comparing the writer epoch modification revision, lease ID and absence of the new key. No overwrite or local fallback is provided. The XML gate is structural only, not cryptographic certificate or signed inventory validation; the test uses synthetic ciphertext. Provision narrow separate issuer and writer mTLS/RBAC identities. This is a storage primitive, not yet the shipped .NET XML repository, read/replication protocol, lease renewal, revocation orchestration or service promotion. An ambiguous write needs reconciliation. The real etcd fixture checks durable append, duplicate refusal and revoked writer refusal.
