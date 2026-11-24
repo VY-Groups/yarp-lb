@@ -147,7 +147,25 @@ def restore_once(args, *, fetch=wire.fetch_pinned, stage=wire.stage_received,
         raise ValueError("untrusted encrypted transfer")
     STAGE = "atomic-received-archive"
     received = stage(str(args.destination_root), args.label, binary)
-    checkpoint = os.path.join(received, "checkpoint.json")
+    # .NET treats the parent of --archive as an untrusted state root and
+    # correctly rejects a checkpoint stored INSIDE that snapshot tree.
+    # Materialize the signed (still-untrusted) checkpoint as a separate,
+    # non-overwriting private file alongside the archive label. The SPKI
+    # public key and monotonic floor remain independently provisioned OUTSIDE
+    # the entire inbox. Merely moving a checkpoint never grants authority.
+    STAGE = "independent-checkpoint-staging"
+    raw_checkpoint = wire.read_private_path(
+        os.path.join(received, "checkpoint.json"), wire.MAX_MANIFEST)
+    checkpoint = os.path.join(args.destination_root,
+                              "." + args.label + ".signed-checkpoint.json")
+    wire.safe_write(checkpoint, raw_checkpoint)
+    root_fd = wire.private_directory(str(args.destination_root))
+    try:
+        os.fsync(root_fd)
+    finally:
+        os.close(root_fd)
+    if not disjoint(checkpoint, received):
+        raise ValueError("signed checkpoint cannot be inside archive state root")
     ring = os.path.join(received, "ring")
     command = [str(app), "restore", "--archive", ring,
                "--state-root", str(args.state_root),
