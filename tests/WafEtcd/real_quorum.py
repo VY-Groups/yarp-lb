@@ -401,14 +401,14 @@ def main():
             # must coexist with (and never impersonate) the WAF lease. The
             # exact same REAL three-member Raft quorum and TLS endpoints are
             # used; CI alone does not prove independently housed hosts.
-            STAGE = "real-dp-recovery-cas-issue"
+            STAGE = "real-dp-recovery-issuer-construct"
             dp_issuer = dp_recovery.RecoveryLeaseIssuer(
                 "fleet-ci", endpoints, cluster, ca, writer_cert, writer_key,
                 "gateway-a", "gateway-b", 43, P, ttl=120)
+            STAGE = "real-dp-recovery-cas-issue"
             try:
                 dp_receipt = dp_issuer.issue_once()
-            except (OSError, ValueError, KeyError, TypeError,
-                    http.client.HTTPException, ssl.SSLError):
+            except Exception:
                 # Only hardcoded source phase names leave the disposable
                 # runner. Never echo etcd responses, tokens, private trust
                 # paths or dynamic exception strings.
