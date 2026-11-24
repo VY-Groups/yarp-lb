@@ -432,7 +432,13 @@ def main():
                  ca, writer_cert, writer_key)
             if dp_verifier.current("after-signed-restore"):
                 raise RuntimeError("revoked DP lease authorized a stale restore")
-            dp_new_epoch = dp_issuer.issue_once()
+            # A NEW independent operator instance must acquire a new
+            # epoch. The old issuer/verifier is pinned to the old holder and
+            # must not silently self-renew after a revocation.
+            dp_new_issuer = dp_recovery.RecoveryLeaseIssuer(
+                "fleet-ci", endpoints, cluster, ca, writer_cert, writer_key,
+                "gateway-a", "gateway-b", 43, P, ttl=120)
+            dp_new_epoch = dp_new_issuer.issue_once()
             if dp_new_epoch["holder"] == dp_receipt["holder"] or \
                     dp_verifier.current("after-signed-restore"):
                 raise RuntimeError("DP recovery old epoch survived Raft lease rollover")
