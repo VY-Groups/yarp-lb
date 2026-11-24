@@ -113,8 +113,27 @@ def sign(private_key, payload, *, runner=subprocess.run):
     return signature.stdout
 
 
+def canonical_p256_spki(public_key, *, runner=subprocess.run):
+    # Independent node identity must be compared by canonical DER SPKI,
+    # NOT by mutable PEM formatting. Two copies of the same private key
+    # with different comments/line wrapping must never count as two hosts.
+    owner_private(public_key)
+    result = runner([OPENSSL, "pkey", "-pubin", "-in", str(public_key),
+                     "-pubout", "-outform", "DER"],
+                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL, check=False, timeout=15)
+    data = result.stdout
+    ec_oid = bytes.fromhex("06072A8648CE3D0201")
+    p256_oid = bytes.fromhex("06082A8648CE3D030107")
+    if (result.returncode or type(data) is not bytes or
+            not 80 <= len(data) <= 140 or
+            ec_oid not in data or p256_oid not in data):
+        raise ValueError("independent P-256 public identity invalid")
+    return hashlib.sha256(data).digest()
+
+
 def verify(public_key, payload, signature, *, runner=subprocess.run):
-    wire.read_private_path(str(public_key), 8192)
+    canonical_p256_spki(public_key, runner=runner)
     if type(signature) is not bytes or not 0 < len(signature) <= 256:
         return False
     with tempfile.TemporaryDirectory(prefix="dp-quiescence-signature-") as folder:
@@ -236,10 +255,9 @@ def verify_two_receipts(fence, source_wire, destination_wire, *,
             not getattr(fence, "_identity", None) or
             fence.remaining_seconds() < 10):
         raise ValueError("fresh authenticated recovery epoch required")
-    if (owner_private(sender_key) == owner_private(receiver_key) or
-            hashlib.sha256(wire.read_private_path(sender_key, 8192)).digest() ==
-            hashlib.sha256(wire.read_private_path(receiver_key, 8192)).digest()):
-        raise ValueError("same public signing identity cannot witness two nodes")
+    if (canonical_p256_spki(sender_key, runner=runner) ==
+            canonical_p256_spki(receiver_key, runner=runner)):
+        raise ValueError("same P-256 SPKI identity cannot witness two nodes")
     first = verify_receipt(source_wire, sender_key, fence, fence.sender,
                            sender_units, clock=clock, runner=runner)
     second = verify_receipt(destination_wire, receiver_key, fence, fence.receiver,
