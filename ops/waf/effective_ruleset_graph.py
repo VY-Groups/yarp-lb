@@ -114,7 +114,12 @@ def walk_graph(files, root):
         raise ValueError("ModSecurity config inventory count cap")
     if any(type(p) is not str or type(v) is not bytes for p, v in files.items()):
         raise ValueError("ModSecurity config inventory type rejected")
-    if any(len(v) == 0 for v in files.values()):
+    # An upstream image may have an empty, inert wrapper .conf file.
+    # That is harmless only outside the actual CRS rules subtree; an empty
+    # rule under /rules would break the separately observed canonical CRS
+    # archive digest and must fail closed.
+    if any(len(v) == 0 and p.startswith(RULE_PREFIX)
+           for p, v in files.items()):
         raise ValueError("ModSecurity config inventory empty file")
     if any(len(v) > MAX_FILE for v in files.values()):
         raise ValueError("ModSecurity config inventory single file cap")
