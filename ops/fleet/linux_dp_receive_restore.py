@@ -174,6 +174,12 @@ def restore_once(args, *, fetch=wire.fetch_pinned, stage=wire.stage_received,
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                      env=environment, timeout=180, check=False)
     if process.returncode != 0:
+        # No raw child stdout/stderr is ever emitted. An allowlisted numeric
+        # process exit distinguishes a .NET host bootstrap failure from a
+        # signed restore refusal without exposing private recovery paths.
+        STAGE = ("signed-dotnet-exit-" + str(process.returncode)
+                 if process.returncode in (1, 131, 134, 150)
+                 else "signed-dotnet-exit-other")
         raise ValueError("independent signed .NET snapshot restore refused")
     # Detect externally changed binaries/dependencies after execution.
     STAGE = "post-execution-bundle-integrity"
