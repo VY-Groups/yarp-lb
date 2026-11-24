@@ -519,8 +519,32 @@ def main():
                 pass
             else:
                 raise RuntimeError("runtime writer overwrote existing key")
+            STAGE = "runtime-atomic-writer-handoff"
+            successor = dp_recovery.RuntimeWriterLeaseIssuer(
+                "fleet-ci", endpoints, cluster, ca, writer_cert, writer_key,
+                "gateway-b", "gateway-a", 45, P, ttl=120)
+            new_receipt = dp_recovery.RuntimeWriterHandoff(
+                runtime_issuer,successor,runtime_receipt).replace_once()
+            if new_receipt["senderNodeId"] != "gateway-b" or \
+                    new_receipt["leaseId"] == runtime_receipt["leaseId"]:
+                raise RuntimeError("atomic writer handoff failed")
+            new_writer = dp_recovery.RuntimeEncryptedRingWriter(
+                "fleet-ci", endpoints, cluster, ca, writer_cert, writer_key,
+                "gateway-b", "gateway-a", 45, P, node_id="gateway-b")
+            replacement_name = "key-99999999-8888-7777-6666-555555555555.xml"
+            replacement_bytes = ciphertext_fixture.replace(
+                b"11111111-2222-3333-4444-555555555555",
+                b"99999999-8888-7777-6666-555555555555")
+            try:
+                runtime_writer.append_once(replacement_name,replacement_bytes)
+            except ValueError:
+                pass
+            else:
+                raise RuntimeError("old runtime writer survived atomic handoff")
+            if new_writer.append_once(replacement_name,replacement_bytes)<=0:
+                raise RuntimeError("successor runtime writer could not append")
             post(addr, ("/v3/lease/revoke",
-                        {"ID":str(runtime_receipt["leaseId"])}),
+                        {"ID":str(new_receipt["leaseId"])}),
                  ca, writer_cert, writer_key)
             replacement = "key-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.xml"
             replacement_xml = ciphertext_fixture.replace(

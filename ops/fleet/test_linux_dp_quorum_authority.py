@@ -271,6 +271,59 @@ class RecoveryAuthorityTests(unittest.TestCase):
                 writer.append_once(name,b"<key><masterKey>plaintext</masterKey></key>")
             self.assertEqual(post.call_count,calls)
 
+    def test_runtime_handoff_atomically_replaces_exact_old_epoch(self):
+        old=dp.RuntimeWriterLeaseIssuer(*self.params)
+        successor=dp.RuntimeWriterLeaseIssuer(*self.params[:6],
+            RECEIVER,SENDER,44,CHECKPOINT)
+        receipt={"schemaVersion":1,"kind":"linux-dp","senderNodeId":SENDER,
+                 "receiverNodeId":RECEIVER,"revision":43,
+                 "checkpointSha256":CHECKPOINT,"holder":"a"*32,
+                 "leaseId":456,"raftModRevision":90,"ttlSeconds":120}
+        old._identity=(999,90,456,"a"*32)
+        def post(endpoint,resource,body):
+            if resource=="/v3/lease/grant":
+                return {"ID":"789","TTL":"120"}
+            self.assertEqual(resource,"/v3/kv/txn")
+            self.assertEqual([x["target"] for x in body["compare"]],["MOD","LEASE"])
+            self.assertEqual(body["compare"][0]["modRevision"],"90")
+            self.assertEqual(body["compare"][1]["lease"],"456")
+            put=body["success"][0]["requestPut"]
+            self.assertEqual(put["lease"],"789")
+            record=json.loads(base64.b64decode(put["value"]))
+            successor._identity=(999,101,789,record["holder"])
+            return {"header":{"cluster_id":"999","member_id":"1","revision":"101"},
+                    "succeeded":True}
+        with mock.patch.object(old,"current",return_value=True), \
+                mock.patch.object(old,"remaining_seconds",return_value=90), \
+                mock.patch.object(successor,"current",return_value=True), \
+                mock.patch.object(successor.client,"_post",side_effect=post):
+            result=dp.RuntimeWriterHandoff(old,successor,receipt).replace_once()
+            self.assertEqual(result["senderNodeId"],RECEIVER)
+            self.assertEqual(result["leaseId"],789)
+            self.assertEqual(result["raftModRevision"],101)
+        with self.assertRaises(ValueError):
+            dp.RuntimeWriterHandoff(old,successor,dict(receipt,holder="wrong"))
+
+    def test_runtime_handoff_contest_only_revokes_new_grant(self):
+        old=dp.RuntimeWriterLeaseIssuer(*self.params)
+        successor=dp.RuntimeWriterLeaseIssuer(*self.params[:6],
+            SENDER,RECEIVER,44,CHECKPOINT)
+        receipt={"schemaVersion":1,"kind":"linux-dp","senderNodeId":SENDER,
+                 "receiverNodeId":RECEIVER,"revision":43,
+                 "checkpointSha256":CHECKPOINT,"holder":"a"*32,
+                 "leaseId":456,"raftModRevision":90}
+        old._identity=(999,90,456,"a"*32)
+        with mock.patch.object(old,"current",return_value=True), \
+                mock.patch.object(old,"remaining_seconds",return_value=90), \
+                mock.patch.object(successor.client,"_post",side_effect=[
+                    {"ID":"789","TTL":"120"},
+                    {"header":{"cluster_id":"999","member_id":"1","revision":"101"},
+                     "succeeded":False}]), \
+                mock.patch.object(successor,"_revoke") as revoke:
+            with self.assertRaises(ValueError):
+                dp.RuntimeWriterHandoff(old,successor,receipt).replace_once()
+            revoke.assert_called_once_with(successor.client.endpoints[0],789)
+
     def test_disallowed_phase_and_identity_fail_without_network(self):
         self.assertFalse(self.issuer.current("before-transfer"))
         self.assertFalse(self.issuer.current("emergency-override"))

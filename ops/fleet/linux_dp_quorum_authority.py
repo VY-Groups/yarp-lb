@@ -464,3 +464,96 @@ class RuntimeEncryptedRingWriter(RecoveryFence):
                 response.get("succeeded") is not True):
             raise ValueError("runtime encrypted key append contested or unverified")
         return etcd.integer(header.get("revision"))
+
+
+class RuntimeWriterHandoff:
+    """Independently authorized atomic epoch replacement, not auto-promotion.
+
+    A designated operator supplies the EXACT old epoch receipt and a new
+    approved writer identity. Both old and new verification use the same
+    independently pinned cluster and operator credentials. Old app instances
+    must retain their old epoch pins: their writes fail after replacement.
+    """
+    def __init__(self, previous, successor, expected_receipt):
+        if (type(previous) is not RuntimeWriterLeaseIssuer or
+                type(successor) is not RuntimeWriterLeaseIssuer or
+                previous is successor or previous.key != successor.key or
+                previous.client.cluster_id != successor.client.cluster_id or
+                previous.client.endpoints != successor.client.endpoints or
+                successor.revision <= previous.revision or
+                type(expected_receipt) is not dict):
+            raise ValueError("invalid independent runtime epoch handoff")
+        expected = {"schemaVersion": 1, "kind": RECOVERY_KIND,
+                    "senderNodeId": previous.sender,
+                    "receiverNodeId": previous.receiver,
+                    "revision": previous.revision,
+                    "checkpointSha256": previous.checkpoint_sha}
+        if any(expected_receipt.get(k) != v for k,v in expected.items()):
+            raise ValueError("old runtime receipt does not match approved identity")
+        holder = expected_receipt.get("holder")
+        if type(holder) is not str or not etcd.NONCE.fullmatch(holder):
+            raise ValueError("invalid old runtime receipt holder")
+        self.expected = (previous.client.cluster_id,
+            etcd.integer(expected_receipt.get("raftModRevision")),
+            etcd.integer(expected_receipt.get("leaseId")), holder)
+        self.previous, self.successor = previous, successor
+
+    def replace_once(self):
+        old, new = self.previous, self.successor
+        if (not old.current("preflight") or old._identity != self.expected or
+                old.remaining_seconds() <= 5 or new._identity is not None):
+            raise ValueError("old runtime epoch no longer independently authorized")
+        endpoint = new.client.endpoints[0]
+        grant = new.client._post(endpoint,"/v3/lease/grant",{"TTL":str(new.ttl)})
+        if type(grant) is not dict:
+            raise ValueError("runtime handoff lease grant unverified")
+        lease = etcd.integer(grant.get("ID"))
+        if lease == self.expected[2]:
+            raise ValueError("runtime successor cannot reuse old lease")
+        lifetime = grant.get("TTL")
+        if type(lifetime) is str and lifetime.isdecimal():
+            lifetime = int(lifetime)
+        if type(lifetime) is not int or lifetime != new.ttl:
+            new._revoke(endpoint,lease)
+            raise ValueError("invalid runtime successor lease duration")
+        nonce = secrets.token_hex(16)
+        record = {"schemaVersion":1,"kind":RECOVERY_KIND,
+                  "senderNodeId":new.sender,"receiverNodeId":new.receiver,
+                  "revision":new.revision,"checkpointSha256":new.checkpoint_sha,
+                  "holder":nonce}
+        encoded = as_base64(json.dumps(record,sort_keys=True,
+                               separators=(",",":")).encode("ascii"))
+        # Refresh old authority before mutation. CAS is still necessary:
+        # revocation or competing handoff can occur after the refresh.
+        if (not old.current("before-transfer") or old._identity != self.expected or
+                old.remaining_seconds() <= 5):
+            new._revoke(endpoint,lease)
+            raise ValueError("old runtime epoch revoked before handoff")
+        # The successor is installed and predecessor fenced at the SAME
+        # linearization point. No delete/regrant window or forced takeover.
+        response = new.client._post(endpoint,"/v3/kv/txn",{
+            "compare":[
+                {"result":"EQUAL","target":"MOD","key":new.key,
+                 "modRevision":str(self.expected[1])},
+                {"result":"EQUAL","target":"LEASE","key":new.key,
+                 "lease":str(self.expected[2])}],
+            "success":[{"requestPut":{"key":new.key,"value":encoded,"lease":str(lease)}}],
+            "failure":[]})
+        header = response.get("header") if type(response) is dict else None
+        if (type(header) is not dict or
+                etcd.integer(header.get("cluster_id")) != self.expected[0] or
+                etcd.integer(header.get("member_id")) != endpoint[3]):
+            raise ValueError("ambiguous runtime handoff: reconcile independently")
+        if response.get("succeeded") is False or (
+                "succeeded" not in response and response.get("responses",[]) == []):
+            new._revoke(endpoint,lease)
+            raise ValueError("runtime handoff CAS contested")
+        if response.get("succeeded") is not True:
+            raise ValueError("ambiguous runtime handoff: reconcile independently")
+        mod = etcd.integer(header.get("revision"))
+        if (not new.current("preflight") or new._identity !=
+                (self.expected[0],mod,lease,nonce)):
+            # A committed successor may exist. Never revoke it merely because
+            # readback failed; leave bounded expiry and require reconciliation.
+            raise ValueError("runtime successor outcome requires reconciliation")
+        return dict(record,leaseId=lease,raftModRevision=mod,ttlSeconds=new.ttl)
