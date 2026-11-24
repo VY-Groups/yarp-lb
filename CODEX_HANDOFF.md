@@ -1,15 +1,23 @@
 # GatewayCore — Codex handoff, verified repository snapshot
 
+## Verified continuation — frozen software candidate (2026-11-24)
+
+- Frozen test pre-release: [`v0.1.0-test.13`](https://github.com/VY%2DGroups/yarp-lb/releases/tag/v0.1.0-test.13), built from source commit `b6f9fe749f7419ecc8b97e51680dca79b14c0cea`. It contains Windows x64 and Linux x64 candidate archives, `SHA256SUMS.txt`, frozen evidence, and offline install/upgrade/rollback instructions.
+- Exact-main acceptance: [workflow run 45390702279](https://github.com/VY%2DGroups/yarp-lb/actions/runs/45390702279) returned `CI-GO`; the 16 baseline workflows and all required #48 software checks completed, with no incomplete items. Both archived packages passed actual startup/restart and negative-key checks on Windows Server 2022 and Ubuntu 24.04 GitHub-hosted runners.
+- PRs #541, #542 and #543 are merged. PR #542's combined distributed-ring/shipping-gateway acceptance passed 16/16 exact-head checks.
+- Issue #48 is closed for software acceptance. The only remaining open issue is #36, which owns physical/environment acceptance: independent VRRP/ECMP hosts, real VIP client path, site failover and partition tests, solo capacity/headroom, host key custody/backup/restore, production PKI, monitoring and CAB evidence.
+- Production remains **NO-GO** until #36 is independently accepted. Annual 99.9% availability is unmeasured; the test candidate and CI do not establish it.
+- The release source SHA above is immutable. Recheck GitHub `main` before subsequent changes; this documentation refresh may advance `main` without changing the candidate binaries.
+
 ## Ownership/licensing direction (2026-11-21; current owner instruction)
 
 The owner intends GatewayCore to be **proprietary** and to postpone commercial licensing/activation development until software issues close. The .NET NSEC3 functionality follows RFC 5155. Earlier repository revisions included project-wide AGPL text; review that history before making distribution claims. See `README.md`, `PROJECT_LICENSE_STATUS.md`, and `AGENTS.md`; older snapshots below are historical, not the owner's current direction.
 
 
-## Verified continuation — current GitHub state (checked 2026-11-23 06:15 UTC)
+## Historical continuation snapshot — GitHub state checked 2026-11-23 06:15 UTC
 
-This section is the time-bounded live snapshot. Recheck GitHub before each
-merge, issue closure, or release decision. The dated sections below are
-historical records, not current issue/PR inventories.
+This dated section is retained as history only. Its branch, issue, and pull-request
+counts are stale; do not use them for current decisions.
 
 - Current `main`: `ae5c416da3130d6e719235b68291d4ec40de68c1`.
   Merged changes include PR #432 (IP-free OTLP access summaries; merge

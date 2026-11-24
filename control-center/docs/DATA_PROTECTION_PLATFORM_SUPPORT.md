@@ -1,12 +1,13 @@
 # Platform support and Data Protection lifecycle
 
-## Current software acceptance snapshot — 2026-11-24
+## Frozen software acceptance snapshot — 2026-11-24
 
-The table below records the latest **verified software behavior**, and supersedes
-older incremental status statements later in this document. It does not declare
-a frozen release or close #48. Final candidate verification and actual customer-host
-acceptance (#36) are separate. Evidence links identify the exact run, not a
-claim about subsequent commits.
+This matrix records tested software behavior for the Windows/Linux test candidate
+`v0.1.0-test.13`, built from source commit
+`b6f9fe749f7419ecc8b97e51680dca79b14c0cea`. Software acceptance issue #48 is
+closed against this evidence. It does not certify customer-host operation or
+production readiness; physical acceptance remains in #36. Evidence links identify
+the exact run and source revision.
 
 | Mode | Verified software coverage | Explicit support boundary |
 | --- | --- | --- |
@@ -15,7 +16,7 @@ claim about subsequent commits.
 | Ubuntu 24.04 x64, certificate-wrapped ring | .NET 10 production process, private filesystem, encrypted XML, rolling recovery and lost-key tests: [source run](https://github.com/VY%2DGroups/yarp-lb/actions/runs/45385303130), [rolling run](https://github.com/VY%2DGroups/yarp-lb/actions/runs/45385303165). The temporary systemd fixture uses the shipped template. | No production installer qualification or real-host key custody assertion. No plaintext or lab-mode fallback in production. |
 | Ubuntu 24.04 x64, opt-in distributed ring | Real three-member mTLS etcd authority, fenced writer, delivered recipient credentials, scheduled rotation and old/new cookies: [Raft run](https://github.com/VY%2DGroups/yarp-lb/actions/runs/45385303158). See [distributed runtime](../../ops/fleet/LINUX_DP_DISTRIBUTED_RUNTIME.md). | External RBAC, credential custody, approved role transition and independent revision floor are mandatory. Distributed local/AD account synchronization is not provided. |
 | RHEL family | [UBI 9 .NET 10 non-root userspace run](https://github.com/VY%2DGroups/yarp-lb/actions/runs/45385303312). | **RHEL host deployment is not qualified**. SELinux, host systemd, kernel and reboot require #36. |
-| Framework-dependent / self-contained installer | Existing source-staging instructions and CI service fixtures; a separate frozen-candidate workflow was added in merged PR #541; no frozen main candidate artifact has yet been accepted. | No final self-contained candidate artifact has yet been accepted. Do not represent the source-staging installer as a full offline binary installer. |
+| Framework-dependent / self-contained installer | Frozen Windows x64 and Linux x64 test candidate archives were published as pre-release `v0.1.0-test.13`; both passed exact-source extraction and startup/restart checks. | Test candidate only, not a production installer. Production installation, protected-state provisioning and rollback on customer hosts remain under #36. |
 | Containers, other OS releases, KMS/HSM integrations | Only documented fixture coverage; no production support assertion. | No production container image or independently qualified external KMS/HSM adapter; certificate wrapping is the selected implementation for #48. |
 
 The historical source runs above used main revision
@@ -23,10 +24,16 @@ The historical source runs above used main revision
 The federated session restart and stale-account restore regression is now merged
 at `396d86ee07391fb6eefe5e505bf39f49da74737d`, with
 [real OIDC/Redis evidence](https://github.com/VY%2DGroups/yarp-lb/actions/runs/45385385609/job/138414833786).
-The combined shipping gateway and real distributed ring test is independently
-approved and passed on the earlier #542 revision, with fresh-head verification
-still required. This snapshot must not be used as the exact frozen-release
-acceptance verdict.
+The combined shipping gateway and real distributed ring test in PR #542 passed
+all 16 exact-head checks and is merged. The final frozen-main run
+[45390702279](https://github.com/VY%2DGroups/yarp-lb/actions/runs/45390702279)
+returned `CI-GO` on the exact candidate SHA, with all required baseline and #48
+checks complete. The workflow verified and uploaded the Windows and Linux
+archives, including actual extracted-app startup/restart acceptance. The
+[pre-release](https://github.com/VY%2DGroups/yarp-lb/releases/tag/v0.1.0-test.13)
+contains both archives, SHA-256 checksums, and the frozen evidence report. This is
+software evidence only; #36 physical acceptance remains open and production stays
+NO-GO.
 
 This is a **tested-behavior matrix**, not a general OS certification or a
 production support commitment. CI builds the shipping project for Windows
