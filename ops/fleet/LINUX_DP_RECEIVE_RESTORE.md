@@ -97,3 +97,29 @@ independent-host, service account, SELinux and site acceptance stay #36.
 
 CI running these separate tests is NOT production GO or permission to
 close #48.
+
+
+## Combined cryptographic acceptance (disposable Linux CI, not site DR)
+
+The actual `control-center/tests/LinuxKeyProtectionTests` suite now
+invokes `ops/fleet/linux_dp_real_restore_e2e.py` after creating a
+genuine RSA certificate-wrapped Linux Data Protection ring, issuing a
+separate P-256 signed inventory checkpoint and committing its protected
+external revision floor. It creates a real temporary OpenSSL CA and
+different sender/receiver TLS leaf certificates, authenticates both
+directions, downloads the encrypted snapshot through the real socket,
+executes the **actual previously built .NET 10 apphost** rather than a
+mock process, and checks the installed ring inventory matches the
+original signed source. The test then starts a fresh .NET OS process
+with independent recovery trust/floor and checks that the exact
+original protected session remains decryptable. A second transfer is
+denied without overwriting archive or destination. CI does not output
+TLS private keys, auth cookies, checkpoint bytes or decrypted material.
+
+The previous transport-only and mock process-contract regressions are
+still run separately. Their PASS cannot replace this combined test.
+The combined test is performed on a disposable **single Linux runner**:
+it does not prove two different server service identities, actual
+Windows DPAPI migration, cross-node trust-floor distribution, an
+independently renewing fencing authority, real host key ACLs or
+DR failover. Those missing SOFTWARE components stay under #48.
