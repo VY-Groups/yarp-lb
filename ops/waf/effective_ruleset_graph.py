@@ -191,10 +191,18 @@ def walk_graph(files, root):
 def observe(container_id):
     if type(container_id) is not str or not rules.HEX_ID.fullmatch(container_id):
         raise ValueError("invalid pinned WAF Docker identity")
-    stage = "nginx-root"
+    stage = "nginx-command"
     try:
         nginx = run_bounded(["docker", "exec", container_id, "nginx", "-T"],
                             max_bytes=2*1024*1024)
+        stage = "nginx-mode"
+        nginx_text = nginx.decode("utf-8", "strict")
+        if not MODSEC_ON.search(nginx_text) or MODSEC_OFF.search(nginx_text):
+            raise ValueError("Nginx ModSecurity not enabled")
+        stage = "nginx-root-count"
+        if len(MODSEC_FILE.findall(nginx_text)) != 1:
+            raise ValueError("Nginx rule root count mismatch")
+        stage = "nginx-root-path"
         root = root_from_nginx(nginx)
         stage = "config-path-listing"
         names = run_bounded(
@@ -238,7 +246,8 @@ def main(argv=None):
         # Never publish raw Nginx/ModSecurity exception strings or private
         # config paths. A fixed safe phase narrows CI failures reproducibly.
         stages = {
-            "nginx-root", "config-path-listing", "config-symlink-check",
+            "nginx-command", "nginx-mode", "nginx-root-count",
+            "nginx-root-path", "config-path-listing", "config-symlink-check",
             "read-actual-config-bytes", "graph-and-inventory"
         }
         stage = str(exc).removeprefix("Effective WAF graph rejected at ")
