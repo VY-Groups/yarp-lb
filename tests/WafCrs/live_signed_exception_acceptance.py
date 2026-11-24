@@ -26,6 +26,7 @@ import live_signed_rollout as live
 import correlate_native_audit as native
 
 PORT = 18889
+STAGE = "initial"
 CASE = re.compile(r"(?im)^X-GatewayCore-CI-Case:\s*(signed-[a-z-]+)\s*$")
 CRS_920420 = re.compile(r'\[id "920420"\]')
 
@@ -58,6 +59,8 @@ def probe(path, case, mime="application/pkix-cert"):
 
 
 def main(compose):
+    global STAGE
+    STAGE = "verify_existing_ruleset"
     if os.environ.get("GITHUB_ACTIONS") != "true" or os.environ.get("RUNNER_OS") != "Linux":
         raise ValueError("real signed exception test restricted to disposable Linux CI")
     source = Path(compose).resolve(strict=True)
@@ -129,15 +132,19 @@ def main(compose):
                 "        target: /etc/modsecurity.d/owasp-crs/rules/"
                 "REQUEST-901-GATEWAYCORE-SIGNED-PKIX.conf\n"
                 "        read_only: true\n", encoding="utf-8")
+            STAGE = "compose_fixture_generation"
             prefix = ["docker", "compose", "--project-directory", str(source.parent),
                       "--project-name", "gatewaycore-signed-exception-ci",
                       "-f", str(private_base), "-f", str(private_override)]
             env = os.environ.copy()
             env["WAF_MODE"] = "On"
             env["WAF_IMAGE"] = os.environ["WAF_IMAGE"]
+            STAGE = "compose_config_validation"
             compose_run([*prefix, "config", "--quiet"], env=env)
             try:
+                STAGE = "compose_start"
                 compose_run([*prefix, "up", "--detach"], env=env, timeout=90)
+                STAGE = "compose_readiness"
                 for _ in range(80):
                     try:
                         if probe("/", "signed-readiness", mime="application/json")[0] == 200:
@@ -148,6 +155,7 @@ def main(compose):
                 else:
                     raise ValueError("newly rendered WAF configuration failed to start")
 
+                STAGE = "scoped_requests"
                 expected = [
                     ("/signed-pkix", "signed-approved", 200),
                     ("/other-route", "signed-outside", 403),
@@ -162,6 +170,7 @@ def main(compose):
                     if code == 200 and b'"accepted":true' not in body:
                         raise ValueError("signed exception request did not reach private origin")
 
+                STAGE = "origin_isolation"
                 container = compose_run([*prefix, "ps", "--quiet", "protected-app"],
                                         env=env).strip()
                 ports = json.loads(compose_run(
@@ -169,6 +178,7 @@ def main(compose):
                      "{{json .NetworkSettings.Ports}}"], env=env))
                 if any(rows for rows in ports.values()):
                     raise ValueError("signed exception lab unexpectedly published origin")
+                STAGE = "native_denial_correlation"
                 log = compose_run([*prefix, "logs", "--no-color", "waf"],
                                   env=env, timeout=25)
                 matches = {"signed-outside": [], "signed-query": []}
@@ -195,5 +205,6 @@ if __name__ == "__main__":
         main(sys.argv[1])
     except (KeyError, ValueError, OSError, UnicodeError, subprocess.SubprocessError,
             TimeoutError, http.client.HTTPException):
-        print("FAIL: private real signed WAF exception acceptance", file=sys.stderr)
+        print("FAIL: private real signed WAF exception acceptance at " + STAGE,
+              file=sys.stderr)
         raise SystemExit(1)
