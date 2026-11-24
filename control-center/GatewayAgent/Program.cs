@@ -245,6 +245,18 @@ app.Use(async (ctx, next) =>
     await next();
 });
 
+#if GATEWAYCORE_COMMERCIAL
+// mTLS identity middleware runs first. Fresh challenge is signed using the
+// installation identity and exact persisted issuer envelope, never the TLS key.
+app.MapPost("/agent/v1/license/proof",(FleetLicenseChallenge input)=>
+{
+    try{return Results.Ok(new {proof=engineLicense.CreateFleetProof(input.Challenge)});}
+    catch(Exception e) when(e is IOException or CryptographicException or InvalidDataException or
+        JsonException or ArgumentException or InvalidOperationException or UnauthorizedAccessException or FormatException)
+    {return Results.StatusCode(402);}
+});
+#endif
+
 app.MapGet("/agent/v1/status", () => Results.Ok(new
 {
     machine = Environment.MachineName,
@@ -590,3 +602,7 @@ record EnginePrepare(string TransactionId,string ExpectedRevision,JsonObject Con
     long ExpiresUnixSeconds,long Sequence,string KeyId,string Signature);
 record EngineActivate(string TransactionId,string PreparedRevision);
 record EngineRollback(string TransactionId);
+
+#if GATEWAYCORE_COMMERCIAL
+record FleetLicenseChallenge(string Challenge);
+#endif

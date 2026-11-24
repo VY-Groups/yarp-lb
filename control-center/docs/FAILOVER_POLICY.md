@@ -41,9 +41,19 @@ The policy reserves slots under a short lock, then calls the YARP updater
 **outside** that lock, avoiding work under request-path contention.
 
 With two gateways, 50% and minimum remaining one permit one simultaneous
-passive ejection. This is not an absolute active-health survivor guarantee:
-YARP may independently mark every destination down. The default
-`HealthyAndUnknown` then fails closed with HTTP 503.
+passive ejection only if a different, currently eligible peer supplies the
+reserve. With active health enabled, the candidate and remaining peers must
+be affirmatively active-healthy; unknown, unhealthy, draining, passively
+ejected and already-reserved peers do not count. A still-passively-ejected
+peer consumes the cap even when the reservation timer has expired. This
+prevents a simultaneous probe failure during startup from reserving a
+long passive cooldown on the future sole survivor. Suppressed failures
+reset their streak; no stale failure is later replayed. Active health can
+still change asynchronously after the decision: this is not an absolute
+active-health survivor guarantee, and existing passive cooldown is not
+overridden. The default `HealthyAndUnknown` fails closed with HTTP 503 when
+no eligible destination exists. No request retry, timeout, or acceptance
+threshold changes were made.
 
 YARP's built-in `HealthyOrPanic` is available only on **explicit configuration**:
 on an all-down condition it can send requests to nodes known unhealthy, which

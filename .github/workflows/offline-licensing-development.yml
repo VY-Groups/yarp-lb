@@ -1,7 +1,9 @@
 name: Offline commercial license verifier (development)
 on:
-  pull_request:
+  push:
     branches: [main]
+  pull_request:
+    branches: [main, feature/offline-commercial-licensing]
     paths:
       - 'src/GatewayCore.Licensing/**'
       - 'src/CommercialEngine/**'

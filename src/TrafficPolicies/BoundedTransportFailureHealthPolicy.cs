@@ -70,8 +70,36 @@ public sealed class BoundedTransportFailureHealthPolicy : IPassiveHealthCheckPol
             scope.FailureStreak[id] = count;
             if (count < requiredFailures || scope.Until.ContainsKey(id) || scope.Until.Count >= cap)
                 return;
+            // Configured capacity alone is not an availability reserve. A
+            // probe timeout at startup can leave both peers actively down;
+            // reserving one of them for 15s then strands the other during
+            // maintenance even after healthy probes resume.
+            var activeEnabled=cluster.Model.Config.HealthCheck?.Active?.Enabled==true;
+            bool Eligible(DestinationState peer)=>EjectionBudget.EligibleForReserve(
+                activeEnabled,peer.Health.Active==DestinationHealth.Healthy,
+                peer.Health.Passive==DestinationHealth.Unhealthy,
+                TrafficLifecycle.IsDraining(peer),scope.Until.ContainsKey(peer.DestinationId));
+            var alternatives=0;
+            var reserved=scope.Until.Count;
+            var candidateEligible=false;
+            foreach(var peer in cluster.Destinations.Values)
+            {
+                // Count a still-ejected destination even if its local
+                // reservation timer expired before YARP's updater ran.
+                if(peer.Health.Passive==DestinationHealth.Unhealthy &&
+                    !scope.Until.ContainsKey(peer.DestinationId))reserved++;
+                if(ReferenceEquals(peer,destination))candidateEligible=Eligible(peer);
+                else if(peer.DestinationId!=id && Eligible(peer))alternatives++;
+            }
+            if(!EjectionBudget.CanReserve(cap,reserved,alternatives,minimumRemaining,candidateEligible))
+            {
+                // Suppressed failure streaks must not be replayed later
+                // as if they were fresh failures after active recovery.
+                scope.FailureStreak.Remove(id);
+                return;
+            }
             scope.FailureStreak.Remove(id);
-            // Claim the only available ejection slot atomically across requests.
+            // Claim the slot atomically across concurrent passive requests.
             scope.Until.Add(destination.DestinationId,next);
         }
         updater.SetPassive(cluster,destination,DestinationHealth.Unhealthy,cooldown);

@@ -12,7 +12,20 @@ var binding = Convert.ToHexString(SHA256.HashData(installation.ExportSubjectPubl
 var now = DateTimeOffset.FromUnixTimeSeconds(1800000000);
 var keys = new Dictionary<string, byte[]> { ["test-1"] = signer.ExportSubjectPublicKeyInfo() };
 var verifier = new OfflineLicenseVerifier(keys);
-if (args.Length >= 2 && args[0] is "--ci-engine-key" or "--ci-engine-license" or "--ci-engine-revoke")
+if(args.Length==6 && args[0]=="--ci-verify-fleet-proofs")
+{
+    if(Environment.GetEnvironmentVariable("CI")!="true" || Environment.GetEnvironmentVariable("GITHUB_ACTIONS")!="true")
+        throw new InvalidOperationException("Disposable fleet test only.");
+    var fleetTrust=JsonSerializer.Deserialize<Dictionary<string,byte[]>>(File.ReadAllBytes(args[1]))!;
+    var proofVerifier=new OfflineLicenseVerifier(fleetTrust);
+    var fleetUtc=DateTimeOffset.UtcNow;
+    var localProof=proofVerifier.VerifyInstallationProof(File.ReadAllBytes(args[4]),args[2],fleetUtc);
+    var remoteProof=proofVerifier.VerifyInstallationProof(File.ReadAllBytes(args[5]),args[3],fleetUtc);
+    FleetLicensePolicy.Validate(localProof,new[]{localProof,remoteProof},fleetUtc);
+    Console.WriteLine("REAL_MTLS_FLEET_PROOFS_VERIFIED");
+    return;
+}
+if (args.Length >= 2 && args[0] is "--ci-engine-key" or "--ci-engine-license" or "--ci-engine-revoke" or "--ci-fleet-license")
 {
     if(Environment.GetEnvironmentVariable("CI")!="true" || Environment.GetEnvironmentVariable("GITHUB_ACTIONS")!="true")
         throw new InvalidOperationException("Disposable engine test only.");
@@ -39,13 +52,19 @@ if (args.Length >= 2 && args[0] is "--ci-engine-key" or "--ci-engine-license" or
     finally{CryptographicOperations.ZeroMemory(rawFixtureKey);}
     var engineBinding=OfflineActivationRequest.Verify(File.ReadAllBytes(args[2])).InstallationKeySha256;
     var engineNow=DateTimeOffset.UtcNow;
-    var engineBytes=args[0]=="--ci-engine-license"?FixtureSign("GCL1",new{
+    var engineBytes=args[0]=="--ci-fleet-license"?FixtureSign("GCL1",new{
+        schemaVersion=2,product="GatewayCore",licenseId="engine-ci",customerId="ci",deploymentId="ci",
+        allocationId="node-"+engineBinding[..32],installationKeySha256=engineBinding,edition="enterprise",revision=1,
+        siteId=args[4],maxNodes=2,maxSites=2,issuedAt=engineNow.ToUnixTimeSeconds(),notBefore=engineNow.ToUnixTimeSeconds(),
+        expiresAt=new DateTimeOffset(engineNow.UtcDateTime.Date.AddDays(2),TimeSpan.Zero).ToUnixTimeSeconds(),
+        features=new[]{"l7","ha","fleet","dc-dr"}},signer):
+        args[0]=="--ci-engine-license"?FixtureSign("GCL1",new{
         schemaVersion=1,product="GatewayCore",licenseId="engine-ci",customerId="ci",deploymentId="ci",
         allocationId="engine-node",installationKeySha256=engineBinding,edition="standard",revision=1,
         maxNodes=1,maxSites=1,issuedAt=engineNow.ToUnixTimeSeconds(),notBefore=engineNow.ToUnixTimeSeconds(),
         expiresAt=engineNow.AddDays(1).ToUnixTimeSeconds(),features=new[]{args[4]}},signer):
         FixtureSign("GCV1",new{schemaVersion=1,product="GatewayCore",licenseId="engine-ci",customerId="ci",
-        deploymentId="ci",allocationId="engine-node",installationKeySha256=engineBinding,
+        deploymentId="ci",allocationId=args[4]=="fleet"?"node-"+engineBinding[..32]:"engine-node",installationKeySha256=engineBinding,
         revokedAt=engineNow.ToUnixTimeSeconds()},signer);
     using var engineOutput=new FileStream(args[3],FileMode.CreateNew);
     engineOutput.Write(engineBytes);
@@ -250,6 +269,7 @@ Check(verifier.Verify(file, binding, now).Allows("l7"), "trust keys defensively 
 Reject(() => verifier.Verify(Sign(Changed("customerId", "other-customer")), binding, now, valid.Checkpoint), "customer replacement");
 Reject(() => verifier.Verify(Sign(Changed("deploymentId", "other-deployment")), binding, now, valid.Checkpoint), "deployment replacement");
 
+FleetProofAcceptance.Run();
 var directory = Path.Combine(Path.GetTempPath(), "gc-license-" + Guid.NewGuid().ToString("N"));
 var directory2 = directory + "-second";
 try

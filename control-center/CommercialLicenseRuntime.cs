@@ -8,12 +8,14 @@ using GatewayCore.Licensing;
 internal sealed class CommercialLicenseRuntime : BackgroundService
 {
     private readonly OfflineLicenseStore store;
+    private readonly OfflineLicenseVerifier verifier;
     private readonly object sync = new();
     private VerifiedLicense? current;
     private string state = "unavailable";
-    private int admittedTraffic;
-    private long admissionDeadlineMs;
-    private long signedExpiryUnixMs;
+    private sealed record TrafficGrant(long DeadlineTick,long ExpiryUnixMs);
+    private TrafficGrant? trafficGrant;
+    private string? lastVerifiedPayload;
+    private long lastVerifiedDeadline;
     // Development default: bounded continuity on unexpected storage failure,
     // never beyond signed expiry. Explicit downgrade/revocation fences now.
     private const long FaultContinuityMs = 15 * 60 * 1000;
@@ -26,7 +28,8 @@ internal sealed class CommercialLicenseRuntime : BackgroundService
         if (stream.Length is < 1 or > 16384) throw new InvalidDataException("Invalid trust resource.");
         var keys = JsonSerializer.Deserialize<Dictionary<string, byte[]>>(stream)
             ?? throw new InvalidDataException("Missing issuer trust.");
-        store = new OfflineLicenseStore(directory, new OfflineLicenseVerifier(keys));
+        verifier = new OfflineLicenseVerifier(keys);
+        store = new OfflineLicenseStore(directory, verifier);
     }
 
     public void Initialize() => store.Initialize();
@@ -42,9 +45,9 @@ internal sealed class CommercialLicenseRuntime : BackgroundService
                 FormatException or JsonException or UnauthorizedAccessException or ArgumentException or InvalidOperationException)
             {
                 // Repeated failures must not renew the continuity window.
-                if (state != "unavailable")
-                    Volatile.Write(ref admissionDeadlineMs,
-                        Math.Min(Volatile.Read(ref admissionDeadlineMs), Environment.TickCount64 + FaultContinuityMs));
+                if (state != "unavailable" && Volatile.Read(ref trafficGrant) is { } oldGrant)
+                    Volatile.Write(ref trafficGrant,oldGrant with
+                    {DeadlineTick=Math.Min(oldGrant.DeadlineTick,Environment.TickCount64+FaultContinuityMs)});
                 current = null;
                 state = "unavailable";
             }
@@ -58,33 +61,38 @@ internal sealed class CommercialLicenseRuntime : BackgroundService
     {
         current = license;
         state = license?.Validity.ToString().ToLowerInvariant() ?? "unactivated";
-        if (license is { Validity: LicenseValidity.Active } && license.Allows("l7"))
+        if(license is not null)
         {
-            var now = DateTimeOffset.UtcNow;
-            var remainingMs = Math.Max(0L, (long)(license.ExpiresAt - now).TotalMilliseconds);
-            Volatile.Write(ref signedExpiryUnixMs, license.ExpiresAt.ToUnixTimeMilliseconds());
-            Volatile.Write(ref admissionDeadlineMs, Environment.TickCount64 + remainingMs);
-            Volatile.Write(ref admittedTraffic, remainingMs > 0 ? 1 : 0);
+            var remainingMs=Math.Max(0L,(long)(license.ExpiresAt-DateTimeOffset.UtcNow).TotalMilliseconds);
+            var proposed=Environment.TickCount64+remainingMs;
+            if(lastVerifiedPayload==license.PayloadSha256)
+                proposed=Math.Min(lastVerifiedDeadline,proposed);
+            lastVerifiedPayload=license.PayloadSha256;
+            lastVerifiedDeadline=proposed;
         }
-        else
-        {
-            Volatile.Write(ref admittedTraffic, 0);
-            Volatile.Write(ref admissionDeadlineMs, 0);
-            Volatile.Write(ref signedExpiryUnixMs, 0);
-            if (license is { Validity: LicenseValidity.Active }) state = "feature-restricted";
-        }
+        // One immutable publication prevents readers observing mixed old/new
+        // admission fields. Refreshing the same signed payload never extends
+        // its monotonic expiry, even after a recoverable store fault.
+        Volatile.Write(ref trafficGrant,license is {Validity:LicenseValidity.Active} && license.Allows("l7") &&
+            Environment.TickCount64<lastVerifiedDeadline
+            ?new TrafficGrant(lastVerifiedDeadline,license.ExpiresAt.ToUnixTimeMilliseconds()):null);
+        if(license is {Validity:LicenseValidity.Active} && !license.Allows("l7"))state="feature-restricted";
     }
 
-    // No disk access, signature verification or network dependency in the
-    // data path. Both wall clock and monotonic bounds must still be valid.
-    public bool TrafficAdmitted => Volatile.Read(ref admittedTraffic) == 1 &&
-        Environment.TickCount64 < Volatile.Read(ref admissionDeadlineMs) &&
-        DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() < Volatile.Read(ref signedExpiryUnixMs);
+    public bool TrafficAdmitted
+    {
+        get
+        {
+            var grant=Volatile.Read(ref trafficGrant);
+            return grant is not null && Environment.TickCount64<grant.DeadlineTick &&
+                DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()<grant.ExpiryUnixMs;
+        }
+    }
     public bool Allows(string feature)
     {
         lock (sync)
-            return current is { Validity: LicenseValidity.Active } && current.ExpiresAt > DateTimeOffset.UtcNow &&
-                current.NotBefore <= DateTimeOffset.UtcNow && current.Allows(feature);
+            return current is {Validity:LicenseValidity.Active} && Environment.TickCount64<lastVerifiedDeadline &&
+                current.ExpiresAt>DateTimeOffset.UtcNow && current.NotBefore<=DateTimeOffset.UtcNow && current.Allows(feature);
     }
 
     public object Status()
@@ -93,7 +101,8 @@ internal sealed class CommercialLicenseRuntime : BackgroundService
         {
             var active = Allows("l7");
             return new { commercial = true, state = active ? "active" :
-                current?.Validity == LicenseValidity.Active && current.ExpiresAt <= DateTimeOffset.UtcNow ? "expired" : state,
+                current?.Validity == LicenseValidity.Active && (current.ExpiresAt <= DateTimeOffset.UtcNow ||
+                    Environment.TickCount64>=lastVerifiedDeadline) ? "expired" : state,
                 active, trafficAdmitted = TrafficAdmitted, edition = current?.Edition, licenseId = current?.LicenseId,
                 allocationId = current?.AllocationId, expiresAt = current?.ExpiresAt, maxNodes = current?.MaxNodes,
                 maxSites = current?.MaxSites, revision = current?.Revision,
@@ -128,6 +137,27 @@ internal sealed class CommercialLicenseRuntime : BackgroundService
         path == "/admin/api/license/status" || path == "/admin/api/license/request" ||
         path == "/admin/api/license/import" || path == "/admin/api/license/revoke" ||
         path == "/admin/api/privacy/accept";
+
+    internal VerifiedLicense VerifyPeerProof(string proof,string challenge)
+    {
+        if(proof.Length>32768 || proof.Any(c=>c is < (char)33 or > (char)126))
+            throw new InvalidDataException("Invalid peer proof.");
+        return verifier.VerifyInstallationProof(Encoding.ASCII.GetBytes(proof),challenge,DateTimeOffset.UtcNow);
+    }
+
+    internal void ValidateFleetProofs(IReadOnlyList<VerifiedLicense> peers)
+    {
+        lock(sync)
+        {
+            // Consult exact persisted local state for a control-plane decision,
+            // not the continuity/admission cache.
+            var local=store.Inspect(DateTimeOffset.UtcNow)??throw new InvalidOperationException("Missing local license.");
+            ApplyVerified(local);
+            if(!Allows("l7") || !Allows("ha") || !Allows("fleet"))
+                throw new CryptographicException("Local fleet entitlement unavailable.");
+            FleetLicensePolicy.Validate(local,peers,DateTimeOffset.UtcNow);
+        }
+    }
 
     // Local controller cap; does not assert that every remote gateway has
     // a valid unique allocation or prove a global site count.
