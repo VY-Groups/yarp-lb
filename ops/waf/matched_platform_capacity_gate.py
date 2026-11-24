@@ -70,7 +70,7 @@ def check_policy(p):
     if (type(p) is not dict or
             set(p) != {
                 "schemaVersion", "sourceSha", "wafImageDigest",
-                "trafficProfileSha256", "concurrency", "windowSeconds",
+                "trafficProfileSha256", "httpVersion", "keepalive", "concurrency", "windowSeconds",
                 "windowCount", "peakBodyGbps", "headroom",
                 "maxP95Ms", "maxP99Ms", "maxWafP99Multiplier",
                 "maxCpuUtilizationPercent", "maxAllocatedBytesPerRequest",
@@ -82,6 +82,9 @@ def check_policy(p):
             not IMAGE.fullmatch(p["wafImageDigest"]) or
             type(p["trafficProfileSha256"]) is not str or
             not HEX.fullmatch(p["trafficProfileSha256"]) or
+            p["httpVersion"] not in ("1.1", "2") or
+            type(p["keepalive"]) is not bool or
+            (p["httpVersion"] == "2" and not p["keepalive"]) or
             type(p["concurrency"]) is not int or p["concurrency"] < 1 or
             type(p["windowSeconds"]) is not int or
             p["windowSeconds"] not in (60, 120, 300) or
@@ -112,6 +115,7 @@ def gate(policy, evidence):
     summary = {"schemaVersion": 1, "decision": "GO",
                "requiredBodyGbps": minimum, "runs": {}, "errors": []}
     issues = summary["errors"]
+    seen_raw_window_digests = set()
     for platform in PLATFORMS:
         runs = evidence["runs"][platform]
         if type(runs) is not dict or set(runs) != set(PATHS):
@@ -131,8 +135,8 @@ def gate(policy, evidence):
                     run["trafficProfileSha256"] != policy["trafficProfileSha256"] or \
                     (run["wafImageDigest"] != policy["wafImageDigest"]
                      if path == "yarp_waf" else run["wafImageDigest"] is not None) or \
-                    run["httpVersion"] not in ("1.1", "2") or \
-                    type(run["keepalive"]) is not bool or \
+                    run["httpVersion"] != policy["httpVersion"] or \
+                    run["keepalive"] != policy["keepalive"] or \
                     run["concurrency"] != policy["concurrency"] or \
                     run["windowSeconds"] != policy["windowSeconds"] or \
                     type(run["hostCpuCores"]) is not int or run["hostCpuCores"] < 1:
@@ -166,6 +170,10 @@ def gate(policy, evidence):
                         sample["p99Ms"] < sample["p95Ms"] or \
                         not nonnegative(sample["cpuSeconds"]):
                     raise ValueError("invalid measured window counters/digest")
+                digest = sample["rawWindowSha256"]
+                if digest in seen_raw_window_digests:
+                    raise ValueError("same raw window evidence reused across paths or minutes")
+                seen_raw_window_digests.add(digest)
                 if path == "direct":
                     if sample["allocatedBytes"] is not None or sample["gcPauseMs"] is not None:
                         raise ValueError("direct origin cannot fabricate YARP allocation data")
