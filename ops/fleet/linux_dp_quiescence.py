@@ -102,8 +102,31 @@ def stopped_and_masked(runner, unit):
             entries.get("UnitFileState") in ("masked-runtime", "masked"))
 
 
-def sign(private_key, payload, *, runner=subprocess.run):
+def require_private_p256_signer(private_key, *, runner=subprocess.run):
+    # Reject a wrong-algorithm, malformed or unavailable signing identity
+    # BEFORE stopping any service. An RSA key can produce an OpenSSL dgst
+    # signature but cannot satisfy a subsequently approved P-256 receipt.
     owner_private(private_key)
+    result = runner([OPENSSL, "pkey", "-in", str(private_key),
+                     "-pubout", "-outform", "DER"],
+                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL, check=False, timeout=15)
+    _validated_p256_spki(result)
+
+
+def _validated_p256_spki(result):
+    data = result.stdout
+    ec_oid = bytes.fromhex("06072A8648CE3D0201")
+    p256_oid = bytes.fromhex("06082A8648CE3D030107")
+    if (result.returncode or type(data) is not bytes or
+            not 80 <= len(data) <= 140 or
+            ec_oid not in data or p256_oid not in data):
+        raise ValueError("approved P-256 signing identity required")
+    return hashlib.sha256(data).digest()
+
+
+def sign(private_key, payload, *, runner=subprocess.run):
+    require_private_p256_signer(private_key, runner=runner)
     signature = runner([OPENSSL, "dgst", "-sha256",
                         "-sign", str(private_key)],
                        input=payload, stdout=subprocess.PIPE,
@@ -122,14 +145,7 @@ def canonical_p256_spki(public_key, *, runner=subprocess.run):
                      "-pubout", "-outform", "DER"],
                     stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                     stderr=subprocess.DEVNULL, check=False, timeout=15)
-    data = result.stdout
-    ec_oid = bytes.fromhex("06072A8648CE3D0201")
-    p256_oid = bytes.fromhex("06082A8648CE3D030107")
-    if (result.returncode or type(data) is not bytes or
-            not 80 <= len(data) <= 140 or
-            ec_oid not in data or p256_oid not in data):
-        raise ValueError("independent P-256 public identity invalid")
-    return hashlib.sha256(data).digest()
+    return _validated_p256_spki(result)
 
 
 def verify(public_key, payload, signature, *, runner=subprocess.run):
@@ -157,7 +173,7 @@ def issue(fence, node_id, units, signing_key, *,
             fence.current("preflight") is not True):
         raise ValueError("offline service quiescence requires signed quorum approval")
     approved_units = require_units(units)
-    owner_private(signing_key)
+    require_private_p256_signer(signing_key, runner=runner)
 
     for unit in approved_units:
         # Stop first, mask against service-manager autorestart, then prove
