@@ -140,6 +140,52 @@ independent trusted revision and prove cross-node cookie continuity.
 Keep #48 open until its remaining operational and platform gates pass; #36
 tracks physical site proof.
 
+## Independently committed Linux recovery revision floor (software candidate)
+
+Linux restore can now read a **durable, owner-only revision floor file**
+instead of a static environment integer. An authorized OFFLINE coordinator
+must stop writers and fence the recovery operation before committing.
+
+\`\`\`bash
+dotnet run --project control-center/tools/LinuxDpRecoveryFloor/LinuxDpRecoveryFloor.csproj -- \
+  --ring /var/lib/gatewaycore-yarp/control-plane/data-protection-keys \
+  --checkpoint /secure/recovery-checkpoints/manifest-rev43.json \
+  --trusted-public-key /secure/recovery-authority/trusted-verifier.pem \
+  --revision-floor-file /secure/recovery-authority/min-revision.txt
+\`\`\`
+
+First create the signed checkpoint using the separate
+\`LinuxDpRecoverySigner\` program. The revision commit requires an existing
+external, single-link, protected floor and independently trusted P-256
+checkpoint. It uses a no-follow private lock in the owner's 0700 directory,
+verifies the signed inventory, rechecks unchanged inputs, atomically replaces
+a private 0600 revision file, fsyncs the containing directory and reads back
+the committed revision. Replay or older signed checkpoints, altered
+encrypted XML, wrong signatures, unsafe files or a busy lock fail closed.
+Neither the ring nor the checkpoint is modified.
+
+To make the committed high-water authoritative for gateway startup, set
+\`YARP_LINUX_DP_RECOVERY_MINIMUM_REVISION_FILE\` to the absolute protected
+external file, alongside \`YARP_LINUX_DP_RECOVERY_MANIFEST_FILE\`,
+\`YARP_LINUX_DP_RECOVERY_TRUST_PUBLIC_KEY_FILE\` and
+\`YARP_LINUX_DP_REQUIRE_SIGNED_RECOVERY=true\`. Do **not** simultaneously
+set the older \`YARP_LINUX_DP_RECOVERY_MINIMUM_REVISION\` integer; the
+combination is rejected to prevent fallback to stale environment values.
+Legacy integer-only startup remains compatible.
+
+The disposable .NET 10 acceptance tests run a real child-process floor
+coordinator, confirm unsigned/replayed signatures fail, commit 42->43,
+preserve ring inventory, preserve authentication cookies on restart and
+reject older signed snapshots. The UBI9 workflow runs the same Linux
+tests inside a Red Hat userspace container, not on a RHEL systemd host.
+
+This is a **local** monotonic primitive, not an authenticated distributed
+quorum, a backup-transfer protocol, a cross-node partition fence or a
+transactional DR rollout. The operator must not invoke it while any node
+can mutate the ring or before recovery is accepted. Fleet anti-rollback,
+real cross-node rotation/recovery, physical storage and site drills remain
+unverified under #48 and #36 respectively. Production remains NO-GO.
+
 ## HTTP protocol and optional-engine support boundary
 
 “CI tested” means the named isolated runner exercised the stated code path. It
@@ -422,7 +468,7 @@ Protection imports the restored keys. This gate is intentionally separate from
 the normal on-disk certificate wrapping, key GUID checks and shared-fleet
 operations. It never writes, repairs, rewraps or decrypts a restored key.
 
-For a deliberately staged recovery, provision all three settings:
+For a deliberately staged recovery, provision the checkpoint/trust files and exactly one minimum revision authority (legacy integer or the new protected revision file):
 
 - `YARP_LINUX_DP_RECOVERY_MANIFEST_FILE`: absolute, 0600, non-symlinked
   trusted checkpoint JSON, independent of the backup whose integrity is checked
@@ -432,7 +478,7 @@ For a deliberately staged recovery, provision all three settings:
   maintained outside the restored snapshot by an independent operator/control
   authority; a signed older revision is rejected even if otherwise valid
 
-Setting one or two of these values without all three is a startup error. The
+Missing one of the required checkpoint/trust/revision inputs, or specifying both revision authorities, is a startup error. The
 manifest is a JSON object with exactly the `Version` (1), `Revision`,
 `InventorySha256` (64 uppercase hex digits) and `SignatureBase64` fields.
 Unknown fields and duplicate/case-aliased names fail closed. `SignatureBase64`

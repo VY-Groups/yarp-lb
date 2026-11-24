@@ -56,6 +56,7 @@ var previousEnv=new[] {
     "YARP_LINUX_DP_OLD_CERT_PFX_PATH","YARP_LINUX_DP_OLD_CERT_PASSWORD_FILE",
     LinuxDpRecoveryEvidence.ManifestEnv, LinuxDpRecoveryEvidence.PublicKeyEnv,
     LinuxDpRecoveryEvidence.MinimumRevisionEnv,
+    LinuxDpRecoveryEvidence.MinimumRevisionFileEnv,
     LinuxDpRecoveryEvidence.RequireEvidenceEnv
 }.ToDictionary(k=>k,k=>Environment.GetEnvironmentVariable(k));
 void Set(string key,string? value) => Environment.SetEnvironmentVariable(key,value);
@@ -516,8 +517,142 @@ try
             File.SetUnixFileMode(attestationPath,PrivateFile);
         }
         WriteAttestation(attestation);
-        Set(LinuxDpRecoveryEvidence.ManifestEnv,attestationPath);
+
+        // Real separate CLI process: read the external trusted floor, reject
+        // invalid signed evidence, atomically advance 42->43, and prove
+        // replay/old signed snapshots cannot turn into successful recovery.
+        var floorProject=Path.GetFullPath(Path.Combine("tools","LinuxDpRecoveryFloor",
+            "LinuxDpRecoveryFloor.csproj"));
+        Assert(File.Exists(floorProject),"offline revision-floor coordinator project exists");
+        int RunFloorCommit(string proposedManifest,string floorFile)
+        {
+            var start=new System.Diagnostics.ProcessStartInfo("dotnet")
+            {
+                UseShellExecute=false,RedirectStandardError=true,RedirectStandardOutput=true
+            };
+            foreach(var arg in new[] {
+                "run","--project",floorProject,"--configuration","Release","--",
+                "--ring",keyDirectory,"--checkpoint",proposedManifest,
+                "--trusted-public-key",trustedPublicPath,"--revision-floor-file",floorFile })
+                start.ArgumentList.Add(arg);
+            using var proc=System.Diagnostics.Process.Start(start)
+                ?? throw new Exception("FAIL: Cannot start Linux DP floor coordinator");
+            if(!proc.WaitForExit(120000))
+            {
+                proc.Kill(entireProcessTree:true);
+                throw new Exception("FAIL: offline revision commit timed out");
+            }
+            return proc.ExitCode;
+        }
+        Assert(LinuxDpRecoveryFloor.ReadExternalFloor(keyDirectory,revisionFloorPath)==42,
+            "externally stored Linux recovery floor starts at independently provisioned 42");
+        var inventoryBeforeCommit=LinuxDpRecoveryEvidence.ComputeInventoryDigest(keyDirectory);
+        var unsignedFloorCandidate=Path.Combine(secrets,"unsigned-floor-candidate.json");
+        File.WriteAllText(unsignedFloorCandidate,
+            System.Text.Json.JsonSerializer.Serialize(
+                new LinuxDpRecoveryManifest(1,43,inventoryBeforeCommit,Convert.ToBase64String(new byte[64]))));
+        File.SetUnixFileMode(unsignedFloorCandidate,PrivateFile);
+        Assert(RunFloorCommit(unsignedFloorCandidate,revisionFloorPath)!=0 &&
+            LinuxDpRecoveryFloor.ReadExternalFloor(keyDirectory,revisionFloorPath)==42,
+            "unsigned recovery cannot advance independent floor");
+        var restoredSelfFloor=Path.Combine(state,"untrusted-recovery-floor.txt");
+        File.WriteAllText(restoredSelfFloor,"42\n");
+        File.SetUnixFileMode(restoredSelfFloor,PrivateFile);
+        Assert(RunFloorCommit(generatedManifest,restoredSelfFloor)!=0 &&
+            File.ReadAllText(restoredSelfFloor)=="42\n",
+            "backup-contained floor cannot authorize its own recovery high-water");
+        var linkedFloor=Path.Combine(secrets,"linked-floor.txt");
+        File.CreateSymbolicLink(linkedFloor,revisionFloorPath);
+        try
+        {
+            Assert(RunFloorCommit(generatedManifest,linkedFloor)!=0 &&
+                LinuxDpRecoveryFloor.ReadExternalFloor(keyDirectory,revisionFloorPath)==42,
+                "symbolic alias cannot advance trusted revision floor");
+        }
+        finally { File.Delete(linkedFloor); }
+        var protectedXml=keyFiles[0];
+        var originalXml=File.ReadAllBytes(protectedXml);
+        try
+        {
+            File.AppendAllText(protectedXml,"<!-- synthetic ring drift -->");
+            File.SetUnixFileMode(protectedXml,PrivateFile);
+            Assert(RunFloorCommit(generatedManifest,revisionFloorPath)!=0 &&
+                LinuxDpRecoveryFloor.ReadExternalFloor(keyDirectory,revisionFloorPath)==42,
+                "changed encrypted inventory cannot advance signed floor");
+        }
+        finally
+        {
+            File.WriteAllBytes(protectedXml,originalXml);
+            File.SetUnixFileMode(protectedXml,PrivateFile);
+        }
+        Assert(RunFloorCommit(generatedManifest,revisionFloorPath)==0 &&
+            LinuxDpRecoveryFloor.ReadExternalFloor(keyDirectory,revisionFloorPath)==43,
+            "real verified offline coordinator durably commits signed 43 high-water");
+        Assert(RunFloorCommit(generatedManifest,revisionFloorPath)!=0 &&
+            LinuxDpRecoveryFloor.ReadExternalFloor(keyDirectory,revisionFloorPath)==43,
+            "replayed signed revision cannot advance or overwrite the external floor");
+        Assert(inventoryBeforeCommit==
+            LinuxDpRecoveryEvidence.ComputeInventoryDigest(keyDirectory),
+            "offline revision commitment never modifies the encrypted key ring");
+        Assert((File.GetUnixFileMode(revisionFloorPath)&(UnixFileMode.GroupRead|
+            UnixFileMode.GroupWrite|UnixFileMode.OtherRead|UnixFileMode.OtherWrite))==0,
+            "committed independent floor persists privately");
+        // Test RESTORATION into a fresh isolated key-ring root, not the
+        // earlier live fleet replica. That replica may legitimately have
+        // generated its own newer encrypted key and is not a byte-identical
+        // backup snapshot. A recovery MUST preserve the signed exact XML
+        // inventory before allowing the new service to use old sessions.
+        var signedRestoreState=Path.Combine(root,"signed-recovery-replica-state");
+        Set("YARP_CONTROL_PLANE_DIR",signedRestoreState);
+        Assert(LinuxKeyProtection.InitializeStateDirectory()==signedRestoreState,
+            "recovery creates a separate owner-only destination state");
+        Set("YARP_CONTROL_PLANE_DIR",state);
+        var signedRestoreKeys=Path.Combine(signedRestoreState,"data-protection-keys");
+        foreach(var sourceKey in Directory.GetFiles(keyDirectory,"*.xml"))
+        {
+            var restoredFile=Path.Combine(signedRestoreKeys,Path.GetFileName(sourceKey));
+            File.Copy(sourceKey,restoredFile,overwrite:false);
+            File.SetUnixFileMode(restoredFile,PrivateFile);
+        }
+        Assert(LinuxDpRecoveryEvidence.ComputeInventoryDigest(signedRestoreKeys) ==
+            inventoryBeforeCommit,
+            "fresh isolated restore retains exact signed encrypted inventory");
+        LinuxDpRecoveryEvidence.Verify(signedRestoreKeys,generatedManifest,
+            trustedPublicPath,LinuxDpRecoveryFloor.ReadExternalFloor(
+                signedRestoreKeys,revisionFloorPath));
+        Assert(true,"fresh isolated replica accepts independently signed restore");
+        Assert(Throws(()=>LinuxDpRecoveryEvidence.Verify(signedRestoreKeys,
+                attestationPath,trustedPublicPath,43)),
+            "fresh isolated replica rejects older signed restore after floor commit");
+
+        // Fleet nodes opt into the independent revision FLOOR FILE at startup,
+        // instead of copying a stale environment integer from a restored
+        // backup. The legacy integer contract must still work by default.
+        Set(LinuxDpRecoveryEvidence.ManifestEnv,generatedManifest);
         Set(LinuxDpRecoveryEvidence.PublicKeyEnv,trustedPublicPath);
+        Set(LinuxDpRecoveryEvidence.MinimumRevisionEnv,null);
+        Set(LinuxDpRecoveryEvidence.MinimumRevisionFileEnv,revisionFloorPath);
+        Set(LinuxDpRecoveryEvidence.RequireEvidenceEnv,"true");
+        using(var restored=Provider(state))
+            Assert(restored.GetRequiredService<IDataProtectionProvider>()
+                .CreateProtector("session-probe").Unprotect(encrypted)=="sensitive-session-value-123",
+                "service restart honors externally committed floor and old encrypted cookie");
+        Set("YARP_CONTROL_PLANE_DIR",signedRestoreState);
+        using(var replicaRestored=Provider(signedRestoreState))
+            Assert(replicaRestored.GetRequiredService<IDataProtectionProvider>()
+                .CreateProtector("session-probe").Unprotect(encrypted)=="sensitive-session-value-123",
+                "independent replica restart preserves original session after signed restore");
+        Set("YARP_CONTROL_PLANE_DIR",state);
+        Set(LinuxDpRecoveryEvidence.ManifestEnv,attestationPath);
+        Assert(Throws(()=>{using var _=Provider(state);}),
+            "older correctly signed restored snapshot fails against durable external floor");
+        Set(LinuxDpRecoveryEvidence.ManifestEnv,generatedManifest);
+        Set(LinuxDpRecoveryEvidence.MinimumRevisionEnv,"42");
+        Assert(Throws(()=>{using var _=Provider(state);}),
+            "mixing stale environment minimum with independent file is rejected");
+        Set(LinuxDpRecoveryEvidence.MinimumRevisionEnv,null);
+        Set(LinuxDpRecoveryEvidence.MinimumRevisionFileEnv,null);
+        Set(LinuxDpRecoveryEvidence.ManifestEnv,attestationPath);
         Set(LinuxDpRecoveryEvidence.MinimumRevisionEnv,"42");
         Set(LinuxDpRecoveryEvidence.RequireEvidenceEnv,"true");
 

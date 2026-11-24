@@ -5,6 +5,8 @@ on:
     paths:
       - "control-center/LinuxKeyProtection.cs"
       - "control-center/LinuxDpRecoveryEvidence.cs"
+      - "control-center/LinuxDpRecoveryFloor.cs"
+      - "control-center/tools/LinuxDpRecoveryFloor/**"
       - "control-center/tools/LinuxDpRecoverySigner/**"
       - "control-center/tests/LinuxKeyProtectionTests/**"
       - "control-center/tests/RhelUbiCompat/**"
@@ -14,6 +16,8 @@ on:
     paths:
       - "control-center/LinuxKeyProtection.cs"
       - "control-center/LinuxDpRecoveryEvidence.cs"
+      - "control-center/LinuxDpRecoveryFloor.cs"
+      - "control-center/tools/LinuxDpRecoveryFloor/**"
       - "control-center/tools/LinuxDpRecoverySigner/**"
       - "control-center/tests/LinuxKeyProtectionTests/**"
       - "control-center/tests/RhelUbiCompat/**"

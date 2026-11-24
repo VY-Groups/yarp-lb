@@ -20,6 +20,7 @@ public static class LinuxDpRecoveryEvidence
     public const string ManifestEnv = "YARP_LINUX_DP_RECOVERY_MANIFEST_FILE";
     public const string PublicKeyEnv = "YARP_LINUX_DP_RECOVERY_TRUST_PUBLIC_KEY_FILE";
     public const string MinimumRevisionEnv = "YARP_LINUX_DP_RECOVERY_MINIMUM_REVISION";
+    public const string MinimumRevisionFileEnv = "YARP_LINUX_DP_RECOVERY_MINIMUM_REVISION_FILE";
     // Provision this from the protected service manager, not from a restored
     // backup. Strictly require a signed inventory on a recovery-fenced node.
     public const string RequireEvidenceEnv = "YARP_LINUX_DP_REQUIRE_SIGNED_RECOVERY";
@@ -33,11 +34,13 @@ public static class LinuxDpRecoveryEvidence
         var manifestPath = Environment.GetEnvironmentVariable(ManifestEnv);
         var trustPath = Environment.GetEnvironmentVariable(PublicKeyEnv);
         var revisionText = Environment.GetEnvironmentVariable(MinimumRevisionEnv);
+        var revisionFloorPath = Environment.GetEnvironmentVariable(MinimumRevisionFileEnv);
         var requirement = Environment.GetEnvironmentVariable(RequireEvidenceEnv);
         if (requirement is not null && requirement is not ("true" or "false"))
             throw new InvalidOperationException(
                 "Linux DP signed-recovery requirement must be exactly true or false");
-        if (manifestPath is null && trustPath is null && revisionText is null)
+        if (manifestPath is null && trustPath is null &&
+            revisionText is null && revisionFloorPath is null)
         {
             if (requirement == "true")
                 throw new InvalidOperationException(
@@ -47,12 +50,24 @@ public static class LinuxDpRecoveryEvidence
 
         if (string.IsNullOrWhiteSpace(manifestPath) ||
             string.IsNullOrWhiteSpace(trustPath) ||
-            !long.TryParse(revisionText, NumberStyles.None, CultureInfo.InvariantCulture,
-                out var trustedMinimumRevision) || trustedMinimumRevision < 1 ||
             !Path.IsPathFullyQualified(manifestPath) ||
-            !Path.IsPathFullyQualified(trustPath))
+            !Path.IsPathFullyQualified(trustPath) ||
+            (revisionText is not null && revisionFloorPath is not null))
             throw new InvalidOperationException(
-                "Signed Linux DP recovery requires an external manifest, trust key and minimum revision");
+                "Signed Linux DP recovery requires exactly one independent revision authority");
+        // An immutable environment integer is retained for standalone legacy
+        // deployments. Fleets opt into an externally custodied, atomically
+        // advanced floor file and MUST NOT supply a stale environment fallback.
+        long trustedMinimumRevision;
+        if (revisionFloorPath is not null)
+            trustedMinimumRevision = LinuxDpRecoveryFloor.ReadExternalFloor(
+                keyRingDirectory, revisionFloorPath);
+        else if (!long.TryParse(revisionText, NumberStyles.None,
+                 CultureInfo.InvariantCulture, out trustedMinimumRevision) ||
+                 trustedMinimumRevision < 1)
+            throw new InvalidOperationException(
+                "Signed Linux DP recovery requires a valid minimum revision");
+
         Verify(keyRingDirectory, manifestPath, trustPath, trustedMinimumRevision);
     }
 
