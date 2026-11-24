@@ -164,6 +164,54 @@ class NodeTests(unittest.TestCase):
         client.apply("block")
         self.assertEqual(waf.applies, ["block"])
 
+    def test_crash_uncertain_prior_intent_blocks_redeployment_and_restart(self):
+        agent, client, fence, waf, _ = self.node("node-a")
+        previous = {
+            "schemaVersion": 1, "nodeId": "node-a", "nodeIds": list(NODES),
+            "revision": 6, "policySha256": POLICY,
+            "rulesetSha256": RULES, "operation": "activate",
+            "mutationMayHaveStarted": True}
+        remote.local.receipt(agent.dir/"rev-6-activate.intent", previous)
+        with self.assertRaises(ValueError):
+            client.apply("block")
+        self.assertEqual(waf.applies, [])
+        self.assertFalse((agent.dir/"rev-7-activate.intent").exists())
+        with self.assertRaises(ValueError):
+            remote.FencedAgent("node-a", NODES, 7, POLICY, RULES,
+                               "block", waf, fence, agent.dir)
+
+    def test_verified_prior_journal_pair_allows_new_approved_revision(self):
+        agent, client, _, waf, _ = self.node("node-a")
+        previous = {
+            "schemaVersion": 1, "nodeId": "node-a", "nodeIds": list(NODES),
+            "revision": 6, "policySha256": POLICY,
+            "rulesetSha256": RULES, "operation": "activate",
+            "mutationMayHaveStarted": True}
+        remote.local.receipt(agent.dir/"rev-6-activate.intent", previous)
+        remote.local.receipt(agent.dir/"rev-6-activate.receipt", {
+            **previous, "result": "verified", "mode": "block"})
+        client.apply("block")
+        self.assertEqual(waf.applies, ["block"])
+        client.apply("detect")
+        self.assertEqual(waf.applies, ["block", "detect"])
+
+    def test_unpaired_or_tampered_node_journal_receipt_refuses_mutation(self):
+        agent, client, _, waf, _ = self.node("node-a")
+        remote.local.receipt(agent.dir/"rev-6-rollback.receipt", {
+            "schemaVersion": 1, "nodeId": "node-a", "nodeIds": list(NODES),
+            "revision": 6, "policySha256": POLICY,
+            "rulesetSha256": RULES, "operation": "rollback",
+            "mutationMayHaveStarted": True, "result": "verified",
+            "mode": "detect"})
+        with self.assertRaises(ValueError):
+            client.apply("block")
+        self.assertEqual(waf.applies, [])
+        (agent.dir/"rev-6-rollback.receipt").unlink()
+        (agent.dir/"rev-8-activate.intent").symlink_to(agent.dir/"missing")
+        with self.assertRaises((OSError, ValueError)):
+            client.apply("block")
+        self.assertEqual(waf.applies, [])
+
     def test_wrong_tls_pin_client_cert_and_node_identity_rejected(self):
         _, client, _, waf, url = self.node("node-a")
         client_cert, client_key, _ = self.cert["client"]
