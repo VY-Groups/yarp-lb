@@ -14,6 +14,8 @@ from pathlib import Path
 import re
 import sys
 
+from corpus_evidence_gate import read_bounded_utf8, write_private_report
+
 PLATFORMS = ("windows", "linux")
 PATHS = ("direct", "yarp", "yarp_waf")
 SHA = re.compile(r"[a-f0-9]{40}\Z", re.ASCII)
@@ -40,9 +42,10 @@ def parse_strict_json(raw):
 
 
 def load_strict(path):
-    data = Path(path).read_bytes()
-    if not data or len(data) > MAX_JSON_BYTES:
-        raise ValueError("evidence/policy exceeds bounded size")
+    # No symlink, FIFO, unbounded or mutable evidence files.
+    data = read_bounded_utf8(path, MAX_JSON_BYTES).encode("utf-8", "strict")
+    if not data:
+        raise ValueError("empty measured capacity evidence")
     return parse_strict_json(data)
 
 
@@ -228,14 +231,13 @@ def main(argv=None):
     options = parser.parse_args(argv)
     try:
         result = gate(load_strict(options.policy), load_strict(options.evidence))
-        # Reports must not overwrite old acceptance or leak raw requests.
-        if options.out.exists() or not options.out.is_absolute() or \
-                not options.out.parent.is_dir():
-            raise ValueError("private, new-only absolute report path required")
-        with options.out.open("x", encoding="utf-8") as f:
-            json.dump(result, f, indent=2, sort_keys=True)
-            f.write("\n")
-        print(result["decision"] + ": Windows/Linux three-path WAF capacity gate")
+        # Operator report uses the existing fail-closed owner-only/private
+        # WAF evidence writer; never overwrite or print route/raw request data.
+        result["measurementPolicyPass"] = result["decision"] == "GO"
+        result["productionGo"] = False
+        result["sourceCustodyVerified"] = False
+        write_private_report(options.out, result)
+        print(result["decision"] + ": measured Windows/Linux three-path WAF gate; not production GO")
         return int(result["decision"] != "GO")
     except (ValueError, KeyError, TypeError, OSError, OverflowError):
         print("NO-GO: missing or invalid measured capacity evidence", file=sys.stderr)
