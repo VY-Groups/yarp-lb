@@ -59,12 +59,20 @@ guarantee that an in-flight process or prior gateway has quiesced when
 the lease expires, so a successful synthetic CAS test is not a live
 fleet anti-split-brain acceptance. No override, local fallback,
 emergency key export or production promotion path is provided.
-Before #48 closure, integrate the fenced issuer/verifier with the
-actual receiver and independently signed checkpoint; prove callback
-order at all real restore boundaries, real three-member TLS partition
-and lease rollover, service stop/restart and original cookie continuity
-across separately authorized Windows/Linux identities. Physical
-two-host and site-level exercises are #36.
+For #48 software acceptance, the implemented receiver now checks the
+fenced issuer's exact SHA-256 checkpoint binding and invokes read-only
+quorum verification before/after ciphertext transfer and before/after
+the actual signed .NET restore; the disposable three-member TLS Raft
+test exercises lease creation, revocation and epoch rollover. These are
+separate, reproduced software contracts, not a completed fleet rollout.
+Still required: an independently authenticated source/destination
+service-writer quiescence controller and renewal/handoff for long-running
+operations, real per-service recovery authorization and staged
+zero-downtime certificate/key-ring rotation with reliable rollback.
+The protected P-256 signature, external monotonic revision floor and
+fresh-process original session continuity must continue to pass on
+the composed recovery path. Independently housed host/site tests
+remain #36, including SELinux-enforcing real RHEL and physical failover.
 
 ## Reproducible current unit contracts
 
@@ -90,5 +98,6 @@ custody, .NET receiver promotion or physical partition recovery.
 `.github/workflows/linux-dp-quorum-authority.yml` separately
 runs the synthetic contracts; the original key encryption, signed
 restore, and Windows/Ubuntu service acceptance remain mandatory.
-The actual receiver has **not** yet been wired to require this lease
-at all recovery phases.
+The actual receiver requires this lease for all non-loopback
+remote snapshot addresses and checks the same epoch at five recovery
+boundaries; it never authorizes automatic live-node promotion.
