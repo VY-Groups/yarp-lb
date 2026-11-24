@@ -241,8 +241,33 @@ def observe(container_id):
             valid_config_path(name)
             files[name] = run_bounded(["docker", "exec", container_id,
                                        "cat", name], max_bytes=MAX_FILE)
-        stage = "graph-and-inventory"
-        digest, count = walk_graph(files, root)
+        stage = "graph-check"
+        try:
+            digest, count = walk_graph(files, root)
+        except ValueError as exc:
+            # Only deterministic source-owned verdict categories, never an
+            # include path or raw ModSecurity configuration fragment.
+            categories = {
+                "unbounded ModSecurity config file inventory": "inventory",
+                "case-aliased WAF configuration path": "case-alias",
+                "untrusted ModSecurity include path": "path",
+                "ModSecurity include path not canonical": "path",
+                "literal config file path contains wildcard": "path",
+                "effective Nginx ModSecurity entrypoint missing": "root-missing",
+                "cyclic ModSecurity configuration include": "cycle",
+                "duplicate effective WAF include": "duplicate",
+                "missing ModSecurity include file": "missing-file",
+                "ModSecurity configuration too large": "file-too-large",
+                "unsupported dynamic or optional ModSecurity include": "dynamic",
+                "unsafe nested ModSecurity include wildcard": "nested-glob",
+                "missing ModSecurity include target": "missing-target",
+                "observed CRS files are not all included": "unreached",
+                "critical WAF attack families not reachable": "family",
+                "unsafe effective CRS setup/attack/anomaly order": "order"
+            }
+            stage = "graph-" + categories.get(str(exc), "unclassified")
+            raise ValueError("fixed graph acceptance category") from None
+        stage = "graph-digest"
         if digest != rules.observe(container_id):
             raise ValueError("included CRS bytes differ from observed Docker inventory")
         return digest, count
@@ -267,7 +292,12 @@ def main(argv=None):
             "nginx-root-path", "config-path-listing", "config-symlink-check",
             "config-symlink-other", "config-symlink-target-unapproved",
             "config-followed-tree",
-            "read-actual-config-bytes", "graph-and-inventory"
+            "read-actual-config-bytes", "graph-check", "graph-digest",
+            "graph-inventory", "graph-case-alias", "graph-path",
+            "graph-root-missing", "graph-cycle", "graph-duplicate",
+            "graph-missing-file", "graph-file-too-large", "graph-dynamic",
+            "graph-nested-glob", "graph-missing-target", "graph-unreached",
+            "graph-family", "graph-order", "graph-unclassified"
         }
         stage = str(exc).removeprefix("Effective WAF graph rejected at ")
         if stage not in stages:
