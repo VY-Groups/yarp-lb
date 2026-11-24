@@ -2419,7 +2419,17 @@ async Task<List<string>> RollbackAttempted(string logPath, JsonObject journal, L
         }
         if(fleetQuorum is null || journal["quorumScope"]?.ToString()!=fleetQuorum.Scope)
             throw new InvalidOperationException("Original quorum scope unavailable.");
-        await fleetQuorum.Assert(journal["id"]!.GetValue<string>(),journal["sequence"]?.GetValue<long>()??0);
+        var tx=journal["id"]!.GetValue<string>();
+        var epoch=journal["sequence"]?.GetValue<long>()??0;
+        if(epoch==0)
+        {
+            if(FleetRolloutJournal.Targets(journal).Any(x=>x["prepareSent"]!.GetValue<bool>()))
+                throw new InvalidOperationException("Missing epoch after dispatch; independent reconciliation required.");
+            epoch=await fleetQuorum.RecoverOwnEpoch(tx);
+            journal["sequence"]=epoch;
+            FleetRolloutJournal.Log(logPath,journal,"fleet","quorum-acquisition-recovered","no-dispatch");
+        }
+        await fleetQuorum.Assert(tx,epoch);
     }
     catch(Exception ex)
     {
@@ -2634,6 +2644,19 @@ app.MapPost("/admin/api/fleet/rollout/{changeId}", async (HttpContext ctx, strin
 #endif
         return Results.Ok(journal);
     }
+#if GATEWAYCORE_COMMERCIAL
+    catch(FleetQuorumContentionException) when(persisted && journal is not null &&
+        journal["sequence"] is null && !FleetRolloutJournal.Targets(journal).Any(x=>x["prepareSent"]!.GetValue<bool>()))
+    {
+        // Definite CAS refusal is not an ambiguous commit. This transaction
+        // never held authority and sent no mutation, so it need not block
+        // the local controller after the actual owner finishes.
+        journal["status"]="rollback-verified";
+        FleetRolloutJournal.Log(logPath,journal,"fleet","quorum-acquire","contended-no-dispatch");
+        await Audit(Actor(ctx),"FLEET_QUORUM_CONTENDED",new {txId,changeId});
+        return Results.Conflict(new {error="Another fleet transaction owns or completed the quorum fence."});
+    }
+#endif
     catch (Exception ex)
     {
         if (!persisted || journal is null)

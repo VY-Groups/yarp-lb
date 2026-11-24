@@ -564,6 +564,21 @@ authorityKeyIdentifier = keyid,issuer
                                     change=admin.request("POST","/admin/api/change-requests",{"reason":"Disposable commercial licensed fleet rollout","payload":payload})
                                     reviewer.request("POST","/admin/api/change-requests/"+change["id"]+"/decision",
                                         {"decision":"approve","reason":"Independently approved commercial acceptance"})
+                                    if os.environ.get("GC_FLEET_QUORUM_MEMBER_CONTAINERS"):
+                                        qfixture=os.environ["GC_FLEET_QUORUM_DLL"]
+                                        qconfig=os.environ["GATEWAYCORE_FLEET_QUORUM_CONFIG"]
+                                        competitor="rollout_"+"E"*24
+                                        competing_epoch=command(qfixture,"acquire",qconfig,competitor,"0").strip()
+                                        originals=[(temp/f"recovery-node-{i}"/"gateway.json").read_bytes() for i in range(2)]
+                                        try:
+                                            admin.request("POST","/admin/api/fleet/rollout/"+change["id"],{},expect=409)
+                                            check(all((temp/f"recovery-node-{i}"/"gateway.json").read_bytes()==originals[i] for i in range(2)),
+                                                "real competing controller cannot dispatch mutation")
+                                            rows=admin.request("GET","/admin/api/fleet/rollouts")
+                                            check(any(row["status"]=="rollback-verified" and all(not target["prepareSent"] for target in row["targets"])
+                                                      for row in rows),"definite CAS loss leaves no unresolved mutation")
+                                        finally:
+                                            command(qfixture,"release",qconfig,competitor,competing_epoch)
                                     rollout=admin.request("POST","/admin/api/fleet/rollout/"+change["id"],{})
                                     check(rollout["status"]=="activated-pending-health-validation","actual commercial controller rollout validates all licensed sites and activates")
                                     for i in range(2):

@@ -11,6 +11,10 @@ using System.Text.RegularExpressions;
 // Persistent Raft lock, deliberately NOT an expiring lease. A crash or partition
 // cannot grant another controller ownership while a mutation may be in flight.
 // No automatic force-unlock. Recovery uses the original transaction/epoch.
+internal sealed class FleetQuorumContentionException : InvalidOperationException
+{
+    internal FleetQuorumContentionException():base("Another fleet transaction owns or completed the quorum fence."){}
+}
 internal sealed class FleetQuorum : IDisposable
 {
     internal sealed record Endpoint(string Url,string LeafSha256,string MemberId);
@@ -142,17 +146,26 @@ internal sealed class FleetQuorum : IDisposable
     {
         if(!writable || !Tx(transaction) || minimumEpoch<0)throw new InvalidOperationException("Unauthorized quorum acquisition.");
         var before=await Read(token);
-        if(before.State is not null)throw new InvalidOperationException("Another unresolved fleet transaction owns the quorum fence.");
+        if(before.State is not null)throw new FleetQuorumContentionException();
         var result=await Post(before.Peer,"/v3/kv/txn",new {
             compare=new[]{new {key,result="EQUAL",target="CREATE",createRevision="0"},
                 new {key=ReceiptKey(transaction),result="EQUAL",target="CREATE",createRevision="0"}},
             success=new[]{new {requestPut=new {key,value=Base64(transaction)}}},failure=Array.Empty<object>()},token);
-        if(!result.TryGetProperty("succeeded",out var ok)||ok.ValueKind!=JsonValueKind.True)
-            throw new InvalidOperationException("Competing quorum acquisition won.");
+        if(!result.TryGetProperty("succeeded",out var ok)||ok.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
+            throw new InvalidDataException("Unconfirmed quorum acquisition response.");
+        if(!ok.GetBoolean())throw new FleetQuorumContentionException();
         var after=await Read(token);
         if(after.State is not { } owned || owned.Transaction!=transaction || owned.Epoch<=minimumEpoch)
             throw new InvalidOperationException("Quorum epoch not above durable node high-water; preserve fence for reconciliation.");
         return owned;
+    }
+    internal async Task<long> RecoverOwnEpoch(string transaction,CancellationToken token=default)
+    {
+        if(!writable||!Tx(transaction))throw new InvalidOperationException("Invalid acquisition recovery.");
+        var observed=await Read(token);
+        if(observed.State is not { } owned||owned.Transaction!=transaction)
+            throw new InvalidOperationException("Original acquisition ownership cannot be confirmed.");
+        return owned.Epoch;
     }
     internal async Task Assert(string transaction,long epoch,CancellationToken token=default)
     {
