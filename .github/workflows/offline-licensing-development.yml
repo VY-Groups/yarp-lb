@@ -5,6 +5,7 @@ on:
     paths:
       - 'src/GatewayCore.Licensing/**'
       - 'tests/OfflineLicensing/**'
+      - 'tools/LicenseAuthority/**'
       - '.github/workflows/offline-licensing-development.yml'
 permissions:
   contents: read

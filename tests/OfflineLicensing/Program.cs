@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using GatewayCore.Licensing;
+using GatewayCore.LicenseAuthority;
 
 // Test-only ephemeral signing keys; no issuer or reusable private key ships.
 using var signer = ECDsa.Create(ECCurve.NamedCurves.nistP256);
@@ -128,5 +129,36 @@ finally
 {
     if (Directory.Exists(directory)) Directory.Delete(directory, true);
     if (Directory.Exists(directory2)) Directory.Delete(directory2, true);
+}
+var issuerDir = Path.Combine(Path.GetTempPath(), "gc-issuer-" + Guid.NewGuid().ToString("N"));
+var nodeDirs = Enumerable.Range(0,3).Select(i => issuerDir + "-node-" + i).ToArray();
+try
+{
+    if (OperatingSystem.IsLinux()) Directory.CreateDirectory(issuerDir, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+    else Directory.CreateDirectory(issuerDir);
+    var authority = new OfflineIssuer(Path.Combine(issuerDir, "subscription.json"), signer, "test-1");
+    var terms = new Subscription("business-license", "business-customer", "business-deployment",
+        "professional", 2, 1, now.AddDays(30).ToUnixTimeSeconds(), new[] {"l7", "ha"});
+    authority.Initialize(terms, now);
+    var nodes = nodeDirs.Select(path => new OfflineLicenseStore(path, verifier)).ToArray();
+    foreach (var node in nodes) node.Initialize();
+    var req = nodes[0].ExportActivationRequest();
+    var issued = authority.Issue(req, "dc", now);
+    Check(nodes[0].Import(issued, now).Allows("ha"), "real issuer-to-installation offline activation");
+    Check(issued.SequenceEqual(authority.Issue(req, "dc", now.AddMinutes(1))), "issuer committed request replay returns original bytes");
+    try { authority.Issue(nodes[1].ExportActivationRequest(), "dr", now); throw new Exception("FAIL: site limit"); }
+    catch (InvalidOperationException) { Console.WriteLine("PASS: issuer denies excess site"); }
+    Check(nodes[1].Import(authority.Issue(nodes[1].ExportActivationRequest(), "dc", now), now).Allows("ha"), "second allocated node");
+    try { authority.Issue(nodes[2].ExportActivationRequest(), "dc", now); throw new Exception("FAIL: seat limit"); }
+    catch (InvalidOperationException) { Console.WriteLine("PASS: issuer denies excess node"); }
+    var recovered = new OfflineIssuer(Path.Combine(issuerDir, "subscription.json"), signer, "test-1");
+    recovered.RenewSubscription(terms with { ExpiresAt = now.AddDays(365).ToUnixTimeSeconds() }, now.AddMinutes(2));
+    var renewed = nodes[0].Import(recovered.Issue(nodes[0].ExportActivationRequest(), "dc", now.AddMinutes(2)), now.AddMinutes(2));
+    Check(renewed.Revision == 2 && renewed.ExpiresAt > now.AddDays(360), "issuer renewal retains allocation and advances revision");
+    Reject(() => nodes[0].Import(issued, now.AddMinutes(3)), "old issuer license after renewal");
+}
+finally
+{
+    foreach (var path in nodeDirs.Append(issuerDir)) if (Directory.Exists(path)) Directory.Delete(path, true);
 }
 Console.WriteLine("OFFLINE_LICENSE_VERIFIER_ACCEPTANCE_PASS");

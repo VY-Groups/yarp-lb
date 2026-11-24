@@ -8,5 +8,6 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="../../src/GatewayCore.Licensing/GatewayCore.Licensing.csproj" />
+    <ProjectReference Include="../../tools/LicenseAuthority/LicenseAuthority.csproj" />
   </ItemGroup>
 </Project>
