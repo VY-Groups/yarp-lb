@@ -156,6 +156,21 @@ try
     var renewed = nodes[0].Import(recovered.Issue(nodes[0].ExportActivationRequest(), "dc", now.AddMinutes(2)), now.AddMinutes(2));
     Check(renewed.Revision == 2 && renewed.ExpiresAt > now.AddDays(360), "issuer renewal retains allocation and advances revision");
     Reject(() => nodes[0].Import(issued, now.AddMinutes(3)), "old issuer license after renewal");
+    var revoked = recovered.Revoke(renewed.AllocationId, now.AddMinutes(4));
+    Check(revoked.SequenceEqual(recovered.Revoke(renewed.AllocationId, now.AddMinutes(5))), "revocation retry is idempotent");
+    Reject(() => nodes[1].ImportRevocation(revoked, now.AddMinutes(4)), "revocation for different allocation");
+    var tampered = revoked.ToArray();
+    tampered[^2] = tampered[^2] == (byte)'A' ? (byte)'B' : (byte)'A';
+    Reject(() => nodes[0].ImportRevocation(tampered, now.AddMinutes(4)), "forged revocation");
+    Check(nodes[0].Inspect(now.AddMinutes(4))?.Allows("ha") == true, "invalid revocation leaves entitlement intact");
+    Check(nodes[0].ImportRevocation(revoked, now.AddMinutes(4)).Validity == LicenseValidity.Revoked, "valid offline revocation");
+    var reopenedRevoked = new OfflineLicenseStore(nodeDirs[0], verifier);
+    Check(reopenedRevoked.Inspect(now.AddMinutes(5))?.Validity == LicenseValidity.Revoked, "revocation survives restart");
+    Reject(() => reopenedRevoked.Import(issued, now.AddMinutes(5)), "revoked allocation cannot import old license");
+    try { recovered.Issue(nodes[0].ExportActivationRequest(), "dc", now.AddMinutes(5)); throw new Exception("FAIL: revoked renewal"); }
+    catch (InvalidOperationException) { Console.WriteLine("PASS: issuer denies revoked renewal"); }
+    try { recovered.Issue(nodes[2].ExportActivationRequest(), "dc", now.AddMinutes(5)); throw new Exception("FAIL: revoked seat reused"); }
+    catch (InvalidOperationException) { Console.WriteLine("PASS: offline revoked seat not silently reused"); }
 }
 finally
 {

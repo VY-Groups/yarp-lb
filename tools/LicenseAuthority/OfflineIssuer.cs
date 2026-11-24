@@ -8,7 +8,7 @@ namespace GatewayCore.LicenseAuthority;
 // Operator-approved terms. The customer request never supplies these.
 public sealed record Subscription(string LicenseId, string CustomerId, string DeploymentId,
     string Edition, int MaxNodes, int MaxSites, long ExpiresAt, string[] Features);
-public sealed record Allocation(string AllocationId, string SiteId, string InstallationKeySha256, long Revision);
+public sealed record Allocation(string AllocationId, string SiteId, string InstallationKeySha256, long Revision, string? RevocationEnvelope = null);
 public sealed record IssuedRequest(string RequestId, string RequestSha256, string SiteId, string Envelope);
 public sealed record IssuerLedger(Subscription Terms, string KeySha256, string KeyId,
     List<Allocation> Allocations, List<IssuedRequest> Requests);
@@ -66,6 +66,9 @@ public sealed class OfflineIssuer
         var requestHash = Convert.ToHexString(SHA256.HashData(requestBytes));
         using var gate = Lock();
         var ledger = Read();
+        if (ledger.Allocations.Any(a => a.InstallationKeySha256 == request.InstallationKeySha256 &&
+            a.RevocationEnvelope is not null))
+            throw new InvalidOperationException("Revoked allocation cannot renew or replay issuance.");
         var prior = ledger.Requests.SingleOrDefault(r => r.RequestId == request.RequestId);
         if (prior is not null)
         {
@@ -104,6 +107,34 @@ public sealed class OfflineIssuer
         // fails, repeat the exact request to retrieve the committed envelope.
         Save(ledger, true);
         return file;
+    }
+
+    // Revocation does not free an offline seat: the old node may still run
+    // until it receives the document or expires. A separate approved recovery
+    // policy is required for replacement/reallocation.
+    public byte[] Revoke(string allocationId, DateTimeOffset now)
+    {
+        if (!ValidId(allocationId)) throw new InvalidDataException("Invalid allocation ID.");
+        using var gate = Lock();
+        var ledger = Read();
+        var node = ledger.Allocations.SingleOrDefault(a => a.AllocationId == allocationId)
+            ?? throw new InvalidOperationException("Unknown allocation.");
+        if (node.RevocationEnvelope is not null) return Encoding.ASCII.GetBytes(node.RevocationEnvelope);
+        var terms = ledger.Terms;
+        var payload = JsonSerializer.SerializeToUtf8Bytes(new
+        {
+            schemaVersion = 1, product = "GatewayCore", licenseId = terms.LicenseId,
+            customerId = terms.CustomerId, deploymentId = terms.DeploymentId,
+            allocationId = node.AllocationId, installationKeySha256 = node.InstallationKeySha256,
+            revokedAt = now.ToUnixTimeSeconds()
+        });
+        var prefix = "GCV1." + keyId + "." + Encode(payload);
+        var envelope = prefix + "." + Encode(signer.SignData(Encoding.ASCII.GetBytes(prefix),
+            HashAlgorithmName.SHA256, DSASignatureFormat.IeeeP1363FixedFieldConcatenation));
+        ledger.Allocations.Remove(node);
+        ledger.Allocations.Add(node with { RevocationEnvelope = envelope });
+        Save(ledger, true);
+        return Encoding.ASCII.GetBytes(envelope);
     }
 
     private byte[] MakeLicense(Subscription terms, Allocation node, DateTimeOffset now)

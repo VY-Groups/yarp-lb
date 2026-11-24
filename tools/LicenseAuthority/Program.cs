@@ -4,15 +4,16 @@ using GatewayCore.LicenseAuthority;
 
 // Local issuer operator CLI. Provision an encrypted PKCS#8 PEM out of band.
 // No private key generation or key material in command arguments or source.
-if (args.Length < 4 || args[0] is not ("init" or "renew" or "issue"))
+if (args.Length < 4 || args[0] is not ("init" or "renew" or "issue" or "revoke"))
 {
     Console.Error.WriteLine("Usage: LicenseAuthority init|renew LEDGER KEY_ID ENCRYPTED_KEY_PEM TERMS_JSON");
     Console.Error.WriteLine("       LicenseAuthority issue LEDGER KEY_ID ENCRYPTED_KEY_PEM REQUEST_GCR SITE OUTPUT_LIC");
+    Console.Error.WriteLine("       LicenseAuthority revoke LEDGER KEY_ID ENCRYPTED_KEY_PEM ALLOCATION_ID OUTPUT_GCV");
     return 2;
 }
 try
 {
-    if (args.Length != (args[0] == "issue" ? 7 : 5)) throw new ArgumentException("Incorrect argument count.");
+    if (args.Length != (args[0] == "issue" ? 7 : args[0] == "revoke" ? 6 : 5)) throw new ArgumentException("Incorrect argument count.");
     if (Console.IsInputRedirected) throw new InvalidOperationException("Use a local interactive issuer console.");
     Console.Error.Write("Signing key passphrase: ");
     var password = new List<char>();
@@ -38,6 +39,13 @@ try
         // Never overwrite an arbitrary output file.
         using var output = new FileStream(args[6], FileMode.CreateNew, FileAccess.Write, FileShare.None);
         output.Write(license);
+        output.Flush(true);
+    }
+    else if (args[0] == "revoke")
+    {
+        var revocation = authority.Revoke(args[4], now);
+        using var output = new FileStream(args[5], FileMode.CreateNew, FileAccess.Write, FileShare.None);
+        output.Write(revocation);
         output.Flush(true);
     }
     else

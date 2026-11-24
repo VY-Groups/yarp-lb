@@ -6,7 +6,7 @@ using System.Text.Json;
 
 namespace GatewayCore.Licensing;
 
-public enum LicenseValidity { NotYetValid, Active, Expired }
+public enum LicenseValidity { NotYetValid, Active, Expired, Revoked }
 
 // A checkpoint is an input from a trusted local state store, not proof of
 // rollback resistance by itself. Persistence and replacement are separate gates.
@@ -147,6 +147,34 @@ public sealed class OfflineLicenseVerifier
         return new(licenseId, customerId, deploymentId, allocationId, installationHash,
             edition, revision, maxNodes, maxSites, issued, notBefore, expires,
             features.ToFrozenSet(StringComparer.Ordinal), digest, validity);
+    }
+
+    // Irreversible, allocation-specific revocation. A genuine offline node
+    // learns about revocation only after importing this signed document.
+    public void VerifyRevocation(ReadOnlySpan<byte> file, VerifiedLicense license)
+    {
+        ArgumentNullException.ThrowIfNull(license);
+        var parts = OfflineActivationRequest.Split(file, 8192, 4, "GCV1");
+        if (!keys.TryGetValue(parts[1], out var spki))
+            throw new CryptographicException("Unknown revocation signing key.");
+        using var key = ECDsa.Create();
+        key.ImportSubjectPublicKeyInfo(spki, out _);
+        OfflineActivationRequest.VerifySignature(parts, key);
+        using var document = JsonDocument.Parse(OfflineActivationRequest.Decode(parts[2], 4096),
+            new JsonDocumentOptions { MaxDepth = 2 });
+        var root = document.RootElement;
+        if (root.ValueKind != JsonValueKind.Object) throw new InvalidDataException("Invalid revocation payload.");
+        var fields = new HashSet<string>(new[] { "schemaVersion", "product", "licenseId", "customerId",
+            "deploymentId", "allocationId", "installationKeySha256", "revokedAt" }, StringComparer.Ordinal);
+        foreach (var property in root.EnumerateObject())
+            if (!fields.Remove(property.Name)) throw new InvalidDataException("Unknown or duplicate revocation property.");
+        if (fields.Count != 0 || Integer(root, "schemaVersion", 1, 1) != 1 ||
+            String(root, "product") != "GatewayCore" || Id(root, "licenseId") != license.LicenseId ||
+            Id(root, "customerId") != license.CustomerId || Id(root, "deploymentId") != license.DeploymentId ||
+            Id(root, "allocationId") != license.AllocationId ||
+            String(root, "installationKeySha256") != license.InstallationKeySha256)
+            throw new CryptographicException("Revocation is not for this allocation.");
+        _ = Timestamp(root, "revokedAt");
     }
 
     private static bool ValidId(string? value) => value is { Length: >= 1 and <= 80 } &&

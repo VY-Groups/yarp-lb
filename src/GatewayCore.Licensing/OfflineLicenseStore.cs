@@ -76,6 +76,8 @@ public sealed class OfflineLicenseStore
         var state = ReadState(key);
         var effective = EffectiveTime(state, now);
         var previous = ReadLicense(state, key, effective);
+        if (previous?.Validity == LicenseValidity.Revoked)
+            throw new CryptographicException("Allocation is permanently revoked.");
         var next = verifier.Verify(file, Binding(key), effective, previous?.Checkpoint);
         if (next.Validity != LicenseValidity.Active)
             throw new InvalidDataException("Only currently active entitlements can be imported.");
@@ -85,10 +87,29 @@ public sealed class OfflineLicenseStore
         return next;
     }
 
-    private sealed record State(long HighestUtc, string? License);
+    public VerifiedLicense ImportRevocation(ReadOnlySpan<byte> file, DateTimeOffset now)
+    {
+        using var gate = Enter();
+        using var key = OpenKey();
+        var state = ReadState(key);
+        var effective = EffectiveTime(state, now);
+        var existing = ReadLicense(state, key, effective) ?? throw new InvalidOperationException("No allocation to revoke.");
+        verifier.VerifyRevocation(file, existing);
+        if (state.Revocation is null)
+            WriteState(key, state with { Revocation = Convert.ToBase64String(file), HighestUtc = effective.ToUnixTimeSeconds() });
+        return existing with { Validity = LicenseValidity.Revoked };
+    }
+
+    private sealed record State(long HighestUtc, string? License, string? Revocation = null);
 
     private VerifiedLicense? ReadLicense(State state, ECDsa key, DateTimeOffset effective)
-        => state.License is null ? null : verifier.Verify(Convert.FromBase64String(state.License), Binding(key), effective);
+    {
+        if (state.License is null) return null;
+        var license = verifier.Verify(Convert.FromBase64String(state.License), Binding(key), effective);
+        if (state.Revocation is null) return license;
+        verifier.VerifyRevocation(Convert.FromBase64String(state.Revocation), license);
+        return license with { Validity = LicenseValidity.Revoked };
+    }
 
     private static string Binding(ECDsa key) => Convert.ToHexString(SHA256.HashData(key.ExportSubjectPublicKeyInfo()));
 
@@ -126,11 +147,12 @@ public sealed class OfflineLicenseStore
 
     private State ReadState(ECDsa key)
     {
-        var parts = OfflineActivationRequest.Split(ReadBounded(StateFile, 40000), 40000, 3, "GCS1");
+        var parts = OfflineActivationRequest.Split(ReadBounded(StateFile, 65536), 65536, 3, "GCS1");
         OfflineActivationRequest.VerifySignature(parts, key);
-        var payload = OfflineActivationRequest.Decode(parts[1], 28000);
+        var payload = OfflineActivationRequest.Decode(parts[1], 48000);
         var state = JsonSerializer.Deserialize<State>(payload) ?? throw new InvalidDataException("Missing state.");
-        if (state.HighestUtc < 0 || (state.License is null && state.HighestUtc != 0) ||
+        if (state.HighestUtc < 0 || (state.License is null && (state.HighestUtc != 0 || state.Revocation is not null)) ||
+            state.Revocation is { Length: > 11000 } ||
             (state.License is not null && (state.HighestUtc == 0 || state.License.Length > 22000)))
             throw new InvalidDataException("Invalid signed state.");
         return state;
