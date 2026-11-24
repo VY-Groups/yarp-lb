@@ -61,12 +61,21 @@ int Invoke(string[] arguments)
             "read-original","parse-original","dpapi-to-cert-rewrap",
             "legacy-envelope-validation","dpapi-xml-decrypt",
             "certificate-xml-encrypt","certificate-roundtrip-decrypt",
-            "certificate-decryptor-type","certificate-secret-replacement",
+            "certificate-roundtrip-compare","certificate-decryptor-type","certificate-secret-replacement",
             "certificate-encrypted-xml-verify",
             "write-private-encrypted","validate-staged-acl",
             "verify-source-inventory","atomic-publish",
             "verify-published-acl","complete"
         };
+        var category = System.Text.RegularExpressions.Regex.Match(
+            childError, @"WIN_DP_MIGRATION_FAILURE_CATEGORY=([a-z]{1,20})");
+        var acceptedCategories = new HashSet<string>(StringComparer.Ordinal) {
+            "cryptography", "access", "filesystem", "xml", "validation",
+            "arguments", "other"
+        };
+        Console.WriteLine("WIN_DP_TEST_REJECTION_CATEGORY=" +
+            (category.Success && acceptedCategories.Contains(category.Groups[1].Value)
+                ? category.Groups[1].Value : "unclassified"));
         Console.WriteLine("WIN_DP_TEST_REJECTION_STAGE=" +
             (matched.Success && knownStages.Contains(matched.Groups[1].Value)
                 ? matched.Groups[1].Value : "unclassified"));
