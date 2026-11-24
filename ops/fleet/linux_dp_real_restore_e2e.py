@@ -134,7 +134,10 @@ def main(argv=None):
         # local source paths or private exception text into public CI.
         # Fixed source-authored stages only; never echo exception text or
         # trust paths. Keep diagnostic stable in customer-safe CI logs.
-        print("FAIL: real pinned mTLS to .NET signed DP restore at " + STAGE,
+        stage = STAGE
+        if stage == "mutual-tls-receive-and-signed-dotnet-restore":
+            stage = "receiver-" + receiver.STAGE
+        print("FAIL: real pinned mTLS to .NET signed DP restore at " + stage,
               file=sys.stderr)
         return 1
     print("PASS: actual pinned mTLS plus signed .NET restore, duplicate refused")
