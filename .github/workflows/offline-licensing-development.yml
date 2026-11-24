@@ -1,5 +1,7 @@
 name: Offline commercial license verifier (development)
 on:
+  push:
+    branches: [main]
   pull_request:
     branches: [main, feature/offline-commercial-licensing]
     paths:

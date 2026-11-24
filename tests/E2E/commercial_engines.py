@@ -154,7 +154,7 @@ with tempfile.TemporaryDirectory(prefix="gc-engine-acceptance-") as td:
             openssl("x509","-req","-in",name+".csr","-CA","ca.pem","-CAkey","ca.key","-CAcreateserial",
                     "-days","1","-sha256","-extfile",ext.name,"-out",name+".pem")
         cert("server","serverAuth");cert("controller","clientAuth");cert("untrusted-controller","clientAuth")
-        pin=hashlib.sha256(ssl.PEM_cert_to_DER_cert((pki/"controller.pem").read_text())).hexdigest().upper()
+        pin="SHA256:"+hashlib.sha256(ssl.PEM_cert_to_DER_cert((pki/"controller.pem").read_text())).hexdigest().upper()
         # Existing agent policy accepts SHA-1 or SHA-256 pins; use SHA-256.
         def client(name=None):
             context=ssl.create_default_context(cafile=str(pki/"ca.pem"))
@@ -189,9 +189,9 @@ with tempfile.TemporaryDirectory(prefix="gc-engine-acceptance-") as td:
                 process=subprocess.Popen(["dotnet",str(agent)],cwd=node,env=node_env,stdout=log,stderr=subprocess.STDOUT)
                 processes.append(process);nodes.append((origin,node_env,activation,node))
             controller=client("controller")
-            challenge=secrets.token_hex(32).upper()
+            challenges=[secrets.token_hex(32).upper() for _ in nodes]
             proofs=[]
-            for origin,_,_,node in nodes:
+            for (origin,_,_,node),challenge in zip(nodes,challenges):
                 for _ in range(40):
                     try:
                         value=proof_request(controller,origin,challenge)
@@ -199,9 +199,9 @@ with tempfile.TemporaryDirectory(prefix="gc-engine-acceptance-") as td:
                     except (OSError,urllib.error.URLError):time.sleep(.25)
                 else:raise AssertionError("Licensed agent did not become ready")
                 path=node/"proof.gcp";path.write_text(value,encoding="ascii");proofs.append(path)
-            result=run(fixture,"--ci-verify-fleet-proofs",trust,challenge,*proofs)
+            result=run(fixture,"--ci-verify-fleet-proofs",trust,*challenges,*proofs)
             assert "REAL_MTLS_FLEET_PROOFS_VERIFIED" in result.stdout
-            run(fixture,"--ci-verify-fleet-proofs",trust,secrets.token_hex(32).upper(),*proofs,ok=False)
+            run(fixture,"--ci-verify-fleet-proofs",trust,secrets.token_hex(32).upper(),challenges[1],*proofs,ok=False)
             for unauthorized in (client(),client("untrusted-controller")):
                 try:
                     proof_request(unauthorized,nodes[0][0],challenge)

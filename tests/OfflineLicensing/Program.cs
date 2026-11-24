@@ -12,15 +12,15 @@ var binding = Convert.ToHexString(SHA256.HashData(installation.ExportSubjectPubl
 var now = DateTimeOffset.FromUnixTimeSeconds(1800000000);
 var keys = new Dictionary<string, byte[]> { ["test-1"] = signer.ExportSubjectPublicKeyInfo() };
 var verifier = new OfflineLicenseVerifier(keys);
-if(args.Length==5 && args[0]=="--ci-verify-fleet-proofs")
+if(args.Length==6 && args[0]=="--ci-verify-fleet-proofs")
 {
     if(Environment.GetEnvironmentVariable("CI")!="true" || Environment.GetEnvironmentVariable("GITHUB_ACTIONS")!="true")
         throw new InvalidOperationException("Disposable fleet test only.");
     var fleetTrust=JsonSerializer.Deserialize<Dictionary<string,byte[]>>(File.ReadAllBytes(args[1]))!;
     var proofVerifier=new OfflineLicenseVerifier(fleetTrust);
     var fleetUtc=DateTimeOffset.UtcNow;
-    var localProof=proofVerifier.VerifyInstallationProof(File.ReadAllBytes(args[3]),args[2],fleetUtc);
-    var remoteProof=proofVerifier.VerifyInstallationProof(File.ReadAllBytes(args[4]),args[2],fleetUtc);
+    var localProof=proofVerifier.VerifyInstallationProof(File.ReadAllBytes(args[4]),args[2],fleetUtc);
+    var remoteProof=proofVerifier.VerifyInstallationProof(File.ReadAllBytes(args[5]),args[3],fleetUtc);
     FleetLicensePolicy.Validate(localProof,new[]{localProof,remoteProof},fleetUtc);
     Console.WriteLine("REAL_MTLS_FLEET_PROOFS_VERIFIED");
     return;
