@@ -7,6 +7,7 @@ on:
       - 'tests/OfflineLicensing/**'
       - 'tests/E2E/offline_commercial.py'
       - 'tools/LicenseAuthority/**'
+      - 'tools/LicensePortal/**'
       - 'control-center/**'
       - '.github/workflows/offline-licensing-development.yml'
 permissions:
@@ -25,6 +26,7 @@ jobs:
         with:
           dotnet-version: '10.0.x'
       - run: dotnet run --project tests/OfflineLicensing/OfflineLicensing.csproj --configuration Release
+      - run: dotnet build tools/LicensePortal/LicensePortal.csproj --configuration Release
 
       - name: Compile commercial gateway against disposable public trust
         shell: bash

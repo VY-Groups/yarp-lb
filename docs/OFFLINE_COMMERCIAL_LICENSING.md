@@ -45,3 +45,6 @@ Added GCM1 signed immutable-package inventory verification, with separately pinn
 
 ### Independent review correction
 A signed currently active renewal which removes L7 immediately fences new proxy admission (503), reports feature-restricted, and locks ordinary management. Existing in-flight requests are not aborted. A subsequent signed active upgrade can restore admission. This is distinct from unexpected expiry or revocation continuity and the decision is applied from the exact committed import result, without a second state read. Added real no-egress downgrade/upgrade regression and corrected the fixture's shadowed local variable.
+
+## Company-side portal prototype
+Added a separate PostgreSQL-backed ASP.NET Core portal under tools/LicensePortal: pinned software mTLS operator identities, customer and subscription records, signed activation request validation, transactional distinct-person approval/rejection, audit records and approved job export, with a browser UI. The private issuer key remains outside the portal. The exported record is not yet an enforced signed authorization for the CLI issuer. MFA, issuance linkage, accounting, production database roles and real PostgreSQL/HTTPS acceptance still need verification. See tools/LicensePortal/README.md.
