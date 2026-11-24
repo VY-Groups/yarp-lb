@@ -47,8 +47,26 @@
           <button id="auth-submit" class="primary" type="submit">Sign in</button>
         </form>
         <a id="auth-sso-link" href="/admin/oidc/start" hidden>Sign in with Enterprise SSO / passkey</a>
+        <p><a class="privacy-link" href="/dashboard/privacy" target="_blank" rel="noopener">Privacy Policy</a></p>
         <div class="auth-security"><span aria-hidden="true">◈</span><span>For authorized operators only. Administrative access must use an approved secure listener in production.</span></div>
       </div>
+    </div>
+  </div>
+</section>
+<section id="privacy-screen" class="privacy-screen" hidden aria-labelledby="privacy-title">
+  <div class="card privacy-card">
+    <div class="auth-brand"><span class="mark" aria-hidden="true">G</span><div><strong data-organization-name>GatewayCore</strong><small>CONTROL CENTER</small></div></div>
+    <span class="auth-kicker">REQUIRED BEFORE MANAGEMENT ACCESS</span>
+    <h1 id="privacy-title">Privacy Policy</h1>
+    <p>Review how GatewayCore and your organization handle information before continuing.</p>
+    <p id="privacy-version" class="subtle"></p>
+    <pre id="privacy-text" class="privacy-text" tabindex="0" aria-label="Privacy Policy notice"></pre>
+    <p class="subtle">If the policy changes, reload this page to review the latest notice.</p>
+    <p id="privacy-message" role="alert" aria-live="assertive"></p>
+    <div class="privacy-actions">
+      <button id="privacy-decline" type="button" class="ghost">Decline</button>
+      <button id="privacy-signout" type="button" class="ghost">Sign out</button>
+      <button id="privacy-accept" type="button" class="primary">Accept &amp; continue</button>
     </div>
   </div>
 </section>
@@ -101,7 +119,7 @@
     </header>
     <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
     <div class="content" id="content" tabindex="-1" aria-label="Selected management page"></div>
-    <footer>GatewayCore Control Center · Development release · Configuration review is not deployment approval</footer>
+    <footer>GatewayCore Control Center · Development release · Configuration review is not deployment approval · <a class="privacy-link" href="/dashboard/privacy" target="_blank" rel="noopener">Privacy Policy</a></footer>
   </main>
 </div>
 <dialog id="modal" aria-labelledby="modal-title" aria-describedby="modal-help">

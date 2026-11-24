@@ -554,6 +554,23 @@ app.Use(async (ctx, next) =>
     await next();
 });
 #endif
+// Enforce acknowledgement on management APIs, not just browser navigation.
+app.Use(async (ctx, next) =>
+{
+    if (ctx.Request.Path.StartsWithSegments("/admin/api") &&
+        !ManagementPrivacyPolicy.Exempt(ctx.Request.Path))
+    {
+        if (ctx.User.Identity?.IsAuthenticated != true)
+        { ctx.Response.StatusCode = 401; return; }
+        if (!ManagementPrivacyPolicy.Accepted(ctx))
+        {
+            ctx.Response.StatusCode = 428;
+            await ctx.Response.WriteAsJsonAsync(new { error = "Please accept the Privacy Policy before using GatewayCore.", code = "privacy_policy_required" });
+            return;
+        }
+    }
+    await next();
+});
 // Process-local, low-cardinality HTTP request telemetry. This is NOT per-destination
 // YARP telemetry and is reset on each process restart.
 long requestsTotal = 0, requests2xx = 0, requests4xx = 0, requests5xx = 0, durationTicks = 0;
@@ -924,11 +941,12 @@ app.Use(async (ctx, next) =>
         if (string.IsNullOrWhiteSpace(token) ||
             !CryptographicOperations.FixedTimeEquals(Encoding.UTF8.GetBytes(token), Encoding.UTF8.GetBytes(provided)))
         { ctx.Response.StatusCode = 403; return; }
-        if (ctx.Request.Path != "/admin/api/logout" && ctx.User.IsInRole("Viewer")) { ctx.Response.StatusCode = 403; return; }
+        if (ctx.Request.Path != "/admin/api/logout" && ctx.Request.Path != ManagementPrivacyPolicy.AcceptancePath && ctx.User.IsInRole("Viewer")) { ctx.Response.StatusCode = 403; return; }
         // All authenticated administrative mutations require recent verified IdP
         // authentication in enterprise mode, except the explicitly named recovery account.
         // The recovery account must have signed in with local password + delivered OTP.
         if (oidcPolicy is not null && ctx.Request.Path != "/admin/api/logout" &&
+            ctx.Request.Path != ManagementPrivacyPolicy.AcceptancePath &&
             !oidcPolicy.IsBreakGlass(ctx.User.Identity?.Name) &&
             !oidcPolicy.SessionValid(ctx.User, ctx.User.Identity?.Name ?? "",
                 ctx.User.FindFirst(ClaimTypes.Role)?.Value ?? "", DateTimeOffset.UtcNow, stepUp: true))
@@ -1215,6 +1233,9 @@ app.MapGet("/admin/api/session", (HttpContext ctx) => Results.Ok(new {
     commercial = true,
     licenseActive = commercialLicense.Allows("l7"),
 #endif
+    privacyAccepted = ManagementPrivacyPolicy.Accepted(ctx),
+    privacyVersion = ManagementPrivacyPolicy.Version,
+    privacyText = ManagementPrivacyPolicy.Text,
     mode = "Local administrative test console — not certified for CA production"
 }));
 
@@ -1244,6 +1265,17 @@ app.MapPost("/admin/api/license/import", (Delegate)(Func<HttpContext, Task<IResu
 app.MapPost("/admin/api/license/revoke", (Delegate)(Func<HttpContext, Task<IResult>>)(ctx => ImportCommercialLicense(ctx, true)))
     .RequireAuthorization(policy => policy.RequireRole("Administrator"));
 #endif
+app.MapPost(ManagementPrivacyPolicy.AcceptancePath, async (HttpContext ctx, PrivacyAcceptanceInput input) =>
+{
+    if (!string.Equals(input.Version, ManagementPrivacyPolicy.Version, StringComparison.Ordinal))
+        return Results.Conflict(new { error = "The Privacy Policy changed. Review the current notice before accepting." });
+    if (!ManagementPrivacyPolicy.Accepted(ctx))
+    {
+        await Audit(Actor(ctx), "PRIVACY_POLICY_ACCEPTED", new { version = ManagementPrivacyPolicy.Version });
+        ManagementPrivacyPolicy.Issue(ctx);
+    }
+    return Results.Ok(new { accepted = true, version = ManagementPrivacyPolicy.Version });
+}).RequireAuthorization();
 
 app.MapPost("/admin/api/bootstrap", async (HttpContext ctx, LoginInput input) =>
 {
@@ -1446,6 +1478,7 @@ app.MapPost("/admin/api/login/verify", async (HttpContext ctx, VerifyOtpInput in
 app.MapPost("/admin/api/logout", async (HttpContext ctx) =>
 {
     await Audit(Actor(ctx), "LOGOUT");
+    ManagementPrivacyPolicy.Clear(ctx);
     if (oidcPolicy is not null && ctx.User.HasClaim(c => c.Type == EnterpriseOidcPolicy.SubjectClaim))
         return Results.SignOut(new AuthenticationProperties { RedirectUri = "/dashboard" },
             [CookieAuthenticationDefaults.AuthenticationScheme, EnterpriseOidcPolicy.Scheme]);
@@ -1744,6 +1777,7 @@ app.MapGet("/dashboard", () => Results.File(Path.Combine(root, "wwwroot", "index
 app.MapGet("/dashboard/license", () => Results.File(Path.Combine(root, "wwwroot", "license.html"), "text/html; charset=utf-8"));
 app.MapGet("/dashboard/license.js", () => Results.File(Path.Combine(root, "wwwroot", "license.js"), "text/javascript; charset=utf-8"));
 #endif
+app.MapGet("/dashboard/privacy", () => Results.Content(ManagementPrivacyPolicy.Page(), "text/html; charset=utf-8"));
 app.MapGet("/dashboard/app.js", () => Results.File(Path.Combine(root, "wwwroot", "app.js"), "text/javascript; charset=utf-8"));
 app.MapGet("/dashboard/style.css", () => Results.File(Path.Combine(root, "wwwroot", "style.css"), "text/css; charset=utf-8"));
 app.MapGet("/gateway/health", () => Results.Ok(new { status = "healthy", gateway = Environment.MachineName, utc = DateTimeOffset.UtcNow }));
