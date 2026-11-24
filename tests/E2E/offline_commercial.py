@@ -8,6 +8,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 
 from real_control_center import Client, backend, check, eventually, gateway, openssl_state, port
 
@@ -136,13 +137,33 @@ def main():
             admin.request("POST", "/admin/api/fleet", fleet_row(3), expect=402)
             check(len(admin.request("GET", "/admin/api/fleet"))==2,"excess local fleet registration denied")
             eventually(anonymous, "/fixture/check", "e2e-origin:/check")
+            short_request = root/"short.gcr"
+            short_request.write_text(admin.request("GET", "/admin/api/license/request")["file"], encoding="ascii")
+            short = issue("--ci-short-renew", short_request, root/"short.lic")
+            short_state=admin.request("POST", "/admin/api/license/import", {"file":short})
+            check(short_state["revision"]==5 and short_state["trafficAdmitted"],"short signed entitlement initially active")
+            # Use the signed UTC deadline; tolerate CI scheduling delay without
+            # weakening the expected 503 immediately after expiration.
+            from datetime import datetime, timezone
+            expiry=datetime.fromisoformat(short_state["expiresAt"].replace("Z","+00:00"))
+            time.sleep(max(0,(expiry-datetime.now(timezone.utc)).total_seconds())+0.3)
+            anonymous.request("GET", "/fixture/check", expect=503)
+            admin.request("GET", "/admin/api/state", expect=402)
+            check(not admin.request("GET", "/admin/api/license/status")["trafficAdmitted"],"signed expiry fences new traffic")
+            resume_request=root/"resume.gcr"
+            resume_request.write_text(admin.request("GET", "/admin/api/license/request")["file"], encoding="ascii")
+            resumed=issue("--ci-resume",resume_request,root/"resume.lic")
+            check(admin.request("POST", "/admin/api/license/import", {"file":resumed})["revision"]==6,
+                  "signed renewal recovers expired installation")
+            eventually(anonymous, "/fixture/check", "e2e-origin:/check")
             revoked = issue("--ci-revoke", renewed["allocationId"], root/"revocation.gcv")
             state = admin.request("POST", "/admin/api/license/revoke", {"file":revoked})
-            check(state["state"] == "revoked" and not state["active"], "actual offline revocation denies management")
+            check(state["state"] == "revoked" and not state["active"] and not state["trafficAdmitted"],
+                  "explicit signed revocation denies management and new traffic")
             admin.request("GET", "/admin/api/state", expect=402)
             admin.request("POST", "/admin/api/license/import", {"file":second}, expect=400)
-            eventually(anonymous, "/fixture/check", "e2e-origin:/check")
-            check(True, "running process preserves previously admitted traffic on revocation")
+            anonymous.request("GET", "/fixture/check", expect=503)
+            check(True, "revocation fences new requests in already-running process")
         with gateway(cwd, dll, root, listen) as base:
             admin = Client(base)
             admin.login(user, password)

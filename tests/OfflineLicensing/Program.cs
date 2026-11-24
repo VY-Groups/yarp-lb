@@ -62,7 +62,7 @@ if (args.Length == 2 && args[0] == "--ci-trust")
     File.WriteAllBytes(args[1], JsonSerializer.SerializeToUtf8Bytes(keys));
     return;
 }
-if (args.Length >= 2 && args[0] is "--ci-authority" or "--ci-issue" or "--ci-revoke" or "--ci-downgrade" or "--ci-upgrade")
+if (args.Length >= 2 && args[0] is "--ci-authority" or "--ci-issue" or "--ci-revoke" or "--ci-downgrade" or "--ci-upgrade" or "--ci-short-renew" or "--ci-resume")
 {
     if (Environment.GetEnvironmentVariable("CI") != "true" ||
         Environment.GetEnvironmentVariable("GITHUB_ACTIONS") != "true" || !OperatingSystem.IsLinux())
@@ -102,7 +102,7 @@ if (args.Length >= 2 && args[0] is "--ci-authority" or "--ci-issue" or "--ci-rev
     byte[] fixtureEnvelope;
     if (args[0] == "--ci-revoke")
     {
-        if (step != 4 || args[2] != fixtureAllocation) throw new InvalidOperationException("Unexpected fixture step.");
+        if (step != 6 || args[2] != fixtureAllocation) throw new InvalidOperationException("Unexpected fixture step.");
         fixtureEnvelope = FixtureSign("GCV1", new
         {
             schemaVersion = 1, product = "GatewayCore", licenseId = "ci-license",
@@ -112,7 +112,8 @@ if (args.Length >= 2 && args[0] is "--ci-authority" or "--ci-issue" or "--ci-rev
     }
     else
     {
-        var expected = step switch { 0 or 1 => "--ci-issue", 2 => "--ci-downgrade", 3 => "--ci-upgrade", _ => "" };
+        var expected = step switch { 0 or 1 => "--ci-issue", 2 => "--ci-downgrade", 3 => "--ci-upgrade",
+            4 => "--ci-short-renew", 5 => "--ci-resume", _ => "" };
         if (args[0] != expected) throw new InvalidOperationException("Unexpected fixture step.");
         var fixtureRequest = OfflineActivationRequest.Verify(File.ReadAllBytes(args[2]));
         if (step == 0) File.WriteAllText(bindingPath, fixtureRequest.InstallationKeySha256);
@@ -123,12 +124,12 @@ if (args.Length >= 2 && args[0] is "--ci-authority" or "--ci-issue" or "--ci-rev
             schemaVersion = 1, product = "GatewayCore", licenseId = "ci-license",
             customerId = "ci-customer", deploymentId = "ci-deployment", allocationId = fixtureAllocation,
             installationKeySha256 = fixtureRequest.InstallationKeySha256, edition = "standard",
-            revision = step + 1, maxNodes = step == 3 ? 2 : 1, maxSites = 1, issuedAt = utc.ToUnixTimeSeconds(),
-            notBefore = utc.ToUnixTimeSeconds(), expiresAt = utc.AddDays(2).ToUnixTimeSeconds(),
+            revision = step + 1, maxNodes = step >= 3 ? 2 : 1, maxSites = 1, issuedAt = utc.ToUnixTimeSeconds(),
+            notBefore = utc.ToUnixTimeSeconds(), expiresAt = (step == 4 ? utc.AddSeconds(20) : utc.AddDays(2)).ToUnixTimeSeconds(),
             features = step switch
             {
                 2 => new[] { "monitoring" },
-                3 => new[] { "l7", "tls", "monitoring", "ha", "fleet" },
+                >= 3 => new[] { "l7", "tls", "monitoring", "ha", "fleet" },
                 _ => new[] { "l7", "tls", "monitoring" }
             }
         }, signer);

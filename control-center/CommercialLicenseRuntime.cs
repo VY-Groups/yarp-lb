@@ -12,6 +12,11 @@ internal sealed class CommercialLicenseRuntime : BackgroundService
     private VerifiedLicense? current;
     private string state = "unavailable";
     private int admittedTraffic;
+    private long admissionDeadlineMs;
+    private long signedExpiryUnixMs;
+    // Development default: bounded continuity on unexpected storage failure,
+    // never beyond signed expiry. Explicit downgrade/revocation fences now.
+    private const long FaultContinuityMs = 15 * 60 * 1000;
     private const int MaxUpload = 24576;
 
     public CommercialLicenseRuntime(string directory)
@@ -36,31 +41,45 @@ internal sealed class CommercialLicenseRuntime : BackgroundService
             catch (Exception e) when (e is IOException or CryptographicException or InvalidDataException or
                 FormatException or JsonException or UnauthorizedAccessException or ArgumentException or InvalidOperationException)
             {
+                // Repeated failures must not renew the continuity window.
+                if (state != "unavailable")
+                    Volatile.Write(ref admissionDeadlineMs,
+                        Math.Min(Volatile.Read(ref admissionDeadlineMs), Environment.TickCount64 + FaultContinuityMs));
                 current = null;
                 state = "unavailable";
             }
         }
     }
 
-    // An explicit signed downgrade takes effect immediately, unlike an
-    // unexpected expiry/state fault. Existing in-flight requests are not aborted.
+    // Explicit signed downgrade/revocation and signed expiry fence new
+    // requests. In-flight requests are not forcibly terminated. A temporary
+    // state fault has bounded continuity only on an already admitted process.
     private void ApplyVerified(VerifiedLicense? license)
     {
         current = license;
         state = license?.Validity.ToString().ToLowerInvariant() ?? "unactivated";
-        if (license is null || license.Validity == LicenseValidity.NotYetValid)
-            Volatile.Write(ref admittedTraffic, 0);
-        else if (license.Validity == LicenseValidity.Active)
+        if (license is { Validity: LicenseValidity.Active } && license.Allows("l7"))
         {
-            Volatile.Write(ref admittedTraffic, license.Allows("l7") ? 1 : 0);
-            if (!license.Allows("l7")) state = "feature-restricted";
+            var now = DateTimeOffset.UtcNow;
+            var remainingMs = Math.Max(0L, (long)(license.ExpiresAt - now).TotalMilliseconds);
+            Volatile.Write(ref signedExpiryUnixMs, license.ExpiresAt.ToUnixTimeMilliseconds());
+            Volatile.Write(ref admissionDeadlineMs, Environment.TickCount64 + remainingMs);
+            Volatile.Write(ref admittedTraffic, remainingMs > 0 ? 1 : 0);
+        }
+        else
+        {
+            Volatile.Write(ref admittedTraffic, 0);
+            Volatile.Write(ref admissionDeadlineMs, 0);
+            Volatile.Write(ref signedExpiryUnixMs, 0);
+            if (license is { Validity: LicenseValidity.Active }) state = "feature-restricted";
         }
     }
 
-    // A valid running process retains forwarding on expiry/revocation/state
-    // fault; an unlicensed fresh process cannot start forwarding. This is a
-    // deliberately narrow continuity prototype, not a production DR policy.
-    public bool TrafficAdmitted => Volatile.Read(ref admittedTraffic) == 1;
+    // No disk access, signature verification or network dependency in the
+    // data path. Both wall clock and monotonic bounds must still be valid.
+    public bool TrafficAdmitted => Volatile.Read(ref admittedTraffic) == 1 &&
+        Environment.TickCount64 < Volatile.Read(ref admissionDeadlineMs) &&
+        DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() < Volatile.Read(ref signedExpiryUnixMs);
     public bool Allows(string feature)
     {
         lock (sync)
