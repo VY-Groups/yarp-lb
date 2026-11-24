@@ -402,6 +402,22 @@ authorityKeyIdentifier = keyid,issuer
                     recovery_ports[1] = free_port()
                 processes = [None,None]
                 streams = []
+                commercial_setting=os.environ.get("GATEWAY_COMMERCIAL_RECOVERY_ROOT")
+                commercial=Path(commercial_setting).resolve() if commercial_setting else None
+                if commercial and (os.name!="posix" or os.environ.get("CI")!="true" or os.environ.get("RUNNER_ENVIRONMENT")!="github-hosted"):
+                    raise AssertionError("Commercial recovery scenario is restricted to disposable hosted Linux CI")
+                if commercial:
+                    fixture=commercial/"fixture/OfflineLicensing.dll"
+                    commercial_agent=commercial/"agent/GatewayCoreGatewayAgent.dll"
+                    commercial_gateway=commercial/"gateway/GatewayCoreYarp.dll"
+                    keys=commercial/"keys"
+                    for required in (fixture,commercial_agent,commercial_gateway,keys/"trust.json"):
+                        if not required.is_file():raise FileNotFoundError(required)
+                    def command(*args,env=None):
+                        result=subprocess.run(["dotnet",*map(str,args)],env=env,capture_output=True,text=True,timeout=45)
+                        if result.returncode:raise AssertionError(result.stdout+result.stderr)
+                        return result.stdout
+                    revoked_nodes=set()
                 controller_root = temp/"fleet-controller"
                 journal_dir = (controller_root/"state"/"fleet-rollouts" if os.name != "nt" else temp/"fleet-journals")
                 journal_dir.mkdir(parents=True,mode=0o700)
@@ -421,9 +437,21 @@ authorityKeyIdentifier = keyid,issuer
                     for key in tuple(child):
                         if key.startswith("Agent__TrustedClientThumbprints__") and key != "Agent__TrustedClientThumbprints__0":
                             del child[key]
+                    agent_binary=AGENT
+                    if commercial:
+                        agent_binary=commercial_agent
+                        child["GATEWAYCORE_ENGINE_LICENSE_DIR"]=str(node/"identity")
+                        request=node/"activation.gcr"
+                        if not request.exists():
+                            command(agent_binary,"--license-init",env=child)
+                            command(agent_binary,"--license-request",request,env=child)
+                            envelope=node/"active.lic"
+                            command(fixture,"--ci-fleet-three-license",keys,request,envelope,"dc" if i==0 else "dr")
+                            command(agent_binary,"--license-import",envelope,env=child)
+                        if i in revoked_nodes:child["GATEWAYCORE_AGENT_RECOVERY_ONLY"]="true"
                     stream = (node/"agent.log").open("a",encoding="utf-8")
                     streams.append(stream)
-                    processes[i]=subprocess.Popen(["dotnet",str(AGENT)],cwd=node,env=child,stdout=stream,stderr=subprocess.STDOUT)
+                    processes[i]=subprocess.Popen(["dotnet",str(agent_binary)],cwd=node,env=child,stdout=stream,stderr=subprocess.STDOUT)
                     wait_for_listener(recovery_ports[i],processes[i],"fleet recovery agent")
                     deadline=time.monotonic()+12
                     while True:
@@ -440,11 +468,21 @@ authorityKeyIdentifier = keyid,issuer
                     if proc is not None and proc.poll() is None:
                         proc.kill()
                         proc.wait(timeout=5)
-                def invoke(mode):
+                def revoke_node(i):
+                    node=temp/f"recovery-node-{i}"
+                    revocation=node/"revoked.gcv"
+                    command(fixture,"--ci-engine-revoke",keys,node/"activation.gcr",revocation,"fleet")
+                    child=dict(os.environ,GATEWAYCORE_ENGINE_LICENSE_DIR=str(node/"identity"))
+                    # Stop first to avoid racing the process's protected-state lock.
+                    stop_node(i)
+                    command(commercial_agent,"--license-revoke",revocation,env=child)
+                    revoked_nodes.add(i)
+                def invoke(mode,revoked=False):
+                    invoke_env=dict(os.environ,GC_TEST_EXPECT_REVOKED="true" if revoked else "false")
                     result=subprocess.run(["dotnet",recovery_dll,"--fleet-recovery-fixture",mode,str(temp),
                         str(good_cert),str(good_key),str(temp/"server.pem"),
                         str(recovery_ports[0]),str(recovery_ports[1]),str(journal_path)],
-                        check=True,capture_output=True,text=True,timeout=35)
+                        check=True,capture_output=True,text=True,timeout=35,env=invoke_env)
                     print(result.stdout,flush=True)
                     return result.stdout
                 root_installed=False
@@ -474,11 +512,19 @@ authorityKeyIdentifier = keyid,issuer
                         sys.path.insert(0,str(REPO/"tests"/"E2E"))
                         from real_control_center import Client, gateway, openssl_state, backend, check
                         cwd=REPO/"control-center"
-                        dll=cwd/"bin/Release/net10.0/GatewayCoreYarp.dll"
+                        dll=commercial_gateway if commercial else cwd/"bin/Release/net10.0/GatewayCoreYarp.dll"
                         client_installed=True
                         invoke("install-client")
                         with patch.dict(os.environ,{"SSL_CERT_FILE":str(temp/"root.pem")}), backend() as upstream:
                             openssl_state(controller_root,upstream)
+                            if commercial:
+                                # Same customer SDK, but an independent third installation.
+                                controller_identity=controller_root/"state"/"commercial-license"
+                                command(commercial_agent,"--license-init",env=dict(os.environ,GATEWAYCORE_ENGINE_LICENSE_DIR=str(controller_identity)))
+                                controller_request=controller_root/"activation.gcr"
+                                signing_key=controller_root/"state"/"fleet-signing-private.pem"
+                                shutil.copyfile(temp/"fleet-private.pem",signing_key)
+                                signing_key.chmod(0o600)
                             node_rows=[{"id":name,"url":f"https://127.0.0.1:{recovery_ports[i]}/",
                                 "clientCertificateThumbprint":pins[0]} for i,name in enumerate(("one","two"))]
                             plan={"mode":"ha-pair","controlPlane":"single-controller","dataStore":"local-file",
@@ -491,6 +537,14 @@ authorityKeyIdentifier = keyid,issuer
                             with gateway(cwd,dll,controller_root,free_port()) as base:
                                 admin=Client(base)
                                 admin.bootstrap("fleetadmin","Disposable-fleet-admin-123!","fleetadmin@example.invalid")
+                                if commercial:
+                                    controller_request.write_text(admin.request("GET","/admin/api/license/request")["file"],encoding="ascii")
+                                    envelope=controller_root/"active.lic"
+                                    command(fixture,"--ci-fleet-three-license",keys,controller_request,envelope,"dc")
+                                    active=admin.request("POST","/admin/api/license/import",{"file":envelope.read_text(encoding="ascii")})
+                                    check(active["active"] and active["maxNodes"]==3,"independent commercial controller allocation")
+                                    admin.request("POST","/admin/api/users",{"username":"fleetreviewer",
+                                        "password":"Disposable-reviewer-123!","email":"fleetreviewer@example.invalid","role":"Administrator"})
                                 admin.request("POST","/admin/api/users",{"username":"fleetoperator",
                                     "password":"Disposable-fleet-operator-123!","email":"fleetoperator@example.invalid","role":"Operator"})
                                 topology=admin.request("GET","/admin/api/onboarding")
@@ -501,8 +555,30 @@ authorityKeyIdentifier = keyid,issuer
                                         "confirmDesign":confirmed,"expectedRevision":topology["revision"]})
                                 for row in node_rows:
                                     admin.request("POST","/admin/api/fleet",row)
+                                if commercial:
+                                    reviewer=Client(base);reviewer.login("fleetreviewer","Disposable-reviewer-123!")
+                                    state=admin.request("GET","/admin/api/state")
+                                    payload={name:state[name] for name in ("routes","clusters","disabled","revision")}
+                                    payload["routes"]["commercial-rollout"]={"ClusterId":"fixture","Match":{"Path":"/commercial-rollout/{**catch-all}"}}
+                                    change=admin.request("POST","/admin/api/change-requests",{"reason":"Disposable commercial licensed fleet rollout","payload":payload})
+                                    reviewer.request("POST","/admin/api/change-requests/"+change["id"]+"/decision",
+                                        {"decision":"approve","reason":"Independently approved commercial acceptance"})
+                                    rollout=admin.request("POST","/admin/api/fleet/rollout/"+change["id"],{})
+                                    check(rollout["status"]=="activated-pending-health-validation","actual commercial controller rollout validates all licensed sites and activates")
+                                    for i in range(2):
+                                        config=json.loads((temp/f"recovery-node-{i}"/"gateway.json").read_bytes())
+                                        check("commercial-rollout" in config["ReverseProxy"]["Routes"],"actual licensed agent config activated")
                                 invoke("prepare")
-                            stop_node(1)
+                                if commercial:
+                                    revocation=controller_root/"revoked.gcv"
+                                    command(fixture,"--ci-engine-revoke",keys,controller_request,revocation,"fleet")
+                                    revoked=admin.request("POST","/admin/api/license/revoke",{"file":revocation.read_text(encoding="ascii")})
+                                    check(revoked["state"]=="revoked","controller revoked during interrupted transaction")
+                            if commercial:
+                                revoke_node(0);revoke_node(1)
+                                start_node(0)
+                            else:
+                                stop_node(1)
                             endpoint="/admin/api/fleet/rollouts/"+journal_path.stem+"/recover"
                             with gateway(cwd,dll,controller_root,free_port()) as base:
                                 admin=Client(base);admin.login("fleetadmin","Disposable-fleet-admin-123!")
@@ -512,7 +588,7 @@ authorityKeyIdentifier = keyid,issuer
                                 operator.request("POST",endpoint,{},expect=403)
                                 admin.request("POST",endpoint,{},csrf=False,expect=403)
                                 check(journal_path.read_bytes()==before,"unauthenticated, unauthorized and missing-CSRF recovery leave journal unchanged")
-                                admin.request("DELETE","/admin/api/fleet/two",expect=409)
+                                admin.request("DELETE","/admin/api/fleet/two",expect=402 if commercial else 409)
                                 admin.request("POST",endpoint,{},expect=502)
                                 state=json.loads(journal_path.read_bytes())
                                 check(state["status"]=="manual-intervention-required" and
@@ -524,9 +600,14 @@ authorityKeyIdentifier = keyid,issuer
                                 restored=admin.request("POST",endpoint,{})
                                 check(restored["status"]=="rollback-verified","real controller API resumes recovery after restart")
                                 admin.request("POST",endpoint,{},expect=409)
-                                if "FLEET_RECOVERY_COMPLETE" not in invoke("verify"):
+                                if "FLEET_RECOVERY_COMPLETE" not in invoke("verify",revoked=bool(commercial)):
                                     raise AssertionError("expected independent original revision and late-activation proof")
+                                if commercial:
+                                    admin.request("GET","/admin/api/state",expect=402)
+                                    check(admin.request("GET","/admin/api/license/status")["state"]=="revoked",
+                                        "recovery does not reactivate controller")
                             print("PASS: real controller HTTP recovery with RBAC, CSRF, restart and production mTLS",flush=True)
+                            if commercial:print("COMMERCIAL_REAL_ROLLOUT_AND_REVOKED_RECOVERY_PASS",flush=True)
                 finally:
                     try:
                         for i in range(2): stop_node(i)

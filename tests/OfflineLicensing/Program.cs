@@ -25,7 +25,7 @@ if(args.Length==6 && args[0]=="--ci-verify-fleet-proofs")
     Console.WriteLine("REAL_MTLS_FLEET_PROOFS_VERIFIED");
     return;
 }
-if (args.Length >= 2 && args[0] is "--ci-engine-key" or "--ci-engine-license" or "--ci-engine-revoke" or "--ci-fleet-license")
+if (args.Length >= 2 && args[0] is "--ci-engine-key" or "--ci-engine-license" or "--ci-engine-revoke" or "--ci-fleet-license" or "--ci-fleet-three-license")
 {
     if(Environment.GetEnvironmentVariable("CI")!="true" || Environment.GetEnvironmentVariable("GITHUB_ACTIONS")!="true")
         throw new InvalidOperationException("Disposable engine test only.");
@@ -52,10 +52,10 @@ if (args.Length >= 2 && args[0] is "--ci-engine-key" or "--ci-engine-license" or
     finally{CryptographicOperations.ZeroMemory(rawFixtureKey);}
     var engineBinding=OfflineActivationRequest.Verify(File.ReadAllBytes(args[2])).InstallationKeySha256;
     var engineNow=DateTimeOffset.UtcNow;
-    var engineBytes=args[0]=="--ci-fleet-license"?FixtureSign("GCL1",new{
+    var engineBytes=args[0] is "--ci-fleet-license" or "--ci-fleet-three-license"?FixtureSign("GCL1",new{
         schemaVersion=2,product="GatewayCore",licenseId="engine-ci",customerId="ci",deploymentId="ci",
         allocationId="node-"+engineBinding[..32],installationKeySha256=engineBinding,edition="enterprise",revision=1,
-        siteId=args[4],maxNodes=2,maxSites=2,issuedAt=engineNow.ToUnixTimeSeconds(),notBefore=engineNow.ToUnixTimeSeconds(),
+        siteId=args[4],maxNodes=args[0]=="--ci-fleet-three-license"?3:2,maxSites=2,issuedAt=engineNow.ToUnixTimeSeconds(),notBefore=engineNow.ToUnixTimeSeconds(),
         expiresAt=new DateTimeOffset(engineNow.UtcDateTime.Date.AddDays(2),TimeSpan.Zero).ToUnixTimeSeconds(),
         features=new[]{"l7","ha","fleet","dc-dr"}},signer):
         args[0]=="--ci-engine-license"?FixtureSign("GCL1",new{

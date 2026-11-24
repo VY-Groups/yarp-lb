@@ -540,7 +540,14 @@ app.UseAuthorization();
 #if GATEWAYCORE_COMMERCIAL
 app.Use(async (ctx, next) =>
 {
-    if (ctx.Request.Path.StartsWithSegments("/admin/api") &&
+    if (CommercialLicenseRuntime.FleetRecoveryEndpoint(ctx.Request.Method,ctx.Request.Path))
+    {
+        if(ctx.User.Identity?.IsAuthenticated!=true){ctx.Response.StatusCode=401;return;}
+        if(!ctx.User.IsInRole("Administrator")){ctx.Response.StatusCode=403;return;}
+        // Only the exact rollback journal endpoints bypass entitlement;
+        // existing audit, CSRF, original inventory and revision checks remain.
+    }
+    else if (ctx.Request.Path.StartsWithSegments("/admin/api") &&
         !CommercialLicenseRuntime.RecoveryEndpoint(ctx.Request.Path))
     {
         if (ctx.User.Identity?.IsAuthenticated != true) { ctx.Response.StatusCode = 401; return; }
@@ -2471,13 +2478,21 @@ app.MapPost("/admin/api/fleet/rollout/{changeId}", async (HttpContext ctx, strin
                 ?? throw new CryptographicException("Missing signed fleet allocation proof.");
             return commercialLicense.VerifyPeerProof(proof,challenge);
         }
-        async Task RequireSamePeer(FleetGateway row,HttpClient client)
+        async Task RequireSameFleet()
         {
-            var observed=await ReadPeer(row,client);
-            if(observed.PayloadSha256!=licensedPeers[row.Id].PayloadSha256 ||
-                observed.InstallationKeySha256!=licensedPeers[row.Id].InstallationKeySha256)
-                throw new CryptographicException("Peer entitlement changed during rollout.");
-            commercialLicense.ValidateFleetProofs(licensedPeers.Values.ToArray());
+            // All targets, not only the next dispatch target, must remain
+            // reachable and entitled. Fresh independent nonces on every
+            // observation; concurrent calls bounded by each client's timeout.
+            var observed=await Task.WhenAll(gateways.Select(async row =>
+            {
+                using var peerClient=CreateFleetClient(row);
+                var peer=await ReadPeer(row,peerClient);
+                if(peer.PayloadSha256!=licensedPeers[row.Id].PayloadSha256 ||
+                   peer.InstallationKeySha256!=licensedPeers[row.Id].InstallationKeySha256)
+                    throw new CryptographicException("Peer entitlement changed during rollout.");
+                return peer;
+            }));
+            commercialLicense.ValidateFleetProofs(observed);
         }
 #endif
         // Preflight every target before authorizing or dispatching any mutation.
@@ -2529,7 +2544,8 @@ app.MapPost("/admin/api/fleet/rollout/{changeId}", async (HttpContext ctx, strin
                 DateTimeOffset.UtcNow.AddMinutes(3).ToUnixTimeSeconds(), sequence);
             using var client = CreateFleetClient(row);
 #if GATEWAYCORE_COMMERCIAL
-            await RequireSamePeer(row,client);
+            await RequireSameFleet();
+            if(!await CurrentPlan())throw new InvalidOperationException("Rollout authorization or plan changed during fleet proof.");
 #endif
             target["prepareSent"] = true;
             FleetRolloutJournal.Log(logPath, journal, row.Id, "prepare", "dispatching");
@@ -2553,7 +2569,8 @@ app.MapPost("/admin/api/fleet/rollout/{changeId}", async (HttpContext ctx, strin
             var prepared = target["preparedRevision"]!.GetValue<string>();
             using var client = CreateFleetClient(row);
 #if GATEWAYCORE_COMMERCIAL
-            await RequireSamePeer(row,client);
+            await RequireSameFleet();
+            if(!await CurrentPlan())throw new InvalidOperationException("Rollout authorization or plan changed during fleet proof.");
 #endif
             target["activateSent"] = true;
             FleetRolloutJournal.Log(logPath, journal, row.Id, "activate", "dispatching");
@@ -2565,6 +2582,10 @@ app.MapPost("/admin/api/fleet/rollout/{changeId}", async (HttpContext ctx, strin
                 throw new InvalidOperationException("Invalid activation acknowledgment");
             FleetRolloutJournal.Log(logPath, journal, row.Id, "activate", "ok", prepared);
         }
+#if GATEWAYCORE_COMMERCIAL
+        await RequireSameFleet();
+        if(!await CurrentPlan())throw new InvalidOperationException("Rollout authorization or plan changed before completion.");
+#endif
         journal["status"] = "activated-pending-health-validation";
         FleetRolloutJournal.Log(logPath, journal, "fleet", "finish", "activation-complete", "Live application health is not verified");
         await Audit(Actor(ctx), "FLEET_ROLLOUT_ACTIVATED", new { txId, changeId });
@@ -2663,6 +2684,9 @@ app.Use(async (ctx, next) =>
         return;
     }
     if (modifying && path.StartsWithSegments("/admin/api/fleet") &&
+#if GATEWAYCORE_COMMERCIAL
+        !CommercialLicenseRuntime.FleetRecoveryEndpoint(ctx.Request.Method,path) &&
+#endif
         !OnboardingApi.IsMultiGatewayDesign(privateDir))
     {
         ctx.Response.StatusCode = 409;

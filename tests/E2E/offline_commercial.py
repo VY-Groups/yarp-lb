@@ -164,6 +164,13 @@ def main():
             admin.request("POST", "/admin/api/license/import", {"file":second}, expect=400)
             anonymous.request("GET", "/fixture/check", expect=503)
             check(True, "revocation fences new requests in already-running process")
+            missing="/admin/api/fleet/rollouts/rollout_"+"A"*24+"/recover"
+            admin.request("GET","/admin/api/fleet/rollouts")
+            admin.request("POST",missing,{},expect=404)
+            admin.request("POST",missing,{},csrf=False,expect=403)
+            Client(base).request("GET","/admin/api/fleet/rollouts",expect=401)
+            admin.request("POST","/admin/api/fleet/rollout/change-20260101T0000000000000Z-AAAAAAAAAA",{},expect=402)
+            check(True,"revoked controller permits only authenticated CSRF-protected journal recovery")
         with gateway(cwd, dll, root, listen) as base:
             admin = Client(base)
             admin.login(user, password)
@@ -171,6 +178,10 @@ def main():
             admin.request("GET", "/admin/api/state", expect=402)
             Client(base).request("GET", "/fixture/check", expect=503)
             check(True, "fresh revoked process cannot admit traffic")
+            admin.request("GET","/admin/api/fleet/rollouts")
+            admin.request("POST","/admin/api/fleet/rollouts/rollout_"+"A"*24+"/recover",{},expect=404)
+            admin.request("GET","/admin/api/fleet",expect=402)
+            check(True,"journal recovery remains accessible after revoked controller restart")
     print("OFFLINE_COMMERCIAL_GATEWAY_ACCEPTANCE_PASS", flush=True)
 
 if __name__ == "__main__":
