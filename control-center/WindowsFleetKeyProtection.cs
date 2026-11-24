@@ -157,7 +157,7 @@ public static class WindowsFleetKeyProtection
         }
     }
 
-    private static string ValidateThumbprint(string? raw, string name)
+    internal static string ValidateThumbprint(string? raw, string name)
     {
         // Thumbprints are certificate lookup locators, not cryptographic
         // signature algorithms or bearer credentials. Require exact 40-hex
@@ -168,7 +168,7 @@ public static class WindowsFleetKeyProtection
         return raw.ToUpperInvariant();
     }
 
-    private static X509Certificate2 LoadPinnedMachineCertificate(string thumbprint)
+    internal static X509Certificate2 LoadPinnedMachineCertificate(string thumbprint)
     {
         using var store = new X509Store(StoreName.My, StoreLocation.LocalMachine);
         store.Open(OpenFlags.ReadOnly | OpenFlags.OpenExistingOnly);
