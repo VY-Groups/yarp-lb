@@ -33,7 +33,10 @@ approved DP recovery epoch before a nonloopback snapshot can be received.
 4. Each guard calls the **real** Linux systemd manager with an explicit,
    sorted, allowlisted unit list: stop, `mask --runtime`, then inspect
    `ActiveState=inactive`, `SubState=dead`, `MainPID=0`, masked
-   `UnitFileState`, and a present unit. After a fresh etcd quorum check,
+   `UnitFileState`, a present unit, and `KillMode=control-group` or
+   `KillMode=mixed`. `KillMode=process` or `none` can strand child
+   key-ring writers even when the main PID has exited, so such units must
+   be independently remediated before a receipt can be signed. After a fresh etcd quorum check,
    it creates an owner-only, new-only P-256 signature over the exact
    cluster/lease/holder, fleet, two node IDs, checkpoint SHA, revision,
    stopped units and at most 90 seconds of wall-clock validity.
