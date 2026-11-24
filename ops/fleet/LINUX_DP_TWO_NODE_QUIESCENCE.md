@@ -137,3 +137,38 @@ malformed ASN.1 fails before any writer service changes. Writer units
 also require `KillMode=control-group` or `mixed`; merely stopped
 `MainPID=0` under `KillMode=process` or `none` is not proof that
 descendant key-ring writers stopped.
+
+## Live quorum supervision while .NET restores a signed offline ring
+
+The real remote receiver now calls
+`ops/fleet/linux_dp_restore_watchdog.py` for the actual .NET 10 restore.
+It launches the approved, tree-hash-pinned restore executable in a new
+private POSIX process session, keeps stdout/stderr suppressed, and requires
+fresh majority-quorum `before-signed-restore` reads and **both** original
+P-256 signed writer receipts at a bounded one-second cadence while the
+subprocess is alive. It never extends the independently approved epoch.
+
+A majority-veto, changed Raft lease identity, expired signature, insufficient
+runway, killed child, nonzero exit or watchdog deadline stops the entire
+process group with SIGKILL. Both pre-launch and post-completion checks remain
+mandatory. After an aborted restore, the ring is **NOT accepted as a live
+node** even if the .NET helper had created a partial or complete offline
+directory before being terminated. An independent operator must quarantine
+and reconcile its inode, signed checkpoint and monotonic floor; the script
+never auto-deletes a potentially trusted ring or unmasks gateway writers.
+
+The disposable watchdog tests use actual Linux subprocesses and verify that
+revocation and timeouts kill the worker before a delayed unauthorized disk
+write. The complete real mTLS + P-256 signed checkpoint + .NET restore test
+exercises the same watchdog call, but intentionally supplies a deterministic
+quorum response oracle; this is **not** an independent live Raft failover test.
+Other real 3-member TLS etcd and actual Ubuntu systemd service tests must also
+pass. A local root administrator can defeat a local process controller; a
+production threat model must physically separate the independent quorum and
+writer-identity authorities.
+
+This protects the offline restore process during the finite authorized
+window; it does **not** implement rolling service handoff, extended automatic
+lease renewal, enterprise signing-key custody or a zero-downtime promotion
+decision. Those remain software obligations under #48, with real-site
+acceptance reserved for #36.
