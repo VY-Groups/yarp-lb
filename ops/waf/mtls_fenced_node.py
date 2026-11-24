@@ -118,6 +118,9 @@ class FencedAgent:
         if self.provider.image_and_config(mode) != self.image:
             raise ValueError("new WAF image differs from signed baseline")
         self.provider.smoke(current["mode"])
+        # Smoke may wait for a cold container; do not trust the pre-smoke
+        # lease for the later Docker mutation boundary.
+        self._attest(stage)
         kind = "activate" if mode == self.target else "rollback"
         name = "rev-" + str(self.revision) + "-" + kind
         intent = self.dir / (name + ".intent")
@@ -131,6 +134,9 @@ class FencedAgent:
                  "policySha256": self.policy_sha, "rulesetSha256": self.ruleset_sha,
                  "operation": kind, "mutationMayHaveStarted": True}
         local.receipt(intent, event)
+        # The fsynced intent is an observable crash boundary. Recheck after
+        # durable I/O and immediately before the non-idempotent provider call.
+        self._attest(stage)
         self.provider.apply(mode)
         after = self._runtime()
         if after != {"mode": mode, "imageId": self.image}:
@@ -176,6 +182,11 @@ class BoundedTlsServer(ThreadingHTTPServer):
     def __init__(self, address, handler):
         super().__init__(address, handler)
         self.slots = threading.BoundedSemaphore(self.max_clients)
+
+    def handle_error(self, *_):
+        # Generic network failures must not print private operator paths or
+        # policy exceptions through BaseServer's default traceback logger.
+        pass
 
     def process_request(self, request, client_address):
         if not self.slots.acquire(blocking=False):
@@ -242,7 +253,7 @@ class NodeHandler(BaseHTTPRequestHandler):
             payload = strict_json(self.rfile.read(int(lengths[0])))
             result = self.server.agent.dispatch(payload)
             self._reply(200, {"ok": True, "nodeId": self.server.agent.node_id, "result": result})
-        except (OSError, ValueError, KeyError, TypeError, UnicodeError):
+        except Exception:
             # Never reveal a private rule, key path, device identity or payload.
             self._reply(409, {"ok": False})
 
