@@ -45,7 +45,12 @@ def compose_run(command, *, env, timeout=60):
 def probe(path, case, mime="application/pkix-cert"):
     connection = http.client.HTTPConnection("127.0.0.1", PORT, timeout=5)
     try:
-        connection.request("POST", path, body=b"synthetic-bounded-public-upload",
+        # The JSON control must contain valid JSON; a fake non-JSON body
+        # would trigger CRS body-processing failure instead of testing the
+        # signed exception and produce a false startup-failure signal.
+        payload = (b'{"fixture":"ordinary"}' if mime == "application/json"
+                   else b"synthetic-bounded-public-upload")
+        connection.request("POST", path, body=payload,
                            headers={"Content-Type": mime, "Connection": "close",
                                     "X-GatewayCore-CI-Case": case})
         response = connection.getresponse()
