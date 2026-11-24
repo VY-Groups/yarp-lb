@@ -168,9 +168,14 @@ def main(compose):
                     ("/signed-pkix", "signed-other-mime", 200)
                 ]
                 for path, name, code in expected:
+                    STAGE = "scoped_" + name
                     media = "application/json" if name == "signed-other-mime" else "application/pkix-cert"
                     status, body = probe(path, name, media)
                     if status != code:
+                        # Only fixed synthetic case ID, status and numeric
+                        # target are safe for public CI; never request bytes.
+                        print(f"SYNTHETIC_SIGNED_SCOPE verdict={name} http={status} expected={code}",
+                              file=sys.stderr)
                         raise ValueError("signed ModSecurity scoped request was not enforced")
                     if code == 200 and b'"accepted":true' not in body:
                         raise ValueError("signed exception request did not reach private origin")
