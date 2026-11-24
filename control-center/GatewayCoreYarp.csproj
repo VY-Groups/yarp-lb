@@ -29,29 +29,7 @@
   <Target Name="RequireReleasePackageTrust" BeforeTargets="PrepareForBuild" Condition="'$(GatewayCoreReleasePackage)' == 'true'">
     <Error Condition="'$(GatewayCoreCommercial)' != 'true'" Text="Release package profile requires commercial licensing." />
     <Error Condition="'$(GatewayCoreReleaseTrustFile)' == '' Or !Exists('$(GatewayCoreReleaseTrustFile)')" Text="Release package requires independently pinned release public trust." />
-    <Error Condition="$([System.Text.RegularExpressions.Regex]::IsMatch('$(GatewayCoreReleaseSourceCommit)', '^[0-9a-f]{40}
-    <Compile Include="../engines/GslbHealthContracts/PrivateKeyFileSecurity.cs" Link="PrivateKeyFileSecurity.cs" />
-    <Compile Include="../engines/GslbHealthContracts/StrictJsonPropertyNames.cs" Link="StrictJsonPropertyNames.cs" />
-    <Compile Include="../src/TrafficPolicies/BoundedTransportFailureHealthPolicy.cs" Link="BoundedTransportFailureHealthPolicy.cs" />
-    <Compile Include="../src/TrafficPolicies/EjectionBudget.cs" Link="EjectionBudget.cs" />
-    <Compile Include="../src/TrafficPolicies/PrimaryBackupCore.cs" Link="PrimaryBackupCore.cs" />
-    <Compile Include="../src/TrafficPolicies/PrimaryBackupPolicy.cs" Link="PrimaryBackupPolicy.cs" />
-    <Compile Include="../src/TrafficPolicies/RiseFallCounter.cs" Link="RiseFallCounter.cs" />
-    <Compile Include="../src/TrafficPolicies/RiseFallActiveHealthPolicy.cs" Link="RiseFallActiveHealthPolicy.cs" />
-    <PackageReference Include="Certes" Version="4.1.0" />
-    <PackageReference Include="Yarp.ReverseProxy" Version="2.3.0" />
-    <PackageReference Include="Microsoft.AspNetCore.Authentication.OpenIdConnect" Version="10.0.15" />
-    <PackageReference Include="StackExchange.Redis" Version="2.9.32" />
-    <PackageReference Include="System.DirectoryServices.Protocols" Version="10.0.15" />
-    <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" Version="10.0.15" />
-    <PackageReference Include="MailKit" Version="4.18.2" />
-    <PackageReference Include="OpenTelemetry.Extensions.Hosting" Version="1.19.1" />
-    <PackageReference Include="OpenTelemetry.Exporter.OpenTelemetryProtocol" Version="1.19.1" />
-    <PackageReference Include="OpenTelemetry.Instrumentation.AspNetCore" Version="1.21.0" />
-    <PackageReference Include="OpenTelemetry.Instrumentation.Runtime" Version="1.21.0" />
-  </ItemGroup>
-</Project>
-)) != 'true'" Text="Release package requires an exact lowercase source commit." />
+    <Error Condition="$([System.Text.RegularExpressions.Regex]::IsMatch('$(GatewayCoreReleaseSourceCommit)', '^[0-9a-f]{40}\z')) != 'true'" Text="Release package requires an exact lowercase source commit." />
   </Target>
   <Target Name="RequireReleasePackageOnCommercialPublish" BeforeTargets="Publish" Condition="'$(GatewayCoreCommercial)' == 'true' And '$(GatewayCoreReleasePackage)' != 'true'">
     <Error Text="Commercial publishing requires the signed release package profile." />
