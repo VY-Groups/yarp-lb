@@ -80,4 +80,53 @@ using var wrongCurve = ECDsa.Create(ECCurve.NamedCurves.nistP384);
 Reject(() => new OfflineLicenseVerifier(new Dictionary<string, byte[]> { ["wrong"] = wrongCurve.ExportSubjectPublicKeyInfo() }), "wrong curve");
 keys["test-1"][0] ^= 255;
 Check(verifier.Verify(file, binding, now).Allows("l7"), "trust keys defensively copied");
+Reject(() => verifier.Verify(Sign(Changed("customerId", "other-customer")), binding, now, valid.Checkpoint), "customer replacement");
+Reject(() => verifier.Verify(Sign(Changed("deploymentId", "other-deployment")), binding, now, valid.Checkpoint), "deployment replacement");
+
+var directory = Path.Combine(Path.GetTempPath(), "gc-license-" + Guid.NewGuid().ToString("N"));
+var directory2 = directory + "-second";
+try
+{
+    var store = new OfflineLicenseStore(directory, verifier);
+    store.Initialize();
+    Check(store.Inspect(now) is null, "explicitly provisioned unlicensed state");
+    var request = store.ExportActivationRequest();
+    var parsed = OfflineActivationRequest.Verify(request);
+    Check(OfflineActivationRequest.Verify(store.ExportActivationRequest()).RequestId != parsed.RequestId,
+        "unique request ID and proof of possession");
+    var modified = request.ToArray();
+    modified[^2] = modified[^2] == (byte)'A' ? (byte)'B' : (byte)'A';
+    Reject(() => OfflineActivationRequest.Verify(modified), "tampered request");
+    var first = (JsonObject)model.DeepClone();
+    first["installationKeySha256"] = parsed.InstallationKeySha256;
+    var firstFile = Sign(first.ToJsonString());
+    Check(store.Import(firstFile, now).Allows("ha"), "offline activation");
+    var reopened = new OfflineLicenseStore(directory, verifier);
+    Check(reopened.Inspect(now.AddMinutes(1))?.Allows("ha") == true, "restart preserves activation");
+    first["revision"] = 3;
+    Check(reopened.Import(Sign(first.ToJsonString()), now.AddMinutes(2)).Revision == 3, "offline renewal");
+    Reject(() => reopened.Import(firstFile, now.AddMinutes(3)), "persisted revision rollback");
+    Reject(() => reopened.Inspect(now.AddHours(-1)), "observed clock rollback");
+    var otherStore = new OfflineLicenseStore(directory2, verifier);
+    otherStore.Initialize();
+    Reject(() => otherStore.Import(firstFile, now), "copy license to independent installation");
+    var statePath = Path.Combine(directory, "license.state");
+    var stateBytes = File.ReadAllBytes(statePath);
+    var corrupted = stateBytes.ToArray();
+    corrupted[8] = corrupted[8] == (byte)'A' ? (byte)'B' : (byte)'A';
+    File.WriteAllBytes(statePath, corrupted);
+    Reject(() => reopened.Inspect(now.AddMinutes(3)), "edited persistent state");
+    File.WriteAllBytes(statePath, stateBytes);
+    Check(reopened.Inspect(now.AddDays(31))?.Validity == LicenseValidity.Expired, "expiry persists across restart");
+    File.Delete(statePath);
+    try { reopened.Inspect(now); throw new Exception("FAIL: missing state accepted"); }
+    catch (FileNotFoundException) { Console.WriteLine("PASS: missing state fails closed"); }
+    try { reopened.Initialize(); throw new Exception("FAIL: silent reinitialization"); }
+    catch (InvalidOperationException) { Console.WriteLine("PASS: no silent identity regeneration"); }
+}
+finally
+{
+    if (Directory.Exists(directory)) Directory.Delete(directory, true);
+    if (Directory.Exists(directory2)) Directory.Delete(directory2, true);
+}
 Console.WriteLine("OFFLINE_LICENSE_VERIFIER_ACCEPTANCE_PASS");

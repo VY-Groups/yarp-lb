@@ -11,7 +11,7 @@ public enum LicenseValidity { NotYetValid, Active, Expired }
 // A checkpoint is an input from a trusted local state store, not proof of
 // rollback resistance by itself. Persistence and replacement are separate gates.
 public sealed record LicenseCheckpoint(string LicenseId, string AllocationId,
-    long Revision, string PayloadSha256);
+    string CustomerId, string DeploymentId, long Revision, string PayloadSha256);
 
 public sealed record VerifiedLicense(
     string LicenseId, string CustomerId, string DeploymentId, string AllocationId,
@@ -21,7 +21,7 @@ public sealed record VerifiedLicense(
     LicenseValidity Validity)
 {
     public bool Allows(string feature) => Validity == LicenseValidity.Active && Features.Contains(feature);
-    public LicenseCheckpoint Checkpoint => new(LicenseId, AllocationId, Revision, PayloadSha256);
+    public LicenseCheckpoint Checkpoint => new(LicenseId, AllocationId, CustomerId, DeploymentId, Revision, PayloadSha256);
 }
 
 // Customer-side verification only. No production signing secret, network
@@ -137,6 +137,7 @@ public sealed class OfflineLicenseVerifier
         var digest = Convert.ToHexString(SHA256.HashData(payload));
         if (checkpoint is not null &&
             (checkpoint.LicenseId != licenseId || checkpoint.AllocationId != allocationId ||
+             checkpoint.CustomerId != customerId || checkpoint.DeploymentId != deploymentId ||
              checkpoint.Revision < 1 || !ValidHash(checkpoint.PayloadSha256) ||
              revision < checkpoint.Revision ||
              (revision == checkpoint.Revision && checkpoint.PayloadSha256 != digest)))
