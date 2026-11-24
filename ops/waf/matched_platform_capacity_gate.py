@@ -92,6 +92,7 @@ def check_policy(p):
             p["windowCount"] > 240 or
             p["windowCount"] * p["windowSeconds"] < 3600 or
             not positive(p["peakBodyGbps"]) or
+            p["peakBodyGbps"] < 0.5 or
             p["headroom"] not in (0.3, 0.5) or
             not positive(p["maxP95Ms"]) or not positive(p["maxP99Ms"]) or
             p["maxP95Ms"] > p["maxP99Ms"] or
