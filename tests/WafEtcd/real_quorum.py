@@ -319,14 +319,27 @@ def main():
 
             # A second controller cannot silently replace a live leased key.
             STAGE = "live-conflicting-writer-cas"
-            duplicate = post(addr, ("/v3/kv/txn",{
-                "compare":[{"result":"EQUAL","target":"CREATE",
-                            "key":keybase,"createRevision":"0"}],
-                "success":[{"requestPut":{"key":keybase,
-                                          "value":encoded,"lease":lease}}],
-                "failure":[]
-            }), ca,writer_cert,writer_key)
+            try:
+                duplicate = post(addr, ("/v3/kv/txn",{
+                    "compare":[{"result":"EQUAL","target":"CREATE",
+                                "key":keybase,"createRevision":"0"}],
+                    "success":[{"requestPut":{"key":keybase,
+                                              "value":encoded,"lease":lease}}],
+                    "failure":[]
+                }), ca,writer_cert,writer_key)
+            except RuntimeError as error:
+                # Only source-owned enum from the disposable HTTP client.
+                candidate = str(error)
+                STAGE = "competing-writer-" + (candidate if
+                    candidate in {"etcd-http-400", "etcd-http-403",
+                        "etcd-http-503", "etcd-http-999",
+                        "etcd-http-oversized"} else "request")
+                raise
             if duplicate.get("succeeded") is not False:
+                # Never print the private WAF lease or any etcd body.
+                STAGE = "competing-writer-unexpected-" + (
+                    "true" if duplicate.get("succeeded") is True else
+                    "missing-or-nonboolean")
                 raise RuntimeError("second etcd WAF writer bypassed active lease")
 
             # Independent revocation is a real quorum event, not a fake local
