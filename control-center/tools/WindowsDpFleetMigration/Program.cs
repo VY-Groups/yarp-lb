@@ -70,6 +70,7 @@ public static class WindowsDpOfflineFleetMigration
         KeyId(root, filename);
         // These checks precede decryption to ensure there is exactly ONE
         // framework-approved DPAPI envelope, not a hidden second secret.
+        Stage = "legacy-envelope-validation";
         var secrets = root.Descendants().Where(x =>
             x.Name.LocalName == "encryptedSecret").ToArray();
         if (secrets.Length != 1 || secrets[0].Name != ProtectionNs + "encryptedSecret" ||
@@ -86,22 +87,28 @@ public static class WindowsDpOfflineFleetMigration
         // The plaintext XElement exists transiently in the isolated process;
         // no master secret is ever written or printed. The process terminates
         // immediately after migrating its bounded offline inventory.
+        Stage = "dpapi-xml-decrypt";
         var plain = new DpapiXmlDecryptor().Decrypt(secret.Elements().Single());
         if (plain.Name.LocalName != "masterKey")
             throw new InvalidOperationException("DPAPI envelope is not a master key");
+        Stage = "certificate-xml-encrypt";
         var wrapped = encryptor.Encrypt(plain);
+        Stage = "certificate-roundtrip-decrypt";
         var recovered = new EncryptedXmlDecryptor().Decrypt(wrapped.EncryptedElement);
         if (!XNode.DeepEquals(plain, recovered))
             throw new InvalidOperationException("Portable X.509 rewrap failed self-check");
+        Stage = "certificate-decryptor-type";
         var typeName = wrapped.DecryptorType.AssemblyQualifiedName;
         if (string.IsNullOrWhiteSpace(typeName) ||
             !typeName.StartsWith(
                 "Microsoft.AspNetCore.DataProtection.XmlEncryption.EncryptedXmlDecryptor, " +
                 "Microsoft.AspNetCore.DataProtection", StringComparison.Ordinal))
             throw new InvalidOperationException("Unexpected certificate decryptor identity");
+        Stage = "certificate-secret-replacement";
         secret.ReplaceWith(new XElement(ProtectionNs + "encryptedSecret",
             new XAttribute("decryptorType", typeName),
             new XElement(wrapped.EncryptedElement)));
+        Stage = "certificate-encrypted-xml-verify";
         if (root.Descendants().Any(x => x.Name.LocalName == "masterKey") ||
             root.Descendants(ProtectionNs + "encryptedSecret").Count() != 1)
             throw new InvalidOperationException("Rewrapped key contains plaintext");
