@@ -83,7 +83,7 @@ Every TLS response is bound to the approved server node ID; different
 server/client leaf pins, wrong CA, malformed input, excessive payload,
 incorrect node ID and revoked quorum do not authorize mutation.
 
-The node writes an exclusive owner-only, fsynced pre-mutation intent whose
+The node also takes a nonblocking, owner-only Linux `flock` around the entire local Docker mutation, post-change verification and receipt commit. A concurrent agent process using the **same approved node receipt directory** cannot run a second mutation in parallel. Independently provision one stable receipt directory per WAF instance; configuring separate directories for the same WAF or allowing an orphan Docker subprocess to outlive the agent remains an operational correctness risk.\n\nThe node writes an exclusive owner-only, fsynced pre-mutation intent whose
 name cannot be reused after process failure. A fully verified state
 transition also gets a new-only durable result receipt. Both controller
 and node retain unresolved journal files on hard crashes rather than
