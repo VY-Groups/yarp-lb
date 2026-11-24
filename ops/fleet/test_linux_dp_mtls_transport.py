@@ -183,6 +183,54 @@ class TransportTests(unittest.TestCase):
             tx.make_server("0.0.0.0",0,bundle,"rev9",client_pin,
                            ca,server_cert,server_key)
 
+    def test_real_pinned_tls_sender_requires_live_checkpoint_bound_quorum(self):
+        ca, identities = self.identities()
+        server_cert, server_key, server_pin = identities["server"]
+        client_cert, client_key, client_pin = identities["client"]
+        bundle = tx.build_bundle(str(self.source), "rev9", str(self.checkpoint))
+
+        class Fence:
+            checkpoint_sha = hashlib.sha256(DUMMY_CHECKPOINT).hexdigest().upper()
+            allowed = True
+            remaining = 90
+
+            def current(self, phase):
+                return self.allowed
+
+            def remaining_seconds(self):
+                return self.remaining
+
+        with self.assertRaises(ValueError):
+            tx.make_server("0.0.0.0", 0, bundle, "rev9", client_pin,
+                           ca, server_cert, server_key, allow_nonloopback=True)
+        fence = Fence()
+        fence.checkpoint_sha = "0" * 64
+        with self.assertRaises(ValueError):
+            tx.make_server("127.0.0.1", 0, bundle, "rev9", client_pin,
+                           ca, server_cert, server_key, fence=fence)
+        fence.checkpoint_sha = hashlib.sha256(DUMMY_CHECKPOINT).hexdigest().upper()
+        fence.allowed = False
+        with self.assertRaises(ValueError):
+            tx.make_server("127.0.0.1", 0, bundle, "rev9", client_pin,
+                           ca, server_cert, server_key, fence=fence)
+        fence.allowed = True
+        srv = tx.make_server("127.0.0.1", 0, bundle, "rev9", client_pin,
+                             ca, server_cert, server_key, fence=fence)
+        thread = threading.Thread(target=srv.serve_forever,
+                                  kwargs={"poll_interval": .02}, daemon=True)
+        thread.start()
+        self.addCleanup(lambda: (srv.shutdown(), srv.server_close(), thread.join(5)))
+        target = "https://127.0.0.1:" + str(srv.server_port)
+        self.assertEqual(tx.fetch_pinned(target, "rev9", server_pin, ca,
+                                         client_cert, client_key), bundle)
+        fence.allowed = False
+        with self.assertRaises(ValueError):
+            tx.fetch_pinned(target, "rev9", server_pin, ca, client_cert, client_key)
+        fence.allowed = True
+        fence.remaining = 5
+        with self.assertRaises(ValueError):
+            tx.fetch_pinned(target, "rev9", server_pin, ca, client_cert, client_key)
+
     def test_stalled_unauthenticated_tls_never_blocks_real_client(self):
         ca,identities=self.identities()
         server_cert,server_key,server_pin=identities["server"]
