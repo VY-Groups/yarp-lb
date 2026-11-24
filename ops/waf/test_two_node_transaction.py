@@ -94,7 +94,7 @@ class FleetTests(unittest.TestCase):
         self.assertEqual(self.receipt()["nodesVerified"], ["waf-a", "waf-b"])
         self.assertEqual(
             self.receipt(".fleet-rev17.json.intent")["state"],
-            "prepared-no-node-mutated")
+            "intent-fsynced-mutation-may-start")
         self.assertEqual(self.output.stat().st_mode & 0o077, 0)
         self.assertEqual(
             (self.folder / ".fleet-rev17.json.intent").stat().st_mode & 0o077, 0)

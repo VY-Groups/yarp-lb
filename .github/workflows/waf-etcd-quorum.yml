@@ -2,9 +2,9 @@ name: Live three-member etcd quorum fencing CI
 on:
   push:
     branches: [main, "feature/**"]
-    paths: ["ops/waf/etcd_quorum_fence.py", "ops/waf/test_etcd_quorum_fence.py", "tests/WafEtcd/**", "ops/waf/etcd_cas_writer.py", "ops/waf/test_etcd_cas_writer.py", "ops/fleet/linux_dp_quorum_authority.py", "ops/fleet/test_linux_dp_quorum_authority.py", ".github/workflows/waf-etcd-quorum.yml"]
+    paths: ["ops/waf/etcd_quorum_fence.py", "ops/waf/test_etcd_quorum_fence.py", "tests/WafEtcd/**", "ops/waf/mtls_fenced_node.py", "ops/waf/waf_node_service.py", "ops/waf/test_mtls_fenced_node.py", "ops/waf/two_node_transaction.py", "ops/waf/test_two_node_transaction.py", "ops/waf/etcd_cas_writer.py", "ops/waf/test_etcd_cas_writer.py", "ops/fleet/linux_dp_quorum_authority.py", "ops/fleet/test_linux_dp_quorum_authority.py", ".github/workflows/waf-etcd-quorum.yml"]
   pull_request:
-    paths: ["ops/waf/etcd_quorum_fence.py", "ops/waf/test_etcd_quorum_fence.py", "tests/WafEtcd/**", "ops/waf/etcd_cas_writer.py", "ops/waf/test_etcd_cas_writer.py", "ops/fleet/linux_dp_quorum_authority.py", "ops/fleet/test_linux_dp_quorum_authority.py", ".github/workflows/waf-etcd-quorum.yml"]
+    paths: ["ops/waf/etcd_quorum_fence.py", "ops/waf/test_etcd_quorum_fence.py", "tests/WafEtcd/**", "ops/waf/mtls_fenced_node.py", "ops/waf/waf_node_service.py", "ops/waf/test_mtls_fenced_node.py", "ops/waf/two_node_transaction.py", "ops/waf/test_two_node_transaction.py", "ops/waf/etcd_cas_writer.py", "ops/waf/test_etcd_cas_writer.py", "ops/fleet/linux_dp_quorum_authority.py", "ops/fleet/test_linux_dp_quorum_authority.py", ".github/workflows/waf-etcd-quorum.yml"]
   workflow_dispatch:
 permissions:
   contents: read
@@ -31,6 +31,12 @@ jobs:
         run: |
           set -euo pipefail
           python3 tests/WafEtcd/real_quorum.py
+      - name: Verify pinned remote node TLS and independently fenced two-node compensation
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m unittest discover -s ops/waf -p test_mtls_fenced_node.py -v
+          python3 -m unittest discover -s ops/waf -p test_two_node_transaction.py -v
       - name: Validate independently signed Linux DP quorum and CAS contracts
         shell: bash
         run: python3 -m unittest discover -s ops/fleet -p test_linux_dp_quorum_authority.py -v
