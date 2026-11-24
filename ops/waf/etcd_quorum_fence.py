@@ -112,6 +112,10 @@ def valid_value(raw, names, revision, policy_digest):
     return value["holder"]
 
 
+class MemberIdentityMismatch(ValueError):
+    """An authenticated endpoint claimed a different approved Raft member."""
+
+
 class EtcdQuorumFence:
     """A fresh linearizable etcd read + lease TTL from 2 of 3 distinct members."""
 
@@ -180,7 +184,7 @@ class EtcdQuorumFence:
             raise ValueError("wrong etcd quorum cluster")
         member = integer(header.get("member_id"))
         if member != endpoint[3]:
-            raise ValueError("etcd member ID not bound to approved TLS leaf")
+            raise MemberIdentityMismatch("etcd member ID not bound to approved TLS leaf")
         observed_revision = integer(header.get("revision"))
         kv = document["kvs"][0]
         if type(kv) is not dict:
@@ -234,6 +238,10 @@ class EtcdQuorumFence:
             try:
                 accepted.append(self._read_member(endpoint, names, revision,
                                                policy_digest))
+            except MemberIdentityMismatch:
+                # A reachable, authenticated endpoint impersonating a different
+                # pinned Raft member is a conflict, not an unreachable vote.
+                return False
             except (OSError, ValueError, KeyError, TypeError,
                     http.client.HTTPException, ssl.SSLError, OverflowError):
                 continue
