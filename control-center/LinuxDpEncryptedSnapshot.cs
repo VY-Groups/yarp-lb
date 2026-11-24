@@ -54,21 +54,36 @@ public static class LinuxDpEncryptedSnapshot
             throw new InvalidOperationException("Encrypted snapshot already exists");
         var sourceDigest = LinuxDpRecoveryEvidence.ComputeInventoryDigest(ringDirectory);
         var staged = Path.Combine(archiveRoot, ".capture-" + Guid.NewGuid().ToString("N"));
+        var stage = "stage-init";
         try
         {
             Directory.CreateDirectory(staged, PrivateDirectory);
+            stage = "copy-ciphertext";
             CopyCheckedEncryptedXml(ringDirectory, staged);
+            stage = "inventory-recheck";
             if (LinuxDpRecoveryEvidence.ComputeInventoryDigest(staged) != sourceDigest ||
                 LinuxDpRecoveryEvidence.ComputeInventoryDigest(ringDirectory) != sourceDigest)
                 throw new InvalidOperationException("Encrypted key-ring changed during offline snapshot");
+            stage = "stage-fsync";
             FlushDirectory(staged);
+            stage = "atomic-publish";
             // Rename is atomic in this directory on a single filesystem.
             // Directory.Move never replaces an existing directory.
             Directory.Move(staged, completed);
+            stage = "root-fsync";
             FlushDirectory(archiveRoot);
+            stage = "published-digest";
             if (LinuxDpRecoveryEvidence.ComputeInventoryDigest(completed) != sourceDigest)
                 throw new InvalidOperationException("Committed snapshot digest changed");
             return sourceDigest;
+        }
+        catch (Exception e) when (e is IOException or InvalidDataException or
+            InvalidOperationException or UnauthorizedAccessException or
+            System.Xml.XmlException)
+        {
+            // Fixed stage IDs are safe for public CI; never print source paths,
+            // certificate material, XML, cookies or arbitrary exception text.
+            throw new InvalidOperationException("Encrypted snapshot stage " + stage, e);
         }
         finally
         {
