@@ -2,9 +2,9 @@ name: Live three-member etcd quorum fencing CI
 on:
   push:
     branches: [main, "feature/**"]
-    paths: ["ops/waf/etcd_quorum_fence.py", "ops/waf/test_etcd_quorum_fence.py", "tests/WafEtcd/**", "ops/waf/etcd_cas_writer.py", "ops/waf/test_etcd_cas_writer.py", "ops/fleet/linux_dp_quorum_authority.py", "ops/fleet/test_linux_dp_quorum_authority.py", ".github/workflows/waf-etcd-quorum.yml"]
+    paths: ["ops/waf/etcd_quorum_fence.py", "ops/waf/test_etcd_quorum_fence.py", "tests/WafEtcd/**", "control-center/LinuxKeyProtection.cs", "control-center/tests/LinuxKeyProtectionTests/**", "ops/waf/etcd_cas_writer.py", "ops/waf/test_etcd_cas_writer.py", "ops/fleet/linux_dp_quorum_authority.py", "ops/fleet/test_linux_dp_quorum_authority.py", ".github/workflows/waf-etcd-quorum.yml"]
   pull_request:
-    paths: ["ops/waf/etcd_quorum_fence.py", "ops/waf/test_etcd_quorum_fence.py", "tests/WafEtcd/**", "ops/waf/etcd_cas_writer.py", "ops/waf/test_etcd_cas_writer.py", "ops/fleet/linux_dp_quorum_authority.py", "ops/fleet/test_linux_dp_quorum_authority.py", ".github/workflows/waf-etcd-quorum.yml"]
+    paths: ["ops/waf/etcd_quorum_fence.py", "ops/waf/test_etcd_quorum_fence.py", "tests/WafEtcd/**", "control-center/LinuxKeyProtection.cs", "control-center/tests/LinuxKeyProtectionTests/**", "ops/waf/etcd_cas_writer.py", "ops/waf/test_etcd_cas_writer.py", "ops/fleet/linux_dp_quorum_authority.py", "ops/fleet/test_linux_dp_quorum_authority.py", ".github/workflows/waf-etcd-quorum.yml"]
   workflow_dispatch:
 permissions:
   contents: read
@@ -12,9 +12,15 @@ jobs:
   real-quorum:
     name: Actual three-member etcd Raft lease CAS/revoke/partition with pinned mTLS
     runs-on: ubuntu-24.04
-    timeout-minutes: 18
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+      - name: Build actual distributed Data Protection acceptance executable
+        shell: bash
+        run: dotnet build control-center/tests/LinuxKeyProtectionTests/LinuxKeyProtectionTests.csproj -c Release
       - name: Resolve immutable upstream etcd release image
         shell: bash
         run: |
@@ -30,7 +36,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python3 tests/WafEtcd/real_quorum.py
+          DP_RUNTIME_FIXTURE_DLL="$PWD/control-center/tests/LinuxKeyProtectionTests/bin/Release/net10.0/LinuxKeyProtectionTests.dll" python3 tests/WafEtcd/real_quorum.py
       - name: Validate independently signed Linux DP quorum and CAS contracts
         shell: bash
         run: python3 -m unittest discover -s ops/fleet -p test_linux_dp_quorum_authority.py -v
