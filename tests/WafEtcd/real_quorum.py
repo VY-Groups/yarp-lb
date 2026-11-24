@@ -90,8 +90,14 @@ def post(url, body, ca, certificate, key):
                       "Accept": "application/json", "Connection": "close"})
         response = conn.getresponse()
         raw = response.read(65537)
-        if response.status != 200 or len(raw) > 65536:
-            raise RuntimeError("disposable etcd API refused request")
+        if response.status != 200:
+            # HTTP status is synthetic runner-only metadata; never print the
+            # response body, certificate, headers or private etcd values.
+            code = response.status if response.status in (
+                400, 401, 403, 404, 408, 429, 500, 502, 503, 504) else 999
+            raise RuntimeError("etcd-http-" + str(code))
+        if len(raw) > 65536:
+            raise RuntimeError("etcd-http-oversized")
         return json.loads(raw)
     finally:
         conn.close()
@@ -186,7 +192,15 @@ def main():
                     break
                 except (OSError, RuntimeError, KeyError, ValueError,
                         http.client.HTTPException, ssl.SSLError) as exc:
-                    last_class = type(exc).__name__
+                    if isinstance(exc, RuntimeError) and str(exc) in {
+                        "etcd-http-400", "etcd-http-401", "etcd-http-403",
+                        "etcd-http-404", "etcd-http-408", "etcd-http-429",
+                        "etcd-http-500", "etcd-http-502", "etcd-http-503",
+                        "etcd-http-504", "etcd-http-999", "etcd-http-oversized"
+                    }:
+                        last_class = str(exc)
+                    else:
+                        last_class = type(exc).__name__
                     time.sleep(.5)
             if cluster is None:
                 states=[]
@@ -202,7 +216,12 @@ def main():
                     STAGE = "cluster-readiness-" + (last_class if last_class in {
                         "ConnectionRefusedError", "SSLCertVerificationError",
                         "SSLError", "TimeoutError", "RuntimeError", "KeyError",
-                        "ValueError", "ConnectionResetError", "OSError"} else "unknown")
+                        "ValueError", "ConnectionResetError", "OSError",
+                        "etcd-http-400", "etcd-http-401", "etcd-http-403",
+                        "etcd-http-404", "etcd-http-408", "etcd-http-429",
+                        "etcd-http-500", "etcd-http-502", "etcd-http-503",
+                        "etcd-http-504", "etcd-http-999", "etcd-http-oversized"
+                    } else "unknown")
                 raise RuntimeError("three-member etcd leader never became ready")
             endpoints = [
                 {"url":f"https://127.0.0.1:{port}",
