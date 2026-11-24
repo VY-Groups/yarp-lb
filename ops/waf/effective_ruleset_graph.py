@@ -234,8 +234,18 @@ def main(argv=None):
         digest, count = observe(args.container)
         print(f"PASS: observed effective CRS include graph files={count} sha256={digest}")
         return 0
-    except ValueError:
-        print("FAIL: effective live WAF include graph not verified", file=sys.stderr)
+    except ValueError as exc:
+        # Never publish raw Nginx/ModSecurity exception strings or private
+        # config paths. A fixed safe phase narrows CI failures reproducibly.
+        stages = {
+            "nginx-root", "config-path-listing", "config-symlink-check",
+            "read-actual-config-bytes", "graph-and-inventory"
+        }
+        stage = str(exc).removeprefix("Effective WAF graph rejected at ")
+        if stage not in stages:
+            stage = "preflight"
+        print("FAIL: effective live WAF include graph at stage=" + stage,
+              file=sys.stderr)
         return 1
 
 
