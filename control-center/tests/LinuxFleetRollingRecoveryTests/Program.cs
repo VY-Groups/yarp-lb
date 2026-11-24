@@ -302,3 +302,5 @@ finally
     // ephemeral self-signed keys/cookies created by this test.
     if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
 }
+
+return 0;
