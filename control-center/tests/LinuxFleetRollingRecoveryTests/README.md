@@ -47,3 +47,7 @@ Run the CI contract via
 `.github/workflows/linux-dp-fleet-rolling-dr.yml`; it is additionally
 gated in the full Control Center Ubuntu job. It must not be run against
 a production identity, real fleet key ring or customer certificate.
+
+### Live HTTP rolling-restart rehearsal
+
+The disposable CI fixture now starts two actual Kestrel child processes with real ASP.NET Core cookie authentication and distinct private key rings. It issues an old cookie, performs continuous authenticated requests while each node is drained, stopped, staged and restarted in turn, and verifies both old and newly rotated cookies on both nodes after staging. Requests are not retried. The harness explicitly serializes admission changes with in-flight probes; it does not exercise the product gateway's routing/drain API or concurrent new-login traffic during staging. It is a software rehearsal, not a physical-host, live writer quorum or full zero-downtime fleet acceptance assertion.

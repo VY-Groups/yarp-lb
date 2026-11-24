@@ -53,7 +53,7 @@ static int Child(string[] a)
     try
     {
         if (a.Length != 8 || a[0] != "child" ||
-            a[1] is not ("mint" or "verify" or "rotate" or "fixture-sleep") ||
+            a[1] is not ("mint" or "verify" or "rotate" or "fixture-sleep" or "http") ||
             (a[6] == "-" ^ a[7] == "-"))
             return 2;
         if (a[1] == "fixture-sleep")
@@ -66,6 +66,8 @@ static int Child(string[] a)
         Configure(a[2], a[3], a[4],
             a[6] == "-" ? null : a[6],
             a[7] == "-" ? null : a[7]);
+        if (a[1] == "http")
+            return HttpRollingAcceptance.RunNode(a[2], a[5]);
         using var provider = OpenProvider(a[2], a[5]);
         var protection = provider.GetRequiredService<IDataProtectionProvider>()
             .CreateProtector(Purpose);
@@ -333,6 +335,16 @@ try
     Check(RunChild("verify", nodeB, nextB, oldB, "OtherTenant.v1",
                    mintOld.Output, "old-session").Exit != 0,
           "cross-tenant Data Protection application boundary rejects old session");
+    var httpA = Path.Combine(root, "http-a");
+    var httpB = Path.Combine(root, "http-b");
+    foreach (var state in new[] {httpA,httpB})
+    {
+        Configure(state, oldA.Pfx, oldA.Password, null, null);
+        LinuxKeyProtection.InitializeStateDirectory();
+    }
+    await HttpRollingAcceptance.RunAsync(httpA, httpB, oldA, nextA, oldB, nextB,
+        ReplicateOnlyNewEncryptedKeys,
+        state => RunChild("rotate", state, nextA, oldA, HttpRollingAcceptance.Application).Exit);
     Console.WriteLine(
         "PASS: real separate-process two-node rolling certificate and lost-key DR software rehearsal");
 }
