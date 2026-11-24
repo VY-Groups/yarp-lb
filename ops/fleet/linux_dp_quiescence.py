@@ -114,14 +114,28 @@ def require_private_p256_signer(private_key, *, runner=subprocess.run):
     _validated_p256_spki(result)
 
 
+# Strict DER SubjectPublicKeyInfo for an uncompressed secp256r1 point.
+# 30 59 SEQUENCE(89):
+#   30 13 AlgorithmIdentifier(ecPublicKey, prime256v1)
+#   03 42 00 04 || X(32) || Y(32)
+# OpenSSL parses the key first. Do NOT search for OID byte sequences:
+# a different curve can contain the P-256 OID inside attacker-controlled
+# point bytes and must never be accepted as a second signing authority.
+P256_SPKI_PREFIX = bytes.fromhex(
+    "3059301306072A8648CE3D020106082A8648CE3D03010703420004"
+)
+
+
 def _validated_p256_spki(result):
-    data = result.stdout
-    ec_oid = bytes.fromhex("06072A8648CE3D0201")
-    p256_oid = bytes.fromhex("06082A8648CE3D030107")
-    if (result.returncode or type(data) is not bytes or
-            not 80 <= len(data) <= 140 or
-            ec_oid not in data or p256_oid not in data):
-        raise ValueError("approved P-256 signing identity required")
+    data = getattr(result, "stdout", None)
+    if (getattr(result, "returncode", None) != 0 or
+            type(data) is not bytes or
+            len(data) != len(P256_SPKI_PREFIX) + 64 or
+            not data.startswith(P256_SPKI_PREFIX)):
+        raise ValueError("strict uncompressed P-256 SPKI signing identity required")
+    # Identity digest is canonical uncompressed DER (not PEM formatting).
+    # Reject compressed and explicit-curve parameters rather than silently
+    # treating non-identical encodings as separate node identities.
     return hashlib.sha256(data).digest()
 
 
