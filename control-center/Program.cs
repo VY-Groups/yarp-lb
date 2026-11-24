@@ -80,6 +80,7 @@ if (args.Length == 1 && args[0] == "--license-init")
     return;
 }
 commercialLicense.Refresh();
+using var fleetQuorum=FleetQuorum.Open(Environment.GetEnvironmentVariable("GATEWAYCORE_FLEET_QUORUM_CONFIG"),true);
 #endif
 var keyDir = Path.Combine(privateDir, "data-protection-keys");
 if (!OperatingSystem.IsLinux() || ec2Lab)
@@ -2385,12 +2386,45 @@ app.MapGet("/admin/api/fleet/status", async () =>
 // approved two-person local change request. Every agent validates its revision.
 // No general-purpose remote shell or arbitrary filesystem access is exposed.
 string FleetDigest() => Convert.ToHexString(SHA256.HashData(AuditStateBytes(fleetPath)));
-Task<List<string>> RollbackAttempted(string logPath, JsonObject journal, List<FleetGateway> gateways) =>
-    FleetRolloutJournal.RollbackAttemptedAsync(logPath, journal, id =>
+async Task<List<string>> RollbackAttempted(string logPath, JsonObject journal, List<FleetGateway> gateways)
+{
+#if GATEWAYCORE_COMMERCIAL
+    // No rollback writes without the original persistent quorum epoch.
+    // Loss of quorum retains the journal and forbids new transactions.
+    var epoch=journal["sequence"]?.GetValue<long>()??0;
+    var tx=journal["id"]!.GetValue<string>();
+    try
     {
-        var row = gateways.Single(x => x.Id == id);
-        return (new Uri(row.Url), CreateFleetClient(row));
+        if(fleetQuorum is null || journal["quorumScope"]?.ToString()!=fleetQuorum.Scope)
+            throw new InvalidOperationException("Original quorum scope unavailable.");
+        await fleetQuorum.Assert(tx,epoch);
+    }
+    catch(Exception ex)
+    {
+        journal["status"]="manual-intervention-required";
+        FleetRolloutJournal.Log(logPath,journal,"fleet","quorum-recovery","blocked",ex.GetType().Name);
+        return new List<string>{"quorum: original ownership unavailable"};
+    }
+#endif
+    var errors=await FleetRolloutJournal.RollbackAttemptedAsync(logPath,journal,id=>
+    {
+        var row=gateways.Single(x=>x.Id==id);
+        return (new Uri(row.Url),CreateFleetClient(row));
     });
+#if GATEWAYCORE_COMMERCIAL
+    if(errors.Count==0)
+    {
+        try{await fleetQuorum!.Release(tx,epoch);}
+        catch(Exception ex)
+        {
+            journal["status"]="manual-intervention-required";
+            FleetRolloutJournal.Log(logPath,journal,"fleet","quorum-release","blocked",ex.GetType().Name);
+            errors.Add("quorum: release not confirmed");
+        }
+    }
+#endif
+    return errors;
+}
 app.MapPost("/admin/api/fleet/rollout/{changeId}", async (HttpContext ctx, string changeId) =>
 {
     if (!Regex.IsMatch(changeId, "^change-[0-9]{8}T[0-9]{13,}Z-[A-F0-9]{10}$"))
@@ -2433,6 +2467,10 @@ app.MapPost("/admin/api/fleet/rollout/{changeId}", async (HttpContext ctx, strin
         var signingKeyPem = await File.ReadAllTextAsync(signingKeyPath, ctx.RequestAborted);
         var targets = new JsonArray();
 #if GATEWAYCORE_COMMERCIAL
+        if(fleetQuorum is null || fleetQuorum.Scope!=commercialLicense.FleetScope())
+            return Results.Conflict(new {error="Authenticated quorum configuration matching the signed deployment is required."});
+        long nodeHighWater=0;
+        long quorumEpoch=0;
         var licensedPeers=new Dictionary<string,VerifiedLicense>(StringComparer.Ordinal);
         async Task<VerifiedLicense> ReadPeer(FleetGateway row,HttpClient client)
         {
@@ -2459,6 +2497,7 @@ app.MapPost("/admin/api/fleet/rollout/{changeId}", async (HttpContext ctx, strin
                 return peer;
             }));
             commercialLicense.ValidateFleetProofs(observed);
+            await fleetQuorum.Assert(txId,quorumEpoch,ctx.RequestAborted);
         }
 #endif
         // Preflight every target before authorizing or dispatching any mutation.
@@ -2474,6 +2513,12 @@ app.MapPost("/admin/api/fleet/rollout/{changeId}", async (HttpContext ctx, strin
             var revision = status?["revision"]?.ToString();
             if (!FleetRolloutJournal.IsDigest(revision) || status?["rollbackFenceProtocol"]?.GetValue<int>() != 1)
                 throw new InvalidOperationException("Agent configuration revision unavailable");
+#if GATEWAYCORE_COMMERCIAL
+            if(status?["quorumFenceProtocol"]?.GetValue<int>()!=1 ||
+                status["quorumScope"]?.ToString()!=fleetQuorum.Scope)
+                throw new InvalidOperationException("Agent does not enforce the same quorum scope.");
+            nodeHighWater=Math.Max(nodeHighWater,status["highestAcceptedSequence"]!.GetValue<long>());
+#endif
             targets.Add(new JsonObject { ["id"] = row.Id, ["originalRevision"] = revision,
                 ["prepareSent"] = false, ["activateSent"] = false, ["rollbackVerified"] = false });
         }
@@ -2485,6 +2530,9 @@ app.MapPost("/admin/api/fleet/rollout/{changeId}", async (HttpContext ctx, strin
             ["status"] = "starting", ["fleetDigest"] = fleetDigest,
             ["changeDigest"] = Convert.ToHexString(SHA256.HashData(changeBytes)), ["targets"] = targets,
             ["details"] = new JsonArray() };
+#if GATEWAYCORE_COMMERCIAL
+        journal["quorumScope"]=fleetQuorum.Scope;
+#endif
         var initial = JsonSerializer.SerializeToUtf8Bytes(journal);
         var denied = await ConfirmStateMutation(ctx, logPath, Array.Empty<byte>(), initial, "FLEET_ROLLOUT_INTENT", true);
         if (denied is not null) return denied;
@@ -2497,7 +2545,14 @@ app.MapPost("/admin/api/fleet/rollout/{changeId}", async (HttpContext ctx, strin
         if (!await CurrentPlan()) return Results.Conflict(new { error = "Rollout authorization or plan changed" });
         WriteAuditedState(logPath, initial);
         persisted = true;
+#if GATEWAYCORE_COMMERCIAL
+        // Persist intent first: if the CAS result is lost, never steal or
+        // silently clear the lock. Reconciliation can inspect this transaction.
+        var ownership=await fleetQuorum.Acquire(txId,nodeHighWater,ctx.RequestAborted);
+        var sequence=quorumEpoch=ownership.Epoch;
+#else
         var sequence = FleetSequenceState.AllocateNext(Path.Combine(privateDir, "fleet-sequence.txt"));
+#endif
         journal["sequence"] = sequence;
         journal["status"] = "preparing";
         FleetRolloutJournal.Write(logPath, journal);
@@ -2552,9 +2607,17 @@ app.MapPost("/admin/api/fleet/rollout/{changeId}", async (HttpContext ctx, strin
         await RequireSameFleet();
         if(!await CurrentPlan())throw new InvalidOperationException("Rollout authorization or plan changed before completion.");
 #endif
+#if GATEWAYCORE_COMMERCIAL
+        // Release only after all activations are acknowledged and the audit
+        // record is durable. If release is ambiguous, retain unresolved state.
+        await Audit(Actor(ctx), "FLEET_ROLLOUT_ACTIVATED", new { txId, changeId });
+        await fleetQuorum.Release(txId,sequence);
+#endif
         journal["status"] = "activated-pending-health-validation";
         FleetRolloutJournal.Log(logPath, journal, "fleet", "finish", "activation-complete", "Live application health is not verified");
+#if !GATEWAYCORE_COMMERCIAL
         await Audit(Actor(ctx), "FLEET_ROLLOUT_ACTIVATED", new { txId, changeId });
+#endif
         return Results.Ok(journal);
     }
     catch (Exception ex)

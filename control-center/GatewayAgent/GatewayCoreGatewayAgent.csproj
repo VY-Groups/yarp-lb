@@ -5,6 +5,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="../FleetQuorum.cs" Link="FleetQuorum.cs" />
     <Compile Include="../FleetConfigSignature.cs" Link="FleetConfigSignature.cs" /><Compile Include="../FleetSequenceState.cs" Link="FleetSequenceState.cs" />
   </ItemGroup>
   <Import Project="../../src/CommercialEngine/CommercialEngine.props" />

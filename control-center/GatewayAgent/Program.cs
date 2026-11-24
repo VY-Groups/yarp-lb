@@ -24,6 +24,25 @@ var allowedThumbprints = builder.Configuration.GetSection("Agent:TrustedClientTh
 var allowedServices = builder.Configuration.GetSection("Agent:AllowedServices").Get<string[]>() ?? [];
 var allowActions = builder.Configuration.GetValue<bool>("Agent:EnableServiceActions");
 var allowConfigChanges = builder.Configuration.GetValue<bool>("Agent:EnableConfigChanges");
+#if GATEWAYCORE_COMMERCIAL
+using var fleetQuorum=FleetQuorum.Open(Environment.GetEnvironmentVariable("GATEWAYCORE_AGENT_QUORUM_CONFIG"),false);
+if(allowConfigChanges && fleetQuorum is null)
+    throw new InvalidOperationException("Commercial gateway config changes require authenticated quorum configuration.");
+if(allowConfigChanges && !recoveryOnly && fleetQuorum!.Scope!=engineLicense!.FleetScope())
+    throw new InvalidOperationException("Agent quorum scope differs from signed deployment.");
+async Task<bool> VerifyFleetFence(string tx,long epoch,bool rollback=false)
+{
+    try
+    {
+        if(fleetQuorum is null || (!rollback && (engineLicense is null || fleetQuorum.Scope!=engineLicense.FleetScope())))return false;
+        await fleetQuorum.Assert(tx,epoch);
+        return rollback || (engineLicense!.Allows("ha") && engineLicense.Allows("fleet"));
+    }
+    catch(Exception ex) when(ex is IOException or HttpRequestException or InvalidOperationException or
+        CryptographicException or ArgumentException or JsonException or FormatException or OverflowException)
+    {return false;}
+}
+#endif
 var allowEngineConfigChanges = builder.Configuration.GetValue<bool>("Agent:EnableEngineConfigChanges");
 var allowEnginePublicBind = builder.Configuration.GetValue<bool>("Agent:AllowEngineNonLoopbackListeners");
 var gslbMetricsPort = builder.Configuration.GetValue<int>("Agent:GslbMetricsPort");
@@ -275,6 +294,10 @@ app.MapGet("/agent/v1/status", () => Results.Ok(new
     revision = allowConfigChanges ? Sha(File.ReadAllBytes(gatewayConfigPath)) : null,
     allowedServiceNames = allowedServices,
     highestAcceptedSequence = allowConfigChanges ? FleetSequenceState.Read(sequencePath) : 0,
+#if GATEWAYCORE_COMMERCIAL
+    quorumFenceProtocol = fleetQuorum is not null ? 1 : 0,
+    quorumScope = fleetQuorum?.Scope,
+#endif
     // This reports agent responsiveness only. NOT YARP's internal destination health.
     kind = "authenticated-agent-status"
 }));
@@ -372,6 +395,10 @@ app.MapPost("/agent/v1/config/prepare", async (ConfigPrepare input) =>
         if (Directory.Exists(txDir)) return Results.Conflict(new { error = "Transaction already exists" });
         if (input.Sequence <= FleetSequenceState.Read(sequencePath))
             return Results.Conflict(new { error = "Older or repeated signed configuration sequence" });
+#if GATEWAYCORE_COMMERCIAL
+        if(!await VerifyFleetFence(input.TransactionId,input.Sequence))
+            return Results.StatusCode(409);
+#endif
         // Reserve the sequence BEFORE staging: a crash cannot make old signed configs eligible.
         FleetSequenceState.Accept(sequencePath, input.Sequence);
         Directory.CreateDirectory(txDir);
@@ -411,6 +438,10 @@ app.MapPost("/agent/v1/config/activate", async (ConfigActivate input) =>
         if (!Sha(actual).Equals(Sha(original),StringComparison.OrdinalIgnoreCase))
             return Results.Conflict(new { error = "Config changed since preparation" });
         await File.WriteAllBytesAsync(gatewayConfigPath + ".next", proposed);
+#if GATEWAYCORE_COMMERCIAL
+        if(!await VerifyFleetFence(input.TransactionId,preparedSequence))
+        {File.Delete(gatewayConfigPath+".next");return Results.StatusCode(409);}
+#endif
         File.Move(gatewayConfigPath + ".next",gatewayConfigPath,true);
         return Results.Ok(new { state="activated", revision=Sha(proposed), transactionId=input.TransactionId });
     }
@@ -438,6 +469,10 @@ app.MapPost("/agent/v1/config/rollback", async (ConfigRollback input) =>
         // Never overwrite config mutated by another operator since rollout.
         if (Sha(actual)!=Sha(staged) && Sha(actual)!=Sha(original))
             return Results.Conflict(new {error="Cannot rollback: gateway has diverged"});
+#if GATEWAYCORE_COMMERCIAL
+        if(!await VerifyFleetFence(input.TransactionId,preparedSequence,rollback:true))
+            return Results.StatusCode(409);
+#endif
         // Fence activation BEFORE restoring the original. A crash cannot make
         // this transaction eligible for a delayed activation after rollback.
         var fence = Path.Combine(tx, "rollback-fence");

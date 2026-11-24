@@ -105,8 +105,11 @@ internal static class FleetRecoveryProcessAcceptance
                 rows.Add(new JsonObject { ["id"]=id,["originalRevision"]=revision,
                     ["prepareSent"]=false,["activateSent"]=false,["rollbackVerified"]=false });
             }
+            using var quorum=FleetQuorum.Open(Environment.GetEnvironmentVariable("GATEWAYCORE_FLEET_QUORUM_CONFIG"),true);
+            if(quorum is not null)sequence=(await quorum.Acquire(tx,sequence-1)).Epoch;
             var journal = new JsonObject {["schema"]=2,["id"]=tx,["fleetDigest"]=digest,
                 ["status"]="preparing",["sequence"]=sequence,["details"]=new JsonArray(),["targets"]=rows};
+            if(quorum is not null)journal["quorumScope"]=quorum.Scope;
             FleetRolloutJournal.Write(path,journal);
             var proxy=JsonNode.Parse("""{"Routes":{},"Clusters":{},"fixture":"candidate"}""")!.AsObject();
             var signingKey=File.ReadAllText(Path.Combine(root,"fleet-private.pem"));

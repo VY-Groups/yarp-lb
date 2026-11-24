@@ -157,6 +157,17 @@ internal sealed class CommercialLicenseRuntime : BackgroundService
         return verifier.VerifyInstallationProof(Encoding.ASCII.GetBytes(proof),challenge,DateTimeOffset.UtcNow);
     }
 
+    internal string FleetScope()
+    {
+        lock(sync)
+        {
+            var local=store.Inspect(DateTimeOffset.UtcNow)??throw new InvalidOperationException("Missing local fleet license.");
+            ApplyVerified(local);
+            if(!Allows("ha")||!Allows("fleet")||local.SiteId is null)throw new InvalidOperationException("Site-bound fleet entitlement required.");
+            return FleetQuorum.DeploymentScope(local.LicenseId,local.CustomerId,local.DeploymentId);
+        }
+    }
+
     internal void ValidateFleetProofs(IReadOnlyList<VerifiedLicense> peers)
     {
         lock(sync)
