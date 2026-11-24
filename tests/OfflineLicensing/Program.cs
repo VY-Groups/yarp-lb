@@ -19,6 +19,51 @@ if (args.Length == 2 && args[0] == "--ci-trust")
     File.WriteAllBytes(args[1], JsonSerializer.SerializeToUtf8Bytes(keys));
     return;
 }
+if (args.Length >= 2 && args[0] is "--ci-authority" or "--ci-issue" or "--ci-revoke")
+{
+    if (Environment.GetEnvironmentVariable("CI") != "true" ||
+        Environment.GetEnvironmentVariable("GITHUB_ACTIONS") != "true" || !OperatingSystem.IsLinux())
+        throw new InvalidOperationException("Disposable Linux CI fixture only.");
+    var root = Path.GetFullPath(args[1]);
+    var keyPath = Path.Combine(root, "disposable-ci-issuer.pk8");
+    var ledgerPath = Path.Combine(root, "issuer.json");
+    if (args[0] == "--ci-authority" && args.Length == 2)
+    {
+        Directory.CreateDirectory(root, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        var raw = signer.ExportPkcs8PrivateKey();
+        try
+        {
+            using var keyFile = new FileStream(keyPath, new FileStreamOptions
+            {
+                Mode = FileMode.CreateNew, Access = FileAccess.Write,
+                UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite
+            });
+            keyFile.Write(raw);
+            keyFile.Flush(true);
+        }
+        finally { CryptographicOperations.ZeroMemory(raw); }
+        File.WriteAllBytes(Path.Combine(root, "public-trust.json"), JsonSerializer.SerializeToUtf8Bytes(keys));
+        var issuer = new OfflineIssuer(ledgerPath, signer, "test-1");
+        issuer.Initialize(new Subscription("ci-license", "ci-customer", "ci-deployment", "standard",
+            1, 1, DateTimeOffset.UtcNow.AddDays(2).ToUnixTimeSeconds(), new[] {"l7", "tls", "monitoring"}),
+            DateTimeOffset.UtcNow);
+        return;
+    }
+    if (args.Length != 4) throw new ArgumentException("Invalid CI fixture arguments.");
+    var privateKey = File.ReadAllBytes(keyPath);
+    try { signer.ImportPkcs8PrivateKey(privateKey, out _); }
+    finally { CryptographicOperations.ZeroMemory(privateKey); }
+    var authority = new OfflineIssuer(ledgerPath, signer, "test-1");
+    var file = args[0] switch
+    {
+        "--ci-issue" => authority.Issue(File.ReadAllBytes(args[2]), "ci-dc", DateTimeOffset.UtcNow),
+        "--ci-revoke" => authority.Revoke(args[2], DateTimeOffset.UtcNow),
+        _ => throw new ArgumentException("Invalid CI command.")
+    };
+    using var output = new FileStream(args[3], FileMode.CreateNew, FileAccess.Write, FileShare.None);
+    output.Write(file);
+    return;
+}
 var model = new JsonObject
 {
     ["schemaVersion"] = 1, ["product"] = "GatewayCore", ["licenseId"] = "test-license",

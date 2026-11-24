@@ -5,6 +5,7 @@ on:
     paths:
       - 'src/GatewayCore.Licensing/**'
       - 'tests/OfflineLicensing/**'
+      - 'tests/E2E/offline_commercial.py'
       - 'tools/LicenseAuthority/**'
       - 'control-center/**'
       - '.github/workflows/offline-licensing-development.yml'
@@ -28,5 +29,23 @@ jobs:
       - name: Compile commercial gateway against disposable public trust
         shell: bash
         run: |
-          dotnet run --project tests/OfflineLicensing/OfflineLicensing.csproj --configuration Release -- --ci-trust "$RUNNER_TEMP/commercial-public-trust.json"
-          dotnet build control-center/GatewayCoreYarp.csproj --configuration Release -p:GatewayCoreCommercial=true -p:GatewayCoreTrustFile="$RUNNER_TEMP/commercial-public-trust.json"
+          if [ "$RUNNER_OS" = Linux ]; then
+            dotnet run --project tests/OfflineLicensing/OfflineLicensing.csproj --configuration Release -- --ci-authority "$RUNNER_TEMP/commercial-ci-authority"
+            trust="$RUNNER_TEMP/commercial-ci-authority/public-trust.json"
+          else
+            trust="$RUNNER_TEMP/commercial-public-trust.json"
+            dotnet run --project tests/OfflineLicensing/OfflineLicensing.csproj --configuration Release -- --ci-trust "$trust"
+          fi
+          dotnet build control-center/GatewayCoreYarp.csproj --configuration Release -p:GatewayCoreCommercial=true -p:GatewayCoreTrustFile="$trust"
+      - name: Actual commercial gateway activation with no network except loopback
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo unshare --net -- bash -ec '
+            ip link set lo up
+            exec runuser -u "$1" -- env PATH="$2" DOTNET_ROOT="$3" CI=true GITHUB_ACTIONS=true python3 tests/E2E/offline_commercial.py "$4"
+          ' _ "$(id -un)" "$PATH" "$DOTNET_ROOT" "$RUNNER_TEMP/commercial-ci-authority"
+      - name: Remove disposable issuer fixture
+        if: always() && runner.os == 'Linux'
+        shell: bash
+        run: rm -rf -- "$RUNNER_TEMP/commercial-ci-authority"
