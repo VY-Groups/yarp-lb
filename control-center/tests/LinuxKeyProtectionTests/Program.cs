@@ -492,6 +492,21 @@ try
         Assert((File.GetUnixFileMode(revisionFloorPath)&(UnixFileMode.GroupRead|
             UnixFileMode.GroupWrite|UnixFileMode.OtherRead|UnixFileMode.OtherWrite))==0,
             "committed independent floor persists privately");
+        // Verify the SAME independently signed encrypted snapshot on a
+        // second, isolated Linux state root before enabling its sessions.
+        // Earlier fleet fixtures copied ciphertext only; no plaintext key,
+        // signer or external revision floor comes from the restored ring.
+        Assert(LinuxDpRecoveryEvidence.ComputeInventoryDigest(fleetReplicaKeys) ==
+            inventoryBeforeCommit,
+            "second isolated replica retains the exact signed encrypted inventory");
+        LinuxDpRecoveryEvidence.Verify(fleetReplicaKeys,generatedManifest,
+            trustedPublicPath,LinuxDpRecoveryFloor.ReadExternalFloor(
+                fleetReplicaKeys,revisionFloorPath));
+        Assert(true,"second isolated replica accepts the independently trusted signed restore");
+        Assert(Throws(()=>LinuxDpRecoveryEvidence.Verify(fleetReplicaKeys,
+                attestationPath,trustedPublicPath,43)),
+            "second isolated replica rejects older signed restore after floor commit");
+
         // Fleet nodes opt into the independent revision FLOOR FILE at startup,
         // instead of copying a stale environment integer from a restored
         // backup. The legacy integer contract must still work by default.
@@ -504,6 +519,12 @@ try
             Assert(restored.GetRequiredService<IDataProtectionProvider>()
                 .CreateProtector("session-probe").Unprotect(encrypted)=="sensitive-session-value-123",
                 "service restart honors externally committed floor and old encrypted cookie");
+        Set("YARP_CONTROL_PLANE_DIR",fleetReplicaState);
+        using(var replicaRestored=Provider(fleetReplicaState))
+            Assert(replicaRestored.GetRequiredService<IDataProtectionProvider>()
+                .CreateProtector("session-probe").Unprotect(encrypted)=="sensitive-session-value-123",
+                "independent replica restart preserves original session after signed restore");
+        Set("YARP_CONTROL_PLANE_DIR",state);
         Set(LinuxDpRecoveryEvidence.ManifestEnv,attestationPath);
         Assert(Throws(()=>{using var _=Provider(state);}),
             "older correctly signed restored snapshot fails against durable external floor");
