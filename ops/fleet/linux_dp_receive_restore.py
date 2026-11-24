@@ -255,7 +255,18 @@ def restore_once(args, *, fetch=wire.fetch_pinned, stage=wire.stage_received,
     require_approved_authority(fence, "after-transfer")
     require_signed_node_quiescence(proof, fence)
     STAGE = "atomic-received-archive"
-    received = stage(str(args.destination_root), args.label, binary)
+    def authorize_publish():
+        require_approved_authority(fence, "after-transfer")
+        require_signed_node_quiescence(proof, fence)
+        if fence is not None:
+            remaining = fence.remaining_seconds()
+            if (type(remaining) not in (int, float) or
+                    not math.isfinite(remaining) or remaining <= 5):
+                raise ValueError("insufficient recovery runway for archive publication")
+        return True
+
+    received = stage(str(args.destination_root), args.label, binary,
+                     authorize_publish=authorize_publish)
     # .NET treats the parent of --archive as an untrusted state root and
     # correctly rejects a checkpoint stored INSIDE that snapshot tree.
     # Materialize the signed (still-untrusted) checkpoint as a separate,

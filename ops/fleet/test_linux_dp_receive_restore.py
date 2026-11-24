@@ -159,7 +159,7 @@ class RecoveryTests(unittest.TestCase):
             invoke=self.fake_success, fence=fence)
         self.assertEqual(received,str(self.inbox/"rev8"))
         self.assertEqual(fence.phases,[
-            "preflight", "before-transfer", "after-transfer",
+            "preflight", "before-transfer", "after-transfer", "after-transfer",
             "before-signed-restore", "after-signed-restore"])
         self.assertEqual(len(self.calls),1)
         self.assertLessEqual(self.calls[0][1]["timeout"], 85)
@@ -194,9 +194,33 @@ class RecoveryTests(unittest.TestCase):
                                        "after-transfer"])
         self.assertEqual(list(self.inbox.iterdir()), [])
 
+    def test_quorum_revoked_during_staging_refuses_atomic_publish(self):
+        fence = SyntheticFence()
+        original_write = wire.safe_write
+
+        def revoke_while_writing(path, data):
+            original_write(path, data)
+            fence.deny = "after-transfer"
+
+        with mock.patch.object(wire, "safe_write", side_effect=revoke_while_writing):
+            with mock.patch.object(wire, "publish_no_replace",
+                                   side_effect=AssertionError("unfenced rename")) as publish:
+                with self.assertRaises(ValueError):
+                    recovery.restore_once(
+                        self.args, fetch=lambda *_:synthetic_blob(),
+                        fence=fence,
+                        invoke=lambda *a,**k:self.fail("unauthorized restore"))
+                publish.assert_not_called()
+        self.assertEqual(fence.phases, ["preflight", "before-transfer",
+                                       "after-transfer", "after-transfer"])
+        self.assertEqual(list(self.inbox.iterdir()), [],
+                         "revoked staging must leave no archive or temporary tree")
+        self.assertFalse((self.state/"data-protection-keys").exists())
+
     def test_staged_checkpoint_must_match_inspected_response(self):
-        def tampered_stage(root, label, blob):
-            path = wire.stage_received(root, label, blob)
+        def tampered_stage(root, label, blob, *, authorize_publish):
+            path = wire.stage_received(root, label, blob,
+                                       authorize_publish=authorize_publish)
             (Path(path)/"checkpoint.json").write_bytes(b"changed")
             return path
 
