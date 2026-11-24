@@ -79,6 +79,12 @@ jobs:
       - name: Verify Linux production Data Protection RSA encryption and rotation
         if: runner.os == 'Linux'
         run: dotnet run --project tests/LinuxKeyProtectionTests/LinuxKeyProtectionTests.csproj --configuration Release
+      - name: Real two-process Linux fleet key rotation and lost-key recovery
+        if: runner.os == 'Linux'
+        env:
+          GITHUB_ACTIONS: "true"
+          RUNNER_OS: "Linux"
+        run: dotnet run --project tests/LinuxFleetRollingRecoveryTests/LinuxFleetRollingRecoveryTests.csproj --configuration Release
       - name: Reject unsafe legacy-state cutover without modifying users or keys
         run: dotnet run --project tests/LegacyStateGuardTests/LegacyStateGuardTests.csproj --configuration Release
       - name: Verify real Control Center EC2 CI-only TLS safety and allowlist

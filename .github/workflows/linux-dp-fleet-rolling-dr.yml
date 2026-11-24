@@ -1,0 +1,35 @@
+name: Linux Data Protection two-node rolling certificate and lost-key DR
+on:
+  pull_request:
+    paths:
+      - "control-center/tests/LinuxFleetRollingRecoveryTests/**"
+      - "control-center/LinuxKeyProtection.cs"
+      - "control-center/LinuxDpRecoveryEvidence.cs"
+      - ".github/workflows/linux-dp-fleet-rolling-dr.yml"
+  push:
+    branches: [main]
+    paths:
+      - "control-center/tests/LinuxFleetRollingRecoveryTests/**"
+      - "control-center/LinuxKeyProtection.cs"
+      - "control-center/LinuxDpRecoveryEvidence.cs"
+      - ".github/workflows/linux-dp-fleet-rolling-dr.yml"
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  real-ubuntu-process-isolated-rotation:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+      - name: Real two-process RSA key-ring rolling migration and fail-closed DR
+        shell: bash
+        env:
+          GITHUB_ACTIONS: "true"
+          RUNNER_OS: "Linux"
+        run: |
+          set -euo pipefail
+          dotnet run --project control-center/tests/LinuxFleetRollingRecoveryTests/LinuxFleetRollingRecoveryTests.csproj --configuration Release
