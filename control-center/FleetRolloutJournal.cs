@@ -91,7 +91,7 @@ internal static class FleetRolloutJournal
     }
 
     internal static async Task<List<string>> RollbackAttemptedAsync(string logPath, JsonObject journal,
-        Func<string, (Uri Origin, HttpClient Client)> connect)
+        Func<string, (Uri Origin, HttpClient Client)> connect,Func<Task>? complete=null)
 {
     var errors = new List<string>();
     foreach (var target in FleetRolloutJournal.Targets(journal).Where(FleetRolloutJournal.NeedsRollback))
@@ -119,6 +119,15 @@ internal static class FleetRolloutJournal
         {
             errors.Add(id + ": " + ex.GetType().Name);
             FleetRolloutJournal.Log(logPath, journal, id, "rollback", "unresolved", ex.GetType().Name);
+        }
+    }
+    if(errors.Count==0 && complete is not null)
+    {
+        try{await complete();}
+        catch(Exception ex)
+        {
+            errors.Add("quorum: completion not confirmed");
+            FleetRolloutJournal.Log(logPath,journal,"fleet","quorum-complete","blocked",ex.GetType().Name);
         }
     }
     journal["status"] = errors.Count == 0 ? "rollback-verified" : "manual-intervention-required";

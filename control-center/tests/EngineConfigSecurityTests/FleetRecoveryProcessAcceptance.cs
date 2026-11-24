@@ -10,7 +10,7 @@ internal static class FleetRecoveryProcessAcceptance
     // Production helper and normal HTTPS transport; no product test bypass.
     internal static async Task RunAsync(string[] args)
     {
-        if (args.Length != 8 || args[0] is not ("prepare" or "recover" or "verify" or "install-client" or "remove-client" or "install-root" or "remove-root"))
+        if (args.Length != 8 || args[0] is not ("prepare" or "recover" or "verify" or "reject-unfenced" or "reject-partition" or "install-client" or "remove-client" or "install-root" or "remove-root"))
             throw new ArgumentException("Expected operation, root, cert, key, server cert, two ports and journal path");
         var (mode, root, certPath, keyPath, serverPath, firstPort, secondPort, path) =
             (args[0],args[1],args[2],args[3],args[4],int.Parse(args[5]),int.Parse(args[6]),args[7]);
@@ -71,7 +71,7 @@ internal static class FleetRecoveryProcessAcceptance
             // agent independently uses production client-chain/CRL validation.
             handler.ServerCertificateCustomValidationCallback = (_,leaf,_,_) =>
                 leaf?.Thumbprint == server.Thumbprint;
-            return (origin,new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(4),MaxResponseContentBufferSize = 65536 });
+            return (origin,new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(mode=="reject-partition"?12:4),MaxResponseContentBufferSize = 65536 });
         }
         async Task<JsonObject> Call(string id,string suffix,object? body = null)
         {
@@ -92,6 +92,43 @@ internal static class FleetRecoveryProcessAcceptance
         const string tx = "rollout_AAAAAAAAAAAAAAAAAAAAAAAA";
         var inventory = Path.Combine(root,"fleet-controller","state","fleet-gateways.json");
         var digest = File.Exists(inventory) ? Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(inventory))) : new string('D',64);
+        if(mode=="reject-unfenced")
+        {
+            var before=await Call("one","agent/v1/status");
+            var revision=before["revision"]!.GetValue<string>();
+            var sequence=checked(before["highestAcceptedSequence"]!.GetValue<long>()+1);
+            var proxy=JsonNode.Parse("""{"Routes":{},"Clusters":{}}""")!.AsObject();
+            var signingKey=File.ReadAllText(Path.Combine(root,"fleet-private.pem"));
+            const string unauthorized="rollout_FFFFFFFFFFFFFFFFFFFFFFFF";
+            var signed=FleetConfigSignature.SignV2(signingKey,unauthorized,revision,proxy,DateTimeOffset.UtcNow.AddMinutes(2).ToUnixTimeSeconds(),sequence);
+            var (origin,client)=Connect("one");
+            using(client)
+            using(var rejected=await client.PostAsJsonAsync(new Uri(origin,"agent/v1/config/prepare"),
+                new {TransactionId=unauthorized,ExpectedRevision=revision,ReverseProxy=proxy,
+                    signed.ExpiresUnixSeconds,signed.Sequence,signed.KeyId,signed.Signature}))
+                Must(rejected.StatusCode==HttpStatusCode.Conflict,"correct controller signature without live quorum cannot prepare");
+            var after=await Call("one","agent/v1/status");
+            Must(after["revision"]!.ToString()==revision &&
+                after["highestAcceptedSequence"]!.GetValue<long>()==sequence-1,
+                "unfenced prepare neither mutates config nor consumes agent epoch");
+            return;
+        }
+        if(mode=="reject-partition")
+        {
+            var pending=FleetRolloutJournal.Read(path);
+            var second=FleetRolloutJournal.Targets(pending)[1];
+            var before=await Call("two","agent/v1/status");
+            var (origin,client)=Connect("two");
+            using(client)
+            using(var rejected=await client.PostAsJsonAsync(new Uri(origin,"agent/v1/config/activate"),
+                new {TransactionId=tx,PreparedRevision=second["preparedRevision"]!.GetValue<string>()}))
+                Must(rejected.StatusCode==HttpStatusCode.Conflict,"actual prepared agent denies activation during Raft minority");
+            var after=await Call("two","agent/v1/status");
+            Must(before["revision"]!.ToString()==after["revision"]!.ToString() &&
+                after["revision"]!.ToString()==second["originalRevision"]!.ToString(),
+                "minority activation leaves exact original config intact");
+            return;
+        }
         if(mode == "prepare")
         {
             var rows = new JsonArray();
@@ -105,8 +142,11 @@ internal static class FleetRecoveryProcessAcceptance
                 rows.Add(new JsonObject { ["id"]=id,["originalRevision"]=revision,
                     ["prepareSent"]=false,["activateSent"]=false,["rollbackVerified"]=false });
             }
+            using var quorum=FleetQuorum.Open(Environment.GetEnvironmentVariable("GATEWAYCORE_FLEET_QUORUM_CONFIG"),true);
+            if(quorum is not null)sequence=(await quorum.Acquire(tx,sequence-1)).Epoch;
             var journal = new JsonObject {["schema"]=2,["id"]=tx,["fleetDigest"]=digest,
                 ["status"]="preparing",["sequence"]=sequence,["details"]=new JsonArray(),["targets"]=rows};
+            if(quorum is not null)journal["quorumScope"]=quorum.Scope;
             FleetRolloutJournal.Write(path,journal);
             var proxy=JsonNode.Parse("""{"Routes":{},"Clusters":{},"fixture":"candidate"}""")!.AsObject();
             var signingKey=File.ReadAllText(Path.Combine(root,"fleet-private.pem"));

@@ -112,6 +112,19 @@ internal sealed class EngineLicenseGate : IDisposable
             {Volatile.Write(ref snapshot,null);}
         }
     }
+    public string FleetScope()
+    {
+        lock(sync)
+        {
+            if(!Allows("ha")||!Allows("fleet"))throw new CryptographicException("Fleet entitlement unavailable.");
+            var license=store.Inspect(DateTimeOffset.UtcNow);
+            if(license is null || license.SiteId is null || !license.Allows("ha")||!license.Allows("fleet"))
+                throw new CryptographicException("Active site-bound fleet entitlement required.");
+            // Same canonical fields as controller scope. Keep shared SDK unchanged.
+            return Convert.ToHexString(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(
+                license.LicenseId+"\n"+license.CustomerId+"\n"+license.DeploymentId)));
+        }
+    }
     public string CreateFleetProof(string challenge)
     {
         lock(sync)
