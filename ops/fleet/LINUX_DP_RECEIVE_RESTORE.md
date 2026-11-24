@@ -56,7 +56,8 @@ python3 ops/fleet/linux_dp_receive_restore.py \
   --trusted-public-key /secure/recovery-authority/trusted-verifier.pem \
   --minimum-revision-file /secure/recovery-authority/min-revision.txt \
   --restore-bundle /opt/gatewaycore/offline-dp-restore \
-  --restore-bundle-sha256 REPLACE_WITH_APPROVED_64_UPPER_HEX_BUNDLE
+  --restore-bundle-sha256 REPLACE_WITH_APPROVED_64_UPPER_HEX_BUNDLE \
+  --dotnet-runtime-root /usr/share/dotnet
 ```
 
 There is no headless live deployment action, implicit recovery retry or
@@ -131,3 +132,25 @@ it does not prove two different server service identities, actual
 Windows DPAPI migration, cross-node trust-floor distribution, an
 independently renewing fencing authority, real host key ACLs or
 DR failover. Those missing SOFTWARE components stay under #48.
+
+### Independent .NET runtime-root approval
+
+For framework-dependent `.NET 10` apphosts installed outside the default
+system runtime discovery locations, supply `--dotnet-runtime-root` only
+after the receiver operator has approved the local installed .NET runtime.
+The root must be absolute, non-symlinked, owned by the system or current
+service identity, non-writable by groups/other users, and contain a single-
+linked executable `dotnet` host of the approved ownership/mode. A
+specially crafted inherited `DOTNET_ROOT` or `DOTNET_ROOT_X64` is
+**never** forwarded to the signed recovery process. The receiver sets
+both to the independently supplied and validated root, or omits both
+and uses the system apphost discovery mechanism. It does not accept
+a downloaded runtime from the snapshot sender. The disposable runner
+resolves the actual host executable from its own installed image, then
+passes that trust-bound root explicitly rather than copying a mutable
+process environment.
+
+Always confirm the .NET runtime version and vendor provenance during
+offline installation or service-account provisioning; a protected path
+alone is not a binary code-signing attestation. This is a software
+recovery integration control, not production site DR evidence.
