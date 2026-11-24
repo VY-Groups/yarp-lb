@@ -15,6 +15,10 @@ if (!OperatingSystem.IsLinux())
     Console.WriteLine("SKIP: Linux-specific filesystem/DAPI tests on non-Linux host");
     return;
 }
+if (args.Length>0 && args[0]=="--distributed-real")
+{
+    Environment.Exit(DistributedRealAcceptance.Run(args));
+}
 // DP-09/DP-13: execute the real key-ring loader in a separate OS process.
 // The disposable protected cookie and expected plaintext travel over stdin, never argv or logs.
 if (args.Length > 0 && args[0] == "--verify-cookie")
@@ -59,7 +63,8 @@ var previousEnv=new[] {
     LinuxDpRecoveryEvidence.MinimumRevisionEnv,
     LinuxDpRecoveryEvidence.MinimumRevisionFileEnv,
     LinuxDpRecoveryEvidence.RequireEvidenceEnv,
-    LinuxKeyProtection.FleetReplicaSetting
+    LinuxKeyProtection.FleetReplicaSetting,
+    LinuxKeyProtection.DistributedRingSetting
 }.ToDictionary(k=>k,k=>Environment.GetEnvironmentVariable(k));
 void Set(string key,string? value) => Environment.SetEnvironmentVariable(key,value);
 // A hard link has a different pathname but the same backing inode; neither
@@ -151,6 +156,7 @@ static bool Throws(Action action)
 try
 {
     Set(LinuxKeyProtection.FleetReplicaSetting,null);
+    Set(LinuxKeyProtection.DistributedRingSetting,null);
     var first=CreateCertificate("first");
     var second=CreateCertificate("second");
     Set("YARP_CONTROL_PLANE_DIR",state);
@@ -1390,6 +1396,69 @@ try
     Assert(historicFiles.All(p=>SHA256.HashData(File.ReadAllBytes(p))
             .SequenceEqual(historicHashes[p])),
         "historic encrypted key XML is not rewritten by decrypt-only retirement overlap");
+    // Exercise the actual .NET Data Protection IXmlRepository integration
+    // contract with deterministic Raft replies (not real network evidence).
+    using(var cert=X509CertificateLoader.LoadPkcs12(File.ReadAllBytes(replacement.Pfx),
+          File.ReadAllText(replacement.PasswordFile).Trim(),X509KeyStorageFlags.EphemeralKeySet))
+    {
+        var members=Enumerable.Range(1,3).Select(i=>
+            new LinuxKeyProtection.DistributedRingRepository.Member(
+                "https://127.0.0."+i+":2379/",new string((char)('0'+i),64),i.ToString())).ToArray();
+        var settings=new LinuxKeyProtection.DistributedRingRepository.Settings(
+            "fleet-ci","node-a","999",1,members,"writer","node-a",456,90,
+            "unused","unused","unused");
+        var records=new Dictionary<string,string>();
+        bool authorized=true;
+        long revision=100;
+        System.Text.Json.JsonDocument Rpc(LinuxKeyProtection.DistributedRingRepository.Member member,
+            string endpoint,object body)
+        {
+            using var request=System.Text.Json.JsonDocument.Parse(System.Text.Json.JsonSerializer.Serialize(body));
+            var header=new {cluster_id="999",member_id=member.MemberId,revision=revision.ToString()};
+            if(endpoint=="/v3/kv/range")
+                return System.Text.Json.JsonDocument.Parse(System.Text.Json.JsonSerializer.Serialize(new {
+                    header,count=records.Count.ToString(),kvs=records.Select(x=>new {
+                        key=x.Key,value=x.Value,version="1",mod_revision=revision.ToString()})}));
+            var compares=request.RootElement.GetProperty("compare").EnumerateArray().ToArray();
+            Assert(compares.Length==3&&compares[0].GetProperty("modRevision").GetString()=="90"&&
+                compares[1].GetProperty("lease").GetString()=="456",
+                "real DP repository mutation carries exact lease and revision CAS");
+            var put=request.RootElement.GetProperty("success")[0].GetProperty("requestPut");
+            var inserted=authorized&&records.TryAdd(put.GetProperty("key").GetString()!,
+                put.GetProperty("value").GetString()!);
+            return System.Text.Json.JsonDocument.Parse(System.Text.Json.JsonSerializer.Serialize(
+                new {header,succeeded=inserted}));
+        }
+        using var distributedWriter=new LinuxKeyProtection.DistributedRingRepository(settings,cert,null,Rpc);
+        var services=new ServiceCollection();
+        services.AddDataProtection().SetApplicationName("distributed-fixture")
+            .ProtectKeysWithCertificate(cert).DisableAutomaticKeyGeneration();
+        services.Configure<KeyManagementOptions>(options=>options.XmlRepository=distributedWriter);
+        using var writer=services.BuildServiceProvider();
+        writer.GetRequiredService<IKeyManager>().CreateNewKey(DateTimeOffset.UtcNow,
+            DateTimeOffset.UtcNow.AddDays(30));
+        var probe=writer.GetRequiredService<IDataProtectionProvider>().CreateProtector("distributed-probe");
+        var cookie=probe.Protect("distributed-cookie");
+        using var distributedReader=new LinuxKeyProtection.DistributedRingRepository(
+            settings with {Mode="reader",NodeId="node-b",WriterNode=null,LeaseId=null,WriterModRevision=null},
+            cert,null,Rpc);
+        var readers=new ServiceCollection();
+        readers.AddDataProtection().SetApplicationName("distributed-fixture")
+            .ProtectKeysWithCertificate(cert).DisableAutomaticKeyGeneration();
+        readers.Configure<KeyManagementOptions>(options=>options.XmlRepository=distributedReader);
+        using var readProvider=readers.BuildServiceProvider();
+        Assert(readProvider.GetRequiredService<IDataProtectionProvider>()
+            .CreateProtector("distributed-probe").Unprotect(cookie)=="distributed-cookie",
+            "real DP cookie decrypts through independent distributed read-only repository");
+        Assert(Throws(()=>readProvider.GetRequiredService<IKeyManager>().CreateNewKey(
+            DateTimeOffset.UtcNow,DateTimeOffset.UtcNow.AddDays(30))),
+            "distributed reader refuses explicit key writes");
+        authorized=false;
+        Assert(Throws(()=>writer.GetRequiredService<IKeyManager>().CreateNewKey(
+            DateTimeOffset.UtcNow,DateTimeOffset.UtcNow.AddDays(30)))&&records.Count==1,
+            "revoked distributed writer cannot publish another encrypted key");
+    }
+    Set(LinuxKeyProtection.DistributedRingSetting,null);
     await ProductLinuxStartupSmoke.RunAsync();
     await SystemdServiceAcceptance.RunTerminationCleanupContractAsync();
     await SystemdServiceAcceptance.RunFromGitHubLinuxAsync();
