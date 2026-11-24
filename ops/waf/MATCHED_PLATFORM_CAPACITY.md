@@ -28,7 +28,7 @@ approval and immutable build:
 - \`trafficProfileSha256\` of the approved complete fixed payload/connection
   mix and approved concurrency, ALPN, keepalive, TLS/HTTP version
 - \`windowSeconds\` 60/120/300 and \`windowCount*windowSeconds >= 3600\`
-- \`peakBodyGbps\` externally observed peak, \`headroom\` exactly 0.30 or 0.50
+- \`peakBodyGbps\` independently measured peak of at least **0.5 Gbps**, \`headroom\` exactly 0.30 or 0.50. Smaller declared peaks fail closed; larger approved peaks remain valid
 - pre-approved \`maxP95Ms\`, \`maxP99Ms\`,
   \`maxWafP99Multiplier\`, \`maxCpuUtilizationPercent\`,
   \`maxAllocatedBytesPerRequest\`, \`maxGcPauseMsPerWindow\`
