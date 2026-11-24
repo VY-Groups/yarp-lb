@@ -23,6 +23,7 @@ import time
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "ops" / "waf"))
 import etcd_quorum_fence as quorum
+import etcd_cas_writer as writer
 
 IMAGE = os.getenv("ETCD_IMAGE", "")
 P = "A" * 64
@@ -310,19 +311,15 @@ def main():
                 value,sort_keys=True).encode("ascii")).decode("ascii")
 
             def grant_and_put():
-                granted = post(addr, ("/v3/lease/grant",{"TTL":"30"}),
-                               ca,writer_cert,writer_key)
-                lease = str(granted["ID"])
-                txn = post(addr, ("/v3/kv/txn",{
-                    "compare":[{"result":"EQUAL","target":"CREATE",
-                                "key":keybase,"createRevision":"0"}],
-                    "success":[{"requestPut":{"key":keybase,
-                                              "value":encoded,"lease":lease}}],
-                    "failure":[]
-                }), ca,writer_cert,writer_key)
-                if txn.get("succeeded") is not True:
-                    raise RuntimeError("etcd atomic lease key reservation failed")
-                return lease
+                authority = writer.EtcdCasWriter(
+                    "fleet-ci", endpoints, cluster, ca, writer_cert,
+                    writer_key, NODES, 7, P, ttl=120)
+                minted = authority.issue_once()
+                if (minted["nodeIds"] != list(NODES) or
+                        minted["policySha256"] != P or
+                        minted["revision"] != 7):
+                    raise RuntimeError("independent CAS writer issued wrong identity")
+                return str(minted["leaseId"])
 
             STAGE = "lease-cas-grant"
             lease = grant_and_put()
