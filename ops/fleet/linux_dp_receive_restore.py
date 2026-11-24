@@ -21,6 +21,7 @@ MAX_BUNDLE_FILES = 256
 MAX_BUNDLE_BYTES = 256 * 1024 * 1024
 MAX_SINGLE_FILE = 64 * 1024 * 1024
 RESTORE_APP = "LinuxDpEncryptedSnapshot"
+STAGE = "init"
 
 
 def disjoint(a, b):
@@ -114,11 +115,14 @@ def verify_restore_app(app_dir, approved_hash):
 
 def restore_once(args, *, fetch=wire.fetch_pinned, stage=wire.stage_received,
                  invoke=subprocess.run):
+    global STAGE
+    STAGE = "platform-and-operator-approval"
     if not sys.platform.startswith("linux") or not args.approved_offline:
         raise ValueError("explicit offline Linux writer-fencing approval required")
     for path in (args.destination_root, args.state_root, args.trusted_public_key,
                  args.minimum_revision_file, args.restore_bundle):
         wire.canonical_absolute(str(path))
+    STAGE = "private-recovery-directories"
     inbox = wire.private_directory(str(args.destination_root))
     os.close(inbox)
     state = wire.private_directory(str(args.state_root))
@@ -129,15 +133,19 @@ def restore_once(args, *, fetch=wire.fetch_pinned, stage=wire.stage_received,
             not disjoint(args.trusted_public_key, args.destination_root) or
             not disjoint(args.minimum_revision_file, args.destination_root)):
         raise ValueError("restored state, inbox, tool and independent trust must be disjoint")
+    STAGE = "independent-trust-custody"
     for item in (args.trusted_public_key, args.minimum_revision_file):
         wire.read_private_path(str(item), 16384)
     if os.path.lexists(os.path.join(args.state_root, "data-protection-keys")):
         raise ValueError("live or previously restored DP ring must not be overwritten")
+    STAGE = "pinned-complete-dotnet-bundle"
     app = verify_restore_app(args.restore_bundle, args.restore_bundle_sha256)
+    STAGE = "pinned-mtls-fetch"
     binary = fetch(args.server_url, args.label, args.server_cert_sha256, args.ca,
                    args.certificate, args.private_key)
     if type(binary) is not bytes or len(binary) > wire.MAX_BUNDLE:
         raise ValueError("untrusted encrypted transfer")
+    STAGE = "atomic-received-archive"
     received = stage(str(args.destination_root), args.label, binary)
     checkpoint = os.path.join(received, "checkpoint.json")
     ring = os.path.join(received, "ring")
@@ -155,19 +163,23 @@ def restore_once(args, *, fetch=wire.fetch_pinned, stage=wire.stage_received,
     # DOTNET_ROOT. Preserve only independently trusted, non-writable,
     # canonical runtime-root paths, never an arbitrary inherited search path
     # or untrusted runtime injection setting.
+    STAGE = "approved-dotnet-runtime"
     for name in ("DOTNET_ROOT", "DOTNET_ROOT_X64"):
         if name in os.environ:
             path = os.environ[name]
             trusted_dir(path)
             environment[name] = path
+    STAGE = "signed-dotnet-restore-subprocess"
     process = invoke(command, shell=False, stdin=subprocess.DEVNULL,
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                      env=environment, timeout=180, check=False)
     if process.returncode != 0:
         raise ValueError("independent signed .NET snapshot restore refused")
     # Detect externally changed binaries/dependencies after execution.
+    STAGE = "post-execution-bundle-integrity"
     if tree_hash(args.restore_bundle) != args.restore_bundle_sha256:
         raise ValueError("restore application changed during execution")
+    STAGE = "restored-private-ring-integrity"
     restored = os.path.join(args.state_root, "data-protection-keys")
     if not os.path.lexists(restored):
         raise ValueError("restore exited without installing encrypted key ring")
