@@ -3,11 +3,15 @@ on:
   pull_request:
     paths:
       - 'ops/windows-installer/**'
+      - 'control-center/wwwroot/**'
+      - 'control-center/docs/OPERATOR_QUICK_GUIDE.md'
       - '.github/workflows/windows-offline-lab-installer.yml'
   push:
     branches: [main]
     paths:
       - 'ops/windows-installer/**'
+      - 'control-center/wwwroot/**'
+      - 'control-center/docs/OPERATOR_QUICK_GUIDE.md'
       - '.github/workflows/windows-offline-lab-installer.yml'
   workflow_dispatch:
 permissions:
@@ -74,6 +78,7 @@ jobs:
           Set-Content setup-output/SHA256SUMS.txt "$hash  GatewayCore-Setup-win-x64.exe" -Encoding ascii
           Set-Content setup-output/SOURCE_COMMIT.txt $env:EXACT_SHA -Encoding ascii
           Copy-Item ops/windows-installer/README.md setup-output/README.md
+          Copy-Item control-center/docs/OPERATOR_QUICK_GUIDE.md setup-output/OPERATOR_QUICK_GUIDE.md
       - uses: actions/upload-artifact@v4
         with:
           name: gatewaycore-windows-lab-setup-${{ env.EXACT_SHA }}-${{ matrix.scenario }}

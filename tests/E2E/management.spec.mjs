@@ -4,6 +4,19 @@ import {test, expect} from '@playwright/test';
 // No HTML mocks, no page.route(), no mocked /admin/api responses.
 test('browser: bootstrap, navigation, onboarding, websites, route edit, users and reset', async ({page}) => {
   const pageErrors=[];
+  async function openNav(view) {
+    const nav = page.locator('button.nav[data-view="'+view+'"]');
+    const parent = nav.locator('xpath=ancestor::details');
+    if (await parent.count() && await parent.getAttribute('open') === null)
+      await parent.locator('summary').click();
+    await nav.click();
+  }
+  async function openAdvancedSetup() {
+    const details = page.locator('.operator-advanced');
+    await expect(details).toBeAttached();
+    if (await details.getAttribute('open') === null)
+      await details.locator('summary').click();
+  }
   page.on('pageerror',error=>pageErrors.push(String(error)));
 
   await page.goto('/dashboard', {waitUntil:'domcontentloaded'});
@@ -34,13 +47,18 @@ test('browser: bootstrap, navigation, onboarding, websites, route edit, users an
   expect(await page.evaluate(async()=> (await fetch('/admin/api/state')).status)).toBe(200);
 
   await test.step('Setup Center page shows live setup state',async()=>{
-    await page.locator('button.nav[data-view="setup"]').click();
+    await openNav('setup');
     await expect(page.locator('#content')).toContainText('FIRST-RUN BOOTSTRAP');
     await expect(page.locator('#content')).toContainText('Set up your YARP gateway');
+    await expect(page.locator('.operator-advanced')).not.toHaveAttribute('open','');
+    await expect(page.locator('[data-action="setup-simple-website"]')).toBeVisible();
+    await openNav('guide');
+    await expect(page.locator('#content')).toContainText('GatewayCore in five steps');
+    await openNav('setup');
   });
 
   await test.step('Architecture has working back and hosting choices',async()=>{
-    await page.locator('button.nav[data-view="onboarding"]').click();
+    await openNav('onboarding');
     await expect(page.locator('#content')).toContainText('Gateway onboarding');
     await expect(page.locator('[data-action="setup-prev"]')).toContainText('Exit to Setup Center');
     await page.locator('[data-action="setup-step"][data-id="2"]').click();
@@ -74,7 +92,27 @@ test('browser: bootstrap, navigation, onboarding, websites, route edit, users an
   });
   await page.reload({waitUntil:'domcontentloaded'});
   await expect(page.locator('#app-shell')).toBeVisible();
-  await page.locator('button.nav[data-view="setup"]').click();
+  await openNav('setup');
+
+  await test.step('Simple website form creates an approval-only single-server draft',async()=>{
+    await page.locator('[data-action="setup-simple-website"]').click();
+    await expect(page.locator('#modal-title')).toContainText('Add website / API');
+    await expect(page.locator('#f-backend2')).not.toHaveAttribute('required','');
+    await page.locator('#f-id').fill('simple-browser');
+    await page.locator('#f-hostname').fill('simple.example.invalid');
+    await page.locator('#f-backend1').fill('http://app.example.invalid/');
+    await page.locator('#confirm').click();
+    await expect(page.locator('#modal')).toBeVisible();
+    await page.locator('#f-backend1').fill('https://app.example.invalid/');
+    await page.locator('#confirm').click();
+    await expect(page.locator('#modal')).toBeHidden();
+    await expect(page.locator('#content')).toContainText('simple-browser-route');
+    await expect(page.locator('#save')).toBeVisible();
+    const live=await page.evaluate(async()=>await (await fetch('/admin/api/state')).json());
+    expect(live.routes['simple-browser-route']).toBeUndefined();
+    await openNav('setup');
+    await expect(page.locator('#save')).toBeVisible();
+  });
 
   await test.step('Add Website supports Apache/Nginx/IIS and exits cleanly',async()=>{
     await page.locator('[data-action="setup-local-web"]').click();
@@ -88,6 +126,7 @@ test('browser: bootstrap, navigation, onboarding, websites, route edit, users an
     await expect(page.locator('#modal')).toBeHidden();
     await expect(page.locator('#page-subtitle')).toContainText('Unsaved');
 
+    await openAdvancedSetup();
     await page.locator('[data-action="setup-add-application"]').click();
     await expect(page.locator('#modal-title')).toContainText('Advanced public HTTPS application');
     await expect(page.locator('#f-hosting')).toContainText('Kubernetes Ingress (external)');
@@ -96,6 +135,7 @@ test('browser: bootstrap, navigation, onboarding, websites, route edit, users an
   });
 
   await test.step('application builder creates separate pools and guards restricted services',async()=>{
+    await openAdvancedSetup();
     await page.locator('[data-action="setup-add-esign-pools"]').click();
     await expect(page.locator('#modal-title')).toContainText('Application public and private API pools');
     await expect(page.locator('#modal-help')).toContainText('Private host matching does not isolate network access');
@@ -115,22 +155,23 @@ test('browser: bootstrap, navigation, onboarding, websites, route edit, users an
     await page.locator('#confirm').click();
     await expect(page.locator('#modal')).toBeHidden();
     await expect(page.locator('#notice')).toContainText('Added public and private eSign route and backend pool');
-    await page.locator('button.nav[data-view="routes"]').click();
+    await openNav('routes');
     await expect(page.locator('#content')).toContainText('esign-browser-public-route');
     await expect(page.locator('#content')).toContainText('esign-browser-private-route');
     await expect(page.locator('#content')).toContainText('esign-browser-public-pool');
     await expect(page.locator('#content')).toContainText('esign-browser-private-pool');
-    await page.locator('button.nav[data-view="clusters"]').click();
+    await openNav('clusters');
     await expect(page.locator('#content')).toContainText('PrimaryBackup');
     await expect(page.locator('#content')).toContainText('Active');
-    await page.locator('button.nav[data-view="backends"]').click();
+    await openNav('backends');
     await expect(page.locator('#content')).toContainText('A host match separates routes');
     await expect(page.locator('#content')).toContainText('Inspect live health');
     await page.locator('[data-action="dest-drain"]').first().click();
     await expect(page.locator('#content')).toContainText('Draining');
     await expect(page.locator('#notice')).toContainText('unsaved draft');
 
-    await page.locator('button.nav[data-view="setup"]').click();
+    await openNav('setup');
+    await openAdvancedSetup();
     await page.locator('[data-action="setup-add-esign-pools"]').click();
     await page.locator('#f-id').fill('ra-browser');
     await page.locator('#f-service').selectOption('RA');
@@ -143,11 +184,12 @@ test('browser: bootstrap, navigation, onboarding, websites, route edit, users an
     await page.locator('#f-privateApp1').fill('https://ra-01.example.invalid/');
     await page.locator('#f-privateApp2').fill('https://ra-02.example.invalid/');
     await page.locator('#confirm').click();
-    await page.locator('button.nav[data-view="routes"]').click();
+    await openNav('routes');
     await expect(page.locator('#content')).toContainText('ra-browser-private-route');
     await expect(page.locator('#content')).not.toContainText('ra-browser-public-route');
 
-    await page.locator('button.nav[data-view="setup"]').click();
+    await openNav('setup');
+    await openAdvancedSetup();
     await page.locator('[data-action="setup-add-esign-pools"]').click();
     await page.locator('#f-id').fill('ocsp-passive');
     await page.locator('#f-service').selectOption('OCSP');
@@ -159,13 +201,13 @@ test('browser: bootstrap, navigation, onboarding, websites, route edit, users an
     await expect(page.locator('#modal-help')).toContainText('bounded transport-failure ejection');
     await page.locator('#confirm').click();
     await expect(page.locator('#notice')).toContainText('two consecutive failures');
-    await page.locator('button.nav[data-view="clusters"]').click();
+    await openNav('clusters');
     await expect(page.locator('#content')).toContainText('Passive only');
   });
 
   await test.step('Edit Route allows optional hostname and a visible Cancel',async()=>{
-    await page.locator('button.nav[data-view="routes"]').click();
-    await expect(page.locator('#content')).toContainText('Routes');
+    await openNav('routes');
+    await expect(page.locator('#content h2')).toHaveText('Websites & routes');
     await page.locator('[data-action="route-edit"]').first().click();
     await expect(page.locator('#modal-title')).toContainText('Edit route');
     await expect(page.locator('#f-hosts')).not.toHaveAttribute('required');
@@ -177,7 +219,7 @@ test('browser: bootstrap, navigation, onboarding, websites, route edit, users an
   });
 
   await test.step('Create account and Reset Password submit real API requests',async()=>{
-    await page.locator('button.nav[data-view="users"]').click();
+    await openNav('users');
     await expect(page.locator('#content')).toContainText('Administrator accounts');
     await page.locator('[data-action="user-add"]').click();
     await expect(page.locator('#modal-title')).toContainText('Create management user');
@@ -202,13 +244,13 @@ test('browser: bootstrap, navigation, onboarding, websites, route edit, users an
     for(const view of ['overview','clusters','backends','health','metrics',
       'inventory','approvals','backups','mail','directory','fleet','capabilities','featurematrix']){
       const nav=page.locator('button.nav[data-view="'+view+'"]');
-      if(await nav.isHidden()){
+      if(await nav.evaluate(el=>el.hidden)){
         // A standalone topology intentionally hides Fleet; that is an access
         // guard, NOT missing or broken navigation.
         expect(view,'only standalone Fleet may be hidden').toBe('fleet');
         continue;
       }
-      await nav.click();
+      await openNav(view);
       await expect(page.locator('#page-title')).not.toBeEmpty();
       await expect(page.locator('#content')).not.toBeEmpty();
     }
@@ -217,20 +259,20 @@ test('browser: bootstrap, navigation, onboarding, websites, route edit, users an
 
   await test.step('Short mobile viewport still reaches lower navigation entries',async()=>{
     await page.setViewportSize({width:390,height:667});
-    await page.locator('button.nav[data-view="users"]').click();
+    await openNav('users');
     await expect(page.locator('#content')).toContainText('Administrator accounts');
-    await page.locator('button.nav[data-view="mail"]').click();
+    await openNav('mail');
     await expect(page.locator('#page-title')).toContainText('Mail & OTP');
   });
 
   await test.step('Zoho India SMTP profile uses SMTP host not webmail, with no credential autofill',async()=>{
-    await page.locator('button.nav[data-view="mail"]').click();
+    await openNav('mail');
     await expect(page.locator('#smtp-preset')).toBeVisible();
     await page.locator('#smtp-preset').selectOption('zoho-in-org');
     await expect(page.locator('#mail-config [name="host"]')).toHaveValue('smtppro.zoho.in');
     // Re-clicking the already active page must not start a competing API
     // request that replaces a user's unsaved form edits.
-    await page.locator('button.nav[data-view="mail"]').click();
+    await openNav('mail');
     await expect(page.locator('#mail-config [name="host"]')).toHaveValue('smtppro.zoho.in');
     await expect(page.locator('#mail-config [name="port"]')).toHaveValue('587');
     await expect(page.locator('#mail-config [name="startTls"]')).toBeChecked();
