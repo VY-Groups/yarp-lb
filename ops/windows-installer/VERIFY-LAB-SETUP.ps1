@@ -19,6 +19,7 @@ $productRoot = Join-Path $env:ProgramData 'GatewayCoreYarp'
 $stateRoot = Join-Path $productRoot 'ControlPlane'
 $configPath = Join-Path $stateRoot 'config\appsettings.json'
 $target = Join-Path $env:ProgramFiles "GatewayCore\Lab\$SourceCommit"
+$testFailureMarker = Join-Path $env:TEMP "GatewayCoreYarp-installer-fail-health-$SourceCommit"
 $oldSha = '0000000000000000000000000000000000000000'
 $oldRoot = Join-Path $env:ProgramFiles "GatewayCore\Lab\$oldSha"
 $oldExe = Join-Path $oldRoot 'app\GatewayCoreYarp.exe'
@@ -98,7 +99,8 @@ function Seed-PreviousInstall {
 function Assert-InstalledService([string]$ExpectedExe) {
     $service = Get-CimInstance Win32_Service -Filter "Name='$serviceName'"
     if ($null -eq $service -or $service.State -ne 'Running' -or $service.StartMode -ne 'Auto' -or $service.StartName -ne 'NT AUTHORITY\LocalService') {
-        throw 'GatewayCore service is not running as LocalService with automatic startup.'
+        $actual = if ($null -eq $service) { 'missing' } else { "State='$($service.State)', StartMode='$($service.StartMode)', StartName='$($service.StartName)'" }
+        throw "GatewayCore service is not running as LocalService with automatic startup. SCM reported: $actual"
     }
     if ($service.PathName.Trim('"') -cne $ExpectedExe) { throw "SCM binary path mismatch: $($service.PathName)" }
     Wait-Healthy
@@ -157,9 +159,9 @@ try {
         $stateAclBefore = Get-DirectoryAclSddl $stateRoot
         $configBefore = [IO.File]::ReadAllText($oldConfig)
         $serviceEnvironmentBefore = @((Get-ItemProperty -LiteralPath $svcKey).Environment)
-        $env:GATEWAYCORE_INSTALLER_TEST_FAIL_HEALTH = '1'
+        Set-Content -LiteralPath $testFailureMarker -Value 'CI-only controlled startup failure' -Encoding ascii
         Invoke-Setup -ExpectFailure
-        Remove-Item Env:\GATEWAYCORE_INSTALLER_TEST_FAIL_HEALTH -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $testFailureMarker -Force -ErrorAction SilentlyContinue
         $restored = Get-CimInstance Win32_Service -Filter "Name='$serviceName'"
         if ($null -eq $restored -or $restored.PathName.Trim('"') -cne $oldExe -or $restored.State -ne 'Running' -or
             $restored.StartMode -ne 'Auto' -or $restored.StartName -ne 'NT AUTHORITY\LocalService') {
@@ -211,7 +213,7 @@ try {
         Write-Output 'PASS: uninstall removes its service and binaries while retaining ProgramData state.'
     }
 } finally {
-    Remove-Item Env:\GATEWAYCORE_INSTALLER_TEST_FAIL_HEALTH -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $testFailureMarker -Force -ErrorAction SilentlyContinue
     $service = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
     if ($null -ne $service) {
         if ($service.Status -ne 'Stopped') { Stop-Service -Name $serviceName -ErrorAction SilentlyContinue }

@@ -40,7 +40,7 @@ Name: "{group}\GatewayCore Dashboard"; Filename: "http://127.0.0.1:8080/dashboar
 Name: "{commondesktop}\GatewayCore Dashboard"; Filename: "http://127.0.0.1:8080/dashboard"; Tasks: desktopicon
 Name: "{group}\Installation and rollback instructions ({#SourceCommit})"; Filename: "{app}\ops\windows-installer\README.md"
 [UninstallRun]
-Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ""{app}\ops\windows-installer\Remove-GatewayCoreLabService.ps1"" -InstallRoot ""{app}"""; Flags: runhidden waituntilterminated
+Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ""{app}\ops\windows-installer\Remove-GatewayCoreLabService.ps1"" -InstallRoot ""{app}"""; RunOnceId: RemoveGatewayCoreService; Flags: runhidden waituntilterminated
 [Run]
 Filename: "http://127.0.0.1:8080/dashboard"; Flags: shellexec runasoriginaluser skipifsilent; Check: DashboardReady
 [Code]
@@ -68,7 +68,7 @@ begin
     MsgBox('GatewayCore Lab requires 64-bit Windows.', mbError, MB_OK);
     Exit;
   end;
-  if not IsAdminLoggedOn then begin
+  if not IsAdmin then begin
     MsgBox('Run GatewayCore Lab Setup as a local administrator.', mbError, MB_OK);
     Exit;
   end;

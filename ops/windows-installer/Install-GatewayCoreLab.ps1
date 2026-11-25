@@ -331,8 +331,9 @@ function Assert-OwnedService([object]$Service) {
 }
 
 function Wait-ServiceHealth([int]$TimeoutSeconds, [switch]$SkipTestInjection) {
-    if (-not $SkipTestInjection -and $env:GATEWAYCORE_INSTALLER_TEST_FAIL_HEALTH -eq '1') {
-        if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted') { throw 'Test-only health failure injection is forbidden outside disposable GitHub-hosted runners.' }
+    $testFailureMarker = Join-Path $env:TEMP "GatewayCoreYarp-installer-fail-health-$SourceCommit"
+    if (-not $SkipTestInjection -and (Test-Path -LiteralPath $testFailureMarker) -and
+        $env:GITHUB_ACTIONS -eq 'true' -and $env:RUNNER_ENVIRONMENT -eq 'github-hosted') {
         throw 'Disposable acceptance requested a controlled service health failure.'
     }
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
@@ -395,169 +396,22 @@ try {
             [Security.Principal.SecurityIdentifier]::new([Security.Principal.WellKnownSidType]::BuiltinAdministratorsSid, $null).Value,
             [Security.Principal.SecurityIdentifier]::new([Security.Principal.WellKnownSidType]::LocalServiceSid, $null).Value
         )
-        foreach ($rule in $rootAcl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])) {
-            if ($rule.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and $rule.IdentityReference.Value -notin $allowedRootPrincipals) {
-                throw 'Existing ProgramData root grants access to an unapproved identity; preserve it and perform a separately reviewed ACL migration.'
-            }
-        }
-        $previousProductRootSddl = $rootAcl.GetSecurityDescriptorSddlForm([Security.AccessControl.AccessControlSections]::Access)
-    } else {
-        Set-ProductRootAcl $productRoot
-    }
-    $previousService = Get-CimInstance Win32_Service -Filter "Name='$serviceName'" -ErrorAction SilentlyContinue
-    $previousExecutable = Assert-OwnedService $previousService
-    $previousWasRunning = $null -ne $previousService -and $previousService.State -eq 'Running'
-    if ($null -ne $previousService) {
-        $previousImagePath = [string]$previousService.PathName
-        $previousStart = (Get-ItemProperty -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Services\$serviceName").Start
-        $previousServiceIdentity = [string]$previousService.StartName
-        if ($previousServiceIdentity -notin @('NT AUTHORITY\LocalService','LocalSystem')) {
-            throw 'In-place upgrade supports only LocalService or LocalSystem service identities; preserve the existing installation and use a reviewed service-account migration.'
-        }
-        $oldServiceProperties = Get-ItemProperty -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Services\$serviceName"
-        if ($null -ne $oldServiceProperties.PSObject.Properties['FailureActions']) { $previousFailureActions = $oldServiceProperties.FailureActions }
-        if ($null -ne $oldServiceProperties.PSObject.Properties['FailureActionsOnNonCrashFailures']) { $previousFailureActionsOnNonCrash = $oldServiceProperties.FailureActionsOnNonCrashFailures }
-        if ($null -ne $oldServiceProperties.PSObject.Properties['Description']) { $previousDescription = $oldServiceProperties.Description }
-        $previousEnvironment = Read-ServiceEnvironment $serviceName
-        $sourceConfig = Get-ConfigSource $previousService $previousEnvironment
-    }
-    if ($configExisted) { $sourceConfig = $configPath }
-    if (-not $sourceConfig -and $null -eq $previousService) {
-        $legacyCandidates = @(Get-ChildItem -LiteralPath (Join-Path $env:ProgramFiles 'GatewayCore\Lab') -Directory -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -match '^[0-9a-f]{40}$' -and $_.FullName -ne $installRoot } |
-            ForEach-Object { Join-Path $_.FullName 'app\appsettings.json' } | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf })
-        if ($legacyCandidates.Count -gt 1) { throw 'Multiple old GatewayCore configurations were found; choose the active one manually before setup.' }
-        if ($legacyCandidates.Count -eq 1) { $sourceConfig = [IO.Path]::GetFullPath($legacyCandidates[0]) }
-    }
-
-    $stateAclManifest = Get-TreeAclManifest $stateRoot
-    $backupId = [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfffZ') + '-' + $SourceCommit.Substring(0,12)
-    $backupPath = Join-Path $backupRoot $backupId
-    New-ProductAcl -Path $backupRoot
-    New-ProductAcl -Path $backupPath
-    if ($stateExisted) {
-        $stateFiles = Get-FileManifest $stateRoot
-        $backupState = Join-Path $backupPath 'ControlPlane'
-        Copy-VerifiedState $stateRoot $backupState $stateFiles
-        foreach ($item in @((Get-Item -LiteralPath $backupState -Force)) + @(Get-ChildItem -LiteralPath $backupState -Force -Recurse)) {
-            Set-BackupAcl $item.FullName
-        }
-        $stateAclManifest | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $backupPath 'ControlPlane-acl.json') -Encoding UTF8
-        $stateFiles | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $backupPath 'ControlPlane-sha256.json') -Encoding UTF8
-    }
-    if ($sourceConfig -and $sourceConfig -ne $configPath) {
-        $configBackup = Join-Path $backupPath 'source-appsettings.json'
-        Copy-Item -LiteralPath $sourceConfig -Destination $configBackup -Force
-        if ((Get-FileHash $sourceConfig -Algorithm SHA256).Hash -ne (Get-FileHash $configBackup -Algorithm SHA256).Hash) { throw 'Runtime config backup verification failed.' }
-        Set-BackupAcl $configBackup
-        $originalConfig = $null
-    } elseif ($configExisted) {
-        $originalConfig = [IO.File]::ReadAllBytes($configPath)
-    }
-
-    $serviceKeyPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$serviceName"
-    $migrationStarted = $true
-    if ($null -ne $previousProductRootSddl) { Set-ProductRootAcl $productRoot }
-    if ($previousWasRunning) {
-        Stop-Service -Name $serviceName
-        (Get-Service $serviceName).WaitForStatus([ServiceProcess.ServiceControllerStatus]::Stopped, [timespan]::FromSeconds(60))
-    }
-    foreach ($path in @($stateRoot, $configRoot)) {
-        if (-not (Test-Path -LiteralPath $path)) { New-ProductAcl -Path $path -IncludeLocalService }
-    }
-    $config = ConvertTo-ManagedConfig $sourceConfig
-    Write-AtomicConfig $config $configPath
-    Assert-NoReparsePoints $stateRoot
-    foreach ($item in @((Get-Item -LiteralPath $stateRoot -Force)) + @(Get-ChildItem -LiteralPath $stateRoot -Force -Recurse)) {
-        Set-StateAcl $item.FullName
-    }
-    $environment = @("YARP_RUNTIME_CONFIG_PATH=$configPath", 'ASPNETCORE_ENVIRONMENT=Production')
-
-    if ($null -eq $previousService) {
-        Invoke-Sc @('create',$serviceName,'binPath=',('"{0}"' -f $exePath),'start=','auto','obj=','NT AUTHORITY\LocalService','DisplayName=','GatewayCore Lab')
-        $serviceCreated = $true
-    } else {
-        $serviceChanged = $true
-        Invoke-Sc @('config',$serviceName,'binPath=',('"{0}"' -f $exePath),'start=','auto','obj=','NT AUTHORITY\LocalService')
-    }
-    if (-not (Test-Path -LiteralPath $serviceKeyPath)) { throw 'SCM service registration did not create its service key.' }
-    New-ItemProperty -LiteralPath $serviceKeyPath -Name Environment -PropertyType MultiString -Value $environment -Force | Out-Null
-    Invoke-Sc @('description',$serviceName,'GatewayCore Lab gateway and local control center')
-    Invoke-Sc @('failure',$serviceName,'reset=','86400','actions=','restart/5000/restart/15000/restart/60000')
-    Start-Service -Name $serviceName
-    Wait-ServiceHealth $HealthTimeoutSeconds
-
-    $liveService = Get-CimInstance Win32_Service -Filter "Name='$serviceName'"
-    if ($null -eq $liveService -or $liveService.StartName -ne 'NT AUTHORITY\LocalService' -or $liveService.StartMode -ne 'Auto') {
-        throw 'The running service does not have the required LocalService / automatic-start settings.'
-    }
-    foreach ($dir in @($stateRoot,$configRoot,(Join-Path $stateRoot 'data-protection-keys'))) {
-        if (-not (Test-Path -LiteralPath $dir) -or -not (Get-Acl -LiteralPath $dir).AreAccessRulesProtected) { throw "Protected service-state ACL verification failed: $dir" }
-    }
-    [IO.File]::WriteAllText($readyMarker, $SourceCommit, [Text.Encoding]::ASCII)
-    $transactionSucceeded = $true
-    Write-Host "GatewayCore Lab is installed and healthy. Rollback backup: $backupPath"
-} catch {
-    $failure = $_
-    $rollbackErrors = [Collections.Generic.List[string]]::new()
-    try {
-        $svc = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
-        if ($null -ne $svc -and $svc.Status -ne 'Stopped') {
-            Stop-Service -Name $serviceName -ErrorAction Stop
-            $svc.WaitForStatus([ServiceProcess.ServiceControllerStatus]::Stopped, [timespan]::FromSeconds(60))
-        }
-    } catch { $rollbackErrors.Add("Could not stop failed service: $($_.Exception.Message)") }
-    if ($migrationStarted) {
-        try {
-            if ($configExisted -and $null -ne $originalConfig) {
-                [IO.File]::WriteAllBytes($configPath, $originalConfig)
-            } elseif (-not $configExisted -and (Test-Path -LiteralPath $configPath)) {
-                Remove-Item -LiteralPath $configPath -Force
-            } elseif ($sourceConfig -and $sourceConfig -ne $configPath -and (Test-Path -LiteralPath $sourceConfig)) {
-                # The old file was never removed or modified; only the new migrated copy is discarded.
-                if (Test-Path -LiteralPath $configPath) { Remove-Item -LiteralPath $configPath -Force }
-            }
-            Restore-TreeAclManifest $stateRoot $stateAclManifest
-            if ($null -ne $previousProductRootSddl) {
-                $rootRestore = [Security.AccessControl.DirectorySecurity]::new()
-                $rootRestore.SetSecurityDescriptorSddlForm($previousProductRootSddl, [Security.AccessControl.AccessControlSections]::Access)
-                Set-Acl -LiteralPath $productRoot -AclObject $rootRestore
-            }
-        } catch { $rollbackErrors.Add("Could not fully restore config/state ACLs: $($_.Exception.Message)") }
-    }
-    try {
-        if ($serviceCreated) {
-            Invoke-Sc @('delete',$serviceName)
-        } elseif ($serviceChanged) {
-            $oldStartMode = switch ($previousStart) { 0 {'boot'} 1 {'system'} 2 {'auto'} 3 {'demand'} 4 {'disabled'} default { throw "Unsupported prior SCM start mode: $previousStart" } }
-            Invoke-Sc @('config',$serviceName,'binPath=',$previousImagePath,'start=',$oldStartMode,'obj=',('"{0}"' -f $previousServiceIdentity))
-            if ($previousEnvironment.Count -gt 0) {
-                New-ItemProperty -LiteralPath $serviceKeyPath -Name Environment -PropertyType MultiString -Value $previousEnvironment -Force | Out-Null
-            } else {
-                Remove-ItemProperty -LiteralPath $serviceKeyPath -Name Environment -ErrorAction SilentlyContinue
-            }
-            if ($null -ne $previousFailureActions) {
-                New-ItemProperty -LiteralPath $serviceKeyPath -Name FailureActions -PropertyType Binary -Value $previousFailureActions -Force | Out-Null
-            } else { Remove-ItemProperty -LiteralPath $serviceKeyPath -Name FailureActions -ErrorAction SilentlyContinue }
-            if ($null -ne $previousFailureActionsOnNonCrash) {
-                New-ItemProperty -LiteralPath $serviceKeyPath -Name FailureActionsOnNonCrashFailures -PropertyType DWord -Value $previousFailureActionsOnNonCrash -Force | Out-Null
-            } else { Remove-ItemProperty -LiteralPath $serviceKeyPath -Name FailureActionsOnNonCrashFailures -ErrorAction SilentlyContinue }
-            if ($null -ne $previousDescription) {
-                Invoke-Sc @('description',$serviceName,[string]$previousDescription)
-            }
-            if ($previousWasRunning) {
-                Start-Service -Name $serviceName
-                Wait-ServiceHealth 60 -SkipTestInjection
-            }
-        }
-    } catch { $rollbackErrors.Add("Could not restore prior service: $($_.Exception.Message)") }
-    if (Test-Path -LiteralPath $readyMarker) { Remove-Item -LiteralPath $readyMarker -Force }
-    if ($rollbackErrors.Count -gt 0) {
-        throw "Setup failed: $($failure.Exception.Message) Rollback was incomplete; preserve installer backup '$backupPath' and investigate: $($rollbackErrors -join '; ')"
-    }
-    throw "Setup failed and the prior service/configuration was restored. Backup: '$backupPath'. Cause: $($failure.Exception.Message)"
-} finally {
-    if ($null -ne $lock) { $lock.Dispose() }
-}
-
-if (-not $transactionSucceeded) { throw 'Setup transaction did not reach a verified healthy state.' }
+        foreach ($rule in $rootAcl.GetAcmˆ◊õhëÈÏ∂ªßq´^uöXŸRŸ^T]Sò[YH[ùö\õ€õY[ùQ\úõ‹êX›[€à⁄[[ùP€€ù[ùYBàBàYà
+	ù[[ôH	ô]ö[›\—òZ[\ôPX›[€ú H¬àô]ÀR][Tõ‹\ùHS]\ò[]	Ÿ\ùöXŸRŸ^T]Sò[YHòZ[\ôPX›[€ú»Tõ‹\ùU\Hö[ò\ûHUò[YH	ô]ö[›\—òZ[\ôPX›[€ú»Qõ‹òŸH›]Sù[àH[ŸH»ô[[›ôKR][Tõ‹\ùHS]\ò[]	Ÿ\ùöXŸRŸ^T]Sò[YHòZ[\ôPX›[€ú»Q\úõ‹êX›[€à⁄[[ùP€€ù[ùYHBàYà
+	ù[[ôH	ô]ö[›\—òZ[\ôPX›[€ú”€ìõ€ê‹ò\⁄
+H¬àô]ÀR][Tõ‹\ùHS]\ò[]	Ÿ\ùöXŸRŸ^T]Sò[YHòZ[\ôPX›[€ú”€ìõ€ê‹ò\⁄òZ[\ô\»Tõ‹\ùU\H€‹ôUò[YH	ô]ö[›\—òZ[\ôPX›[€ú”€ìõ€ê‹ò\⁄Qõ‹òŸH›]Sù[àH[ŸH»ô[[›ôKR][Tõ‹\ùHS]\ò[]	Ÿ\ùöXŸRŸ^T]Sò[YHòZ[\ôPX›[€ú”€ìõ€ê‹ò\⁄òZ[\ô\»Q\úõ‹êX›[€à⁄[[ùP€€ù[ùYHBàYà
+	ù[[ôH	ô]ö[›\—\ÿ‹ö\[€äH¬à[ùõ⁄ŸKTÿ»
+	Ÿ\ÿ‹ö\[€âÀ	Ÿ\ùöXŸSò[YK‹›ö[ô◊Iô]ö[›\—\ÿ‹ö\[€äBàBàYà
+	ô]ö[›\’ÿ\‘ù[õö[ô H¬à›\ùTŸ\ùöXŸHSò[YH	Ÿ\ùöXŸSò[YBàÿZ]TŸ\ùöXŸRX[åT⁄⁄\\›[öôX›[€ÇàBàBàHÿ]⁄»	õ€òX⁄—\úõ‹úÀêY
+ê€›[õ›ô\›‹ôHö[‹àŸ\ùöXŸNà	
+	Àë^Ÿ\[€ãìY\‹ÿYŸJHäHBàYà
+\›T]S]\ò[]	ôXYSX\öŸ\äH»ô[[›ôKR][HS]\ò[]	ôXYSX\öŸ\àQõ‹òŸHBàYà
+	õ€òX⁄—\úõ‹úÀê€›[ùY›
+H¬àõ›»îŸ]\òZ[Yà	
+	òZ[\ôKë^Ÿ\[€ãìY\‹ÿYŸJHõ€òX⁄»ÿ\»[ò€€\]N»ô\Ÿ\ùôH[ú›[\àòX⁄›\	…òX⁄›\]	»[ô[ùô\›Yÿ]Nà	
+	õ€òX⁄—\úõ‹ú»Zõ⁄[à	Œ»	 HÇàBàõ›»îŸ]\òZ[Y[ôHö[‹àŸ\ùöXŸKÿ€€ôöY›\ò][€àÿ\»ô\›‹ôYàòX⁄›\à	…òX⁄›\]	Ààÿ]\ŸNà	
+	òZ[\ôKë^Ÿ\[€ãìY\‹ÿYŸJHÇüHö[ò[H¬àYà
+	ù[[ôH	ÿ⁄ H»	ÿ⁄Àë\‹‹ŸJ
+HBüBÇöYà
+[õ›	ò[úÿX›[€î›XÿŸYYY
+H»õ›»	‘Ÿ]\ò[úÿX›[€àYõ›ôXX⁄Hô\öYöYYX[H›]Kâ»B
