@@ -52,7 +52,6 @@ function Assert-NoReparsePoints([string]$Path) {
 function New-ProductAcl([string]$Path, [switch]$IncludeLocalService) {
     if (Test-Path -LiteralPath $Path) {
         $existing = Get-Acl -LiteralPath $Path
-        if (-not $existing.AreAccessRulesProtected) { throw "Existing private installer directory has inherited permissions: $Path" }
         $allowed = @(
             [Security.Principal.SecurityIdentifier]::new([Security.Principal.WellKnownSidType]::LocalSystemSid, $null).Value,
             [Security.Principal.SecurityIdentifier]::new([Security.Principal.WellKnownSidType]::BuiltinAdministratorsSid, $null).Value,
@@ -60,7 +59,8 @@ function New-ProductAcl([string]$Path, [switch]$IncludeLocalService) {
         )
         $localServiceSid = [Security.Principal.SecurityIdentifier]::new([Security.Principal.WellKnownSidType]::LocalServiceSid, $null).Value
         if ($IncludeLocalService) { $allowed += $localServiceSid }
-        foreach ($rule in $existing.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])) {
+        $rules = @($existing.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier]))
+        foreach ($rule in $rules) {
             if ($rule.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and
                 $rule.IdentityReference.Value -notin $allowed) {
                 throw "Existing private installer directory grants access to an unapproved identity: $Path"
@@ -69,6 +69,30 @@ function New-ProductAcl([string]$Path, [switch]$IncludeLocalService) {
                 $rule.IdentityReference.Value -eq $localServiceSid) {
                 throw "Installer backup directory must not be readable by the GatewayCore service account: $Path"
             }
+        }
+        if (-not $existing.AreAccessRulesProtected) {
+            # Existing product subdirectories can have been created by the
+            # service and inherit from a previously secured product parent.
+            # Validate every inherited allow above before replacing inheritance
+            # with the exact product ACL; never normalize a broad grant.
+            $acl = [Security.AccessControl.DirectorySecurity]::new()
+            $acl.SetAccessRuleProtection($true, $false)
+            $principals = @(
+                [Security.Principal.SecurityIdentifier]::new([Security.Principal.WellKnownSidType]::LocalSystemSid, $null),
+                [Security.Principal.SecurityIdentifier]::new([Security.Principal.WellKnownSidType]::BuiltinAdministratorsSid, $null)
+            )
+            if ($IncludeLocalService) {
+                $principals += [Security.Principal.SecurityIdentifier]::new([Security.Principal.WellKnownSidType]::LocalServiceSid, $null)
+            }
+            foreach ($sid in $principals) {
+                $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+                    $sid, [Security.AccessControl.FileSystemRights]::FullControl,
+                    ([Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [Security.AccessControl.InheritanceFlags]::ObjectInherit),
+                    [Security.AccessControl.PropagationFlags]::None,
+                    [Security.AccessControl.AccessControlType]::Allow))
+            }
+            Set-Acl -LiteralPath $Path -AclObject $acl
+            return
         }
         if ($IncludeLocalService -and $existing.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier]).IdentityReference.Value -notcontains $localServiceSid) {
             $rule = [Security.AccessControl.FileSystemAccessRule]::new(
