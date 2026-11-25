@@ -56,7 +56,25 @@ public static class LegacyStateGuard
 
         var existing = FindPriorWindowsStores(activeDirectory);
         if (existing.Count == 0) return;
-        if (approvedResidualStores is not null && existing.All(store => approvedResidualStores.Contains(store, StringComparer.OrdinalIgnoreCase))) return;
+        if (approvedResidualStores is not null && existing.All(store => approvedResidualStores.Contains(store, StringComparer.OrdinalIgnoreCase)))
+        {
+            foreach (var store in existing)
+            {
+                RejectLink(Directory.GetParent(store)!.FullName);
+                RejectLink(store);
+                // Recheck anything readable. The elevated Setup preflight
+                // classified the exact path; the service must not gain read
+                // rights to inaccessible old key material just to start.
+                // Never accept known identity/credential files as residual.
+                if (File.Exists(Path.Combine(store, "admin-users.json")) ||
+                    File.Exists(Path.Combine(store, "mail-settings.json")) ||
+                    File.Exists(Path.Combine(store, "directory-settings.json")))
+                    throw new InvalidOperationException("Previous YARP control-plane state detected: legacy identity or credentials require reviewed migration.");
+                try { ValidateResidualStore(store); }
+                catch (UnauthorizedAccessException) { /* administrator-approved isolation, no legacy read grant */ }
+            }
+            return;
+        }
         throw new InvalidOperationException(
             "Previous YARP control-plane state detected: " + string.Join("; ", existing) +
             ". Stopping before any new state is created. The renamed application " +
@@ -89,33 +107,39 @@ public static class LegacyStateGuard
                     throw new InvalidOperationException("Legacy state requires reviewed migration: " + state);
                 continue;
             }
-            RejectLink(state);
-            foreach (var entry in Directory.EnumerateFileSystemEntries(state))
-            {
-                RejectLink(entry);
-                var name = Path.GetFileName(entry);
-                if (!Directory.Exists(entry))
-                    throw new InvalidOperationException("Legacy state requires reviewed migration: " + state);
-                if (name.Equals("data-protection-keys", StringComparison.OrdinalIgnoreCase))
-                {
-                    foreach (var key in Directory.EnumerateFileSystemEntries(entry))
-                    {
-                        RejectLink(key);
-                        var file = Path.GetFileName(key);
-                        if (!File.Exists(key) || !file.StartsWith("key-", StringComparison.OrdinalIgnoreCase)
-                            || !file.EndsWith(".xml", StringComparison.OrdinalIgnoreCase)
-                            || !Guid.TryParseExact(file[4..^4], "D", out _))
-                            throw new InvalidOperationException("Legacy state requires reviewed migration: " + state);
-                    }
-                }
-                else if (!(new[] { "change-requests", "config-backups", "fleet-rollouts" }).Contains(name, StringComparer.OrdinalIgnoreCase)
-                         || Directory.EnumerateFileSystemEntries(entry).Any())
-                    throw new InvalidOperationException("Legacy state requires reviewed migration: " + state);
-            }
+            ValidateResidualStore(state);
             if (Directory.Exists(Path.Combine(state, "data-protection-keys")))
                 residual.Add(state);
         }
         return residual;
+    }
+
+    private static void ValidateResidualStore(string state)
+    {
+        RejectLink(state);
+        foreach (var entry in Directory.EnumerateFileSystemEntries(state))
+        {
+            RejectLink(entry);
+            var name = Path.GetFileName(entry);
+            if (!Directory.Exists(entry))
+                throw new InvalidOperationException("Legacy state requires reviewed migration: " + state);
+            if (name.Equals("data-protection-keys", StringComparison.OrdinalIgnoreCase))
+            {
+                foreach (var key in Directory.EnumerateFileSystemEntries(entry))
+                {
+                    RejectLink(key);
+                    var file = Path.GetFileName(key);
+                    if (!File.Exists(key) || !file.StartsWith("key-", StringComparison.OrdinalIgnoreCase)
+                        || !file.EndsWith(".xml", StringComparison.OrdinalIgnoreCase)
+                        || !Guid.TryParseExact(file[4..^4], "D", out _))
+                        throw new InvalidOperationException("Legacy state requires reviewed migration: " + state);
+                }
+            }
+            else if (!(new[] { "change-requests", "config-backups", "fleet-rollouts" }).Contains(name, StringComparer.OrdinalIgnoreCase)
+                     || Directory.EnumerateFileSystemEntries(entry).Any())
+                throw new InvalidOperationException("Legacy state requires reviewed migration: " + state);
+        }
+
     }
 
     private static void RejectLink(string path)

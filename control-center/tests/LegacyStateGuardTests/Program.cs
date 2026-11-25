@@ -55,6 +55,7 @@ try
     File.Delete(nested);
     File.WriteAllText(previousUsers, "[]");
     ExpectMigrationRejection(() => LegacyStateGuard.ClassifyResidualWindowsStores(current));
+    ExpectRejection(() => LegacyStateGuard.RejectUnmigratedWindowsState(current, approved));
     File.Delete(previousUsers);
     File.Delete(residualKey);
     Directory.Delete(Path.Combine(previous, "data-protection-keys"));
