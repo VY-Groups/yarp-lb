@@ -40,6 +40,23 @@ try
     File.Delete(previousUsers);
     Directory.CreateDirectory(Path.Combine(previous, "data-protection-keys"));
     ExpectRejection(() => LegacyStateGuard.RejectUnmigratedWindowsState(current));
+    var residualKey = Path.Combine(previous, "data-protection-keys", "key-" + Guid.NewGuid().ToString("D") + ".xml");
+    File.WriteAllText(residualKey, "<disposable-key/>");
+    foreach (var name in new[] { "change-requests", "config-backups", "fleet-rollouts" })
+        Directory.CreateDirectory(Path.Combine(previous, name));
+    var approved = LegacyStateGuard.ClassifyResidualWindowsStores(current);
+    Assert(approved.Count == 1 && approved[0] == previous, "Only residual key-only state may be isolated");
+    LegacyStateGuard.RejectUnmigratedWindowsState(current, approved);
+    ExpectRejection(() => LegacyStateGuard.RejectUnmigratedWindowsState(current, new[] { current }));
+    Assert(File.ReadAllText(residualKey) == "<disposable-key/>", "Old key is untouched");
+    var nested = Path.Combine(previous, "config-backups", "config.json");
+    File.WriteAllText(nested, "{}");
+    ExpectMigrationRejection(() => LegacyStateGuard.ClassifyResidualWindowsStores(current));
+    File.Delete(nested);
+    File.WriteAllText(previousUsers, "[]");
+    ExpectMigrationRejection(() => LegacyStateGuard.ClassifyResidualWindowsStores(current));
+    File.Delete(previousUsers);
+    File.Delete(residualKey);
     Directory.Delete(Path.Combine(previous, "data-protection-keys"));
 
     var unrelated = Path.Combine(root, "UnrelatedApplication", "ControlPlane");
@@ -57,6 +74,13 @@ finally
 static void Assert(bool condition, string description)
 {
     if (!condition) throw new Exception(description);
+}
+
+static void ExpectMigrationRejection(Action action)
+{
+    try { action(); }
+    catch (InvalidOperationException ex) when (ex.Message.Contains("Legacy state requires reviewed migration", StringComparison.Ordinal)) { return; }
+    throw new Exception("Expected migration preflight rejection");
 }
 
 static void ExpectRejection(Action action)

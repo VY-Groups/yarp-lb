@@ -3,7 +3,7 @@ param(
     [Parameter(Mandatory)][ValidatePattern('^[0-9a-f]{40}$')][string]$SourceCommit,
     [Parameter(Mandatory)][string]$SetupPath,
     [Parameter(Mandatory)][string]$PayloadPath,
-    [Parameter(Mandatory)][ValidateSet('Fresh','Upgrade','Rollback','IPv6Upgrade','IPv6Rollback')][string]$Scenario
+    [Parameter(Mandatory)][ValidateSet('Fresh','Upgrade','Rollback','IPv6Upgrade','IPv6Rollback','ResidualLegacy','LegacyBlocked')][string]$Scenario
 )
 
 $ErrorActionPreference = 'Stop'
@@ -29,6 +29,11 @@ $adminFile = Join-Path $stateRoot 'admin-users.json'
 $svcKey = "HKLM:\SYSTEM\CurrentControlSet\Services\$serviceName"
 $setupLog = Join-Path $env:TEMP "GatewayCore-Setup-$SourceCommit.log"
 $stateBefore = @{}
+$legacyRoot = Join-Path $env:ProgramData 'FormerLabYarp'
+$legacyState = Join-Path $legacyRoot 'ControlPlane'
+$legacyFixtureCreated = $false
+$legacyHash = $null
+$legacyKey = Join-Path $legacyState 'data-protection-keys\key-12d68b74-55c3-4e77-811a-00347e414612.xml'
 $oldInstalled = $false
 $setupArgs = @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-',"/LOG=$setupLog")
 
@@ -214,13 +219,43 @@ function Assert-InstalledPayload {
 
 try {
     if ((Test-Path -LiteralPath $target) -or (Get-Service -Name $serviceName -ErrorAction SilentlyContinue)) { throw 'Runner has pre-existing target or service state.' }
-    if ($Scenario -eq 'Fresh') {
+    if ($Scenario -in @('Fresh','ResidualLegacy','LegacyBlocked')) {
         if (Test-Path -LiteralPath $productRoot) { throw 'Fresh-install runner has pre-existing ProgramData state.' }
+        if ($Scenario -in @('ResidualLegacy','LegacyBlocked')) {
+            if (Test-Path -LiteralPath $legacyRoot) { throw 'Legacy fixture already exists.' }
+            $legacyFixtureCreated = $true
+            foreach ($name in @('change-requests','config-backups','data-protection-keys','fleet-rollouts')) {
+                New-Item -ItemType Directory -Path (Join-Path $legacyState $name) -Force | Out-Null
+            }
+            Set-Content -LiteralPath $legacyKey -Value '<disposable-test-key/>' -Encoding ascii
+            $legacyHash = (Get-FileHash -LiteralPath $legacyKey -Algorithm SHA256).Hash
+            # Reproduce the retained state from a failed previous fresh attempt
+            # with protected neutral root and ControlPlane ACLs.
+            if ($Scenario -eq 'ResidualLegacy') {
+                New-Item -ItemType Directory -Path $stateRoot -Force | Out-Null
+                & icacls.exe $productRoot /inheritance:r /grant:r '*S-1-5-18:(F)' '*S-1-5-32-544:(F)' '*S-1-5-19:(RX)' | Out-Null
+                if ($LASTEXITCODE -ne 0) { throw 'Fixture root ACL failed.' }
+                & icacls.exe $stateRoot /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)(F)' '*S-1-5-32-544:(OI)(CI)(F)' '*S-1-5-19:(OI)(CI)(F)' | Out-Null
+                if ($LASTEXITCODE -ne 0) { throw 'Fixture state ACL failed.' }
+            } else {
+                Set-Content -LiteralPath (Join-Path $legacyState 'admin-users.json') -Value '[{"Username":"legacy-test"}]' -Encoding ascii
+            }
+        }
     } else {
         Seed-PreviousInstall
     }
 
-    if ($Scenario -in @('Rollback','IPv6Rollback')) {
+    if ($Scenario -eq 'LegacyBlocked') {
+        $legacyUserHash = (Get-FileHash (Join-Path $legacyState 'admin-users.json')).Hash
+        $process = Start-Process -FilePath $SetupPath -ArgumentList $setupArgs -Wait -PassThru
+        if ($process.ExitCode -eq 0) { throw 'Legacy identity state was silently accepted.' }
+        Assert-FailedCandidateRemoved
+        if (Get-Service -Name $serviceName -ErrorAction SilentlyContinue) { throw 'Rejected preflight created a service.' }
+        if (Test-Path -LiteralPath $productRoot) { throw 'Rejected preflight created neutral state.' }
+        if ((Get-FileHash $legacyKey).Hash -ne $legacyHash -or (Get-FileHash (Join-Path $legacyState 'admin-users.json')).Hash -ne $legacyUserHash) { throw 'Rejected preflight modified old state.' }
+        if ((Get-Content -LiteralPath $setupLog -Raw) -notmatch '(?s)Legacy state requires.{0,120}reviewed migration') { throw 'Setup did not report legacy migration requirement.' }
+        Write-Output 'PASS: legacy identity data rejected before service or state changes; original files retained.'
+    } elseif ($Scenario -in @('Rollback','IPv6Rollback')) {
         $stateAclBefore = Get-DirectoryAclSddl $stateRoot
         $configBefore = [IO.File]::ReadAllText($oldConfig)
         $serviceEnvironmentBefore = @((Get-ItemProperty -LiteralPath $svcKey).Environment)
@@ -253,6 +288,15 @@ try {
         Invoke-Setup
         Assert-InstalledPayload
         Assert-InstalledService (Join-Path $target 'app\GatewayCoreYarp.exe')
+        if ($Scenario -eq 'ResidualLegacy') {
+            if ((Get-FileHash $legacyKey).Hash -ne $legacyHash) { throw 'Residual legacy key modified.' }
+            if (Test-Path (Join-Path $stateRoot ('data-protection-keys\' + [IO.Path]::GetFileName($legacyKey)))) { throw 'Legacy key imported into new state.' }
+            $newKeys = @(Get-ChildItem (Join-Path $stateRoot 'data-protection-keys') -Filter 'key-*.xml' -File)
+            if ($newKeys.Count -eq 0) { throw 'No independent GatewayCore key generated.' }
+            Restart-Service -Name $serviceName
+            Wait-Healthy
+            Write-Output 'PASS: residual legacy keys preserved, independent GatewayCore state healthy and service restart verified.'
+        }
         if ($Scenario -in @('Upgrade','IPv6Upgrade')) {
             if (-not (Test-Path -LiteralPath $adminFile) -or (Get-Content (Join-Path $stateRoot 'migration-sentinel.txt') -Raw).Trim() -cne 'preserve-state') {
                 throw 'Upgrade did not preserve administrator and application state.'
@@ -307,6 +351,7 @@ try {
         if ($service.Status -ne 'Stopped') { Stop-Service -Name $serviceName -ErrorAction SilentlyContinue }
         & "$env:WINDIR\System32\sc.exe" delete $serviceName | Out-Null
     }
+    if ($legacyFixtureCreated) { Remove-Item -LiteralPath $legacyRoot -Recurse -Force }
     if (Test-Path -LiteralPath $oldRoot) { Remove-Item -LiteralPath $oldRoot -Recurse -Force }
     if (Test-Path -LiteralPath $target) { Remove-Item -LiteralPath $target -Recurse -Force }
     if (Test-Path -LiteralPath $productRoot) { Remove-Item -LiteralPath $productRoot -Recurse -Force }

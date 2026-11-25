@@ -20,7 +20,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        scenario: [Fresh, Upgrade, Rollback, IPv6Upgrade, IPv6Rollback]
+        scenario: [Fresh, Upgrade, Rollback, IPv6Upgrade, IPv6Rollback, ResidualLegacy, LegacyBlocked]
     env:
       EXACT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
       INSTALL_SCENARIO: ${{ matrix.scenario }}

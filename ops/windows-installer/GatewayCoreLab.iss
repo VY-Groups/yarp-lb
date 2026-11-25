@@ -24,6 +24,7 @@ OutputBaseFilename=GatewayCore-Setup-win-x64
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
+SetupLogging=yes
 UninstallDisplayName=GatewayCore Lab ({#SourceCommit})
 UninstallDisplayIcon={app}\app\GatewayCoreYarp.exe
 CloseApplications=no
@@ -150,7 +151,7 @@ begin
         Log('Candidate directory still present while Setup is running; verify deferred uninstall cleanup after Setup exits.');
     end else
       Log('Candidate cleanup refused because service ownership could not be safely excluded.');
-    SuppressibleMsgBox('GatewayCore service setup or health verification failed. Setup did not succeed. Inspect the Setup log and protected ProgramData backup before retrying.', mbError, MB_OK, IDOK);
+    SuppressibleMsgBox('GatewayCore service setup or health verification failed. Setup did not succeed. Inspect the automatically saved Setup log (in your TEMP directory) and protected ProgramData backup before retrying.', mbError, MB_OK, IDOK);
   end;
 end;
 
