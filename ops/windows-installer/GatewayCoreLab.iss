@@ -30,7 +30,11 @@ CloseApplications=no
 RestartApplications=no
 [Files]
 Source: "{#PayloadDir}\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion
+[Tasks]
+Name: desktopicon; Description: "Create a desktop shortcut"; Flags: unchecked
 [Icons]
+Name: "{group}\GatewayCore Dashboard"; Filename: "http://127.0.0.1:8080/dashboard"
+Name: "{commondesktop}\GatewayCore Dashboard"; Filename: "http://127.0.0.1:8080/dashboard"; Tasks: desktopicon
 Name: "{group}\Installation and rollback instructions ({#SourceCommit})"; Filename: "{app}\README.md"
 [Code]
 function PrepareToInstall(var NeedsRestart: Boolean): String;
