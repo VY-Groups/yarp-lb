@@ -261,26 +261,39 @@ function ConvertTo-ManagedConfig([string]$SourcePath) {
         }
     }
     if ($null -eq $config -or $config -isnot [pscustomobject]) { throw 'Runtime configuration must be a JSON object.' }
-    if ($null -eq $config.ReverseProxy) { $config | Add-Member -NotePropertyName ReverseProxy -NotePropertyValue ([pscustomobject]@{ Routes=[pscustomobject]@{}; Clusters=[pscustomobject]@{} }) }
-    if ($config.ReverseProxy -isnot [pscustomobject]) { throw 'ReverseProxy configuration must be an object; migration stopped without discarding it.' }
-    foreach ($name in @('Routes','Clusters')) {
-        if ($null -eq $config.ReverseProxy.$name) { $config.ReverseProxy | Add-Member -NotePropertyName $name -NotePropertyValue ([pscustomobject]@{}) }
-        if ($config.ReverseProxy.$name -isnot [pscustomobject]) { throw "ReverseProxy.$name must be an object; migration stopped without rewriting it." }
+    $reverseProxyProperty = $config.PSObject.Properties['ReverseProxy']
+    if ($null -eq $reverseProxyProperty -or $null -eq $reverseProxyProperty.Value) {
+        $config | Add-Member -NotePropertyName ReverseProxy -NotePropertyValue ([pscustomobject]@{ Routes=[pscustomobject]@{}; Clusters=[pscustomobject]@{} }) -Force
     }
-    if ($null -eq $config.Kestrel) { $config | Add-Member -NotePropertyName Kestrel -NotePropertyValue ([pscustomobject]@{ Endpoints=[pscustomobject]@{} }) }
-    if ($config.Kestrel -isnot [pscustomobject]) { throw 'Kestrel configuration must be an object.' }
-    if ($null -eq $config.Kestrel.Endpoints) { $config.Kestrel | Add-Member -NotePropertyName Endpoints -NotePropertyValue ([pscustomobject]@{}) }
-    if ($config.Kestrel.Endpoints -isnot [pscustomobject]) { throw 'Kestrel.Endpoints must be an object.' }
-    $dashboard = $config.Kestrel.Endpoints.PSObject.Properties['GatewayCoreDashboard']
+    $reverseProxy = $config.PSObject.Properties['ReverseProxy'].Value
+    if ($reverseProxy -isnot [pscustomobject]) { throw 'ReverseProxy configuration must be an object; migration stopped without discarding it.' }
+    foreach ($name in @('Routes','Clusters')) {
+        $member = $reverseProxy.PSObject.Properties[$name]
+        if ($null -eq $member -or $null -eq $member.Value) { $reverseProxy | Add-Member -NotePropertyName $name -NotePropertyValue ([pscustomobject]@{}) -Force }
+        if ($reverseProxy.PSObject.Properties[$name].Value -isnot [pscustomobject]) { throw "ReverseProxy.$name must be an object; migration stopped without rewriting it." }
+    }
+    $kestrelProperty = $config.PSObject.Properties['Kestrel']
+    if ($null -eq $kestrelProperty -or $null -eq $kestrelProperty.Value) {
+        $config | Add-Member -NotePropertyName Kestrel -NotePropertyValue ([pscustomobject]@{ Endpoints=[pscustomobject]@{} }) -Force
+    }
+    $kestrel = $config.PSObject.Properties['Kestrel'].Value
+    if ($kestrel -isnot [pscustomobject]) { throw 'Kestrel configuration must be an object.' }
+    $endpointsProperty = $kestrel.PSObject.Properties['Endpoints']
+    if ($null -eq $endpointsProperty -or $null -eq $endpointsProperty.Value) { $kestrel | Add-Member -NotePropertyName Endpoints -NotePropertyValue ([pscustomobject]@{}) -Force }
+    $endpoints = $kestrel.PSObject.Properties['Endpoints'].Value
+    if ($endpoints -isnot [pscustomobject]) { throw 'Kestrel.Endpoints must be an object.' }
+    $dashboard = $endpoints.PSObject.Properties['GatewayCoreDashboard']
     if ($null -ne $dashboard) {
-        if ($null -eq $dashboard.Value -or $dashboard.Value.Url -cne 'http://127.0.0.1:8080') { throw 'GatewayCoreDashboard must use the installer-owned loopback URL http://127.0.0.1:8080.' }
+        $dashboardUrl = if ($null -eq $dashboard.Value) { $null } else { $dashboard.Value.PSObject.Properties['Url'] }
+        if ($null -eq $dashboardUrl -or $dashboardUrl.Value -cne 'http://127.0.0.1:8080') { throw 'GatewayCoreDashboard must use the installer-owned loopback URL http://127.0.0.1:8080.' }
     } else {
         $reusableLoopbackEndpoint = $false
-        foreach ($endpoint in $config.Kestrel.Endpoints.PSObject.Properties) {
-            if ($null -ne $endpoint.Value -and $endpoint.Value.Url) {
+        foreach ($endpoint in $endpoints.PSObject.Properties) {
+            $endpointUrl = if ($null -eq $endpoint.Value) { $null } else { $endpoint.Value.PSObject.Properties['Url'] }
+            if ($null -ne $endpointUrl -and $endpointUrl.Value) {
                 $uri = $null
-                if ([Uri]::TryCreate([string]$endpoint.Value.Url, [UriKind]::Absolute, [ref]$uri) -and $uri.Port -eq 8080) {
-                    $isLoopback = [Uri]::IsLoopback($uri)
+                if ([Uri]::TryCreate([string]$endpointUrl.Value, [UriKind]::Absolute, [ref]$uri) -and $uri.Port -eq 8080) {
+                    $isLoopback = $uri.IsLoopback
                     if ($uri.Scheme -ne 'http' -or -not $isLoopback) {
                         throw 'Port 8080 is assigned to a non-loopback or non-HTTP endpoint; installer cannot safely expose the local dashboard.'
                     }
@@ -289,19 +302,22 @@ function ConvertTo-ManagedConfig([string]$SourcePath) {
             }
         }
         if (-not $reusableLoopbackEndpoint) {
-            $config.Kestrel.Endpoints | Add-Member -NotePropertyName GatewayCoreDashboard -NotePropertyValue ([pscustomobject]@{ Url='http://127.0.0.1:8080' })
+            $endpoints | Add-Member -NotePropertyName GatewayCoreDashboard -NotePropertyValue ([pscustomobject]@{ Url='http://127.0.0.1:8080' })
         }
     }
-    if ($null -eq $config.AllowedHosts) { $config | Add-Member -NotePropertyName AllowedHosts -NotePropertyValue 'localhost;127.0.0.1' }
-    if ($null -eq $config.GatewayCoreInstaller) { $config | Add-Member -NotePropertyName GatewayCoreInstaller -NotePropertyValue ([pscustomobject]@{}) }
-    if ($config.GatewayCoreInstaller -isnot [pscustomobject]) { throw 'Installer configuration metadata must be an object.' }
+    if ($null -eq $config.PSObject.Properties['AllowedHosts']) { $config | Add-Member -NotePropertyName AllowedHosts -NotePropertyValue 'localhost;127.0.0.1' }
+    $installerProperty = $config.PSObject.Properties['GatewayCoreInstaller']
+    if ($null -eq $installerProperty -or $null -eq $installerProperty.Value) { $config | Add-Member -NotePropertyName GatewayCoreInstaller -NotePropertyValue ([pscustomobject]@{}) -Force }
+    $installer = $config.PSObject.Properties['GatewayCoreInstaller'].Value
+    if ($installer -isnot [pscustomobject]) { throw 'Installer configuration metadata must be an object.' }
     $version = 0
-    if ($null -ne $config.GatewayCoreInstaller.ConfigurationSchemaVersion) {
-        $version = [int]$config.GatewayCoreInstaller.ConfigurationSchemaVersion
+    $versionProperty = $installer.PSObject.Properties['ConfigurationSchemaVersion']
+    if ($null -ne $versionProperty -and $null -ne $versionProperty.Value) {
+        $version = [int]$versionProperty.Value
     }
     if ($version -gt 1 -or $version -lt 0) { throw "Unsupported runtime configuration schema version: $version" }
     if ($version -lt 1) {
-        $config.GatewayCoreInstaller | Add-Member -NotePropertyName ConfigurationSchemaVersion -NotePropertyValue 1 -Force
+        $installer | Add-Member -NotePropertyName ConfigurationSchemaVersion -NotePropertyValue 1 -Force
     }
     return $config
 }

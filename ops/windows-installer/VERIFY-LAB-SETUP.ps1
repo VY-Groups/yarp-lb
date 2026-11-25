@@ -67,10 +67,11 @@ function Get-DirectoryAclSddl([string]$Path) {
 }
 
 function Test-LoopbackDashboardEndpoint([object]$Endpoint) {
-    if ($null -eq $Endpoint -or -not $Endpoint.Url) { return $false }
+    $urlProperty = if ($null -eq $Endpoint) { $null } else { $Endpoint.PSObject.Properties['Url'] }
+    if ($null -eq $urlProperty -or -not $urlProperty.Value) { return $false }
     $uri = $null
-    if (-not [Uri]::TryCreate([string]$Endpoint.Url,[UriKind]::Absolute,[ref]$uri)) { return $false }
-    return $uri.Scheme -eq 'http' -and $uri.Port -eq 8080 -and [Uri]::IsLoopback($uri)
+    if (-not [Uri]::TryCreate([string]$urlProperty.Value,[UriKind]::Absolute,[ref]$uri)) { return $false }
+    return $uri.Scheme -eq 'http' -and $uri.Port -eq 8080 -and $uri.IsLoopback
 }
 
 function Seed-PreviousInstall {
@@ -118,7 +119,9 @@ function Assert-InstalledService([string]$ExpectedExe) {
     $marker = Join-Path (Split-Path -Parent (Split-Path -Parent $ExpectedExe)) '.dashboard-ready'
     if ((Get-Content -LiteralPath $marker -Raw).Trim() -cne $SourceCommit) { throw 'Dashboard launch marker was written before/without the verified install commit.' }
     $config = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json
-    if ($config.GatewayCoreInstaller.ConfigurationSchemaVersion -ne 1) { throw 'Runtime config was not migrated to schema version 1.' }
+    $installerMetadata = $config.PSObject.Properties['GatewayCoreInstaller']
+    $schemaVersion = if ($null -eq $installerMetadata -or $null -eq $installerMetadata.Value) { $null } else { $installerMetadata.Value.PSObject.Properties['ConfigurationSchemaVersion'] }
+    if ($null -eq $schemaVersion -or $schemaVersion.Value -ne 1) { throw 'Runtime config was not migrated to schema version 1.' }
     $dashboardEndpoint = @($config.Kestrel.Endpoints.PSObject.Properties | Where-Object { Test-LoopbackDashboardEndpoint $_.Value })
     if ($dashboardEndpoint.Count -eq 0) { throw 'Dashboard listener is not bound to loopback port 8080.' }
     $stateAcl = Get-Acl -LiteralPath $stateRoot
