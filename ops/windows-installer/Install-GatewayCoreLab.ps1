@@ -326,7 +326,7 @@ function ConvertTo-ManagedConfig([string]$SourcePath) {
                     }
                     # ASP.NET Core localhost binds loopback on both families.
                     # ::1 binds IPv6 only, so do not count it as IPv4-ready.
-                    if ($uri.Host -ne '::1') { $hasIPv4LoopbackEndpoint = $true }
+                    if ($uri.Host.Trim('[',']') -ne '::1') { $hasIPv4LoopbackEndpoint = $true }
                 }
             }
         }
