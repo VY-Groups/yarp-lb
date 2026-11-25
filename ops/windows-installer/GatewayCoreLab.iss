@@ -147,7 +147,7 @@ begin
       else
         Log('Failed candidate uninstaller could not be launched.');
       if DirExists(ExpandConstant('{app}')) then
-        Log('Failed candidate directory remains; administrator recovery required.');
+        Log('Candidate directory still present while Setup is running; verify deferred uninstall cleanup after Setup exits.');
     end else
       Log('Candidate cleanup refused because service ownership could not be safely excluded.');
     SuppressibleMsgBox('GatewayCore service setup or health verification failed. Setup did not succeed. Inspect the Setup log and protected ProgramData backup before retrying.', mbError, MB_OK, IDOK);

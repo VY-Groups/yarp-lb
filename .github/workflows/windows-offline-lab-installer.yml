@@ -20,7 +20,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        scenario: [Fresh, Upgrade, Rollback, IPv6Upgrade]
+        scenario: [Fresh, Upgrade, Rollback, IPv6Upgrade, IPv6Rollback]
     env:
       EXACT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
       INSTALL_SCENARIO: ${{ matrix.scenario }}
@@ -76,6 +76,6 @@ jobs:
           Copy-Item ops/windows-installer/README.md setup-output/README.md
       - uses: actions/upload-artifact@v4
         with:
-          name: gatewaycore-windows-lab-setup-${{ env.EXACT_SHA }}
+          name: gatewaycore-windows-lab-setup-${{ env.EXACT_SHA }}-${{ matrix.scenario }}
           path: setup-output/
           if-no-files-found: error

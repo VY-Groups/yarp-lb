@@ -326,7 +326,7 @@ function ConvertTo-ManagedConfig([string]$SourcePath) {
                     }
                     # ASP.NET Core localhost binds loopback on both families.
                     # ::1 binds IPv6 only, so do not count it as IPv4-ready.
-                    if ($uri.Host.Trim('[',']') -ne '::1') { $hasIPv4LoopbackEndpoint = $true }
+                    if ($uri.IdnHost -in @('127.0.0.1','localhost')) { $hasIPv4LoopbackEndpoint = $true }
                 }
             }
         }
@@ -379,24 +379,79 @@ function Assert-OwnedService([object]$Service) {
     return $exe
 }
 
-function Wait-ServiceHealth([int]$TimeoutSeconds, [switch]$SkipTestInjection) {
+# Direct HTTP only: do not use the system proxy or follow redirects.
+function Test-DirectServiceHealth([string]$BaseUrl) {
+    $uri = [Uri]$BaseUrl
+    if ($uri.Scheme -ne 'http' -or -not $uri.IsLoopback -or $uri.Port -ne 8080 -or
+        $uri.AbsolutePath -ne '/' -or $uri.UserInfo -or $uri.Query -or $uri.Fragment) {
+        throw 'Unsafe loopback health URL.'
+    }
+    $svc = Get-CimInstance Win32_Service -Filter "Name='$serviceName'"
+    if ($null -eq $svc -or $svc.State -ne 'Running' -or $svc.ProcessId -eq 0) { throw 'SCM service is not running.' }
+    $address = $uri.IdnHost
+    $listeners = @(Get-NetTCPConnection -State Listen -LocalPort 8080 -ErrorAction SilentlyContinue |
+        Where-Object { $_.OwningProcess -eq $svc.ProcessId })
+    $owned = @($listeners | Where-Object {
+        $_.LocalAddress -eq $address -or ($address -eq 'localhost' -and $_.LocalAddress -in @('127.0.0.1','::1'))
+    })
+    if ($owned.Count -eq 0) { throw "No SCM-owned listener for $BaseUrl (PID $($svc.ProcessId))." }
+    $output = @(& "$env:WINDIR\System32\curl.exe" --noproxy '*' --globoff --silent --show-error --max-time 3 --write-out '\n%{http_code}' ($BaseUrl.TrimEnd('/') + '/gateway/health') 2>&1)
+    $code = $LASTEXITCODE
+    if ($code -ne 0 -or $output.Count -lt 2) { throw "Direct health probe failed (curl exit $code)." }
+    if ([string]$output[-1] -ne '200') { throw "Direct health probe returned HTTP $($output[-1])." }
+    $body = ($output | Select-Object -SkipLast 1) -join [Environment]::NewLine
+    if (($body | ConvertFrom-Json).status -ne 'healthy') { throw 'Health response was not healthy.' }
+}
+
+function Get-ConfiguredHealthUrls([string]$Path) {
+    if (-not $Path -or -not (Test-Path -LiteralPath $Path -PathType Leaf)) { return @() }
+    $settings = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
+    $k = $settings.PSObject.Properties['Kestrel']
+    if ($null -eq $k -or $null -eq $k.Value) { return @() }
+    $e = $k.Value.PSObject.Properties['Endpoints']
+    if ($null -eq $e -or $null -eq $e.Value) { return @() }
+    foreach ($item in $e.Value.PSObject.Properties) {
+        if ($null -eq $item.Value) { continue }
+        $u = $item.Value.PSObject.Properties['Url']
+        if ($null -eq $u -or -not $u.Value) { continue }
+        $uri = $null
+        if ([Uri]::TryCreate([string]$u.Value,[UriKind]::Absolute,[ref]$uri) -and
+            $uri.Scheme -eq 'http' -and $uri.IsLoopback -and $uri.Port -eq 8080 -and
+            $uri.AbsolutePath -eq '/' -and -not $uri.UserInfo -and -not $uri.Query -and -not $uri.Fragment) {
+            $uri.GetLeftPart([UriPartial]::Authority)
+        }
+    }
+}
+
+function Wait-ServiceHealth([int]$TimeoutSeconds, [string[]]$BaseUrls = @('http://127.0.0.1:8080'), [switch]$SkipTestInjection) {
     $testFailureMarker = Join-Path $env:TEMP "GatewayCoreYarp-installer-fail-health-$SourceCommit"
     if (-not $SkipTestInjection -and (Test-Path -LiteralPath $testFailureMarker) -and
         $env:GITHUB_ACTIONS -eq 'true' -and $env:RUNNER_ENVIRONMENT -eq 'github-hosted') {
         throw 'Disposable acceptance requested a controlled service health failure.'
     }
+    if ($BaseUrls.Count -eq 0) { throw 'No saved loopback health endpoint.' }
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    $last = 'no response'
     do {
-        $service = Get-Service -Name $serviceName -ErrorAction Stop
-        if ($service.Status -eq 'Running') {
-            try {
-                $reply = Invoke-WebRequest -UseBasicParsing -Method Get -Uri 'http://127.0.0.1:8080/gateway/health' -TimeoutSec 3
-                if ($reply.StatusCode -eq 200 -and (($reply.Content | ConvertFrom-Json).status -eq 'healthy')) { return }
-            } catch { }
-        }
+        try {
+            foreach ($url in $BaseUrls) {
+                $last = $url
+                Test-DirectServiceHealth $url
+            }
+            Write-Host "SCM-owned health verified: $($BaseUrls -join ', ')"
+            return
+        } catch { $last = "$last : $($_.Exception.Message)" }
         Start-Sleep -Milliseconds 400
     } while ([DateTime]::UtcNow -lt $deadline)
-    throw 'GatewayCore service did not pass the loopback health check before the startup deadline.'
+    Write-Host "Health deadline diagnostics: $last"
+    Get-CimInstance Win32_Service -Filter "Name='$serviceName'" |
+        Select-Object State,ProcessId,ExitCode,ServiceSpecificExitCode | Format-List | Out-Host
+    Get-NetTCPConnection -LocalPort 8080 -ErrorAction SilentlyContinue |
+        Select-Object LocalAddress,LocalPort,State,OwningProcess | Format-Table -AutoSize | Out-Host
+    Get-WinEvent -FilterHashtable @{LogName='Application';StartTime=(Get-Date).AddMinutes(-5)} -MaxEvents 30 -ErrorAction SilentlyContinue |
+        Where-Object {$_.ProviderName -match 'GatewayCore|\.NET Runtime|Application Error'} |
+        Select-Object TimeCreated,ProviderName,Id,LevelDisplayName | Format-Table -AutoSize | Out-Host
+    throw "GatewayCore service did not pass the loopback health check before the startup deadline. Last probe: $last"
 }
 
 function Invoke-Sc([string[]]$Arguments) {
@@ -406,6 +461,7 @@ function Invoke-Sc([string[]]$Arguments) {
 
 Assert-Administrator
 Assert-Prerequisites
+if (-not (Test-Path -LiteralPath "$env:WINDIR\System32\curl.exe" -PathType Leaf)) { throw 'Windows built-in curl.exe is required for direct loopback health verification.' }
 if ($installRoot.TrimEnd('\') -ne $expectedRoot.TrimEnd('\')) { throw 'Installer path is not the unique versioned Program Files directory.' }
 if (-not (Test-Path -LiteralPath $exePath -PathType Leaf)) { throw 'The self-contained GatewayCore executable is missing.' }
 if (Test-Path -LiteralPath $readyMarker) { Remove-Item -LiteralPath $readyMarker -Force }
@@ -418,6 +474,7 @@ $backupPath = $null
 $previousService = $null
 $previousWasRunning = $false
 $previousEnvironment = @()
+$previousHealthUrls = @()
 $previousStart = $null
 $previousImagePath = $null
     $previousProductRootSddl = $null
@@ -471,6 +528,16 @@ try {
         $previousEnvironment = Read-ServiceEnvironment $serviceName
         $sourceConfig = Get-ConfigSource $previousService $previousEnvironment
     }
+    if ($previousWasRunning) {
+        $priorUrls = @(Get-ConfiguredHealthUrls $sourceConfig | Select-Object -Unique)
+        if ($priorUrls.Count -eq 0) { $priorUrls = @('http://127.0.0.1:8080') }
+        foreach ($url in $priorUrls) {
+            try { Test-DirectServiceHealth $url; $previousHealthUrls += $url } catch {
+                Write-Host "Prior health probe $url unavailable: $($_.Exception.Message)"
+            }
+        }
+        if ($previousHealthUrls.Count -eq 0) { throw 'Cannot establish a healthy prior loopback endpoint; existing service was not changed.' }
+    }
     if ($configExisted) { $sourceConfig = $configPath }
     if (-not $sourceConfig -and $null -eq $previousService) {
         $legacyCandidates = @(Get-ChildItem -LiteralPath (Join-Path $env:ProgramFiles 'GatewayCore\Lab') -Directory -ErrorAction SilentlyContinue |
@@ -517,6 +584,8 @@ try {
     }
     $config = ConvertTo-ManagedConfig $sourceConfig
     Write-AtomicConfig $config $configPath
+    $candidateHealthUrls = @('http://127.0.0.1:8080') + @(Get-ConfiguredHealthUrls $configPath | Where-Object { $_ -ne 'http://127.0.0.1:8080' })
+    Write-Host "Candidate configured loopback endpoints: $($candidateHealthUrls -join ', ')"
     Assert-NoReparsePoints $stateRoot
     foreach ($item in @((Get-Item -LiteralPath $stateRoot -Force)) + @(Get-ChildItem -LiteralPath $stateRoot -Force -Recurse)) {
         Set-StateAcl $item.FullName
@@ -535,7 +604,7 @@ try {
     Invoke-Sc @('description',$serviceName,'GatewayCore Lab gateway and local control center')
     Invoke-Sc @('failure',$serviceName,'reset=','86400','actions=','restart/5000/restart/15000/restart/60000')
     Start-Service -Name $serviceName
-    Wait-ServiceHealth $HealthTimeoutSeconds
+    Wait-ServiceHealth $HealthTimeoutSeconds -BaseUrls $candidateHealthUrls
 
     $liveService = Get-CimInstance Win32_Service -Filter "Name='$serviceName'"
     if ($null -eq $liveService -or $liveService.StartName -ne 'NT AUTHORITY\LocalService' -or $liveService.StartMode -ne 'Auto') {
@@ -552,7 +621,7 @@ try {
     $rollbackErrors = [Collections.Generic.List[string]]::new()
     try {
         $svc = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
-        if ($null -ne $svc -and $svc.Status -ne 'Stopped') {
+        if ($migrationStarted -and $null -ne $svc -and $svc.Status -ne 'Stopped') {
             Stop-Service -Name $serviceName -ErrorAction Stop
             $svc.WaitForStatus([ServiceProcess.ServiceControllerStatus]::Stopped, [timespan]::FromSeconds(60))
         }
@@ -597,8 +666,11 @@ try {
             }
             if ($previousWasRunning) {
                 Start-Service -Name $serviceName
-                Wait-ServiceHealth 60 -SkipTestInjection
+                Wait-ServiceHealth 60 -BaseUrls $previousHealthUrls -SkipTestInjection
             }
+        } elseif ($migrationStarted -and $previousWasRunning) {
+            Start-Service -Name $serviceName
+            Wait-ServiceHealth 60 -BaseUrls $previousHealthUrls -SkipTestInjection
         }
     } catch { $rollbackErrors.Add("Could not restore prior service: $($_.Exception.Message)") }
     if (Test-Path -LiteralPath $readyMarker) { Remove-Item -LiteralPath $readyMarker -Force }

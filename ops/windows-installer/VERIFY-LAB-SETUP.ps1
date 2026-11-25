@@ -3,7 +3,7 @@ param(
     [Parameter(Mandatory)][ValidatePattern('^[0-9a-f]{40}$')][string]$SourceCommit,
     [Parameter(Mandatory)][string]$SetupPath,
     [Parameter(Mandatory)][string]$PayloadPath,
-    [Parameter(Mandatory)][ValidateSet('Fresh','Upgrade','Rollback','IPv6Upgrade')][string]$Scenario
+    [Parameter(Mandatory)][ValidateSet('Fresh','Upgrade','Rollback','IPv6Upgrade','IPv6Rollback')][string]$Scenario
 )
 
 $ErrorActionPreference = 'Stop'
@@ -24,7 +24,7 @@ $oldSha = '0000000000000000000000000000000000000000'
 $oldRoot = Join-Path $env:ProgramFiles "GatewayCore\Lab\$oldSha"
 $oldExe = Join-Path $oldRoot 'app\GatewayCoreYarp.exe'
 $oldConfig = Join-Path $oldRoot 'app\appsettings.json'
-$oldConfigUrl = if ($Scenario -eq 'IPv6Upgrade') { 'http://[::1]:8080' } else { 'http://127.0.0.1:8080' }
+$oldConfigUrl = if ($Scenario -in @('IPv6Upgrade','IPv6Rollback')) { 'http://[::1]:8080' } else { 'http://127.0.0.1:8080' }
 $adminFile = Join-Path $stateRoot 'admin-users.json'
 $svcKey = "HKLM:\SYSTEM\CurrentControlSet\Services\$serviceName"
 $setupLog = Join-Path $env:TEMP "GatewayCore-Setup-$SourceCommit.log"
@@ -76,6 +76,20 @@ function Wait-Healthy([int]$Seconds = 90) {
     throw "Loopback health endpoint $oldConfigUrl did not become ready. Last probe: $last"
 }
 
+function Assert-FailedCandidateRemoved {
+    $uninstallKey = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\GatewayCore-Lab-${SourceCommit}_is1"
+    $deadline = [DateTime]::UtcNow.AddSeconds(15)
+    do {
+        if (-not (Test-Path -LiteralPath $target) -and -not (Test-Path -LiteralPath $uninstallKey)) {
+            Write-Output 'PASS: failed candidate and uninstall registration absent after Setup exit.'
+            return
+        }
+        Start-Sleep -Milliseconds 250
+    } while ([DateTime]::UtcNow -lt $deadline)
+    if (Test-Path -LiteralPath $target) { Get-ChildItem -LiteralPath $target -Force -Recurse | Select-Object FullName | Out-Host }
+    throw 'Failed Setup left candidate files or installed-program registration after process exit.'
+}
+
 function Invoke-Setup([switch]$ExpectFailure) {
     $process = Start-Process -FilePath $SetupPath -ArgumentList $setupArgs -Wait -PassThru
     $logText = if (Test-Path -LiteralPath $setupLog) { Get-Content -LiteralPath $setupLog -Raw } else { '' }
@@ -83,13 +97,13 @@ function Invoke-Setup([switch]$ExpectFailure) {
     if ($ExpectFailure) {
         # Inno Setup wraps long logged PowerShell lines at arbitrary columns.
         if ($process.ExitCode -eq 0) { throw "Failed Setup falsely reported success (exit 0).\n$diagnostic" }
-        if (Test-Path -LiteralPath $target) { throw "Failed Setup left its candidate installation directory behind: $target`n$diagnostic" }
-        $uninstallKey = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\GatewayCore-Lab-${SourceCommit}_is1"
-        if (Test-Path -LiteralPath $uninstallKey) { throw 'Failed Setup left an installed-program registration.' }
+        Assert-FailedCandidateRemoved
+        if ($logText -match 'Rollback was incomplete') { throw "Installer reported incomplete rollback.`n$diagnostic" }
         if ($logText -notmatch '(?s)Disposable acceptance.{0,160}contro.{0,40}lled service health failure\.') {
             throw "The upgrade did not fail at the intended post-start health gate. Exit=$($process.ExitCode).`n$diagnostic"
         }
     } elseif ($process.ExitCode -ne 0 -or -not (Test-Path -LiteralPath (Join-Path $target '.dashboard-ready'))) {
+        if ($process.ExitCode -ne 0) { try { Assert-FailedCandidateRemoved } catch { Write-Output $_.Exception.Message } }
         throw "Setup did not complete and mark the healthy service ready. Exit=$($process.ExitCode).`n$diagnostic"
     }
 }
@@ -112,7 +126,7 @@ function Seed-PreviousInstall {
     Get-ChildItem -LiteralPath (Join-Path $PayloadPath 'app') -Force | Copy-Item -Destination (Split-Path -Parent $oldExe) -Recurse -Force
     if (-not (Test-Path -LiteralPath $oldExe -PathType Leaf)) { throw 'Synthetic previous executable is missing.' }
     $config = [ordered]@{
-        AllowedHosts=if ($Scenario -eq 'IPv6Upgrade') { '[::1]' } else { 'localhost;127.0.0.1' }
+        AllowedHosts=if ($Scenario -in @('IPv6Upgrade','IPv6Rollback')) { '[::1]' } else { 'localhost;127.0.0.1' }
         Kestrel=@{Endpoints=@{LocalHttp=@{Url=$oldConfigUrl}}}
         ReverseProxy=@{Routes=@{};Clusters=@{}}
         MigrationSentinel='preserve-this-value'
@@ -123,7 +137,7 @@ function Seed-PreviousInstall {
     Start-Service -Name $serviceName
     $script:oldInstalled = $true
     Wait-Healthy
-    if ($Scenario -eq 'IPv6Upgrade') {
+    if ($Scenario -in @('IPv6Upgrade','IPv6Rollback')) {
         $oldPid = (Get-CimInstance Win32_Service -Filter "Name='$serviceName'").ProcessId
         $listeners = @(Get-NetTCPConnection -State Listen -LocalPort 8080 | Where-Object OwningProcess -eq $oldPid)
         if (@($listeners | Where-Object LocalAddress -eq '::1').Count -ne 1 -or @($listeners | Where-Object LocalAddress -eq '127.0.0.1').Count -ne 0) {
@@ -206,7 +220,7 @@ try {
         Seed-PreviousInstall
     }
 
-    if ($Scenario -eq 'Rollback') {
+    if ($Scenario -in @('Rollback','IPv6Rollback')) {
         $stateAclBefore = Get-DirectoryAclSddl $stateRoot
         $configBefore = [IO.File]::ReadAllText($oldConfig)
         $serviceEnvironmentBefore = @((Get-ItemProperty -LiteralPath $svcKey).Environment)
@@ -227,6 +241,11 @@ try {
         Write-Output 'PASS: injected startup failure returned nonzero, removed candidate and rolled back the service path, config and ACL.'
         Invoke-Setup
         Assert-InstalledService (Join-Path $target 'app\GatewayCoreYarp.exe')
+        if ($Scenario -eq 'IPv6Rollback') {
+            $h4 = Invoke-DirectLoopback 'http://127.0.0.1:8080/gateway/health'
+            if ($h4.StatusCode -ne 200 -or ($h4.Content | ConvertFrom-Json).status -ne 'healthy') { throw 'IPv4 health failed after retrying IPv6 upgrade.' }
+            if ((Invoke-DirectLoopback 'http://127.0.0.1:8080/dashboard').StatusCode -ne 200) { throw 'IPv4 dashboard failed after retrying IPv6 upgrade.' }
+        }
         $retryUninstall = Start-Process -FilePath (Join-Path $target 'unins000.exe') -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait -PassThru
         if ($retryUninstall.ExitCode -ne 0 -or (Get-Service -Name $serviceName -ErrorAction SilentlyContinue)) { throw 'Retry uninstall failed.' }
         Write-Output 'PASS: same exact Setup can be retried successfully after rollback.'
@@ -249,7 +268,7 @@ try {
             if ($backups.Count -eq 0 -or -not (Test-Path (Join-Path $backups[-1].FullName 'ControlPlane-sha256.json'))) { throw 'Upgrade did not retain a verified pre-migration backup.' }
             if (-not (Test-Path (Join-Path $backups[-1].FullName 'source-appsettings.json'))) { throw 'Upgrade did not back up the previous runtime configuration.' }
             if ((Get-Content $configPath -Raw | ConvertFrom-Json).MigrationSentinel -cne 'preserve-this-value') { throw 'Configuration migration discarded an existing setting.' }
-            if ($Scenario -eq 'IPv6Upgrade') {
+            if ($Scenario -in @('IPv6Upgrade','IPv6Rollback')) {
                 $config = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json
                 $ipv6 = @($config.Kestrel.Endpoints.PSObject.Properties | Where-Object { $_.Value.Url -eq 'http://[::1]:8080' })
                 $ipv4 = @($config.Kestrel.Endpoints.PSObject.Properties | Where-Object { $_.Value.Url -eq 'http://127.0.0.1:8080' })
