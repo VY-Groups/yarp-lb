@@ -51,9 +51,15 @@ function Wait-Healthy([int]$Seconds = 90) {
 
 function Invoke-Setup([switch]$ExpectFailure) {
     $process = Start-Process -FilePath $SetupPath -ArgumentList $setupArgs -Wait -PassThru
-    $diagnostic = if (Test-Path -LiteralPath $setupLog) { (Get-Content -LiteralPath $setupLog -Tail 40 | Out-String) } else { 'Setup log was not created.' }
-    if ($ExpectFailure -and $process.ExitCode -eq 0) { throw "Setup unexpectedly succeeded during the injected health failure.`n$diagnostic" }
-    if (-not $ExpectFailure -and $process.ExitCode -ne 0) { throw "Setup failed with exit code $($process.ExitCode).`n$diagnostic" }
+    $logText = if (Test-Path -LiteralPath $setupLog) { Get-Content -LiteralPath $setupLog -Raw } else { '' }
+    $diagnostic = if ($logText) { ($logText -split "`r?`n" | Select-Object -Last 60) -join "`n" } else { 'Setup log was not created.' }
+    if ($ExpectFailure) {
+        if ($logText -notmatch 'Disposable acceptance requested a controlled service health failure\.') {
+            throw "The upgrade did not fail at the intended post-start health gate. Exit=$($process.ExitCode).`n$diagnostic"
+        }
+    } elseif ($process.ExitCode -ne 0 -or -not (Test-Path -LiteralPath (Join-Path $target '.dashboard-ready'))) {
+        throw "Setup did not complete and mark the healthy service ready. Exit=$($process.ExitCode).`n$diagnostic"
+    }
 }
 
 function Get-DirectoryAclSddl([string]$Path) {

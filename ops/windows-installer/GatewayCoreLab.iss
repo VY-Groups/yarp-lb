@@ -89,6 +89,14 @@ begin
   Result := FileExists(ExpandConstant('{app}\.dashboard-ready'));
 end;
 
+procedure GatewayCoreInstallerOutput(const S: String; const Error, FirstLine: Boolean);
+begin
+  if Error then
+    Log('GatewayCore installer output capture failed: ' + S)
+  else
+    Log('GatewayCore installer: ' + S);
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
 var
   ExitCode: Integer;
@@ -99,8 +107,8 @@ begin
     Parameters := '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' +
       ExpandConstant('{app}\ops\windows-installer\Install-GatewayCoreLab.ps1') +
       '" -InstallRoot "' + ExpandConstant('{app}') + '" -SourceCommit "{#SourceCommit}"';
-    if not Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'), Parameters,
-      ExpandConstant('{app}'), SW_HIDE, ewWaitUntilTerminated, ExitCode) then
+    if not ExecAndLogOutput(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'), Parameters,
+      ExpandConstant('{app}'), SW_SHOWNORMAL, ewWaitUntilTerminated, ExitCode, @GatewayCoreInstallerOutput) then
       RaiseException('Could not launch the transactional GatewayCore service installer.');
     Log(Format('GatewayCore Lab service installer exit code=%d.', [ExitCode]));
     if ExitCode <> 0 then
