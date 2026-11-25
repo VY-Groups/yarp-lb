@@ -388,11 +388,20 @@ function Test-DirectServiceHealth([string]$BaseUrl) {
     }
     $svc = Get-CimInstance Win32_Service -Filter "Name='$serviceName'"
     if ($null -eq $svc -or $svc.State -ne 'Running' -or $svc.ProcessId -eq 0) { throw 'SCM service is not running.' }
-    $address = $uri.IdnHost
+    $address = $uri.IdnHost.Trim('[',']')
+    $expectedIp = $null
+    if ($address -ne 'localhost' -and -not [Net.IPAddress]::TryParse($address,[ref]$expectedIp)) {
+        throw 'Health endpoint must be a loopback IP literal or localhost.'
+    }
     $listeners = @(Get-NetTCPConnection -State Listen -LocalPort 8080 -ErrorAction SilentlyContinue |
         Where-Object { $_.OwningProcess -eq $svc.ProcessId })
     $owned = @($listeners | Where-Object {
-        $_.LocalAddress -eq $address -or ($address -eq 'localhost' -and $_.LocalAddress -in @('127.0.0.1','::1'))
+        $listenerIp = $null
+        if (-not [Net.IPAddress]::TryParse([string]$_.LocalAddress,[ref]$listenerIp)) { return $false }
+        if ($address -eq 'localhost') {
+            return ($listenerIp.Equals([Net.IPAddress]::Loopback) -or $listenerIp.Equals([Net.IPAddress]::IPv6Loopback))
+        }
+        return $listenerIp.Equals($expectedIp)
     })
     if ($owned.Count -eq 0) { throw "No SCM-owned listener for $BaseUrl (PID $($svc.ProcessId))." }
     $output = @(& "$env:WINDIR\System32\curl.exe" --noproxy '*' --globoff --silent --show-error --max-time 3 --write-out '\n%{http_code}' ($BaseUrl.TrimEnd('/') + '/gateway/health') 2>&1)
@@ -418,7 +427,13 @@ function Get-ConfiguredHealthUrls([string]$Path) {
         if ([Uri]::TryCreate([string]$u.Value,[UriKind]::Absolute,[ref]$uri) -and
             $uri.Scheme -eq 'http' -and $uri.IsLoopback -and $uri.Port -eq 8080 -and
             $uri.AbsolutePath -eq '/' -and -not $uri.UserInfo -and -not $uri.Query -and -not $uri.Fragment) {
-            $uri.GetLeftPart([UriPartial]::Authority)
+            $hostText = $uri.IdnHost.Trim('[',']')
+            $ip = $null
+            if ([Net.IPAddress]::TryParse($hostText,[ref]$ip)) {
+                if ($ip.AddressFamily -eq [Net.Sockets.AddressFamily]::InterNetworkV6) { $hostText = '[' + $ip.ToString() + ']' }
+                else { $hostText = $ip.ToString() }
+            }
+            'http://' + $hostText + ':8080'
         }
     }
 }
