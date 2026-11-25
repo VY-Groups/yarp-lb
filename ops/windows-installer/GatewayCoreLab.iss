@@ -63,6 +63,7 @@ var
   Version: TWindowsVersion;
   InstallationType: String;
 begin
+  Log('GatewayCore Lab InitializeSetup entered.');
   Result := False;
   if not IsWin64 then begin
     MsgBox('GatewayCore Lab requires 64-bit Windows.', mbError, MB_OK);
@@ -79,6 +80,7 @@ begin
     MsgBox('GatewayCore Lab Setup supports Windows Server 2022 or later only.', mbError, MB_OK);
     Exit;
   end;
+  Log('GatewayCore Lab InitializeSetup prerequisites passed.');
   Result := True;
 end;
 
@@ -92,6 +94,7 @@ var
   ExitCode: Integer;
   Parameters: String;
 begin
+  Log(Format('GatewayCore Lab CurStepChanged step=%d.', [Ord(CurStep)]));
   if CurStep = ssPostInstall then begin
     Parameters := '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' +
       ExpandConstant('{app}\ops\windows-installer\Install-GatewayCoreLab.ps1') +
@@ -99,6 +102,7 @@ begin
     if not Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'), Parameters,
       ExpandConstant('{app}'), SW_HIDE, ewWaitUntilTerminated, ExitCode) then
       RaiseException('Could not launch the transactional GatewayCore service installer.');
+    Log(Format('GatewayCore Lab service installer exit code=%d.', [ExitCode]));
     if ExitCode <> 0 then
       RaiseException('GatewayCore service setup or health verification failed. The installer attempted to restore the prior service and configuration; inspect the retained ProgramData installer backup before retrying.');
   end;

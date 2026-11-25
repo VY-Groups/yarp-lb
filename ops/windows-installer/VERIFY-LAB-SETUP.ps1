@@ -27,9 +27,10 @@ $oldConfig = Join-Path $oldRoot 'app\appsettings.json'
 $oldConfigUrl = 'http://127.0.0.1:8080'
 $adminFile = Join-Path $stateRoot 'admin-users.json'
 $svcKey = "HKLM:\SYSTEM\CurrentControlSet\Services\$serviceName"
+$setupLog = Join-Path $env:TEMP "GatewayCore-Setup-$SourceCommit.log"
 $stateBefore = @{}
 $oldInstalled = $false
-$setupArgs = '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP-'
+$setupArgs = @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-',"/LOG=$setupLog")
 
 function Invoke-Sc([string[]]$Arguments) {
     & "$env:WINDIR\System32\sc.exe" @Arguments | Out-Null
@@ -50,8 +51,9 @@ function Wait-Healthy([int]$Seconds = 90) {
 
 function Invoke-Setup([switch]$ExpectFailure) {
     $process = Start-Process -FilePath $SetupPath -ArgumentList $setupArgs -Wait -PassThru
-    if ($ExpectFailure -and $process.ExitCode -eq 0) { throw 'Setup unexpectedly succeeded during the injected health failure.' }
-    if (-not $ExpectFailure -and $process.ExitCode -ne 0) { throw "Setup failed with exit code $($process.ExitCode)." }
+    $diagnostic = if (Test-Path -LiteralPath $setupLog) { (Get-Content -LiteralPath $setupLog -Tail 40 | Out-String) } else { 'Setup log was not created.' }
+    if ($ExpectFailure -and $process.ExitCode -eq 0) { throw "Setup unexpectedly succeeded during the injected health failure.`n$diagnostic" }
+    if (-not $ExpectFailure -and $process.ExitCode -ne 0) { throw "Setup failed with exit code $($process.ExitCode).`n$diagnostic" }
 }
 
 function Get-DirectoryAclSddl([string]$Path) {
@@ -100,7 +102,8 @@ function Assert-InstalledService([string]$ExpectedExe) {
     $service = Get-CimInstance Win32_Service -Filter "Name='$serviceName'"
     if ($null -eq $service -or $service.State -ne 'Running' -or $service.StartMode -ne 'Auto' -or $service.StartName -ne 'NT AUTHORITY\LocalService') {
         $actual = if ($null -eq $service) { 'missing' } else { "State='$($service.State)', StartMode='$($service.StartMode)', StartName='$($service.StartName)'" }
-        throw "GatewayCore service is not running as LocalService with automatic startup. SCM reported: $actual"
+        $diagnostic = if (Test-Path -LiteralPath $setupLog) { (Get-Content -LiteralPath $setupLog -Tail 40 | Out-String) } else { 'Setup log was not created.' }
+        throw "GatewayCore service is not running as LocalService with automatic startup. SCM reported: $actual`n$diagnostic"
     }
     if ($service.PathName.Trim('"') -cne $ExpectedExe) { throw "SCM binary path mismatch: $($service.PathName)" }
     Wait-Healthy
