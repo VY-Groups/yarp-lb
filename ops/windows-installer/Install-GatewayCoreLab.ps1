@@ -332,6 +332,10 @@ function ConvertTo-ManagedConfig([string]$SourcePath) {
         }
         if (-not $hasIPv4LoopbackEndpoint) {
             $endpoints | Add-Member -NotePropertyName GatewayCoreDashboard -NotePropertyValue ([pscustomobject]@{ Url='http://127.0.0.1:8080' })
+            $hosts = $config.PSObject.Properties['AllowedHosts']
+            if ($null -ne $hosts -and $hosts.Value -is [string] -and $hosts.Value -and $hosts.Value -ne '*' -and ($hosts.Value -split ';') -notcontains '127.0.0.1') {
+                $hosts.Value = $hosts.Value.TrimEnd(';') + ';127.0.0.1'
+            }
         }
     }
     if ($null -eq $config.PSObject.Properties['AllowedHosts']) { $config | Add-Member -NotePropertyName AllowedHosts -NotePropertyValue 'localhost;127.0.0.1' }

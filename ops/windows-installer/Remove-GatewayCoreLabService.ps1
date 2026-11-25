@@ -1,11 +1,11 @@
 [CmdletBinding()]
-param([Parameter(Mandatory)][string]$InstallRoot)
+param([Parameter(Mandatory)][string]$InstallRoot, [switch]$AssertNotOwner)
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 $InstallRoot = [IO.Path]::GetFullPath($InstallRoot).TrimEnd('\')
 $serviceName = 'GatewayCoreYarp'
-$service = Get-CimInstance Win32_Service -Filter "Name='$serviceName'" -ErrorAction SilentlyContinue
+$service = Get-CimInstance Win32_Service -Filter "Name='$serviceName'" -ErrorAction Stop
 if ($null -eq $service) { exit 0 }
 $match = [regex]::Match([string]$service.PathName, '"(?<exe>[^"]+\\GatewayCoreYarp\.exe)"|(?<exe>.+?\\GatewayCoreYarp\.exe)(?:\s|$)', 'IgnoreCase')
 if (-not $match.Success) { throw 'Service executable path is not verifiable; refusing uninstall to avoid deleting an unrelated service.' }
@@ -14,6 +14,7 @@ if (-not [string]::Equals($serviceRoot, $InstallRoot, [StringComparison]::Ordina
     Write-Output 'A newer or different GatewayCore installation owns the service; leaving it unchanged.'
     exit 0
 }
+if ($AssertNotOwner) { throw 'Failed candidate still owns the service; preserve its files and backups for administrator recovery.' }
 $running = Get-Service -Name $serviceName -ErrorAction Stop
 if ($running.Status -ne 'Stopped') {
     Stop-Service -Name $serviceName

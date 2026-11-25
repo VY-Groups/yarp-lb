@@ -37,16 +37,43 @@ function Invoke-Sc([string[]]$Arguments) {
     if ($LASTEXITCODE -ne 0) { throw "sc.exe $($Arguments -join ' ') failed with $LASTEXITCODE" }
 }
 
+function Invoke-DirectLoopback([string]$Url, [string]$JsonBody = '') {
+    # Windows PowerShell 5.1's WebRequest stack can use a system proxy for
+    # an IPv6 literal. Use curl with no proxy and report actual HTTP status.
+    $arguments = @('--noproxy','*','--globoff','--silent','--show-error','--max-time','5','--write-out','\n%{http_code}', $Url)
+    $bodyPath = $null
+    try {
+        if ($JsonBody) {
+            $bodyPath = [IO.Path]::GetTempFileName()
+            [IO.File]::WriteAllText($bodyPath, $JsonBody, [Text.UTF8Encoding]::new($false))
+            $arguments += @('--header','Content-Type: application/json','--data-binary',("@"+$bodyPath))
+        }
+        $output = @(& "$env:WINDIR\System32\curl.exe" @arguments 2>&1)
+        $exitCode = $LASTEXITCODE
+        if ($exitCode -ne 0 -or $output.Count -lt 1) { throw "Direct loopback request failed ($exitCode): $output" }
+        $status = [int]$output[-1]
+        $body = ($output | Select-Object -SkipLast 1) -join "`n"
+        return [pscustomobject]@{ StatusCode=$status; Content=$body }
+    } finally {
+        if ($bodyPath) { Remove-Item -LiteralPath $bodyPath -Force -ErrorAction SilentlyContinue }
+    }
+}
+
 function Wait-Healthy([int]$Seconds = 90) {
     $until = [DateTime]::UtcNow.AddSeconds($Seconds)
+    $last = 'no response'
     do {
         try {
-            $response = Invoke-WebRequest -UseBasicParsing -Uri ($oldConfigUrl + '/gateway/health') -TimeoutSec 2
+            $response = Invoke-DirectLoopback ($oldConfigUrl + '/gateway/health')
             if ($response.StatusCode -eq 200 -and ($response.Content | ConvertFrom-Json).status -eq 'healthy') { return }
-        } catch { }
+            $last = "HTTP $($response.StatusCode)"
+        } catch { $last = $_.Exception.Message }
         Start-Sleep -Milliseconds 400
     } while ([DateTime]::UtcNow -lt $until)
-    throw 'Loopback health endpoint did not become ready.'
+    Get-CimInstance Win32_Service -Filter "Name='$serviceName'" | Select-Object State,ProcessId,ExitCode,ServiceSpecificExitCode,PathName | Format-List | Out-Host
+    Get-NetTCPConnection -LocalPort 8080 -ErrorAction SilentlyContinue | Format-Table -AutoSize | Out-Host
+    Get-WinEvent -FilterHashtable @{LogName='Application';StartTime=(Get-Date).AddMinutes(-5)} -MaxEvents 30 -ErrorAction SilentlyContinue | Where-Object {$_.ProviderName -match 'GatewayCore|\.NET Runtime|Application Error'} | Select-Object TimeCreated,ProviderName,Message | Format-List | Out-Host
+    throw "Loopback health endpoint $oldConfigUrl did not become ready. Last probe: $last"
 }
 
 function Invoke-Setup([switch]$ExpectFailure) {
@@ -56,7 +83,9 @@ function Invoke-Setup([switch]$ExpectFailure) {
     if ($ExpectFailure) {
         # Inno Setup wraps long logged PowerShell lines at arbitrary columns.
         if ($process.ExitCode -eq 0) { throw "Failed Setup falsely reported success (exit 0).\n$diagnostic" }
-        if (Test-Path -LiteralPath $target) { throw "Failed Setup left its candidate installation directory behind: $target\n$diagnostic" }
+        if (Test-Path -LiteralPath $target) { throw "Failed Setup left its candidate installation directory behind: $target`n$diagnostic" }
+        $uninstallKey = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\GatewayCore-Lab-${SourceCommit}_is1"
+        if (Test-Path -LiteralPath $uninstallKey) { throw 'Failed Setup left an installed-program registration.' }
         if ($logText -notmatch '(?s)Disposable acceptance.{0,160}contro.{0,40}lled service health failure\.') {
             throw "The upgrade did not fail at the intended post-start health gate. Exit=$($process.ExitCode).`n$diagnostic"
         }
@@ -83,7 +112,7 @@ function Seed-PreviousInstall {
     Get-ChildItem -LiteralPath (Join-Path $PayloadPath 'app') -Force | Copy-Item -Destination (Split-Path -Parent $oldExe) -Recurse -Force
     if (-not (Test-Path -LiteralPath $oldExe -PathType Leaf)) { throw 'Synthetic previous executable is missing.' }
     $config = [ordered]@{
-        AllowedHosts='localhost;127.0.0.1;[::1]'
+        AllowedHosts=if ($Scenario -eq 'IPv6Upgrade') { '[::1]' } else { 'localhost;127.0.0.1' }
         Kestrel=@{Endpoints=@{LocalHttp=@{Url=$oldConfigUrl}}}
         ReverseProxy=@{Routes=@{};Clusters=@{}}
         MigrationSentinel='preserve-this-value'
@@ -94,9 +123,16 @@ function Seed-PreviousInstall {
     Start-Service -Name $serviceName
     $script:oldInstalled = $true
     Wait-Healthy
-    $web = New-Object Microsoft.PowerShell.Commands.WebRequestSession
+    if ($Scenario -eq 'IPv6Upgrade') {
+        $oldPid = (Get-CimInstance Win32_Service -Filter "Name='$serviceName'").ProcessId
+        $listeners = @(Get-NetTCPConnection -State Listen -LocalPort 8080 | Where-Object OwningProcess -eq $oldPid)
+        if (@($listeners | Where-Object LocalAddress -eq '::1').Count -ne 1 -or @($listeners | Where-Object LocalAddress -eq '127.0.0.1').Count -ne 0) {
+            throw 'Prior service is not IPv6-only; regression fixture is invalid.'
+        }
+        Write-Output 'PASS: prior IPv6-only service is healthy before Setup.'
+    }
     $body = @{username='installer_ci_admin';password='Disposable-Installer-CI-Password-Not-For-Use';email='installer@example.invalid'} | ConvertTo-Json -Compress
-    $response = Invoke-WebRequest -UseBasicParsing -Uri ($oldConfigUrl + '/admin/api/bootstrap') -Method Post -WebSession $web -TimeoutSec 10 -ContentType 'application/json' -Body $body
+    $response = Invoke-DirectLoopback ($oldConfigUrl + '/admin/api/bootstrap') $body
     if ($response.StatusCode -ne 200 -or -not ($response.Content | ConvertFrom-Json).authenticated) { throw 'Previous installation did not create disposable administrator state.' }
     Set-Content -LiteralPath (Join-Path $stateRoot 'migration-sentinel.txt') -Value 'preserve-state' -Encoding ascii
     $keyDirectory = Join-Path $stateRoot 'data-protection-keys'
@@ -117,7 +153,7 @@ function Assert-InstalledService([string]$ExpectedExe) {
     }
     if ($service.PathName.Trim('"') -cne $ExpectedExe) { throw "SCM binary path mismatch: $($service.PathName)" }
     Wait-Healthy
-    $dashboard = Invoke-WebRequest -UseBasicParsing -Uri ($oldConfigUrl + '/dashboard') -TimeoutSec 10
+    $dashboard = Invoke-DirectLoopback ($oldConfigUrl + '/dashboard')
     if ($dashboard.StatusCode -ne 200) { throw 'Dashboard did not return HTTP 200 after health became ready.' }
     $marker = Join-Path (Split-Path -Parent (Split-Path -Parent $ExpectedExe)) '.dashboard-ready'
     if ((Get-Content -LiteralPath $marker -Raw).Trim() -cne $SourceCommit) { throw 'Dashboard launch marker was written before/without the verified install commit.' }
@@ -188,7 +224,12 @@ try {
         if ([IO.File]::ReadAllText($oldConfig) -cne $configBefore) { throw 'Failed upgrade changed the old runtime config.' }
         if (Test-Path -LiteralPath $configPath) { throw 'Failed upgrade left a partial migrated runtime config.' }
         Wait-Healthy
-        Write-Output 'PASS: injected startup failure rolled back the service path, config and ACL.'
+        Write-Output 'PASS: injected startup failure returned nonzero, removed candidate and rolled back the service path, config and ACL.'
+        Invoke-Setup
+        Assert-InstalledService (Join-Path $target 'app\GatewayCoreYarp.exe')
+        $retryUninstall = Start-Process -FilePath (Join-Path $target 'unins000.exe') -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait -PassThru
+        if ($retryUninstall.ExitCode -ne 0 -or (Get-Service -Name $serviceName -ErrorAction SilentlyContinue)) { throw 'Retry uninstall failed.' }
+        Write-Output 'PASS: same exact Setup can be retried successfully after rollback.'
     } else {
         Invoke-Setup
         Assert-InstalledPayload
@@ -213,10 +254,11 @@ try {
                 $ipv6 = @($config.Kestrel.Endpoints.PSObject.Properties | Where-Object { $_.Value.Url -eq 'http://[::1]:8080' })
                 $ipv4 = @($config.Kestrel.Endpoints.PSObject.Properties | Where-Object { $_.Value.Url -eq 'http://127.0.0.1:8080' })
                 if ($ipv6.Count -ne 1 -or $ipv4.Count -ne 1) { throw 'IPv6-only upgrade did not preserve ::1 and provision the IPv4 management listener.' }
-                $health4 = Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:8080/gateway/health' -TimeoutSec 10
+                $health4 = Invoke-DirectLoopback 'http://127.0.0.1:8080/gateway/health'
                 if ($health4.StatusCode -ne 200 -or ($health4.Content | ConvertFrom-Json).status -ne 'healthy') {
                     throw 'IPv4 management listener added for IPv6-only upgrade did not become healthy.'
                 }
+                if ((Invoke-DirectLoopback 'http://127.0.0.1:8080/dashboard').StatusCode -ne 200) { throw 'IPv4 dashboard is not reachable after migration.' }
                 Write-Output 'PASS: IPv6-only previous service migrated without losing ::1 and gained verified IPv4 loopback dashboard.'
             } else {
                 Write-Output 'PASS: upgrade detected prior service, backed up protected state/config, migrated config and preserved DPAPI/admin data.'
