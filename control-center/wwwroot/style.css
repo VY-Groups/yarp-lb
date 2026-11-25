@@ -245,3 +245,25 @@ dialog{border-color:#4a607a;box-shadow:0 24px 85px rgba(0,0,0,.75)}
 .privacy-link{color:#5ee6cf;text-decoration:underline;text-underline-offset:3px}
 #privacy-message{color:#f5cc8b;line-height:1.5}
 @media(max-width:600px){.privacy-screen{padding:12px}.privacy-card{margin:8px auto}.privacy-text{padding:12px}.privacy-actions button{flex:1 1 auto}}
+
+/* Task-first workspace with native, keyboard-operable disclosures. */
+.operator-intro{margin:16px 0;background:#15283c}
+.operator-intro h2{margin:0 0 8px}
+.operator-intro p,.operator-steps p{color:#b9ccdf;line-height:1.65}
+.operator-flow{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:16px}
+.operator-flow span:not([aria-hidden]){border:1px solid #436079;border-radius:8px;padding:9px 14px;font-weight:700}
+.operator-flow span[aria-hidden]{color:#69e7d0}
+.operator-steps{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;margin:14px 0}
+.operator-steps section{min-width:0}
+.operator-steps h3{font-size:17px;color:#edf5ff;margin:9px 0}
+.operator-steps button{margin:4px 4px 0 0}
+.operator-number{display:inline-grid;place-items:center;width:30px;height:30px;border-radius:50%;background:#214c51;color:#8df3de;font-weight:800}
+.operator-help{margin:10px 0 20px}
+.operator-advanced{margin:16px 0}
+.operator-advanced>summary,.advanced-nav>summary{cursor:pointer;font-weight:700;line-height:1.5}
+.operator-advanced>summary{padding:6px 0;color:#dceafa}
+.operator-advanced[open]>summary{margin-bottom:15px}
+.advanced-nav>summary{padding:10px 9px;color:#bacde1;font-size:12px}
+.advanced-nav[open]>.nav{margin-left:8px;width:calc(100% - 8px)}
+@media(max-width:950px){.sidebar nav{display:block;overflow:visible}.nav-group.simple-nav{display:flex;flex-wrap:wrap;gap:5px}.nav-group.advanced-nav{display:block;margin:4px 0}.nav-group:not(:last-child)::after{display:none}.advanced-nav[open]>.nav{display:inline-flex;width:auto;margin:4px}.simple-nav .nav-group-title{display:none}}
+@media(max-width:650px){.operator-steps{grid-template-columns:1fr}.operator-flow{gap:5px}.operator-flow span:not([aria-hidden]){padding:6px 8px;font-size:12px}}

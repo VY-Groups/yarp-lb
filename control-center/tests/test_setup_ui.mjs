@@ -32,6 +32,9 @@ assert.ok(html.includes('&lt;script&gt;alert(1)&lt;/script&gt;'), 'rendered evid
 assert.ok(!html.includes('Maintenance <script>'), 'no unsanitized response HTML');
 assert.ok(html.includes('not implemented'), 'feature gaps must remain visible');
 assert.ok(html.includes('setup-add-application'), 'guided public app onboarding action exists');
+assert.ok(html.includes('setup-simple-website'), 'basic website entry point exists');
+assert.ok(html.includes('<details class="card operator-advanced">'), 'advanced evidence is collapsed by default');
+assert.ok(vm.runInContext('guide()',ctx).includes('different administrator'), 'guide explains independent approval');
 await vm.runInContext('setupLiveHealth()',ctx);
 assert.ok(getNode('setup-live-output').innerHTML.includes('Unknown'));
 await vm.runInContext('setupFreeze(false)',ctx);

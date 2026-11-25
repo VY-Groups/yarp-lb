@@ -78,25 +78,34 @@
     </div>
     <div class="workspace-label"><span class="workspace-indicator" aria-hidden="true"></span> ON-PREMISES WORKSPACE <span class="workspace-version">v0.1</span></div>
     <nav aria-label="Primary navigation">
-      <div class="nav-group" aria-label="Workspace"><h2 class="nav-group-title">Workspace</h2><button type="button" class="nav active" data-view="overview"><span class="nav-icon" aria-hidden="true">◉</span><span class="nav-text">Overview</span></button>
-<button type="button" class="nav" data-view="setup"><span class="nav-icon" aria-hidden="true">◫</span><span class="nav-text">Setup Center</span></button>
-<button type="button" class="nav" data-view="organization"><span class="nav-icon" aria-hidden="true">▤</span><span class="nav-text">Organization</span></button>
-<button type="button" class="nav" data-view="onboarding"><span class="nav-icon" aria-hidden="true">◇</span><span class="nav-text">Architecture & setup</span></button></div>
-<div class="nav-group" aria-label="Traffic & delivery"><h2 class="nav-group-title">Traffic & delivery</h2><button type="button" class="nav" data-view="routes"><span class="nav-icon" aria-hidden="true">⇄</span><span class="nav-text">Routes</span></button>
-<button type="button" class="nav" data-view="clusters"><span class="nav-icon" aria-hidden="true">▦</span><span class="nav-text">Clusters</span></button>
-<button type="button" class="nav" data-view="backends"><span class="nav-icon" aria-hidden="true">⬡</span><span class="nav-text">Backends</span></button>
+<div class="nav-group simple-nav" aria-label="Everyday tasks"><h2 class="nav-group-title">Everyday tasks</h2>
+<button type="button" class="nav" data-view="setup"><span class="nav-icon" aria-hidden="true">◫</span><span class="nav-text">Start here</span></button>
+<button type="button" class="nav" data-view="overview"><span class="nav-icon" aria-hidden="true">◉</span><span class="nav-text">Dashboard</span></button>
+<button type="button" class="nav" data-view="routes"><span class="nav-icon" aria-hidden="true">⇄</span><span class="nav-text">Websites &amp; routes</span></button>
+<button type="button" class="nav" data-view="backends"><span class="nav-icon" aria-hidden="true">⬡</span><span class="nav-text">Backend servers</span></button>
 <button type="button" class="nav" data-view="health"><span class="nav-icon" aria-hidden="true">♡</span><span class="nav-text">Health checks</span></button>
-<button type="button" class="nav" data-view="metrics"><span class="nav-icon" aria-hidden="true">▥</span><span class="nav-text">HTTP metrics</span></button></div>
-<div class="nav-group" aria-label="Change & operations"><h2 class="nav-group-title">Change & operations</h2><button type="button" class="nav" data-view="approvals"><span class="nav-icon" aria-hidden="true">✓</span><span class="nav-text">Change approvals</span></button>
-<button type="button" class="nav" data-view="backups"><span class="nav-icon" aria-hidden="true">◷</span><span class="nav-text">Backups & audit</span></button>
+<button type="button" class="nav" data-view="metrics"><span class="nav-icon" aria-hidden="true">▥</span><span class="nav-text">Traffic metrics</span></button>
+<button type="button" class="nav" data-view="approvals"><span class="nav-icon" aria-hidden="true">✓</span><span class="nav-text">Change requests</span></button>
+<button type="button" class="nav" data-view="guide"><span class="nav-icon" aria-hidden="true">?</span><span class="nav-text">User guide</span></button>
+</div>
+<details class="nav-group advanced-nav"><summary>Configuration</summary>
+<button type="button" class="nav" data-view="organization"><span class="nav-icon" aria-hidden="true">▤</span><span class="nav-text">Organization</span></button>
+<button type="button" class="nav" data-view="onboarding"><span class="nav-icon" aria-hidden="true">◇</span><span class="nav-text">Gateway architecture</span></button>
+<button type="button" class="nav" data-view="clusters"><span class="nav-icon" aria-hidden="true">▦</span><span class="nav-text">Backend groups</span></button>
+<button type="button" class="nav" data-view="backups"><span class="nav-icon" aria-hidden="true">◷</span><span class="nav-text">Backups &amp; audit</span></button>
+</details>
+<details class="nav-group advanced-nav"><summary>Multi-gateway &amp; modules</summary>
 <button type="button" class="nav" data-view="fleet"><span class="nav-icon" aria-hidden="true">▣</span><span class="nav-text">Gateway fleet</span></button>
 <button type="button" class="nav" data-view="peers"><span class="nav-icon" aria-hidden="true">⇌</span><span class="nav-text">Peer synchronization</span></button>
-<button type="button" class="nav" data-view="inventory"><span class="nav-icon" aria-hidden="true">▧</span><span class="nav-text">Machines & inventory</span></button></div>
-<div class="nav-group" aria-label="Platform"><h2 class="nav-group-title">Platform</h2><button type="button" class="nav" data-view="capabilities"><span class="nav-icon" aria-hidden="true">⚙</span><span class="nav-text">Capabilities</span></button>
-<button type="button" class="nav" data-view="featurematrix"><span class="nav-icon" aria-hidden="true">◇</span><span class="nav-text">Traffic Engine & modules</span></button></div>
-<div class="nav-group" aria-label="Access & security"><h2 class="nav-group-title">Access & security</h2><button type="button" class="nav" data-view="users"><span class="nav-icon" aria-hidden="true">♙</span><span class="nav-text">Admin accounts</span></button>
-<button type="button" class="nav" data-view="mail"><span class="nav-icon" aria-hidden="true">✉</span><span class="nav-text">Mail & OTP</span></button>
-<button type="button" class="nav" data-view="directory"><span class="nav-icon" aria-hidden="true">⌁</span><span class="nav-text">Active Directory</span></button></div>
+<button type="button" class="nav" data-view="inventory"><span class="nav-icon" aria-hidden="true">▧</span><span class="nav-text">Machines &amp; inventory</span></button>
+<button type="button" class="nav" data-view="capabilities"><span class="nav-icon" aria-hidden="true">⚙</span><span class="nav-text">Capabilities</span></button>
+<button type="button" class="nav" data-view="featurematrix"><span class="nav-icon" aria-hidden="true">◇</span><span class="nav-text">Traffic engine &amp; modules</span></button>
+</details>
+<details class="nav-group advanced-nav"><summary>Security &amp; accounts</summary>
+<button type="button" class="nav" data-view="users"><span class="nav-icon" aria-hidden="true">♙</span><span class="nav-text">Admin accounts</span></button>
+<button type="button" class="nav" data-view="mail"><span class="nav-icon" aria-hidden="true">✉</span><span class="nav-text">Mail &amp; OTP</span></button>
+<button type="button" class="nav" data-view="directory"><span class="nav-icon" aria-hidden="true">⌁</span><span class="nav-text">Active Directory</span></button>
+</details>
     </nav>
     <div class="sidefoot"><span class="dot"></span> Local administration<br><span class="muted">Configuration updates require independent approval</span></div>
   </aside>
