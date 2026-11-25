@@ -36,7 +36,17 @@ Name: desktopicon; Description: "Create a desktop shortcut"; Flags: unchecked
 Name: "{group}\GatewayCore Dashboard"; Filename: "http://127.0.0.1:8080/dashboard"
 Name: "{commondesktop}\GatewayCore Dashboard"; Filename: "http://127.0.0.1:8080/dashboard"; Tasks: desktopicon
 Name: "{group}\Installation and rollback instructions ({#SourceCommit})"; Filename: "{app}\README.md"
+[Run]
+Filename: "http://127.0.0.1:8080/dashboard"; Description: "Open GatewayCore Dashboard"; Flags: postinstall shellexec skipifsilent runasoriginaluser; Check: DashboardReady
 [Code]
+var
+  Healthy: Boolean;
+
+function DashboardReady: Boolean;
+begin
+  Result := Healthy;
+end;
+
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
   Expected: String;
@@ -65,5 +75,8 @@ begin
       RaiseException('Could not launch secure state provisioning. Setup cannot complete.');
     if ExitCode <> 0 then
       RaiseException('Secure state provisioning failed. Existing state is not automatically modified. Contact the administrator for offline recovery.');
+    { Browser launch is gated on a future integrated service health check.
+      Never open an unverified listener just because binaries were copied. }
+    Healthy := False;
   end;
 end;
