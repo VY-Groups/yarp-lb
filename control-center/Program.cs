@@ -65,8 +65,44 @@ var privateDir = ec2Lab ? Ec2WorkflowLab.PrivateDirectory()
     : OperatingSystem.IsLinux() ? LinuxKeyProtection.InitializeStateDirectory()
     : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
         "GatewayCoreYarp", "ControlPlane");
+#if !GATEWAYCORE_COMMERCIAL
+// Read-only local installer preflight, before touching any state or keys.
+if (args.Length == 1 && args[0] == "--windows-lab-check-residual-state")
+{
+    if (!OperatingSystem.IsWindows() || ec2Lab)
+    {
+        Environment.ExitCode = 78;
+        return;
+    }
+    try
+    {
+        Console.WriteLine(JsonSerializer.Serialize(LegacyStateGuard.ClassifyResidualWindowsStores(privateDir)));
+    }
+    catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException)
+    {
+        Console.Error.WriteLine(ex.Message);
+        Environment.ExitCode = 78;
+    }
+    return;
+}
+#endif
 if (OperatingSystem.IsWindows() && !ec2Lab)
-    LegacyStateGuard.RejectUnmigratedWindowsState(privateDir);
+{
+    IReadOnlyCollection<string>? approvedResidualStores = null;
+#if !GATEWAYCORE_COMMERCIAL
+    // The ordinary lab installer places an exact, administrator-authorized
+    // isolation list in SCM's service environment. It is not a migration,
+    // global ignore switch, or commercial/production startup exemption.
+    if (Microsoft.Extensions.Hosting.WindowsServices.WindowsServiceHelpers.IsWindowsService())
+    {
+        var approved = Environment.GetEnvironmentVariable("GATEWAYCORE_LAB_RESIDUAL_STORES");
+        if (!string.IsNullOrEmpty(approved))
+            approvedResidualStores = JsonSerializer.Deserialize<string[]>(Convert.FromBase64String(approved))
+                ?? throw new InvalidOperationException("Invalid lab residual-store authorization");
+    }
+#endif
+    LegacyStateGuard.RejectUnmigratedWindowsState(privateDir, approvedResidualStores);
+}
 if (OperatingSystem.IsWindows() && !ec2Lab)
     WindowsStateProtection.InitializeStateDirectory(Path.GetDirectoryName(privateDir)!, privateDir,
         installerLocalSystem: args.Length == 1 && args[0] == "--windows-prepare-state");

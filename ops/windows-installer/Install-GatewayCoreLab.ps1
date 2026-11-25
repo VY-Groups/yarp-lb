@@ -505,10 +505,57 @@ $sourceConfig = $null
 $serviceCreated = $false
 $serviceChanged = $false
 $migrationStarted = $false
+$approvedResidualStores = @()
+$residualAuthorization = $null
+$setupStartedAt = Get-Date
 $transactionSucceeded = $false
 
 try {
     $lock = [IO.File]::Open($lockPath, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+    # Inspect before modifying any service or state. The elevated installer
+    # can inspect former state even if LocalService cannot read old keys.
+    $preflightError = [IO.Path]::GetTempFileName()
+    $preflightOutput = [IO.Path]::GetTempFileName()
+    try {
+        $preflight = Start-Process -FilePath $exePath -ArgumentList '--windows-lab-check-residual-state' -RedirectStandardError $preflightError -RedirectStandardOutput $preflightOutput -NoNewWindow -Wait -PassThru
+        if ($preflight.ExitCode -ne 0) {
+            $reason = Get-Content -LiteralPath $preflightError -Raw
+            throw "Legacy preflight refused Setup before service changes. $reason"
+        }
+        $preflightJson = Get-Content -LiteralPath $preflightOutput -Raw
+        if (-not $preflightJson -or -not $preflightJson.TrimStart().StartsWith('[')) { throw 'Legacy preflight did not return an explicit store list.' }
+        # Windows PowerShell 5.1 emits a top-level JSON array as a single
+        # pipeline object, even for []. Wrap it in an object before reading
+        # the property so empty and singleton lists retain their shape.
+        $parsed = ('{"stores":' + $preflightJson + '}') | ConvertFrom-Json
+        if ($null -eq $parsed.stores -or $parsed.stores -isnot [array]) { throw 'Legacy preflight store list is invalid.' }
+        foreach ($store in $parsed.stores) {
+            if ($store -isnot [string] -or -not [IO.Path]::IsPathRooted($store)) { throw 'Legacy preflight returned an invalid store path.' }
+            $approvedResidualStores += $store
+        }
+        if ($approvedResidualStores.Count -gt 0) {
+            # Preserve the application's exact JSON, avoiding a second
+            # PowerShell serialization and SCM quoting ambiguities.
+            $residualAuthorization = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($preflightJson))
+        }
+        Write-Host "Legacy preflight residual store count: $($approvedResidualStores.Count)"
+    } finally {
+        Remove-Item -LiteralPath $preflightError,$preflightOutput -Force -ErrorAction SilentlyContinue
+    }
+    if ($approvedResidualStores.Count -gt 0) {
+        $otherServices = @(Get-CimInstance Win32_Service | Where-Object {
+            $_.Name -ne $serviceName -and ($_.Name -match 'Yarp' -or $_.PathName -match 'Yarp[^\\"]*\.exe')
+        })
+        $currentService = Get-CimInstance Win32_Service -Filter "Name='$serviceName'"
+        $currentServicePid = if ($null -eq $currentService) { 0 } else { $currentService.ProcessId }
+        $otherProcesses = @(Get-CimInstance Win32_Process | Where-Object {
+            $_.Name -match 'Yarp.*\.exe$' -and $_.ProcessId -ne $currentServicePid
+        })
+        if ($otherServices.Count -gt 0 -or $otherProcesses.Count -gt 0) {
+            throw 'Legacy preflight refused Setup: a previous YARP service or process exists. Use reviewed migration; no legacy state was changed.'
+        }
+        Write-Host 'Legacy preflight accepted residual key-only state for separate lab installation. Existing keys and state will remain untouched.'
+    }
     if (Test-Path -LiteralPath $productRoot) {
         $rootAcl = Get-Acl -LiteralPath $productRoot
         if (-not $rootAcl.AreAccessRulesProtected) { throw 'Existing ProgramData root has inherited permissions; preserve it and perform a separately reviewed ACL migration.' }
@@ -606,6 +653,9 @@ try {
         Set-StateAcl $item.FullName
     }
     $environment = @("YARP_RUNTIME_CONFIG_PATH=$configPath", 'ASPNETCORE_ENVIRONMENT=Production')
+    if ($approvedResidualStores.Count -gt 0) {
+        $environment += "GATEWAYCORE_LAB_RESIDUAL_STORES=$residualAuthorization"
+    }
 
     if ($null -eq $previousService) {
         Invoke-Sc @('create',$serviceName,'binPath=',('"{0}"' -f $exePath),'start=','auto','obj=','NT AUTHORITY\LocalService','DisplayName=','GatewayCore Lab')
@@ -618,7 +668,27 @@ try {
     New-ItemProperty -LiteralPath $serviceKeyPath -Name Environment -PropertyType MultiString -Value $environment -Force | Out-Null
     Invoke-Sc @('description',$serviceName,'GatewayCore Lab gateway and local control center')
     Invoke-Sc @('failure',$serviceName,'reset=','86400','actions=','restart/5000/restart/15000/restart/60000')
-    Start-Service -Name $serviceName
+    try {
+        Start-Service -Name $serviceName
+    } catch {
+        Write-Host 'SCM startup failed. Recent relevant Windows event diagnostics:'
+        foreach ($logName in @('System','Application')) {
+            Get-WinEvent -FilterHashtable @{LogName=$logName;StartTime=$setupStartedAt} -ErrorAction SilentlyContinue |
+                Where-Object { $_.Message -match 'GatewayCore' } |
+                Select-Object -First 12 TimeCreated,Id,ProviderName |
+                Format-Table -AutoSize | Out-Host
+        }
+        # Capture exception type and first application stack frame without
+        # recording arbitrary exception payloads or protected settings.
+        Get-WinEvent -FilterHashtable @{LogName='Application';ProviderName='.NET Runtime';Id=1026;StartTime=$setupStartedAt} -ErrorAction SilentlyContinue |
+            Where-Object { $_.Message -match 'GatewayCoreYarp\.exe' } |
+            Select-Object -First 3 | ForEach-Object {
+                $exceptionType = [regex]::Match($_.Message,'Exception Info:\s*([A-Za-z0-9_.]+)').Groups[1].Value
+                $frame = @($_.Message -split '\r?\n' | Where-Object { $_ -match '^\s+at (Program\.|LegacyStateGuard\.|WindowsStateProtection\.)' } | Select-Object -First 1)
+                Write-Host "GatewayCore startup exception type: $exceptionType; frame: $frame"
+            }
+        throw
+    }
     Wait-ServiceHealth $HealthTimeoutSeconds -BaseUrls $candidateHealthUrls
 
     $liveService = Get-CimInstance Win32_Service -Filter "Name='$serviceName'"
