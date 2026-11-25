@@ -46,14 +46,16 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $compiler = Join-Path ([Environment]::GetFolderPath('ProgramFilesX86')) 'Inno Setup 6\ISCC.exe'
           if (-not (Test-Path -LiteralPath $compiler -PathType Leaf)) { throw 'Hosted Inno Setup compiler not found' }
-          $version = (Get-Item -LiteralPath $compiler).VersionInfo.ProductVersion
-          Write-Host "Inno Setup compiler version: $version"
-          if ($version -notmatch '^6\.') { throw 'Unexpected installer toolchain' }
+          # ISCC.exe may expose a placeholder PE ProductVersion (0.0.0.0).
+          # Require the actual compiler engine banner from the successful compile.
           $out = Join-Path $PWD 'setup-output'
           New-Item -ItemType Directory -Path $out | Out-Null
           $payload = (Resolve-Path extracted).Path
-          & $compiler "/DSourceCommit=$env:EXACT_SHA" "/DPayloadDir=$payload" "/DSetupOut=$out" (Resolve-Path ops/windows-installer/GatewayCoreLab.iss).Path
-          if ($LASTEXITCODE -ne 0) { throw 'Installer compilation failed' }
+          $compileLog = @(& $compiler "/DSourceCommit=$env:EXACT_SHA" "/DPayloadDir=$payload" "/DSetupOut=$out" (Resolve-Path ops/windows-installer/GatewayCoreLab.iss).Path)
+          $compileExit = $LASTEXITCODE
+          $compileLog | ForEach-Object { Write-Host $_ }
+          if ($compileExit -ne 0) { throw "Installer compilation failed: $compileExit" }
+          if (($compileLog -join "`n") -notmatch '(?im)^\s*Compiler engine version:\s*Inno Setup 6\.[0-9]+(?:\.[0-9]+)*\b') { throw 'Expected Inno Setup 6 compiler engine banner not found' }
           if (-not (Test-Path -LiteralPath (Join-Path $out 'GatewayCore-Setup-win-x64.exe'))) { throw 'Setup EXE missing' }
       - name: Execute installer and verify payload, SCM and uninstall
         shell: powershell
