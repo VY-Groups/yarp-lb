@@ -10,7 +10,7 @@ using System.Runtime.Versioning;
 [SupportedOSPlatform("windows")]
 public static class WindowsStateProtection
 {
-    public static string InitializeStateDirectory(string productDirectory, string stateDirectory)
+    public static string InitializeStateDirectory(string productDirectory, string stateDirectory, bool installerLocalSystem = false)
     {
         if (!OperatingSystem.IsWindows())
             throw new PlatformNotSupportedException("Windows state protection is Windows-only");
@@ -24,10 +24,12 @@ public static class WindowsStateProtection
             !string.Equals(Path.GetFileName(stateDirectory), "ControlPlane", StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException("Windows state must be productDirectory\\ControlPlane");
 
-        EnsurePrivateDirectory(productDirectory);
-        EnsurePrivateDirectory(stateDirectory);
+        if (installerLocalSystem && (Directory.Exists(productDirectory) || File.Exists(productDirectory)))
+            throw new InvalidOperationException("Installer provisioning requires absent state");
+        EnsurePrivateDirectory(productDirectory, installerLocalSystem);
+        EnsurePrivateDirectory(stateDirectory, installerLocalSystem);
         var keyDirectory = Path.Combine(stateDirectory, "data-protection-keys");
-        EnsurePrivateDirectory(keyDirectory);
+        EnsurePrivateDirectory(keyDirectory, installerLocalSystem);
         foreach (var keyFile in Directory.EnumerateFiles(keyDirectory, "*.xml"))
             ValidatePrivateFile(keyFile);
         return stateDirectory;
@@ -64,7 +66,7 @@ public static class WindowsStateProtection
         EnsurePrivateDirectory(path);
     }
 
-    private static void EnsurePrivateDirectory(string path)
+    private static void EnsurePrivateDirectory(string path, bool installerLocalSystem = false)
     {
         // Directory.CreateDirectory follows existing parent junctions and
         // symlinks. Reject linked ancestors BEFORE creating any state under
@@ -82,7 +84,8 @@ public static class WindowsStateProtection
 
         var security = new DirectorySecurity();
         security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
-        AddFullControl(security, WindowsIdentity.GetCurrent().User
+        if (!installerLocalSystem)
+            AddFullControl(security, WindowsIdentity.GetCurrent().User
             ?? throw new InvalidOperationException("Current Windows identity has no SID"),
             InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit);
         AddFullControl(security, new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null),

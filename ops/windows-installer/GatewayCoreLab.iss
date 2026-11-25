@@ -43,6 +43,23 @@ begin
     Result := 'The lab installer only supports its fixed versioned Program Files directory.';
     Exit;
   end;
+  if DirExists(ExpandConstant('{commonappdata}\GatewayCoreYarp')) then begin
+    Result := 'Existing GatewayCore state detected. Setup will not overwrite or change its permissions. Preserve the state and arrange a reviewed offline migration before installing this fresh lab build.';
+    Exit;
+  end;
   if DirExists(Expected) then
     Result := 'This version already exists. Do not overwrite binaries or state. Drain and stop its service before uninstalling.';
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+var
+  ExitCode: Integer;
+begin
+  if CurStep = ssPostInstall then begin
+    if not Exec(ExpandConstant('{app}\app\GatewayCoreYarp.exe'), '--windows-prepare-state',
+      ExpandConstant('{app}\app'), SW_HIDE, ewWaitUntilTerminated, ExitCode) then
+      RaiseException('Could not launch secure state provisioning. Setup cannot complete.');
+    if ExitCode <> 0 then
+      RaiseException('Secure state provisioning failed. Existing state is not automatically modified. Contact the administrator for offline recovery.');
+  end;
 end;
