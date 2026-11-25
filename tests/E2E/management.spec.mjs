@@ -207,7 +207,7 @@ test('browser: bootstrap, navigation, onboarding, websites, route edit, users an
 
   await test.step('Edit Route allows optional hostname and a visible Cancel',async()=>{
     await openNav('routes');
-    await expect(page.locator('#content')).toContainText('Routes');
+    await expect(page.locator('#content h2')).toHaveText('Websites & routes');
     await page.locator('[data-action="route-edit"]').first().click();
     await expect(page.locator('#modal-title')).toContainText('Edit route');
     await expect(page.locator('#f-hosts')).not.toHaveAttribute('required');

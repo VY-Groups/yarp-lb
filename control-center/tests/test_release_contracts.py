@@ -28,8 +28,14 @@ assert 'C:\\YARP\\Backups' in installer
 assert 'wwwroot\\app.js' in installer
 assert 'appsettings.json' in installer and 'configHashBefore' in installer
 assert 'before-0.1' in installer
-assert 'Setup Center' in html and '0.1' in html and 'style="' not in html
-assert "'setup','onboarding','users','mail','directory'" in ts
+assert 'data-view="setup"' in html and 'Start here' in html and '0.1' in html and 'style="' not in html
+assert 'data-view="guide"' in html and 'User guide' in html
+assert '<details class="nav-group advanced-nav">' in html
+assert 'data-view="routes"' in html and 'Websites &amp; routes' in html
+assert "'setup','onboarding','users','mail','directory','guide'" in ts
+assert 'setup-simple-website' in ts and 'function addSimpleWebsite()' in ts
+assert 'Complete Gateway architecture first (step 1).' in ts
+assert 'No live traffic changed.' in ts
 assert 'setup-add-application' in ts and 'setup-live-health' in ts
 assert "HealthyAndUnknown" in ts
 assert "if(b1===b2)throw Error" in ts
