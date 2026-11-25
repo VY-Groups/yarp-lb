@@ -32,7 +32,7 @@ RestartApplications=no
 Source: "{#PayloadDir}\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion
 Source: "Install-GatewayCoreLab.ps1"; DestDir: "{app}\ops\windows-installer"; Flags: ignoreversion
 Source: "Remove-GatewayCoreLabService.ps1"; DestDir: "{app}\ops\windows-installer"; Flags: ignoreversion
-Source: "README.md"; DestDir: "{app}\ops\windows-installer"; Flags: ignoreversion
+Source: "README.md"; DestDir: "{app}\ops\windows-installer"; Flags: ignoreversion; AfterInstall: InstallAndVerifyService
 [Tasks]
 Name: desktopicon; Description: "Create a desktop shortcut"; Flags: unchecked
 [Icons]
@@ -97,13 +97,13 @@ begin
     Log('GatewayCore installer: ' + S);
 end;
 
-procedure CurStepChanged(CurStep: TSetupStep);
+procedure InstallAndVerifyService();
 var
   ExitCode: Integer;
   Parameters: String;
 begin
-  Log(Format('GatewayCore Lab CurStepChanged step=%d.', [Ord(CurStep)]));
-  if CurStep = ssPostInstall then begin
+  Log('GatewayCore Lab performing service installation during the transactional file-install phase.');
+  begin
     Parameters := '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' +
       ExpandConstant('{app}\ops\windows-installer\Install-GatewayCoreLab.ps1') +
       '" -InstallRoot "' + ExpandConstant('{app}') + '" -SourceCommit "{#SourceCommit}"';
@@ -112,6 +112,6 @@ begin
       RaiseException('Could not launch the transactional GatewayCore service installer.');
     Log(Format('GatewayCore Lab service installer exit code=%d.', [ExitCode]));
     if ExitCode <> 0 then
-      RaiseException('GatewayCore service setup or health verification failed. The installer attempted to restore the prior service and configuration; inspect the retained ProgramData installer backup before retrying.');
+      RaiseException('GatewayCore service setup or health verification failed. The previous service and configuration were restored by the installer script. Setup must fail and remove the candidate files; inspect the retained ProgramData backup before retrying.');
   end;
 end;
