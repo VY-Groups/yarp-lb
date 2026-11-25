@@ -54,7 +54,9 @@ function Invoke-Setup([switch]$ExpectFailure) {
     $logText = if (Test-Path -LiteralPath $setupLog) { Get-Content -LiteralPath $setupLog -Raw } else { '' }
     $diagnostic = if ($logText) { ($logText -split "`r?`n" | Select-Object -Last 60) -join "`n" } else { 'Setup log was not created.' }
     if ($ExpectFailure) {
-        if ($logText -notmatch 'Disposable acceptance requested a controlled service health failure\.') {
+        # Inno Setup wraps long logged PowerShell lines at arbitrary columns.
+        $normalizedLogText = $logText -replace '\s+', ' '
+        if ($normalizedLogText -notmatch 'Disposable acceptance requested a controlled service health failure\.') {
             throw "The upgrade did not fail at the intended post-start health gate. Exit=$($process.ExitCode).`n$diagnostic"
         }
     } elseif ($process.ExitCode -ne 0 -or -not (Test-Path -LiteralPath (Join-Path $target '.dashboard-ready'))) {
