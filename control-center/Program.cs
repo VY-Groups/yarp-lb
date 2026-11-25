@@ -68,7 +68,8 @@ var privateDir = ec2Lab ? Ec2WorkflowLab.PrivateDirectory()
 if (OperatingSystem.IsWindows() && !ec2Lab)
     LegacyStateGuard.RejectUnmigratedWindowsState(privateDir);
 if (OperatingSystem.IsWindows() && !ec2Lab)
-    WindowsStateProtection.InitializeStateDirectory(Path.GetDirectoryName(privateDir)!, privateDir);
+    WindowsStateProtection.InitializeStateDirectory(Path.GetDirectoryName(privateDir)!, privateDir,
+        installerLocalSystem: args.Length == 1 && args[0] == "--windows-prepare-state");
 // Local installer provisioning uses the same fail-closed state checks above.
 if (args.Length == 1 && args[0] == "--windows-prepare-state")
 {

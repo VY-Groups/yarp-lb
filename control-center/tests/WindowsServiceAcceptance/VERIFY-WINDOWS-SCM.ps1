@@ -5,7 +5,8 @@
 param(
     [ValidateSet('LocalSystem', 'LocalService')]
     [string]$Identity = 'LocalSystem',
-    [string]$CandidateAppDirectory = ''
+    [string]$CandidateAppDirectory = '',
+    [switch]$InstallerProvisionedState
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -21,8 +22,15 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
 $name = 'GatewayCoreYarp'
 $product = Join-Path $env:ProgramData $name
 if ($null -ne (Get-Service -Name $name -ErrorAction SilentlyContinue) -or
-    (Test-Path -LiteralPath $product)) {
+    ((Test-Path -LiteralPath $product) -and -not $InstallerProvisionedState)) {
     throw 'REFUSED: pre-existing service or gateway state may not be touched'
+}
+if ($InstallerProvisionedState) {
+    if ($Identity -ne 'LocalSystem' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted' -or -not $CandidateAppDirectory) { throw 'Installer state test requires hosted LocalSystem candidate' }
+    foreach ($dir in @($product,(Join-Path $product 'ControlPlane'),(Join-Path $product 'ControlPlane\data-protection-keys'))) {
+        if (-not (Test-Path -LiteralPath $dir -PathType Container) -or -not (Get-Acl -LiteralPath $dir).AreAccessRulesProtected) { throw 'Missing protected installer state' }
+    }
+    if (@(Get-ChildItem -LiteralPath $product -Recurse -File -Force).Count -ne 0) { throw 'Installer state must be empty' }
 }
 $root = Join-Path $env:RUNNER_TEMP ('gatewaycore-scm-' + [guid]::NewGuid().ToString('N'))
 $published = if ($Identity -eq 'LocalService') {

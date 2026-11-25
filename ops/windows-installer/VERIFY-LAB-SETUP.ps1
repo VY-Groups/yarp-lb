@@ -29,9 +29,8 @@ try {
   if ($again.ExitCode -eq 0) { throw 'Setup permitted an existing version overwrite' }
   # Only this disposable runner's newly provisioned empty state is removed.
   if (@(Get-ChildItem -LiteralPath $state -Recurse -File -Force).Count -ne 0) { throw 'Unexpected files in fresh state' }
-  Remove-Item -LiteralPath $state -Recurse -Force
   $scm=Join-Path $PSScriptRoot '..\..\control-center\tests\WindowsServiceAcceptance\VERIFY-WINDOWS-SCM.ps1'
-  & $scm -CandidateAppDirectory (Join-Path $target 'app')
+  & $scm -CandidateAppDirectory (Join-Path $target 'app') -InstallerProvisionedState
   & $scm -Identity LocalService -CandidateAppDirectory (Join-Path $target 'app')
   if (Test-Path -LiteralPath $state) { throw 'SCM smoke did not clean its disposable state' }
   New-Item -ItemType Directory -Path $state | Out-Null
