@@ -3,7 +3,7 @@ param(
     [Parameter(Mandatory)][ValidatePattern('^[0-9a-f]{40}$')][string]$SourceCommit,
     [Parameter(Mandatory)][string]$SetupPath,
     [Parameter(Mandatory)][string]$PayloadPath,
-    [Parameter(Mandatory)][ValidateSet('Fresh','Upgrade','Rollback')][string]$Scenario
+    [Parameter(Mandatory)][ValidateSet('Fresh','Upgrade','Rollback','IPv6Upgrade')][string]$Scenario
 )
 
 $ErrorActionPreference = 'Stop'
@@ -24,7 +24,7 @@ $oldSha = '0000000000000000000000000000000000000000'
 $oldRoot = Join-Path $env:ProgramFiles "GatewayCore\Lab\$oldSha"
 $oldExe = Join-Path $oldRoot 'app\GatewayCoreYarp.exe'
 $oldConfig = Join-Path $oldRoot 'app\appsettings.json'
-$oldConfigUrl = 'http://127.0.0.1:8080'
+$oldConfigUrl = if ($Scenario -eq 'IPv6Upgrade') { 'http://[::1]:8080' } else { 'http://127.0.0.1:8080' }
 $adminFile = Join-Path $stateRoot 'admin-users.json'
 $svcKey = "HKLM:\SYSTEM\CurrentControlSet\Services\$serviceName"
 $setupLog = Join-Path $env:TEMP "GatewayCore-Setup-$SourceCommit.log"
@@ -55,6 +55,8 @@ function Invoke-Setup([switch]$ExpectFailure) {
     $diagnostic = if ($logText) { ($logText -split "`r?`n" | Select-Object -Last 60) -join "`n" } else { 'Setup log was not created.' }
     if ($ExpectFailure) {
         # Inno Setup wraps long logged PowerShell lines at arbitrary columns.
+        if ($process.ExitCode -eq 0) { throw "Failed Setup falsely reported success (exit 0).\n$diagnostic" }
+        if (Test-Path -LiteralPath $target) { throw "Failed Setup left its candidate installation directory behind: $target\n$diagnostic" }
         if ($logText -notmatch '(?s)Disposable acceptance.{0,160}contro.{0,40}lled service health failure\.') {
             throw "The upgrade did not fail at the intended post-start health gate. Exit=$($process.ExitCode).`n$diagnostic"
         }
@@ -81,7 +83,7 @@ function Seed-PreviousInstall {
     Get-ChildItem -LiteralPath (Join-Path $PayloadPath 'app') -Force | Copy-Item -Destination (Split-Path -Parent $oldExe) -Recurse -Force
     if (-not (Test-Path -LiteralPath $oldExe -PathType Leaf)) { throw 'Synthetic previous executable is missing.' }
     $config = [ordered]@{
-        AllowedHosts='localhost;127.0.0.1'
+        AllowedHosts='localhost;127.0.0.1;[::1]'
         Kestrel=@{Endpoints=@{LocalHttp=@{Url=$oldConfigUrl}}}
         ReverseProxy=@{Routes=@{};Clusters=@{}}
         MigrationSentinel='preserve-this-value'
@@ -191,7 +193,7 @@ try {
         Invoke-Setup
         Assert-InstalledPayload
         Assert-InstalledService (Join-Path $target 'app\GatewayCoreYarp.exe')
-        if ($Scenario -eq 'Upgrade') {
+        if ($Scenario -in @('Upgrade','IPv6Upgrade')) {
             if (-not (Test-Path -LiteralPath $adminFile) -or (Get-Content (Join-Path $stateRoot 'migration-sentinel.txt') -Raw).Trim() -cne 'preserve-state') {
                 throw 'Upgrade did not preserve administrator and application state.'
             }
@@ -206,7 +208,19 @@ try {
             if ($backups.Count -eq 0 -or -not (Test-Path (Join-Path $backups[-1].FullName 'ControlPlane-sha256.json'))) { throw 'Upgrade did not retain a verified pre-migration backup.' }
             if (-not (Test-Path (Join-Path $backups[-1].FullName 'source-appsettings.json'))) { throw 'Upgrade did not back up the previous runtime configuration.' }
             if ((Get-Content $configPath -Raw | ConvertFrom-Json).MigrationSentinel -cne 'preserve-this-value') { throw 'Configuration migration discarded an existing setting.' }
-            Write-Output 'PASS: upgrade detected prior service, backed up protected state/config, migrated config and preserved DPAPI/admin data.'
+            if ($Scenario -eq 'IPv6Upgrade') {
+                $config = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json
+                $ipv6 = @($config.Kestrel.Endpoints.PSObject.Properties | Where-Object { $_.Value.Url -eq 'http://[::1]:8080' })
+                $ipv4 = @($config.Kestrel.Endpoints.PSObject.Properties | Where-Object { $_.Value.Url -eq 'http://127.0.0.1:8080' })
+                if ($ipv6.Count -ne 1 -or $ipv4.Count -ne 1) { throw 'IPv6-only upgrade did not preserve ::1 and provision the IPv4 management listener.' }
+                $health4 = Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:8080/gateway/health' -TimeoutSec 10
+                if ($health4.StatusCode -ne 200 -or ($health4.Content | ConvertFrom-Json).status -ne 'healthy') {
+                    throw 'IPv4 management listener added for IPv6-only upgrade did not become healthy.'
+                }
+                Write-Output 'PASS: IPv6-only previous service migrated without losing ::1 and gained verified IPv4 loopback dashboard.'
+            } else {
+                Write-Output 'PASS: upgrade detected prior service, backed up protected state/config, migrated config and preserved DPAPI/admin data.'
+            }
         } else {
             $shortcutCheck = Get-Content (Join-Path $PSScriptRoot 'GatewayCoreLab.iss') -Raw
             if ($shortcutCheck -notmatch 'Check:\s*DashboardReady' -or $shortcutCheck -notmatch 'shellexec\s+runasoriginaluser\s+skipifsilent') { throw 'Dashboard launch is not gated to verified service readiness and the interactive user.' }
@@ -220,7 +234,7 @@ try {
         $uninstall = Start-Process -FilePath $uninstaller -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait -PassThru
         if ($uninstall.ExitCode -ne 0 -or (Get-Service -Name $serviceName -ErrorAction SilentlyContinue)) { throw 'Uninstall did not remove the service cleanly.' }
         if (-not (Test-Path -LiteralPath (Join-Path $stateRoot 'data-protection-keys')) -or -not (Test-Path -LiteralPath $adminFile -ErrorAction SilentlyContinue)) {
-            if ($Scenario -eq 'Upgrade') { throw 'Uninstall removed protected existing state.' }
+            if ($Scenario -in @('Upgrade','IPv6Upgrade')) { throw 'Uninstall removed protected existing state.' }
             if (-not (Test-Path -LiteralPath $stateRoot)) { throw 'Uninstall removed protected ProgramData state.' }
         }
         Write-Output 'PASS: uninstall removes its service and binaries while retaining ProgramData state.'
