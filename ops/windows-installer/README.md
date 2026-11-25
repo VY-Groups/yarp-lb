@@ -1,0 +1,11 @@
+# GatewayCore offline Windows lab installer
+
+**Ordinary noncommercial test build, production NO-GO.** Setup is an offline x64 wizard for a versioned binary installation. It is not the signed commercial distribution and does not activate licensing. The installer itself is not Authenticode signed.
+
+1. Obtain the Setup EXE, SHA256SUMS.txt and SOURCE_COMMIT.txt from a successful exact-source Windows offline lab Setup EXE run. A PR artifact is unapproved; use only the independently accepted main revision for formal testing.
+2. Verify the setup file using Get-FileHash -Algorithm SHA256. Run GatewayCore-Setup-win-x64.exe as administrator on an isolated Windows test machine.
+3. Files are installed under Program Files/GatewayCore/Lab/<full-source-SHA>/app. No internet or .NET SDK is required for this self-contained gateway payload. OS prerequisites still apply.
+4. Setup deliberately does not start services, create listener configuration, import certificates, open firewall ports or create/reset ProgramData. Use the exact-source reviewed configuration and SCM provisioning instructions before starting the gateway; do not launch with a production backend until authorized. See control-center/docs/DATA_PROTECTION_PLATFORM_SUPPORT.md and ops/release/ISSUE48_CANDIDATE.md in the same source revision.
+5. Drain and stop the installed service before uninstall or a binary-path switch. Keep protected mutable state and prior approved binaries for rollback. Setup refuses to overwrite an existing revision. Uninstall removes installer-owned binaries but leaves external ProgramData untouched.
+
+The workflow uses the hosted Windows Inno Setup 6 compiler and verifies the extracted candidate, installed file inventory, overwrite refusal, staged SCM service startup under LocalSystem and LocalService, and uninstall with a state sentinel. It uploads the tested Setup EXE and its SHA256, not a production release. Separate commercial-mode signed component packages and installation-bound GCL1 entitlements require the authorized lab signing host. Physical acceptance remains under #36.

@@ -1,0 +1,75 @@
+name: Windows offline lab Setup EXE
+on:
+  pull_request:
+    paths:
+      - 'ops/windows-installer/**'
+      - '.github/workflows/windows-offline-lab-installer.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'ops/windows-installer/**'
+      - '.github/workflows/windows-offline-lab-installer.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  setup:
+    runs-on: windows-2022
+    timeout-minutes: 35
+    env:
+      EXACT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - name: Build ordinary self-contained offline candidate
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ((git rev-parse HEAD) -cne $env:EXACT_SHA -or $env:EXACT_SHA -cnotmatch '^[0-9a-f]{40}$') { throw 'Source mismatch' }
+          dotnet publish control-center/GatewayCoreYarp.csproj -c Release -r win-x64 --self-contained true -p:PublishReadyToRun=false -o candidate/app
+          if ($LASTEXITCODE -ne 0) { throw 'Publish failed' }
+          Remove-Item candidate/app/appsettings.json -ErrorAction SilentlyContinue
+          Set-Content candidate/SOURCE_COMMIT.txt $env:EXACT_SHA -Encoding ascii
+          Copy-Item ops/windows-installer/README.md candidate/README.md
+          python ops/release/package_candidate.py --root candidate --rid win-x64 --sha $env:EXACT_SHA --out candidate-archive
+          if ($LASTEXITCODE -ne 0) { throw 'Candidate inventory failed' }
+          python ops/release/extract_candidate.py --archive-dir candidate-archive --out extracted
+          if ($LASTEXITCODE -ne 0) { throw 'Candidate extraction failed' }
+      - name: Compile actual Windows Setup executable
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $compiler = Join-Path ([Environment]::GetFolderPath('ProgramFilesX86')) 'Inno Setup 6\ISCC.exe'
+          if (-not (Test-Path -LiteralPath $compiler -PathType Leaf)) { throw 'Hosted Inno Setup compiler not found' }
+          # ISCC.exe may expose a placeholder PE ProductVersion (0.0.0.0).
+          # Require the actual compiler engine banner from the successful compile.
+          $out = Join-Path $PWD 'setup-output'
+          New-Item -ItemType Directory -Path $out | Out-Null
+          $payload = (Resolve-Path extracted).Path
+          $compileLog = @(& $compiler "/DSourceCommit=$env:EXACT_SHA" "/DPayloadDir=$payload" "/DSetupOut=$out" (Resolve-Path ops/windows-installer/GatewayCoreLab.iss).Path)
+          $compileExit = $LASTEXITCODE
+          $compileLog | ForEach-Object { Write-Host $_ }
+          if ($compileExit -ne 0) { throw "Installer compilation failed: $compileExit" }
+          if (($compileLog -join "`n") -notmatch '(?im)^\s*Compiler engine version:\s*Inno Setup 6\.[0-9]+(?:\.[0-9]+)*\b') { throw 'Expected Inno Setup 6 compiler engine banner not found' }
+          if (-not (Test-Path -LiteralPath (Join-Path $out 'GatewayCore-Setup-win-x64.exe'))) { throw 'Setup EXE missing' }
+      - name: Execute installer and verify payload, SCM and uninstall
+        shell: powershell
+        run: |
+          .\ops\windows-installer\VERIFY-LAB-SETUP.ps1 -SourceCommit $env:EXACT_SHA -SetupPath (Resolve-Path setup-output/GatewayCore-Setup-win-x64.exe).Path -PayloadPath (Resolve-Path extracted).Path
+      - name: Hash verified setup
+        shell: pwsh
+        run: |
+          $hash = (Get-FileHash setup-output/GatewayCore-Setup-win-x64.exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          Set-Content setup-output/SHA256SUMS.txt "$hash  GatewayCore-Setup-win-x64.exe" -Encoding ascii
+          Set-Content setup-output/SOURCE_COMMIT.txt $env:EXACT_SHA -Encoding ascii
+          Copy-Item ops/windows-installer/README.md setup-output/README.md
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gatewaycore-windows-lab-setup-${{ env.EXACT_SHA }}
+          path: setup-output/
+          if-no-files-found: error
