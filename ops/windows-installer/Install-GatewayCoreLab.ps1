@@ -311,21 +311,26 @@ function ConvertTo-ManagedConfig([string]$SourcePath) {
         $dashboardUrl = if ($null -eq $dashboard.Value) { $null } else { $dashboard.Value.PSObject.Properties['Url'] }
         if ($null -eq $dashboardUrl -or $dashboardUrl.Value -cne 'http://127.0.0.1:8080') { throw 'GatewayCoreDashboard must use the installer-owned loopback URL http://127.0.0.1:8080.' }
     } else {
-        $reusableLoopbackEndpoint = $false
+        # An IPv6-only ::1 listener cannot satisfy the installer's IPv4
+        # health probe or its desktop dashboard shortcut. Preserve it, and
+        # provision a separate IPv4 loopback listener for the management UI.
+        $hasIPv4LoopbackEndpoint = $false
         foreach ($endpoint in $endpoints.PSObject.Properties) {
             $endpointUrl = if ($null -eq $endpoint.Value) { $null } else { $endpoint.Value.PSObject.Properties['Url'] }
             if ($null -ne $endpointUrl -and $endpointUrl.Value) {
                 $uri = $null
                 if ([Uri]::TryCreate([string]$endpointUrl.Value, [UriKind]::Absolute, [ref]$uri) -and $uri.Port -eq 8080) {
-                    $isLoopback = $uri.IsLoopback
-                    if ($uri.Scheme -ne 'http' -or -not $isLoopback) {
-                        throw 'Port 8080 is assigned to a non-loopback or non-HTTP endpoint; installer cannot safely expose the local dashboard.'
+                    if ($uri.Scheme -ne 'http' -or -not $uri.IsLoopback -or
+                        $uri.AbsolutePath -ne '/' -or $uri.Query -or $uri.Fragment -or $uri.UserInfo) {
+                        throw 'Port 8080 is assigned to a non-loopback or incompatible endpoint; installer cannot safely expose the local dashboard.'
                     }
-                    $reusableLoopbackEndpoint = $true
+                    # ASP.NET Core localhost binds loopback on both families.
+                    # ::1 binds IPv6 only, so do not count it as IPv4-ready.
+                    if ($uri.Host -ne '::1') { $hasIPv4LoopbackEndpoint = $true }
                 }
             }
         }
-        if (-not $reusableLoopbackEndpoint) {
+        if (-not $hasIPv4LoopbackEndpoint) {
             $endpoints | Add-Member -NotePropertyName GatewayCoreDashboard -NotePropertyValue ([pscustomobject]@{ Url='http://127.0.0.1:8080' })
         }
     }
