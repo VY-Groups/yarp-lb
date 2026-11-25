@@ -14,10 +14,16 @@ permissions:
   contents: read
 jobs:
   setup:
+    name: Windows installer acceptance (${{ matrix.scenario }})
     runs-on: windows-2022
     timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        scenario: [Fresh, Upgrade, Rollback]
     env:
       EXACT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      INSTALL_SCENARIO: ${{ matrix.scenario }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -60,7 +66,7 @@ jobs:
       - name: Execute installer and verify payload, SCM and uninstall
         shell: powershell
         run: |
-          .\ops\windows-installer\VERIFY-LAB-SETUP.ps1 -SourceCommit $env:EXACT_SHA -SetupPath (Resolve-Path setup-output/GatewayCore-Setup-win-x64.exe).Path -PayloadPath (Resolve-Path extracted).Path
+          .\ops\windows-installer\VERIFY-LAB-SETUP.ps1 -SourceCommit $env:EXACT_SHA -SetupPath (Resolve-Path setup-output/GatewayCore-Setup-win-x64.exe).Path -PayloadPath (Resolve-Path extracted).Path -Scenario $env:INSTALL_SCENARIO
       - name: Hash verified setup
         shell: pwsh
         run: |
