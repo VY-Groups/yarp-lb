@@ -97,7 +97,7 @@ if (OperatingSystem.IsWindows() && !ec2Lab)
     {
         var approved = Environment.GetEnvironmentVariable("GATEWAYCORE_LAB_RESIDUAL_STORES");
         if (!string.IsNullOrEmpty(approved))
-            approvedResidualStores = JsonSerializer.Deserialize<string[]>(approved)
+            approvedResidualStores = JsonSerializer.Deserialize<string[]>(Convert.FromBase64String(approved))
                 ?? throw new InvalidOperationException("Invalid lab residual-store authorization");
     }
 #endif

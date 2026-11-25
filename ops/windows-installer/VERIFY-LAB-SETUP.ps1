@@ -288,7 +288,15 @@ try {
         Invoke-Setup
         Assert-InstalledPayload
         Assert-InstalledService (Join-Path $target 'app\GatewayCoreYarp.exe')
+        $serviceEnvironment = @((Get-ItemProperty -LiteralPath $svcKey).Environment)
+        $isolations = @($serviceEnvironment | Where-Object { $_ -like 'GATEWAYCORE_LAB_RESIDUAL_STORES=*' })
+        if ($Scenario -ne 'ResidualLegacy' -and $isolations.Count -ne 0) { throw 'Clean install or upgrade received a spurious legacy authorization.' }
         if ($Scenario -eq 'ResidualLegacy') {
+            if ($isolations.Count -ne 1) { throw 'Expected exactly one residual-store authorization.' }
+            $encoded = $isolations[0].Substring('GATEWAYCORE_LAB_RESIDUAL_STORES='.Length)
+            $decoded = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($encoded))
+            $authorized = ('{"stores":' + $decoded + '}') | ConvertFrom-Json
+            if ($authorized.stores.Count -ne 1 -or $authorized.stores[0] -ne $legacyState) { throw 'Installer authorized unexpected legacy stores.' }
             if ((Get-FileHash $legacyKey).Hash -ne $legacyHash) { throw 'Residual legacy key modified.' }
             if (Test-Path (Join-Path $stateRoot ('data-protection-keys\' + [IO.Path]::GetFileName($legacyKey)))) { throw 'Legacy key imported into new state.' }
             $newKeys = @(Get-ChildItem (Join-Path $stateRoot 'data-protection-keys') -Filter 'key-*.xml' -File)

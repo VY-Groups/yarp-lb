@@ -506,6 +506,7 @@ $serviceCreated = $false
 $serviceChanged = $false
 $migrationStarted = $false
 $approvedResidualStores = @()
+$residualAuthorization = $null
 $setupStartedAt = Get-Date
 $transactionSucceeded = $false
 
@@ -523,7 +524,21 @@ try {
         }
         $preflightJson = Get-Content -LiteralPath $preflightOutput -Raw
         if (-not $preflightJson -or -not $preflightJson.TrimStart().StartsWith('[')) { throw 'Legacy preflight did not return an explicit store list.' }
-        $approvedResidualStores = @($preflightJson | ConvertFrom-Json)
+        # Windows PowerShell 5.1 emits a top-level JSON array as a single
+        # pipeline object, even for []. Wrap it in an object before reading
+        # the property so empty and singleton lists retain their shape.
+        $parsed = ('{"stores":' + $preflightJson + '}') | ConvertFrom-Json
+        if ($null -eq $parsed.stores -or $parsed.stores -isnot [array]) { throw 'Legacy preflight store list is invalid.' }
+        foreach ($store in $parsed.stores) {
+            if ($store -isnot [string] -or -not [IO.Path]::IsPathRooted($store)) { throw 'Legacy preflight returned an invalid store path.' }
+            $approvedResidualStores += $store
+        }
+        if ($approvedResidualStores.Count -gt 0) {
+            # Preserve the application's exact JSON, avoiding a second
+            # PowerShell serialization and SCM quoting ambiguities.
+            $residualAuthorization = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($preflightJson))
+        }
+        Write-Host "Legacy preflight residual store count: $($approvedResidualStores.Count)"
     } finally {
         Remove-Item -LiteralPath $preflightError,$preflightOutput -Force -ErrorAction SilentlyContinue
     }
@@ -639,8 +654,7 @@ try {
     }
     $environment = @("YARP_RUNTIME_CONFIG_PATH=$configPath", 'ASPNETCORE_ENVIRONMENT=Production')
     if ($approvedResidualStores.Count -gt 0) {
-        $authorization = ConvertTo-Json -InputObject @($approvedResidualStores) -Compress
-        $environment += "GATEWAYCORE_LAB_RESIDUAL_STORES=$authorization"
+        $environment += "GATEWAYCORE_LAB_RESIDUAL_STORES=$residualAuthorization"
     }
 
     if ($null -eq $previousService) {
@@ -664,6 +678,15 @@ try {
                 Select-Object -First 12 TimeCreated,Id,ProviderName |
                 Format-Table -AutoSize | Out-Host
         }
+        # Capture exception type and first application stack frame without
+        # recording arbitrary exception payloads or protected settings.
+        Get-WinEvent -FilterHashtable @{LogName='Application';ProviderName='.NET Runtime';Id=1026;StartTime=$setupStartedAt} -ErrorAction SilentlyContinue |
+            Where-Object { $_.Message -match 'GatewayCoreYarp\.exe' } |
+            Select-Object -First 3 | ForEach-Object {
+                $exceptionType = [regex]::Match($_.Message,'Exception Info:\s*([A-Za-z0-9_.]+)').Groups[1].Value
+                $frame = @($_.Message -split '\r?\n' | Where-Object { $_ -match '^\s+at (Program\.|LegacyStateGuard\.|WindowsStateProtection\.)' } | Select-Object -First 1)
+                Write-Host "GatewayCore startup exception type: $exceptionType; frame: $frame"
+            }
         throw
     }
     Wait-ServiceHealth $HealthTimeoutSeconds -BaseUrls $candidateHealthUrls
