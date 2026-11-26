@@ -210,3 +210,5 @@ GatewayClientAddressTests.Run();
 GatewayMetricsTests.Run();
 
 SharedMonitorTests.Run();
+
+await CompoundDiagnosticsTests.RunAsync();

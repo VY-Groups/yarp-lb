@@ -34,6 +34,8 @@
     <Compile Include="GatewayMetricsTests.cs" />
     <Compile Include="../../SharedMonitorContract.cs" Link="SharedMonitorContract.cs" />
     <Compile Include="SharedMonitorTests.cs" />
+    <Compile Include="../../CompoundDiagnostics.cs" Link="CompoundDiagnostics.cs" />
+    <Compile Include="CompoundDiagnosticsTests.cs" />
     <Compile Include="Program.cs" />
   </ItemGroup>
 </Project>
