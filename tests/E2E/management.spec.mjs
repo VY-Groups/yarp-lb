@@ -262,6 +262,9 @@ test('browser: bootstrap, navigation, onboarding, websites, route edit, users an
     const inventory=await page.evaluate(async()=>{const r=await fetch('/admin/api/tls/inventory');return {status:r.status,body:await r.json()}});
     expect(inventory.status).toBe(200);
     expect(Array.isArray(inventory.body.configuredEndpoints)).toBe(true);
+    expect(inventory.body.acmeRenewalConfigured).toBe(false);
+    expect(inventory.body.acmeRevocationConfigured).toBe(false);
+    await expect(page.locator('#content')).toContainText('Automatic renewal service: Not configured');
     await expect(page.locator('#context-help-text')).toContainText('certificate');
     await openNav('waf');
     await expect(page.locator('#content')).toContainText('No direct activation from this page');
@@ -281,7 +284,12 @@ test('browser: bootstrap, navigation, onboarding, websites, route edit, users an
     expect(policy.shadowEvidenceSha256).toBeNull();
     const download=page.waitForEvent('download');
     await page.locator('#specialist-download').click();
-    expect((await download).suggestedFilename()).toBe('waf-policy-unsigned.json');
+    const exported = await download;
+    expect(exported.suggestedFilename()).toBe('waf-policy-unsigned.json');
+    const stream = await exported.createReadStream();
+    const hash = (await import('node:crypto')).createHash('sha256');
+    for await (const chunk of stream) hash.update(chunk);
+    await expect(page.locator('#specialist-digest')).toHaveText(hash.digest('hex').toUpperCase());
 
     await openNav('gslb');
     await expect(page.locator('#content')).toContainText('separate authoritative engine');

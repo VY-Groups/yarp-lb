@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Configuration;
 using Microsoft.AspNetCore.Authorization;
+using Microsoft.Extensions.DependencyInjection;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 
@@ -17,6 +18,10 @@ public static class TlsInventory
 
     public static void MapTlsInventory(this WebApplication app)
     {
+        // Query registrations, not the issuer or external CA. No credentials are exposed.
+        var registrations = app.Services.GetService<IServiceProviderIsService>();
+        var renewalConfigured = registrations?.IsService(typeof(AcmeRenewalCoordinator)) == true;
+        var revocationConfigured = registrations?.IsService(typeof(AcmeRevocationCoordinator)) == true;
         app.MapGet("/admin/api/tls/inventory", (IConfiguration cfg) =>
         {
             var endpoints = cfg.GetSection("Kestrel:Endpoints").GetChildren().Select(x => new
@@ -61,9 +66,12 @@ public static class TlsInventory
                 storeState,
                 certificates,
                 configuredEndpoints = endpoints,
-                acmeIntegration = "preflight-and-traffic-pfx-rotation-only; issuance-and-renewal-not-implemented",
+                acmeIntegration = renewalConfigured ? "configured" : "not-configured",
+                acmeRenewalConfigured = renewalConfigured,
+                acmeRevocationConfigured = revocationConfigured,
+                acmeScope = "Local service registration only; CA connectivity, last renewal, active certificate and revocation are not verified.",
                 trafficCertificateRotation = "opt-in via TrafficCertificateDnsNames in isolated listener configuration",
-                backendMutualTlsProvisioning = "not-implemented"
+                backendMutualTlsProvisioning = "installed-client-certificate-and-approved-cluster-draft"
             });
         }).RequireAuthorization(p => p.RequireRole("Administrator", "Operator"));
     }

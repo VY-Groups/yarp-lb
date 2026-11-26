@@ -32,9 +32,18 @@ public static class SpecialistDrafts
     private static int Integer(string s, int min, int max) =>
         int.TryParse(s, NumberStyles.None, CultureInfo.InvariantCulture, out var n) && n >= min && n <= max
             ? n : throw new ArgumentException($"Expected an integer from {min} to {max}.");
-    private static IResult Candidate(JsonNode value, string filename) =>
-        Results.Ok(new { filename, json = value.ToJsonString(Pretty) + "\n",
+    private static IResult Candidate(JsonNode value, string filename)
+    {
+        var json = value.ToJsonString(Pretty) + "\n";
+        var bytes = System.Text.Encoding.UTF8.GetBytes(json);
+        // The offline WAF verifier accepts at most 64 KiB; enforce a
+        // common bounded export and hash the exact UTF-8 bytes for review.
+        if (bytes.Length > 65536)
+            throw new ArgumentException("Serialized candidate exceeds 64 KiB.");
+        return Results.Ok(new { filename, json, byteLength = bytes.Length,
+            sha256 = Convert.ToHexString(SHA256.HashData(bytes)),
             status = "unsigned-draft-only", deploymentReady = false });
+    }
     private static IResult Bad(Exception ex) => Results.BadRequest(new { error = ex.Message });
 
     public static void MapSpecialistDrafts(this WebApplication app)
