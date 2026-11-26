@@ -318,6 +318,15 @@ try
     Require(aPercent is >= 75 and <= 85, $"80:20 ratio in tolerance: A={aPercent:F2}%");
     Record("weighted-80-20", new { aPercent, weighted });
 
+    Configure("WeightedRoundRobin", 3, 1);
+    await Task.Delay(2500);
+    var weightedRotation = await Sample(400, 1);
+    Require(weightedRotation.Success == 400 && weightedRotation.Nodes.GetValueOrDefault("A") == 300,
+        "weighted HTTP round robin gives exact 3:1 ratio across complete cycles");
+    Configure("WeightedRoundRobin", 3, 1, drainA: true);
+    await Task.Delay(1600);
+    Require(await RoutesOnly("B"), "weighted round robin excludes draining destinations");
+    Record("weighted-round-robin", weightedRotation);
     Configure("WeightedLeastRequests", 1, 1);
     await Task.Delay(2500);
     var heldWeightedRequest = client.GetAsync(proxy + "/api/hold");

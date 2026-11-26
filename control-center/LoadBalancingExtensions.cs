@@ -19,6 +19,7 @@ public sealed class WeightedRandomPolicy : ILoadBalancingPolicy
         Span<int> weights = availableDestinations.Count <= 128
             ? stackalloc int[availableDestinations.Count]
             : new int[availableDestinations.Count];
+        weights.Clear();
         var total = 0;
         for (var i = 0; i < availableDestinations.Count; i++)
         {
@@ -146,5 +147,42 @@ public sealed class WeightedLeastRequestsPolicy : ILoadBalancingPolicy
             }
         }
         return best;
+    }
+}
+
+
+/// <summary>Deterministic cyclic weighted HTTP request selection. The cursor
+/// belongs to the live cluster, not a process-lifetime map of arbitrary IDs.</summary>
+public sealed class WeightedRoundRobinPolicy : ILoadBalancingPolicy
+{
+    public string Name => "WeightedRoundRobin";
+    private sealed class Cursor { internal long Value = -1; }
+    private readonly System.Runtime.CompilerServices.ConditionalWeakTable<ClusterState, Cursor> cursors = new();
+
+    public DestinationState? PickDestination(HttpContext context, ClusterState cluster,
+        IReadOnlyList<DestinationState> availableDestinations)
+    {
+        var count = availableDestinations.Count;
+        if (count == 0) return null;
+        Span<int> weights = count <= 128 ? stackalloc int[count] : new int[count];
+        weights.Clear();
+        var total = 0;
+        for (var i = 0; i < count; i++)
+        {
+            var candidate = availableDestinations[i];
+            if (TrafficLifecycle.IsDraining(candidate)) continue;
+            var weight = TrafficLifecycle.EffectiveWeightedRandomWeight(candidate, WeightedRandomPolicy.WeightOf(candidate));
+            weights[i] = weight;
+            total = checked(total + weight);
+        }
+        if (total == 0) return null;
+        var cursor = cursors.GetValue(cluster, static _ => new Cursor());
+        var ticket = (int)(unchecked((ulong)Interlocked.Increment(ref cursor.Value)) % (ulong)total);
+        for (var i = 0; i < count; i++)
+        {
+            if (ticket < weights[i]) return availableDestinations[i];
+            ticket -= weights[i];
+        }
+        throw new InvalidOperationException("Invalid weighted rotation");
     }
 }

@@ -29,3 +29,5 @@ Hardware acceleration and upstream volumetric DDoS absorption are deployment-dep
 - ADC service map on Overview, derived from actual route-to-cluster-to-destination configuration including disabled members, policies, unresolved references and unreferenced groups. Distinguishes draft/configured state from live traffic and routes through existing authorized editors. This is not the new VIP/object persistence model or a full ADC navigation redesign.
 
 - L4 weighted rotation (TCP and new UDP sessions) and weighted least TCP connections added in engine and signed staging, with real socket acceptance. Exact-head verification pending; L4 dashboard configuration editor and runtime rollout remain incomplete.
+
+- L7 cyclic weighted round robin added through existing reviewed cluster editor/API, runtime and real request tests. Stable weights/membership give exact complete-cycle ratio; not smooth weighted rotation or fleet-shared scheduling. Existing weighted-random scratch span explicitly initialized to zero so draining entries never consume tickets.

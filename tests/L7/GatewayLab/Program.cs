@@ -58,6 +58,7 @@ builder.Services.AddReverseProxy()
     .LoadFromConfig(builder.Configuration.GetSection("ReverseProxy"));
 builder.Services.AddSingleton<ILoadBalancingPolicy, WeightedRandomPolicy>();
 builder.Services.AddSingleton<ILoadBalancingPolicy, WeightedLeastRequestsPolicy>();
+builder.Services.AddSingleton<ILoadBalancingPolicy, WeightedRoundRobinPolicy>();
 builder.Services.AddSingleton<ILoadBalancingPolicy, SourceIpHashPolicy>();
 builder.Services.AddSingleton<ILoadBalancingPolicy, PrimaryBackupPolicy>();
 builder.Services.AddHostedService<AutonomousRecoveryObserver>();

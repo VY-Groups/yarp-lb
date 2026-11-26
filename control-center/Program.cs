@@ -300,6 +300,7 @@ builder.Services.AddHostedService<DestinationAdmissionRegistryReconciler>();
 // Custom policies are registered on every serving YARP instance, never on the UI alone.
 builder.Services.AddSingleton<ILoadBalancingPolicy, WeightedRandomPolicy>();
 builder.Services.AddSingleton<ILoadBalancingPolicy, WeightedLeastRequestsPolicy>();
+builder.Services.AddSingleton<ILoadBalancingPolicy, WeightedRoundRobinPolicy>();
 builder.Services.AddSingleton<ILoadBalancingPolicy, SourceIpHashPolicy>();
 builder.Services.AddSingleton<ILoadBalancingPolicy, PrimaryBackupPolicy>();
 // Poll YARP active-health state independently of incoming requests.
@@ -2374,7 +2375,7 @@ IResult? ValidateChangePayload(JsonObject submitted)
         if (c["HttpRequest"]?["Version"] is JsonNode version && version.ToString() is not ("1.0" or "1.1" or "2" or "3"))
             return Results.BadRequest(new { error = "Unsupported outbound HTTP version" });
         var policy = c["LoadBalancingPolicy"]?.ToString() ?? "RoundRobin";
-        if (policy is not ("RoundRobin" or "PowerOfTwoChoices" or "LeastRequests" or "Random" or "FirstAlphabetical" or "WeightedRandom" or "WeightedLeastRequests" or "SourceIpHash" or "PrimaryBackup")) return Results.BadRequest(new { error = "Unsupported load-balancing policy" });
+        if (policy is not ("RoundRobin" or "PowerOfTwoChoices" or "LeastRequests" or "Random" or "FirstAlphabetical" or "WeightedRandom" or "WeightedLeastRequests" or "WeightedRoundRobin" or "SourceIpHash" or "PrimaryBackup")) return Results.BadRequest(new { error = "Unsupported load-balancing policy" });
         if (policy == "PrimaryBackup" && c["HealthCheck"]?["Active"]?["Enabled"]?.ToString()?.ToLowerInvariant() != "true")
             return Results.BadRequest(new { error = $"Cluster {key}: PrimaryBackup requires enabled active health checks for safe fallback" });
         if (c["Destinations"] is not JsonObject dests || dests.Count > 40) return Results.BadRequest(new { error = "Invalid destinations" });
