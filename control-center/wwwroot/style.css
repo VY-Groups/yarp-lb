@@ -304,3 +304,8 @@ dialog{border-color:#4a607a;box-shadow:0 24px 85px rgba(0,0,0,.75)}
 @media(max-width:1250px){.journey-checklist{grid-template-columns:repeat(3,minmax(0,1fr))}}
 @media(max-width:720px){.journey-checklist{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:420px){.journey-checklist{grid-template-columns:1fr}}
+
+/* Specialist workflows: contextual, readable and responsive. */
+.context-help{border:1px solid #30455e;border-radius:8px;padding:10px 14px;margin:0 0 14px;background:#142338;color:#c5d6e7}.context-help summary{cursor:pointer;font-weight:600}.context-help p{line-height:1.6;margin:8px 0 0}.specialist-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,210px),1fr));gap:12px;margin:12px 0}.specialist-tile{padding:14px;border:1px solid #30455e;border-radius:8px;background:#16273b;overflow-wrap:anywhere}.specialist-tile h3{margin:0 0 7px}.specialist-tile p{line-height:1.55}.specialist-steps{padding-left:24px;line-height:1.65}.specialist-steps li{padding:7px 0}.specialist-topology{margin:12px 0}.specialist-topology .operator-flow{justify-content:center}.specialist-topology .specialist-grid{text-align:center}
+
+#specialist-draft textarea,#specialist-json{width:100%;box-sizing:border-box;min-height:90px;resize:vertical;font:inherit;color:inherit;background:#101c2c;border:1px solid #38536f;border-radius:6px;padding:10px}#specialist-result{margin-top:14px}#specialist-result label{display:block}#specialist-draft details{padding:12px;border:1px solid #38536f;border-radius:8px}

@@ -17,6 +17,9 @@ const nav=[...html.matchAll(/data-view="([^"]+)"/g)].map(match=>match[1]);
 assert.equal(new Set(nav).size,nav.length,'navigation must not duplicate pages');
 assert.ok(nav.length>=19, 'all existing pages plus peer status must remain navigable');
 assert.ok(nav.includes('peers'));
+for(const page of ['tls','waf','gslb']) assert.ok(nav.includes(page));
+assert.match(html,/id="context-help-text"/);
+for(const page of nav) assert.ok(ts.includes('"'+page+'":'), 'missing contextual help: '+page);
 assert.match(html,/GatewayCore Control Center/);
 assert.match(js,/Sign in to GatewayCore/);
 assert.match(ts,/Sign in to GatewayCore/);
@@ -78,6 +81,16 @@ assert.match(content,/atomic Redis/);
 assert.match(content,/&lt;script&gt;/);
 assert.doesNotMatch(content,/<script>alert/);
 assert.match(content,/Best-effort status only/);
+const policy=vm.runInContext('policyReference()',ctx);
+for(const name of ['RoundRobin','WeightedRandom','SourceIpHash','PrimaryBackup']) assert.ok(policy.includes(name));
+assert.match(vm.runInContext("modulePage('waf')",ctx),/No direct activation/);
+assert.match(vm.runInContext("modulePage('gslb')",ctx),/Manual deployment evidence required/);
+vm.runInContext("topologyDraft={mode:'ha-pair',publicVip:'vip.example.invalid',gateways:[{id:'node-dc',hostname:'<img src=x>',site:'dc'},{id:'node-dr',hostname:'dr.example.invalid',site:'dr'}],workloads:[]}",ctx);
+const design=vm.runInContext('architecturePreview()',ctx);
+assert.match(design,/Primary data center/);
+assert.match(design,/Disaster recovery/);
+assert.match(design,/&lt;img src=x&gt;/);
+assert.doesNotMatch(design,/<img src=x>/);
 
 // Fleet status must expose only agent-reported engine configuration metadata
 // and must label runtime DNS health and quorum as unverified.

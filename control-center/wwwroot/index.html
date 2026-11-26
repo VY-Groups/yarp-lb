@@ -129,9 +129,12 @@
 <button type="button" class="nav" data-view="peers"><span class="nav-icon" aria-hidden="true">⇌</span><span class="nav-text">Peer synchronization</span></button>
 <button type="button" class="nav" data-view="inventory"><span class="nav-icon" aria-hidden="true">▧</span><span class="nav-text">Machines &amp; inventory</span></button>
 <button type="button" class="nav" data-view="capabilities"><span class="nav-icon" aria-hidden="true">⚙</span><span class="nav-text">Capabilities</span></button>
+<button type="button" class="nav" data-view="waf"><span class="nav-icon" aria-hidden="true">◈</span><span class="nav-text">WAF policy workflow</span></button>
+<button type="button" class="nav" data-view="gslb"><span class="nav-icon" aria-hidden="true">◎</span><span class="nav-text">DNS &amp; GSLB workflow</span></button>
 <button type="button" class="nav" data-view="featurematrix"><span class="nav-icon" aria-hidden="true">◇</span><span class="nav-text">Traffic engine &amp; modules</span></button>
 </details>
 <details class="nav-group advanced-nav"><summary>Security &amp; accounts</summary>
+<button type="button" class="nav" data-view="tls"><span class="nav-icon" aria-hidden="true">◇</span><span class="nav-text">Certificates &amp; TLS</span></button>
 <button type="button" class="nav" data-view="users"><span class="nav-icon" aria-hidden="true">♙</span><span class="nav-text">Admin accounts</span></button>
 <button type="button" class="nav" data-view="mail"><span class="nav-icon" aria-hidden="true">✉</span><span class="nav-text">Mail &amp; OTP</span></button>
 <button type="button" class="nav" data-view="directory"><span class="nav-icon" aria-hidden="true">⌁</span><span class="nav-text">Active Directory</span></button>
@@ -156,6 +159,7 @@
         <button id="save" class="primary" type="button">Submit for approval</button>
       </div>
     </header>
+    <details class="context-help" id="context-help"><summary>Help with this page</summary><p id="context-help-text"></p></details>
     <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
     <div class="content" id="content" tabindex="-1" aria-label="Selected management page"></div>
     <footer>GatewayCore Control Center · Development release · Configuration review is not deployment approval · <a class="privacy-link" href="/dashboard/privacy" target="_blank" rel="noopener">Privacy Policy</a></footer>

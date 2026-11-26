@@ -3198,6 +3198,7 @@ if (peerSyncSettings is not null && peerStateJournal is not null && peerSigner i
 }
 app.MapOrganizationProfile(privateDir, Audit);
 app.MapTlsInventory();
+app.MapSpecialistDrafts();
 app.MapReverseProxy(proxyPipeline =>
 {
 #if GATEWAYCORE_COMMERCIAL
