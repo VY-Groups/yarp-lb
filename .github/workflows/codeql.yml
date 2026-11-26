@@ -124,6 +124,7 @@ jobs:
         if not files:
             raise SystemExit("CodeQL inventory: no SARIF output")
         counts = collections.Counter()
+        locations = []
         run_count = 0
         for file in files:
             document = json.loads(file.read_text(encoding="utf-8"))
@@ -137,6 +138,27 @@ jobs:
                 for result in results:
                     rule = result.get("ruleId") or "(unknown rule)"
                     counts[rule] += 1
+                    trace = []
+                    for flow in result.get("codeFlows", [])[:3]:
+                        for thread in flow.get("threadFlows", [])[:3]:
+                            trace.extend(item.get("location", {}) for item in thread.get("locations", [])[:50])
+                    primary = result.get("locations", [])[:5]
+                    related = result.get("relatedLocations", [])[:10]
+                    for kind, location in ([("primary", item) for item in primary] +
+                                           [("related", item) for item in related] +
+                                           [("trace", item) for item in trace]):
+                        physical = location.get("physicalLocation", {})
+                        artifact = physical.get("artifactLocation", {})
+                        uri = artifact.get("uri", "")
+                        region = physical.get("region", {})
+                        # Retain only repository-relative source locations; no snippets,
+                        # messages, absolute paths or untrusted workflow log commands.
+                        if (isinstance(uri, str) and uri and not uri.startswith("/")
+                            and ":" not in uri and "\\" not in uri
+                            and ".." not in uri.split("/") and all(
+                                ch.isascii() and (ch.isalnum() or ch in "/._-") for ch in uri)):
+                            locations.append({"rule": rule, "path": uri,
+                                              "line": region.get("startLine"), "kind": kind})
         inventory = {
             "commit": os.environ["GITHUB_SHA"],
             "ref": os.environ["GITHUB_REF"],
@@ -146,6 +168,7 @@ jobs:
             "sarif_runs": run_count,
             "observed_results": sum(counts.values()),
             "by_rule": dict(sorted(counts.items())),
+            "locations": locations,
             "scope": "Raw SARIF result counts, not GitHub alert closure status",
         }
         destination = Path(os.environ["INVENTORY_DIRECTORY"])

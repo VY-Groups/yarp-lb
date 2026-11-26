@@ -264,6 +264,8 @@ test('browser: bootstrap, navigation, onboarding, websites, route edit, users an
     expect(Array.isArray(inventory.body.configuredEndpoints)).toBe(true);
     expect(inventory.body.acmeRenewalConfigured).toBe(false);
     expect(inventory.body.acmeRevocationConfigured).toBe(false);
+    await expect(page.locator('#acme-revoke-form')).toHaveCount(0);
+    await expect(page.locator('#acme-renew-due')).toHaveCount(0);
     await expect(page.locator('#content')).toContainText('Automatic renewal service: Not configured');
     await expect(page.locator('#context-help-text')).toContainText('certificate');
     await openNav('waf');
@@ -291,6 +293,14 @@ test('browser: bootstrap, navigation, onboarding, websites, route edit, users an
     for await (const chunk of stream) hash.update(chunk);
     await expect(page.locator('#specialist-digest')).toHaveText(hash.digest('hex').toUpperCase());
 
+    await form.locator('[name="rollbackFromRevision"]').fill('2');
+    await form.locator('button[type="submit"]').click();
+    await expect(page.locator('#specialist-result')).toContainText('fresh revision');
+    await form.locator('[name="revision"]').fill('3');
+    await form.locator('button[type="submit"]').click();
+    await expect(page.locator('#specialist-json')).toBeVisible();
+    expect(JSON.parse(await page.locator('#specialist-json').inputValue()).revision).toBe(3);
+
     await openNav('gslb');
     await expect(page.locator('#content')).toContainText('separate authoritative engine');
     await expect(page.locator('#content')).toContainText('Manual deployment evidence required');
@@ -310,6 +320,23 @@ test('browser: bootstrap, navigation, onboarding, websites, route edit, users an
     expect(config.Zones[0].FailClosedWhenAllSitesDown).toBe(true);
     expect(config.Zones[0].Sites.length).toBe(2);
     expect(config.Zones[0].RoutingPolicy).toBe('Failover');
+    await form.locator('details summary').click();
+    await form.locator('[name="dnssecMode"]').selectOption('Nsec3');
+    await form.locator('[name="dnssecKeyPath"]').fill('/etc/gatewaycore/dns/active.pem');
+    await form.locator('[name="dnssecSalt"]').fill('1234567890ABCDEF');
+    await form.locator('[name="dnssecIterations"]').fill('51');
+    await form.locator('[name="dnssecIterations"]').fill('5');
+    await form.locator('[name="delegations"]').fill('child.app.example.test | ns.child.app.example.test | 10.0.0.54');
+    await form.locator('[name="delegationDs"]').fill('child.app.example.test | 1234 | 13 | 2 | ' + 'A'.repeat(64));
+    await form.locator('button[type="submit"]').click();
+    await expect(page.locator('#specialist-json')).toBeVisible();
+    const signedDraft=JSON.parse(await page.locator('#specialist-json').inputValue());
+    expect(signedDraft.Zones[0].DnssecDenialMode).toBe('Nsec3');
+    expect(signedDraft.Zones[0].DnssecNsec3Iterations).toBe(5);
+    expect(signedDraft.Zones[0].Delegations[0].DsRecords[0].DigestHex).toBe('A'.repeat(64));
+    await form.locator('[name="dnssecKeyPath"]').fill('../private.pem');
+    await form.locator('button[type="submit"]').click();
+    await expect(page.locator('#specialist-result')).toContainText('absolute host key references');
     const invalid=await page.evaluate(async()=>{const s=await(await fetch('/admin/api/session')).json();return(await fetch('/admin/api/specialist/backend-certificate-check',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':s.csrf},body:JSON.stringify({thumbprint:'0'.repeat(40)})})).status});
     expect(invalid).toBe(400);
 

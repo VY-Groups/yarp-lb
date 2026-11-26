@@ -56,7 +56,7 @@ public static class SpecialistDrafts
           .RequireAuthorization(p => p.RequireRole("Administrator", "Operator"));
         app.MapPost("/admin/api/specialist/gslb-draft", (GslbDraftInput input) =>
         {
-            try { return Candidate(Gslb(input), "gslb-zone-unsigned.json"); }
+            try { return ValidatedGslbCandidate(input); }
             catch (ArgumentException ex) { return Bad(ex); }
         }).WithMetadata(new RequestSizeLimitAttribute(65536))
           .RequireAuthorization(p => p.RequireRole("Administrator", "Operator"));
@@ -85,6 +85,8 @@ public static class SpecialistDrafts
             !Hash(x.RulesetSha256) || x.ValidDays is < 1 or > 45 ||
             (x.Mode == "block" ? !Hash(x.ShadowEvidenceSha256) : !string.IsNullOrEmpty(x.ShadowEvidenceSha256)))
             throw new ArgumentException("Enter a positive revision, observed uppercase ruleset digest, validity (1–45 days) and blocking evidence digest only for block mode.");
+        if (x.RollbackFromRevision is { } previous && (previous < 1 || previous >= x.Revision))
+            throw new ArgumentException("Rollback must be prepared as a fresh revision greater than the previously deployed revision.");
         var now = DateTimeOffset.UtcNow;
         var expires = now.AddDays(x.ValidDays);
         var exceptions = new JsonArray();
@@ -106,13 +108,113 @@ public static class SpecialistDrafts
             ["rulesetSha256"] = x.RulesetSha256, ["shadowEvidenceSha256"] = x.Mode == "block" ? x.ShadowEvidenceSha256 : null,
             ["issuedAtUtc"] = Utc(now), ["expiresAtUtc"] = Utc(expires), ["exceptions"] = exceptions };
     }
-    internal static JsonObject Gslb(GslbDraftInput x)
+    private static string KeyReference(string value)
     {
-        // Restricted initial zone builder. Advanced DNSSEC, ECS and authority
-        // settings must be incorporated through the separate signed workflow.
-        if (!Host(x.Name) || !Host(x.SoaContact) || x.Serial == 0 || x.Ttl is < 5 or > 300 ||
-            x.Policy is not ("Weighted" or "Failover" or "WeightedFailover") ||
-            x.ProbeInterval is < 1 or > 60 || x.FailureThreshold is < 1 or > 10 || x.SuccessThreshold is < 1 or > 10)
+        // Accept an absolute POSIX or drive-qualified Windows reference, not
+        // a URI, UNC/device path, relative path, PEM content or traversal.
+        if (value.Length is < 2 or > 512 || value.Any(char.IsControl) ||
+            value.Contains("-----", StringComparison.Ordinal) ||
+            !(value.StartsWith('/') && !value.StartsWith("//", StringComparison.Ordinal) ||
+              Regex.IsMatch(value, @"^[A-Za-z]:\\[^\\]")) ||
+            value.Split('/', '\\').Any(piece => piece is "." or ".."))
+            throw new ArgumentException("DNSSEC requires absolute host key references, never private key contents.");
+        return value;
+    }
+    private static void AddAuthorityDraft(GslbDraftInput x, JsonObject zone)
+    {
+        var mode = string.IsNullOrEmpty(x.DnssecMode) ? "Disabled" : x.DnssecMode;
+        if (mode is not ("Disabled" or "Nsec" or "Nsec3"))
+            throw new ArgumentException("Unsupported DNSSEC denial mode.");
+        var primary = x.DnssecKeyPath ?? "";
+        var prepublish = Rows(x.DnssecPrepublishPaths ?? "", 2, 1).Select(r => KeyReference(r[0])).ToArray();
+        var additional = Rows(x.DnssecAdditionalPaths ?? "", 2, 1).Select(r => KeyReference(r[0])).ToArray();
+        if (mode == "Disabled")
+        {
+            if (primary.Length != 0 || prepublish.Length != 0 || additional.Length != 0 ||
+                !string.IsNullOrEmpty(x.DnssecSalt) || x.DnssecIterations is not null)
+                throw new ArgumentException("Remove signing references and NSEC3 parameters when DNSSEC is disabled.");
+        }
+        else
+        {
+            primary = KeyReference(primary);
+            var paths = new[] { primary }.Concat(prepublish).Concat(additional).ToArray();
+            if (paths.Distinct(StringComparer.OrdinalIgnoreCase).Count() != paths.Length)
+                throw new ArgumentException("Active, prepublish and additional signing key references must be distinct.");
+            zone["DnssecPrivateKeyPath"] = primary;
+            zone["DnssecDenialMode"] = mode;
+            if (prepublish.Length > 0) zone["DnssecPrepublishPublicKeyPaths"] = new JsonArray(prepublish.Select(p => (JsonNode?)JsonValue.Create(p)).ToArray());
+            if (additional.Length > 0) zone["DnssecAdditionalSigningKeyPaths"] = new JsonArray(additional.Select(p => (JsonNode?)JsonValue.Create(p)).ToArray());
+            if (mode == "Nsec3")
+            {
+                if (x.DnssecSalt is not { Length: >= 16 and <= 64 } salt || salt.Length % 2 != 0 ||
+                    !salt.All(Uri.IsHexDigit) || x.DnssecIterations is null or < 0 or > 50)
+                    throw new ArgumentException("NSEC3 requires an explicit 8–32 byte hex salt and 0–50 iterations.");
+                zone["DnssecNsec3SaltHex"] = salt.ToUpperInvariant();
+                zone["DnssecNsec3Iterations"] = x.DnssecIterations.Value;
+            }
+            else if (!string.IsNullOrEmpty(x.DnssecSalt) || x.DnssecIterations is not null)
+                throw new ArgumentException("Salt and iterations are only valid for NSEC3.");
+        }
+        var origin = x.Name!.TrimEnd('.');
+        var cuts = new Dictionary<string, JsonObject>(StringComparer.OrdinalIgnoreCase);
+        foreach (var row in Rows(x.Delegations ?? "", 64, 3))
+        {
+            var cut = row[0].TrimEnd('.');
+            if (!Host(row[0]) || !cut.EndsWith("." + origin, StringComparison.OrdinalIgnoreCase) ||
+                !Host(row[1]) || !IPAddress.TryParse(row[2], out var address))
+                throw new ArgumentException("Delegation requires a strict child zone, DNS nameserver and unicast address.");
+            if (!cuts.TryGetValue(cut, out var entry))
+                cuts.Add(cut, entry = new JsonObject { ["Name"] = cut, ["NameServers"] = new JsonArray(), ["DsRecords"] = new JsonArray() });
+            var servers = (JsonArray)entry["NameServers"]!;
+            if (servers.Count >= 4 || servers.Any(s => string.Equals(s!["Host"]!.GetValue<string>(), row[1].TrimEnd('.'), StringComparison.OrdinalIgnoreCase)))
+                throw new ArgumentException("Each delegation permits at most four distinct nameservers in this editor.");
+            servers.Add(new JsonObject { ["Host"] = row[1].TrimEnd('.'), ["Address"] = address.ToString() });
+        }
+        if (cuts.Keys.Any(c => cuts.Keys.Any(other => !c.Equals(other, StringComparison.OrdinalIgnoreCase) &&
+                c.EndsWith("." + other, StringComparison.OrdinalIgnoreCase))) ||
+            ((JsonArray)zone["NameServers"]!).Any(ns => cuts.Keys.Any(cut =>
+                ns!["Host"]!.GetValue<string>().Equals(cut, StringComparison.OrdinalIgnoreCase) ||
+                ns["Host"]!.GetValue<string>().EndsWith("." + cut, StringComparison.OrdinalIgnoreCase))))
+            throw new ArgumentException("Nested cuts or parent nameservers below a child delegation are unsupported.");
+        foreach (var row in Rows(x.DelegationDs ?? "", 64, 5))
+        {
+            if (mode == "Disabled" || !cuts.TryGetValue(row[0].TrimEnd('.'), out var entry))
+                throw new ArgumentException("DS records require a signed parent and a configured delegation.");
+            var tag = Integer(row[1], 0, 65535);
+            var algorithm = Integer(row[2], 1, 255);
+            var digestType = Integer(row[3], 2, 4);
+            if (algorithm is not (1 or 3 or 5 or 6 or 7 or 8 or 10 or 12 or 13 or 14 or 15 or 16) ||
+                digestType is not (2 or 4) || row[4].Length != (digestType == 2 ? 64 : 96) || !row[4].All(Uri.IsHexDigit))
+                throw new ArgumentException("DS requires a supported algorithm and exact SHA-256 or SHA-384 hex digest.");
+            var ds = (JsonArray)entry["DsRecords"]!;
+            var candidate = new JsonObject { ["KeyTag"] = tag, ["Algorithm"] = algorithm, ["DigestType"] = digestType, ["DigestHex"] = row[4].ToUpperInvariant() };
+            if (ds.Count >= 8 || ds.Any(item => JsonNode.DeepEquals(item, candidate)))
+                throw new ArgumentException("Duplicate or excessive DS records.");
+            ds.Add(candidate);
+        }
+        if (cuts.Count > 0) zone["Delegations"] = new JsonArray(cuts.Values.Select(v => (JsonNode?)v).ToArray());
+    }
+    // Untrusted fields may reject draft construction, but cannot choose
+    // whether a constructed draft is checked by the signed-agent schema.
+    private static IResult ValidatedGslbCandidate(GslbDraftInput input)
+    {
+        var config = BuildGslbDraft(input);
+        if (!EngineConfigContract.Validate("gslb", config, allowPublicBind: false))
+            throw new ArgumentException("The existing signed agent staging schema rejected the candidate; check addresses and values.");
+        return Candidate(config, "gslb-zone-unsigned.json");
+    }
+    internal static JsonObject BuildGslbDraft(GslbDraftInput x)
+    {
+        // Initial loopback configuration; key paths are references only.
+        // This process never reads or provisions DNS signing keys.
+        // Evaluate every independent input predicate. No supplied field can
+        // short-circuit another check, and endpoint authorization is separate.
+        var namesValid = Host(x.Name) & Host(x.SoaContact);
+        var timingValid = (x.Serial != 0) & (x.Ttl is >= 5 and <= 300) &
+            (x.ProbeInterval is >= 1 and <= 60) & (x.FailureThreshold is >= 1 and <= 10) &
+            (x.SuccessThreshold is >= 1 and <= 10);
+        var policyValid = x.Policy is "Weighted" or "Failover" or "WeightedFailover";
+        if (!(namesValid & timingValid & policyValid))
             throw new ArgumentException("Enter valid zone/SOA DNS names, positive serial, TTL (5–300), health intervals and a supported policy.");
         var sites = new JsonArray();
         var addresses = new HashSet<IPAddress>();
@@ -133,22 +235,25 @@ public static class SpecialistDrafts
                 throw new ArgumentException("Nameservers require distinct DNS names and IP addresses.");
             servers.Add(new JsonObject { ["Host"] = r[0].TrimEnd('.'), ["Address"] = address.ToString() });
         }
+        if (names.Count > 4) throw new ArgumentException("At most four authoritative nameservers are supported.");
         if (sites.Count == 0 || servers.Count == 0) throw new ArgumentException("Enter at least one site and authoritative nameserver.");
         var zone = new JsonObject { ["Name"] = x.Name!.TrimEnd('.'), ["SoaContact"] = x.SoaContact!.TrimEnd('.'),
             ["SoaSerial"] = x.Serial, ["TtlSeconds"] = x.Ttl, ["RoutingPolicy"] = x.Policy,
             ["FailureThreshold"] = x.FailureThreshold, ["SuccessThreshold"] = x.SuccessThreshold,
             ["FailClosedWhenAllSitesDown"] = true, ["Sites"] = sites, ["NameServers"] = servers };
+        AddAuthorityDraft(x, zone);
         // Safe loopback candidate: operator must review actual interface,
         // authority fencing, DNSSEC and signed activation separately.
         var config = new JsonObject { ["AllowNonLoopbackListeners"] = false, ["ListenHost"] = "127.0.0.1",
             ["ListenPort"] = 15353, ["ProbeIntervalSeconds"] = x.ProbeInterval, ["Zones"] = new JsonArray(zone) };
-        if (!EngineConfigContract.Validate("gslb", config, allowPublicBind: false))
-            throw new ArgumentException("The existing signed agent staging schema rejected the candidate; check addresses and values.");
         return config;
     }
 }
 public sealed record WafDraftInput(long Revision, string? Mode, string? RulesetSha256,
-    string? ShadowEvidenceSha256, int ValidDays, string? Exceptions);
+    string? ShadowEvidenceSha256, int ValidDays, string? Exceptions, long? RollbackFromRevision = null);
 public sealed record GslbDraftInput(string? Name, string? SoaContact, uint Serial, int Ttl,
-    string? Policy, int ProbeInterval, int FailureThreshold, int SuccessThreshold, string? Sites, string? NameServers);
+    string? Policy, int ProbeInterval, int FailureThreshold, int SuccessThreshold, string? Sites, string? NameServers,
+    string? DnssecMode = null, string? DnssecKeyPath = null, string? DnssecPrepublishPaths = null,
+    string? DnssecAdditionalPaths = null, string? DnssecSalt = null, int? DnssecIterations = null,
+    string? Delegations = null, string? DelegationDs = null);
 public sealed record BackendCertificateCheck(string? Thumbprint);

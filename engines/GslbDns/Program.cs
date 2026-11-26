@@ -19,7 +19,10 @@ if(args.Length != 1 || !File.Exists(args[0]))
     return 64;
 }
 var options = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
-var config = JsonSerializer.Deserialize<DnsConfig>(File.ReadAllText(args[0]), options)
+var configBytes = File.ReadAllBytes(args[0]);
+var loadedConfigRevision = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(configBytes));
+using var configReader = new StreamReader(new MemoryStream(configBytes), detectEncodingFromByteOrderMarks: true);
+var config = JsonSerializer.Deserialize<DnsConfig>(configReader.ReadToEnd(), options)
     ?? throw new InvalidDataException("Missing DNS config");
 using var geoIpDatabase = new GeoIpEcsDatabase(config.GeoIpCountryDatabasePath,
     config.GeoIpAsnDatabasePath, config.GeoIpMaxDatabaseAgeDays,
@@ -376,7 +379,7 @@ await using var reportServer = config.AgentReports is null || reportStore is nul
     ? null : new AgentHealthReportServer(config.AgentReports, reportStore, runtimeMetrics);
 await using var metricsServer = config.MetricsListenPort == 0 ? null : new DnsMetricsServer(
     config.MetricsListenHost, config.MetricsListenPort, runtimeMetrics,
-    groups.Values.ToArray(), reportStore, reportTargets, authorityFenceStore);
+    groups.Values.ToArray(), reportStore, reportTargets, authorityFenceStore, loadedConfigRevision);
 using var validation = groups.Values.SelectMany(group => group.Sites).Any(site => site.Validators.Length > 0)
     ? new ExternalValidation(groups.Values.SelectMany(group => group.Sites).SelectMany(site => site.Validators)) : null;
 using var stop=new CancellationTokenSource();

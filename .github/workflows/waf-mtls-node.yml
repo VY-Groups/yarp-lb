@@ -6,6 +6,12 @@ on:
       - "ops/waf/mtls_fenced_node.py"
       - "ops/waf/waf_node_service.py"
       - "ops/waf/two_node_transaction.py"
+      - "ops/waf/waf_fleet_rollout.py"
+      - "ops/waf/dashboard_broker.py"
+      - "ops/waf/test_dashboard_broker.py"
+      - "ops/waf/verify_signed_policy.py"
+      - "ops/waf/test_verify_signed_policy.py"
+      - "ops/waf/test_waf_fleet_rollout.py"
       - "ops/waf/test_mtls_fenced_node.py"
       - "ops/waf/test_two_node_transaction.py"
       - ".github/workflows/waf-mtls-node.yml"
@@ -14,6 +20,12 @@ on:
       - "ops/waf/mtls_fenced_node.py"
       - "ops/waf/waf_node_service.py"
       - "ops/waf/two_node_transaction.py"
+      - "ops/waf/waf_fleet_rollout.py"
+      - "ops/waf/dashboard_broker.py"
+      - "ops/waf/test_dashboard_broker.py"
+      - "ops/waf/verify_signed_policy.py"
+      - "ops/waf/test_verify_signed_policy.py"
+      - "ops/waf/test_waf_fleet_rollout.py"
       - "ops/waf/test_mtls_fenced_node.py"
       - "ops/waf/test_two_node_transaction.py"
       - ".github/workflows/waf-mtls-node.yml"
@@ -32,3 +44,6 @@ jobs:
           set -euo pipefail
           python3 -m unittest discover -s ops/waf -p test_mtls_fenced_node.py -v
           python3 -m unittest discover -s ops/waf -p test_two_node_transaction.py -v
+          python3 -m unittest discover -s ops/waf -p test_verify_signed_policy.py -v
+          python3 -m unittest discover -s ops/waf -p test_waf_fleet_rollout.py -v
+          python3 -m unittest discover -s ops/waf -p test_dashboard_broker.py -v

@@ -215,6 +215,17 @@ else if (ec2Lab)
     Console.Error.WriteLine("WARNING: CI-only EC2 lab uses temporary, unencrypted local Data Protection keys. Never use in production.");
 else
     throw new PlatformNotSupportedException("Unsupported OS Data Protection mode");
+var stagedImportEnabled = !ec2Lab && isolatedListeners?.Config.TrafficCertificateDnsNames is { Length: > 0 } &&
+    string.Equals(Environment.GetEnvironmentVariable("YARP_STAGED_TRAFFIC_CERTIFICATE_IMPORT"), "true", StringComparison.OrdinalIgnoreCase);
+if (stagedImportEnabled || acmeRenewalSettings is not null)
+    builder.Services.AddSingleton<AcmeCertificateLifecycleGate>();
+if (stagedImportEnabled)
+{
+    var settings = isolatedListeners!.Config;
+    builder.Services.AddSingleton(services => new StagedTrafficCertificate(settings.TrafficPfxPath,
+        settings.TrafficPfxPasswordFile, settings.TrafficCertificateDnsNames!,
+        isolatedListeners.IsTrafficCertificateActive, services.GetRequiredService<AcmeCertificateLifecycleGate>()));
+}
 if (acmeRenewalSettings is { } renewalSettings)
 {
     var activeListeners = isolatedListeners ?? throw new InvalidOperationException(
@@ -225,7 +236,6 @@ if (acmeRenewalSettings is { } renewalSettings)
     IAcmeDns01Publisher? dns01Publisher = renewalSettings.EnableDns01Renewal
         ? renewalSettings.Dns01Publisher!.CreateVerifiedPublisher()
         : null;
-    builder.Services.AddSingleton<AcmeCertificateLifecycleGate>();
     var accountKeyPath = Path.Combine(privateDir, "acme-account.encrypted");
     builder.Services.AddSingleton<IAcmeCertificateIssuer>(services => new CertesAcmeCertificateIssuer(
         new AcmeAccountKeyStore(accountKeyPath,
@@ -240,10 +250,12 @@ if (acmeRenewalSettings is { } renewalSettings)
         services.GetRequiredService<IAcmeCertificateIssuer>(), renewalSettings.DirectoryUrl,
         renewalSettings.DnsName, renewalSettings.ContactEmail, activeListeners.IsTrafficCertificateActive,
         services.GetRequiredService<AcmeCertificateLifecycleGate>()));
-    builder.Services.AddHostedService(services => new AcmeRenewalBackgroundService(renewalSettings,
+    builder.Services.AddSingleton<AcmeRenewalBackgroundService>(services => new AcmeRenewalBackgroundService(renewalSettings,
         services.GetRequiredService<AcmeRenewalCoordinator>(), null,
         services.GetRequiredService<ILogger<AcmeRenewalBackgroundService>>(),
         dns01Publisher));
+    builder.Services.AddHostedService<AcmeRenewalBackgroundService>(services =>
+        services.GetRequiredService<AcmeRenewalBackgroundService>());
 }
 // Keep executable/static assets read-only under /opt on hardened Linux.
 // Management may atomically update ONLY a private state-directory config.
@@ -352,6 +364,13 @@ builder.Services.AddRateLimiter(options =>
     options.AddFixedWindowLimiter("mailtest", cfg => { cfg.PermitLimit = 3; cfg.Window = TimeSpan.FromMinutes(5); cfg.QueueLimit = 0; });
     options.AddFixedWindowLimiter("ldaptest", cfg => { cfg.PermitLimit = 4; cfg.Window = TimeSpan.FromMinutes(5); cfg.QueueLimit = 0; });
     options.AddFixedWindowLimiter("acme-revoke", cfg => { cfg.PermitLimit = 2; cfg.Window = TimeSpan.FromMinutes(5); cfg.QueueLimit = 0; });
+    options.AddFixedWindowLimiter("waf-dashboard-deployment", cfg => { cfg.PermitLimit = 2; cfg.Window = TimeSpan.FromMinutes(1); cfg.QueueLimit = 0; });
+    options.AddFixedWindowLimiter("tls-stage-import", cfg => { cfg.PermitLimit = 4; cfg.Window = TimeSpan.FromMinutes(1); cfg.QueueLimit = 0; });
+    options.AddFixedWindowLimiter("acme-renew-due", cfg => { cfg.PermitLimit = 1; cfg.Window = TimeSpan.FromMinutes(10); cfg.QueueLimit = 0; });
+    options.AddFixedWindowLimiter("employee-invite-issue", cfg =>
+    { cfg.PermitLimit = 8; cfg.Window = TimeSpan.FromMinutes(5); cfg.QueueLimit = 0; });
+    options.AddFixedWindowLimiter("employee-invite-redeem", cfg =>
+    { cfg.PermitLimit = 24; cfg.Window = TimeSpan.FromMinutes(5); cfg.QueueLimit = 0; });
     options.AddFixedWindowLimiter("first-run", cfg =>
     { cfg.PermitLimit = 24; cfg.Window = TimeSpan.FromMinutes(5); cfg.QueueLimit = 0; });
     options.AddFixedWindowLimiter("login", cfg =>
@@ -470,6 +489,11 @@ var backupFolder = Path.Combine(privateDir, "config-backups");
 Directory.CreateDirectory(backupFolder);
 var jsonOptions = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
 var loginGate = new SemaphoreSlim(1, 1);
+#if !GATEWAYCORE_COMMERCIAL
+// Process-local invitations are deliberately invalidated by a service restart.
+// The account writer gate serializes issue, revoke, verify and redemption.
+var employeeInvitations = new Dictionary<string, EmployeeInvitation>(StringComparer.Ordinal);
+#endif
 var pendingOtp = new ConcurrentDictionary<string, OtpChallenge>();
 var mailPath = Path.Combine(privateDir, "mail-settings.json");
 var mailProofPath = Path.Combine(privateDir, "mail-test-proof.sha256");
@@ -622,7 +646,8 @@ app.Use(async (ctx, next) =>
 app.Use(async (ctx, next) =>
 {
     if (ctx.Request.Path.StartsWithSegments("/admin/api") &&
-        !ManagementPrivacyPolicy.Exempt(ctx.Request.Path))
+        !ManagementPrivacyPolicy.Exempt(ctx.Request.Path) &&
+        ctx.GetEndpoint()?.Metadata.GetMetadata<EmployeeInvitationRedemptionEndpoint>() is null)
     {
         if (ctx.User.Identity?.IsAuthenticated != true)
         { ctx.Response.StatusCode = 401; return; }
@@ -985,7 +1010,8 @@ app.Use(async (ctx, next) =>
     if (ctx.Request.Path.StartsWithSegments("/admin/api") &&
         (ctx.Request.Method is "POST" or "PUT" or "PATCH" or "DELETE") &&
         !ctx.Request.Path.StartsWithSegments("/admin/api/bootstrap") &&
-        !ctx.Request.Path.StartsWithSegments("/admin/api/login"))
+        !ctx.Request.Path.StartsWithSegments("/admin/api/login") &&
+        ctx.GetEndpoint()?.Metadata.GetMetadata<EmployeeInvitationRedemptionEndpoint>() is null)
     {
         if (ctx.User.Identity?.IsAuthenticated != true) { ctx.Response.StatusCode = 401; return; }
         var token = ctx.User.FindFirst("csrf")?.Value;
@@ -1484,6 +1510,7 @@ app.MapPost("/admin/api/bootstrap/setup", async (HttpContext ctx, SetupEnrollmen
 app.MapGet("/admin/api/auth-methods", () => Results.Ok(new {
     local = true, activeDirectory = oidcPolicy is null && directoryAuth.Read().Enabled,
     mailOtp = ReadMail().Enabled, enterpriseOidc = oidcPolicy is not null,
+    employeeInvitations = EmployeeInvitationsAvailable(),
     info = oidcPolicy is not null ? "Enterprise SSO with phishing-resistant MFA; local sign-in reserved for recovery" :
         "AD sign-in requires LDAPS, mapped groups and email OTP"
 }));
@@ -1696,6 +1723,173 @@ app.MapPost("/admin/api/users", async (HttpContext ctx, UserInput input) =>
     }
     finally { loginGate.Release(); }
 }).RequireAuthorization(p => p.RequireRole("Administrator"));
+// Invite-based self-registration is limited to ordinary, local-account lab
+// installations. Enterprise identity, signed commercial identity, and external
+// audit deployments continue to use their existing approved enrollment paths.
+bool EmployeeInvitationsAvailable()
+{
+#if GATEWAYCORE_COMMERCIAL
+    return false;
+#else
+    if (oidcPolicy is not null || externalAuditIntent is not null || OnboardingApi.IsMultiGatewayDesign(privateDir)) return false;
+    var mail = ReadMail();
+    return mail.Enabled && MailDeliveryVerified(mail) &&
+        ReadUsers().Any(u => u.Enabled && u.Role == "Administrator");
+#endif
+}
+#if !GATEWAYCORE_COMMERCIAL
+void ExpireEmployeeInvitations()
+{
+    var now = DateTimeOffset.UtcNow;
+    foreach (var id in employeeInvitations.Where(p => p.Value.ExpiresUtc <= now).Select(p => p.Key).ToArray())
+        employeeInvitations.Remove(id);
+}
+bool InvitationTransportAllowed(HttpContext ctx) => ctx.Request.IsHttps ||
+    (ctx.Connection.RemoteIpAddress is { } address && IPAddress.IsLoopback(address) &&
+     (ctx.Request.Host.Host.Equals("localhost", StringComparison.OrdinalIgnoreCase) ||
+      ctx.Request.Host.Host is "127.0.0.1" or "[::1]" or "::1"));
+bool InvitationIssuerCurrent(EmployeeInvitation entry, List<AdminUser> users) =>
+    users.Any(u => u.Enabled && u.Role == "Administrator" &&
+        u.Username.Equals(entry.Issuer, StringComparison.OrdinalIgnoreCase) &&
+        u.SecurityStamp == entry.IssuerStamp);
+bool InvitationAccountFree(EmployeeInvitation entry, List<AdminUser> users) =>
+    !users.Any(u => u.Username.Equals(entry.Username, StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(u.Email, entry.Email, StringComparison.OrdinalIgnoreCase));
+IResult InvalidInvitation() => Results.BadRequest(new { error = "Invitation is invalid, expired or already used. Ask your administrator to issue a new invitation." });
+app.MapGet("/admin/api/users/invitations", async (HttpContext ctx) =>
+{
+    if (!EmployeeInvitationsAvailable() || !InvitationTransportAllowed(ctx)) return Results.StatusCode(403);
+    await loginGate.WaitAsync(ctx.RequestAborted);
+    try
+    {
+        if (!await AuditActorCurrent(ctx, administratorOnly: true)) return Results.StatusCode(403);
+        ExpireEmployeeInvitations();
+        return Results.Ok(employeeInvitations.Values.Select(x => new {
+            x.Id, x.Username, emailHint = MaskEmail(x.Email), x.Role, x.ExpiresUtc,
+            status = x.Verified ? "email-verified" : "awaiting-email-verification"
+        }).ToArray());
+    }
+    finally { loginGate.Release(); }
+}).RequireAuthorization(p => p.RequireRole("Administrator"));
+
+app.MapPost("/admin/api/users/invitations", async (HttpContext ctx, EmployeeInvitationInput input) =>
+{
+    if (!EmployeeInvitationsAvailable() || !InvitationTransportAllowed(ctx)) return Results.StatusCode(403);
+    if (ctx.Request.ContentLength is > 4096 || !ValidUser(input.Username) ||
+        !ValidEmail(input.Email) || !MailAddress.TryCreate(input.Email, out var address) ||
+        !string.Equals(address.Address, input.Email, StringComparison.OrdinalIgnoreCase) ||
+        input.Role is not ("Operator" or "Viewer"))
+        return Results.BadRequest(new { error = "Enter a unique username, plain mailbox address and Operator or Viewer role." });
+    await loginGate.WaitAsync(ctx.RequestAborted);
+    try
+    {
+        if (!await AuditActorCurrent(ctx, administratorOnly: true) || !EmployeeInvitationsAvailable())
+            return Results.StatusCode(403);
+        ExpireEmployeeInvitations();
+        var users = ReadUsers();
+        var issuer = users.Single(u => u.Username.Equals(Actor(ctx), StringComparison.OrdinalIgnoreCase));
+        var cfg = ReadMail();
+        var code = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
+        var entry = new EmployeeInvitation(Convert.ToHexString(RandomNumberGenerator.GetBytes(16)),
+            input.Username!, address.Address, input.Role!, issuer.Username, issuer.SecurityStamp,
+            MailFingerprint(cfg), EmployeeInvitation.Digest(code), DateTimeOffset.UtcNow.AddMinutes(30), false);
+        if (!InvitationAccountFree(entry, users)) return Results.Conflict(new { error = "Username or mailbox already belongs to an account." });
+        if (employeeInvitations.Count >= 128) return Results.Json(new { error = "Invitation capacity reached; revoke unused invitations." }, statusCode: 429);
+        if (employeeInvitations.Values.Any(x => x.Username.Equals(entry.Username, StringComparison.OrdinalIgnoreCase) ||
+            x.Email.Equals(entry.Email, StringComparison.OrdinalIgnoreCase)))
+            return Results.Conflict(new { error = "A pending invitation already exists; revoke it before issuing another." });
+        await SendMailMessage(entry.Email, "GatewayCore employee invitation",
+            $"You have been invited to GatewayCore as {entry.Role} with username {entry.Username}. Open the authorized management dashboard, choose Accept employee invitation, and enter this one-time code: {code}. It expires in 30 minutes. Never share this code or a password.", cfg);
+        if (ctx.RequestAborted.IsCancellationRequested || !EmployeeInvitationsAvailable() ||
+            !InvitationIssuerCurrent(entry, ReadUsers()) || MailFingerprint(ReadMail()) != entry.MailFingerprint)
+            return Results.Conflict(new { error = "Invitation authorization changed; ask the administrator to issue another." });
+        await Audit(issuer.Username, "EMPLOYEE_INVITATION_ISSUED", new { entry.Id, entry.Username, entry.Role });
+        employeeInvitations.Add(entry.Id, entry);
+        return Results.Ok(new { entry.Id, entry.Username, emailHint = MaskEmail(entry.Email), entry.Role, entry.ExpiresUtc });
+    }
+    catch (Exception ex) when (ex is not OperationCanceledException)
+    {
+        app.Logger.LogWarning("EMPLOYEE_INVITATION_ISSUE_FAILED type={ErrorType}", ex.GetType().Name);
+        return Results.Json(new { error = "Invitation could not be issued. Check verified SMTP and audit availability." }, statusCode: 503);
+    }
+    finally { loginGate.Release(); }
+}).WithMetadata(new Microsoft.AspNetCore.Mvc.RequestSizeLimitAttribute(4096)).RequireRateLimiting("employee-invite-issue").RequireAuthorization(p => p.RequireRole("Administrator"));
+
+app.MapPost("/admin/api/users/invitations/{id}/revoke", async (HttpContext ctx, string id) =>
+{
+    if (!InvitationTransportAllowed(ctx) || !Regex.IsMatch(id, "^[A-F0-9]{32}$")) return Results.BadRequest();
+    await loginGate.WaitAsync(ctx.RequestAborted);
+    try
+    {
+        if (!await AuditActorCurrent(ctx, administratorOnly: true)) return Results.StatusCode(403);
+        ExpireEmployeeInvitations();
+        if (!employeeInvitations.TryGetValue(id, out var entry)) return Results.NotFound();
+        await Audit(Actor(ctx), "EMPLOYEE_INVITATION_REVOKED", new { entry.Id, entry.Username });
+        employeeInvitations.Remove(id);
+        return Results.Ok(new { revoked = true });
+    }
+    finally { loginGate.Release(); }
+}).RequireAuthorization(p => p.RequireRole("Administrator"));
+
+app.MapPost("/admin/api/employee-invitation/redeem", async (HttpContext ctx, EmployeeInvitationRedeem input) =>
+{
+    // This exact unauthenticated endpoint is protected by an emailed 256-bit
+    // capability, the existing management transport restriction, bounded body,
+    // rate limiting and the account writer gate. It never issues a session.
+    if (!EmployeeInvitationsAvailable() || !InvitationTransportAllowed(ctx) ||
+        ctx.User.Identity?.IsAuthenticated == true) return Results.StatusCode(403);
+    if (ctx.Request.ContentLength is > 4096 || input.Action is not ("verify" or "finish") ||
+        input.Code is null || !Regex.IsMatch(input.Code, "^[A-Fa-f0-9]{64}$")) return InvalidInvitation();
+    await loginGate.WaitAsync(ctx.RequestAborted);
+    try
+    {
+        if (!EmployeeInvitationsAvailable()) return Results.StatusCode(403);
+        ExpireEmployeeInvitations();
+        var digest = EmployeeInvitation.Digest(input.Code.ToUpperInvariant());
+        var entry = employeeInvitations.Values.SingleOrDefault(x => CryptographicOperations.FixedTimeEquals(x.CodeHash, digest));
+        if (entry is null || entry.Verified != (input.Action == "finish")) return InvalidInvitation();
+        var users = ReadUsers();
+        if (!InvitationIssuerCurrent(entry, users) || !InvitationAccountFree(entry, users) ||
+            entry.MailFingerprint != MailFingerprint(ReadMail()))
+        {
+            employeeInvitations.Remove(entry.Id);
+            return InvalidInvitation();
+        }
+        // The server's stored capability state, not the submitted action,
+        // determines the transition. Action is only a consistency assertion.
+        if (!entry.Verified)
+        {
+            // Rotate away from the emailed credential immediately. The short
+            // completion capability never appears in a URL or persistent storage.
+            var completion = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
+            var expires = DateTimeOffset.UtcNow.AddMinutes(10);
+            if (expires > entry.ExpiresUtc) expires = entry.ExpiresUtc;
+            await Audit(entry.Issuer, "EMPLOYEE_INVITATION_EMAIL_VERIFIED", new { entry.Id, entry.Username });
+            employeeInvitations[entry.Id] = entry with { CodeHash = EmployeeInvitation.Digest(completion), Verified = true, ExpiresUtc = expires };
+            return Results.Ok(new { verified = true, completion, entry.Username, entry.Role });
+        }
+        if (!ValidPassword(input.Password)) return Results.BadRequest(new { error = "Password must contain 16–256 characters." });
+        users.Add(NewUser(entry.Username, entry.Role, input.Password!, entry.Email));
+        await Audit(entry.Issuer, "EMPLOYEE_INVITATION_REDEMPTION_PREPARED", new { entry.Id, entry.Username, entry.Role });
+        if (ctx.RequestAborted.IsCancellationRequested || !EmployeeInvitationsAvailable() ||
+            entry.MailFingerprint != MailFingerprint(ReadMail()) || entry.ExpiresUtc <= DateTimeOffset.UtcNow ||
+            !InvitationIssuerCurrent(entry, ReadUsers()) || !InvitationAccountFree(entry, ReadUsers()))
+            return InvalidInvitation();
+        WriteUsers(users);
+        employeeInvitations.Remove(entry.Id);
+        await Audit(entry.Username, "EMPLOYEE_INVITATION_REDEEMED", new { entry.Id, entry.Role });
+        return Results.Ok(new { created = true, entry.Username });
+    }
+    catch (Exception ex) when (ex is not OperationCanceledException)
+    {
+        app.Logger.LogWarning("EMPLOYEE_INVITATION_REDEEM_FAILED type={ErrorType}", ex.GetType().Name);
+        return Results.Json(new { error = "Registration could not be completed. Contact your administrator." }, statusCode: 503);
+    }
+    finally { loginGate.Release(); }
+}).WithMetadata(new Microsoft.AspNetCore.Mvc.RequestSizeLimitAttribute(4096),
+    new EmployeeInvitationRedemptionEndpoint()).RequireRateLimiting("employee-invite-redeem").AllowAnonymous();
+#endif
+
 app.MapPost("/admin/api/users/{username}/password", async (HttpContext ctx, string username, PasswordInput input) =>
 {
     if (!ValidPassword(input.Password)) return Results.BadRequest(new { error = "Password must contain at least 16 characters" });
@@ -1971,6 +2165,31 @@ app.MapHttp01Challenge(acmeHttp01PublicEntrypointEnabled,
     ctx => isolatedListeners?.OnTrafficHttp(ctx) == true);
 if (acmeRenewalSettings is { } revokeSettings)
 {
+    app.MapPost("/admin/api/tls/acme/renew-due", async (HttpContext ctx, AcmeRenewalBackgroundService worker) =>
+    {
+        if (!await AuditActorCurrent(ctx, administratorOnly: true))
+            return Results.StatusCode(403);
+        await Audit(Actor(ctx), "ACME_RENEWAL_CHECK_REQUESTED", new { dnsName = revokeSettings.DnsName });
+        if (!await AuditActorCurrent(ctx, administratorOnly: true))
+            return Results.StatusCode(403);
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(ctx.RequestAborted,
+            app.Lifetime.ApplicationStopping);
+        linked.CancelAfter(TimeSpan.FromMinutes(11));
+        try
+        {
+            var outcome = await worker.CheckDueAsync(linked.Token);
+            if (outcome is null) return Results.Conflict(new { error = "A scheduled or manual certificate check is already in progress." });
+            await Audit(Actor(ctx), "ACME_RENEWAL_CHECK_COMPLETED", new { outcome.Renewed, outcome.NotAfter, outcome.Reason });
+            return Results.Ok(outcome);
+        }
+        catch (Exception ex)
+        {
+            await Audit(Actor(ctx), "ACME_RENEWAL_CHECK_FAILED", new { failureType = ex.GetType().Name });
+            return Results.Json(new { error = "Renewal was not confirmed. Inspect certificate status and audit before retrying." }, statusCode: 503);
+        }
+    }).RequireAuthorization(policy => policy.RequireRole("Administrator"))
+      .RequireRateLimiting("acme-renew-due");
+
     app.MapPost("/admin/api/tls/acme/revoke", async (HttpContext ctx,
         AcmeRevocationCoordinator coordinator) =>
     {
@@ -3023,7 +3242,83 @@ if (peerSyncSettings is not null && peerStateJournal is not null && peerSigner i
 }
 app.MapOrganizationProfile(privateDir, Audit);
 app.MapTlsInventory();
+if (stagedImportEnabled)
+{
+    app.MapPost("/admin/api/tls/staged/preview", async (HttpContext ctx, StagedTrafficCertificate service) =>
+    {
+        if (!await AuditActorCurrent(ctx, true)) return Results.StatusCode(403);
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ctx.RequestAborted);
+        timeout.CancelAfter(TimeSpan.FromSeconds(10));
+        try { return Results.Ok(await service.PreviewAsync(timeout.Token)); }
+        catch (Exception ex)
+        {
+            await Audit(Actor(ctx), "TLS_STAGED_PREVIEW_FAILED", new { failureType = ex.GetType().Name });
+            return Results.Conflict(new { error = "No usable staged PFX or active certificate drift. Check host provisioning." });
+        }
+    }).RequireAuthorization(p => p.RequireRole("Administrator")).RequireRateLimiting("tls-stage-import");
+    app.MapPost("/admin/api/tls/staged/activate", async (HttpContext ctx, StagedTrafficCertificate service, StagedActivationInput input) =>
+    {
+        if (input.CandidateDigest is null || input.ActiveDigest is null ||
+            !Regex.IsMatch(input.CandidateDigest, "^[A-F0-9]{64}$") || !Regex.IsMatch(input.ActiveDigest, "^[A-F0-9]{64}$") ||
+            input.Confirmation != "ACTIVATE " + input.CandidateDigest)
+            return Results.BadRequest(new { error = "Exact preview digests and typed confirmation required." });
+        if (!await AuditActorCurrent(ctx, true)) return Results.StatusCode(403);
+        // Do not introduce an external-audit or enterprise mutation bypass.
+        if (externalAuditIntent is not null || oidcPolicy is not null || OnboardingApi.IsMultiGatewayDesign(privateDir))
+            return Results.Conflict(new { error = "Staged local import requires the independently approved fleet/enterprise procedure." });
+        await Audit(Actor(ctx), "TLS_STAGED_ACTIVATION_REQUEST", new { input.CandidateDigest, input.ActiveDigest });
+        if (!await AuditActorCurrent(ctx, true)) return Results.StatusCode(403);
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ctx.RequestAborted, app.Lifetime.ApplicationStopping);
+        timeout.CancelAfter(TimeSpan.FromSeconds(45));
+        try
+        {
+            var result = await service.ActivateAsync(input.CandidateDigest, input.ActiveDigest, timeout.Token);
+            await Audit(Actor(ctx), "TLS_STAGED_ACTIVATED", new { result.Thumbprint, result.NotAfterUtc });
+            return Results.Ok(new { activated = true, result.Thumbprint, result.NotAfterUtc });
+        }
+        catch (Exception ex)
+        {
+            await Audit(Actor(ctx), "TLS_STAGED_ACTIVATION_UNCONFIRMED", new { failureType = ex.GetType().Name });
+            return Results.Conflict(new { error = "Activation not confirmed. Verify live TLS and reconcile before retrying." });
+        }
+    }).RequireAuthorization(p => p.RequireRole("Administrator")).RequireRateLimiting("tls-stage-import");
+}
 app.MapSpecialistDrafts();
+var wafBroker = WafDashboardBroker.FromEnvironment();
+app.MapGet("/admin/api/specialist/waf-deployment", () => Results.Ok(new {
+    configured = wafBroker is not null,
+    scope = "Linux host-approved signed policy; independent quorum commit required"
+})).RequireAuthorization(p => p.RequireRole("Administrator"));
+app.MapPost("/admin/api/specialist/waf-deployment", async (HttpContext ctx, WafDashboardRequest request) =>
+{
+    if (wafBroker is null) return Results.Conflict(new { error = "Host WAF deployment broker not configured." });
+    if (!await AuditActorCurrent(ctx, true)) return Results.StatusCode(403);
+    if (externalAuditIntent is not null || oidcPolicy is not null)
+        return Results.Conflict(new { error = "External-audit/enterprise deployments require the independent operator workflow." });
+    if (request.Operation is not ("preflight" or "execute") || request.Revision is < 1 or > 9007199254740991 ||
+        request.Digest is null || !Regex.IsMatch(request.Digest, "^[A-F0-9]{64}$") ||
+        request.Confirmation != request.Operation.ToUpperInvariant() + " " + request.Digest)
+        return Results.BadRequest(new { error = "Exact signed policy revision, digest and confirmation required." });
+    if (SetupCenter.ReadFreeze(privateDir).Frozen)
+        return Results.Conflict(new { error = "Local routing change freeze is active." });
+    await Audit(Actor(ctx), "WAF_BROKER_REQUESTED", new { request.Operation, request.Revision, request.Digest });
+    if (!await AuditActorCurrent(ctx, true)) return Results.StatusCode(403);
+    try
+    {
+        var outcome = await wafBroker.RequestAsync(request, ctx.RequestAborted);
+        await Audit(Actor(ctx), "WAF_BROKER_OUTCOME", new { request.Revision, request.Digest, outcome });
+        return outcome == "refused-or-failed"
+            ? Results.Conflict(new { error = "Broker refused or failed. Inspect independent operator receipts." })
+            : Results.Ok(new { outcome });
+    }
+    catch (Exception ex)
+    {
+        await Audit(Actor(ctx), "WAF_BROKER_UNCONFIRMED", new { failureType = ex.GetType().Name });
+        return Results.Json(new { error = "Result unconfirmed. Do not retry until independent reconciliation." }, statusCode: 503);
+    }
+}).WithMetadata(new RequestSizeLimitAttribute(2048))
+  .RequireAuthorization(p => p.RequireRole("Administrator"))
+  .RequireRateLimiting("waf-dashboard-deployment");
 app.MapReverseProxy(proxyPipeline =>
 {
 #if GATEWAYCORE_COMMERCIAL
@@ -3336,6 +3631,15 @@ record MailSettings(bool Enabled = false, string Host = "", int Port = 25, strin
     string AuthMode = "password", string OAuthClientId = "", string EncryptedOAuthClientSecret = "", string EncryptedOAuthRefreshToken = "", string OAuthTenant = "");
 record MailSettingsInput(bool Enabled, string Host, int Port, string From, string Username, string Password, bool StartTls,
     string AuthMode = "password", string OAuthClientId = "", string OAuthClientSecret = "", string OAuthRefreshToken = "", string OAuthTenant = "");
+record EmployeeInvitationInput(string? Username, string? Email, string? Role);
+sealed class EmployeeInvitationRedemptionEndpoint { }
+record EmployeeInvitationRedeem(string? Action, string? Code, string? Password = null);
+record StagedActivationInput(string? CandidateDigest, string? ActiveDigest, string? Confirmation);
+record EmployeeInvitation(string Id, string Username, string Email, string Role, string Issuer, string IssuerStamp,
+    string MailFingerprint, byte[] CodeHash, DateTimeOffset ExpiresUtc, bool Verified)
+{
+    public static byte[] Digest(string code) => SHA256.HashData(Encoding.ASCII.GetBytes(code));
+}
 record UserInput(string Username, string Role, string Password, string? Email);
 record PasswordInput(string Password);
 record ChangeDecision(string Decision, string? Reason);

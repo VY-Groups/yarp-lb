@@ -447,7 +447,7 @@ public sealed class AcmeRenewalCoordinator(IAcmeCertificateIssuer issuer,
         }
     }
 
-    private static Task<byte[]> ReadBoundedPfxAsync(string path, CancellationToken token)
+    internal static Task<byte[]> ReadBoundedPfxAsync(string path, CancellationToken token)
     {
         token.ThrowIfCancellationRequested();
         var bytes = GatewayCore.Gslb.Contracts.PrivateKeyFileSecurity.ReadPrivateFileBytes(
@@ -462,7 +462,7 @@ public sealed class AcmeRenewalCoordinator(IAcmeCertificateIssuer issuer,
         catch { CryptographicOperations.ZeroMemory(bytes); throw; }
     }
 
-    private static Task<string> ReadBoundedPasswordAsync(string path, CancellationToken token)
+    internal static Task<string> ReadBoundedPasswordAsync(string path, CancellationToken token)
     {
         token.ThrowIfCancellationRequested();
         var bytes = GatewayCore.Gslb.Contracts.PrivateKeyFileSecurity.ReadPrivateFileBytes(
@@ -479,7 +479,7 @@ public sealed class AcmeRenewalCoordinator(IAcmeCertificateIssuer issuer,
         finally { CryptographicOperations.ZeroMemory(bytes); }
     }
 
-    private static async Task<bool> MatchesActiveAsync(string pfxPath, string passwordPath,
+    internal static async Task<bool> MatchesActiveAsync(string pfxPath, string passwordPath,
         byte[] expectedPfx, string expectedPassword, CancellationToken token)
     {
         var current = await ReadBoundedPfxAsync(pfxPath, token);
@@ -492,7 +492,7 @@ public sealed class AcmeRenewalCoordinator(IAcmeCertificateIssuer issuer,
         finally { CryptographicOperations.ZeroMemory(current); }
     }
 
-    private static async Task WritePrivatePfxAsync(string path, byte[] pfx, CancellationToken cancellationToken)
+    internal static async Task WritePrivatePfxAsync(string path, byte[] pfx, CancellationToken cancellationToken)
     {
         if (pfx.Length is < 512 or > 1_048_576) throw new CryptographicException("PFX payload is outside its size bound.");
         await using var file = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None,
@@ -586,6 +586,22 @@ public sealed class AcmeRenewalBackgroundService(AcmeRenewalSettings settings,
     IAcmeDns01Publisher? dns01Publisher = null) : BackgroundService
 {
     private readonly TimeProvider clock = timeProvider ?? TimeProvider.System;
+    private readonly SemaphoreSlim scheduledOrManual = new(1, 1);
+
+    // A manual request uses the exact same configured issuer, challenge and
+    // due-date policy as the scheduler. It cannot force an early CA order.
+    public async Task<AcmeRenewalResult?> CheckDueAsync(CancellationToken token)
+    {
+        if (!await scheduledOrManual.WaitAsync(0, token)) return null;
+        try
+        {
+            return await coordinator.RenewIfDueAsync(settings.DirectoryUrl, settings.DnsName,
+                settings.ContactEmail, publicHttp01Enabled: !settings.EnableDns01Renewal,
+                settings.PfxPath, settings.PfxPasswordFile, TimeSpan.FromDays(settings.RenewalWindowDays),
+                token, dns01Publisher);
+        }
+        finally { scheduledOrManual.Release(); }
+    }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -597,12 +613,9 @@ public sealed class AcmeRenewalBackgroundService(AcmeRenewalSettings settings,
             TimeSpan nextDelay;
             try
             {
-                await coordinator.RenewIfDueAsync(settings.DirectoryUrl, settings.DnsName, settings.ContactEmail,
-                    publicHttp01Enabled: !settings.EnableDns01Renewal, settings.PfxPath,
-                    settings.PfxPasswordFile, TimeSpan.FromDays(settings.RenewalWindowDays),
-                    stoppingToken, dns01Publisher);
+                var outcome = await CheckDueAsync(stoppingToken);
                 backoff = TimeSpan.FromMinutes(1);
-                nextDelay = TimeSpan.FromHours(6);
+                nextDelay = outcome is null ? TimeSpan.FromMinutes(1) : TimeSpan.FromHours(6);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { break; }
             catch (Exception ex)
@@ -748,7 +761,10 @@ public sealed class AcmeRevocationCoordinator(IAcmeCertificateIssuer issuer,
             catch (FormatException ex) { throw new ArgumentException("Certificate DER is not valid base64.", ex); }
             if (der.Length is < 128 or > 1_048_576)
                 throw new ArgumentException("Certificate DER is outside its accepted size bound.");
-            using var certificate = new X509Certificate2(der);
+            // A revocation request accepts a public DER certificate only, never PFX or private key material.
+            using var certificate = X509CertificateLoader.LoadCertificate(der);
+            if (!certificate.RawData.AsSpan().SequenceEqual(der))
+                throw new ArgumentException("Revocation requires exact public DER certificate bytes.");
             var thumbprint = certificate.Thumbprint.ToUpperInvariant();
             if (!CryptographicOperations.FixedTimeEquals(
                     Encoding.ASCII.GetBytes(thumbprint), Encoding.ASCII.GetBytes(request.Thumbprint)))
@@ -782,3 +798,95 @@ public sealed class AcmeRevocationCoordinator(IAcmeCertificateIssuer issuer,
         }
     }
 }
+
+    
+/// <summary>Import only a host-staged PFX at the fixed sibling path. No browser secrets
+/// or paths are accepted. All writes share the ACME lifecycle gate.</summary>
+public sealed class StagedTrafficCertificate(string activePath, string passwordPath,
+    string[] dnsNames, Func<string, bool> isActive, AcmeCertificateLifecycleGate gate,
+    X509ChainPolicy? testChainPolicy = null)
+{
+    private string StagedPath => activePath + ".pending.pfx";
+    private static string Digest(byte[] bytes) => Convert.ToHexString(SHA256.HashData(bytes));
+
+    public async Task<StagedCertificatePreview> PreviewAsync(CancellationToken token)
+    {
+        using var lease = await gate.EnterAsync(token);
+        var bytes = await AcmeRenewalCoordinator.ReadBoundedPfxAsync(StagedPath, token);
+        var active = await AcmeRenewalCoordinator.ReadBoundedPfxAsync(activePath, token);
+        try
+        {
+            var password = await AcmeRenewalCoordinator.ReadBoundedPasswordAsync(passwordPath, token);
+            var preview = Validate(bytes, password);
+            using var current = X509CertificateLoader.LoadPkcs12(active, password, X509KeyStorageFlags.EphemeralKeySet);
+            if (!isActive(current.Thumbprint)) throw new InvalidOperationException("Active file and listener differ.");
+            return preview with { ActiveDigest = Digest(active) };
+        }
+        finally { CryptographicOperations.ZeroMemory(bytes); CryptographicOperations.ZeroMemory(active); }
+    }
+
+    private StagedCertificatePreview Validate(byte[] bytes, string password)
+    {
+        using var leaf = X509CertificateLoader.LoadPkcs12(bytes, password, X509KeyStorageFlags.EphemeralKeySet);
+        return new(Digest(bytes), "", leaf.Thumbprint, leaf.NotAfter.ToUniversalTime());
+    }
+
+    public async Task<StagedCertificatePreview> ActivateAsync(string expectedDigest, string expectedActiveDigest,
+        CancellationToken token)
+    {
+        using var lease = await gate.EnterAsync(token);
+        var candidate = await AcmeRenewalCoordinator.ReadBoundedPfxAsync(StagedPath, token);
+        byte[]? original = null;
+        string? temp = null;
+        try
+        {
+            original = await AcmeRenewalCoordinator.ReadBoundedPfxAsync(activePath, token);
+            if (Digest(candidate) != expectedDigest || Digest(original) != expectedActiveDigest)
+                throw new InvalidOperationException("Staged or active file changed since preview.");
+            var password = await AcmeRenewalCoordinator.ReadBoundedPasswordAsync(passwordPath, token);
+            using var previous = X509CertificateLoader.LoadPkcs12(original, password, X509KeyStorageFlags.EphemeralKeySet);
+            if (!isActive(previous.Thumbprint)) throw new InvalidOperationException("Active file and listener differ.");
+            var result = Validate(candidate, password) with { ActiveDigest = expectedActiveDigest };
+            if (result.Thumbprint == previous.Thumbprint)
+                throw new InvalidOperationException("Candidate is already active.");
+            temp = activePath + ".import-" + Guid.NewGuid().ToString("N") + ".pfx";
+            await AcmeRenewalCoordinator.WritePrivatePfxAsync(temp, candidate, token);
+            // Full shipping validation: private key, SAN, EKU, chain and expiry.
+            using (var checkedRotation = new TrafficCertificateRotation(temp, passwordPath, dnsNames, testChainPolicy))
+                if (checkedRotation.Current.Thumbprint != result.Thumbprint)
+                    throw new CryptographicException("Candidate leaf mismatch.");
+            if (!await AcmeRenewalCoordinator.MatchesActiveAsync(activePath, passwordPath, original, password, token))
+                throw new InvalidOperationException("Active certificate or password changed.");
+            token.ThrowIfCancellationRequested();
+            File.Move(temp, activePath, true);
+            temp = null;
+            try
+            {
+                using var activation = CancellationTokenSource.CreateLinkedTokenSource(token);
+                activation.CancelAfter(TimeSpan.FromSeconds(15));
+                while (!isActive(result.Thumbprint)) await Task.Delay(100, activation.Token);
+                return result;
+            }
+            catch
+            {
+                // Restore only if our candidate still owns the active file.
+                if (!await AcmeRenewalCoordinator.MatchesActiveAsync(activePath, passwordPath, candidate, password, CancellationToken.None))
+                    throw new InvalidOperationException("Import failed and active state drifted; manual reconciliation required.");
+                temp = activePath + ".restore-" + Guid.NewGuid().ToString("N") + ".pfx";
+                await AcmeRenewalCoordinator.WritePrivatePfxAsync(temp, original, CancellationToken.None);
+                File.Move(temp, activePath, true);
+                temp = null;
+                using var recovery = new CancellationTokenSource(TimeSpan.FromSeconds(25));
+                while (!isActive(previous.Thumbprint)) await Task.Delay(100, recovery.Token);
+                throw;
+            }
+        }
+        finally
+        {
+            if (temp is not null) try { File.Delete(temp); } catch (IOException) { }
+            CryptographicOperations.ZeroMemory(candidate);
+            if (original is not null) CryptographicOperations.ZeroMemory(original);
+        }
+    }
+}
+public sealed record StagedCertificatePreview(string CandidateDigest, string ActiveDigest, string Thumbprint, DateTime NotAfterUtc);

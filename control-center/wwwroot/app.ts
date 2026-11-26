@@ -360,21 +360,186 @@ async function certificatePage() {
         const endpoints: Obj[] = Array.isArray(x.configuredEndpoints) ? x.configuredEndpoints : [];
         const rows = certs.map(c => `<tr><td><b>${esc(c.subject)}</b><div class="subtle">${esc(c.issuer)}</div></td><td class="mono">${esc(c.thumbprint)}</td><td>${esc(c.notAfterUtc)}</td><td><span class="chip ${c.expiryState === 'valid-date-only' ? '' : 'warn'}">${esc(c.expiryState)}</span></td><td>${c.privateKeyAvailable ? 'Reported present' : 'Not reported'} · ${c.serverAuthenticationEku ? 'Server EKU allowed' : 'Server EKU not allowed'}</td></tr>`).join('');
         const listeners = endpoints.map(e => `<tr><td>${esc(e.name)}</td><td>${esc(e.scheme)}</td><td>${e.certificateReferenceConfigured ? 'Reference configured' : 'No reference reported'}</td></tr>`).join('');
-        $('content').innerHTML = `<div class="card"><h2>Certificates &amp; TLS</h2><p>Inventory for ${esc(x.gateway)} · ${esc(x.timestampUtc)} · store ${esc(x.storeState)}</p>${actionBtn('Refresh inventory', 'switch', 'tls', 'ghost')}<div class="healthbanner">Read-only local store and configured endpoint metadata. Valid dates and a reported private key do not establish certificate trust, SAN match, active selection or accessibility to the service.</div></div><div class="card card-spaced"><h3>Configured endpoints</h3><div class="tablewrap"><table><thead><tr><th>Listener</th><th>Scheme</th><th>Certificate reference</th></tr></thead><tbody>${listeners || '<tr><td colspan="3">No endpoint metadata reported.</td></tr>'}</tbody></table></div></div><div class="card card-spaced"><h3>Local certificate inventory</h3><div class="tablewrap"><table><thead><tr><th>Subject / issuer</th><th>Thumbprint</th><th>Not after (UTC)</th><th>Date status</th><th>Key / purpose</th></tr></thead><tbody>${rows || '<tr><td colspan="5">No certificates reported; verify the configured file/store separately.</td></tr>'}</tbody></table></div></div><div class="card card-spaced"><h3>ACME lifecycle availability</h3><p>Automatic renewal service: ${x.acmeRenewalConfigured === true ? 'Configured' : 'Not configured'}. Historical certificate revocation service: ${x.acmeRevocationConfigured === true ? 'Configured' : 'Not configured'}.</p><p class="subtle">${esc(x.acmeScope || 'Service capability is not reported; do not infer readiness.')}</p><h3>Certificate change workflow</h3><ol class="specialist-steps"><li>Identify traffic, management or backend client certificate usage and approved CA.</li><li>Provision the trusted chain and protected key via the documented host configuration. Never upload keys to the dashboard.</li><li>Review SAN, expiry, EKU, listener isolation, file/store ACL and renewal or rollback procedure.</li><li>Apply the approved change and test actual TLS and mTLS, then verify live selection and monitor expiration.</li></ol><p class="subtle">Traffic certificate import, ACME configuration and trust-store changes use the approved host runbook. Backend client identity can be added to a reviewed configuration draft below.</p>${actionBtn('Configure backend mTLS', 'backend-cert', '', 'primary')}</div>`;
+        $('content').innerHTML = `<div class="card"><h2>Certificates &amp; TLS</h2><p>Inventory for ${esc(x.gateway)} · ${esc(x.timestampUtc)} · store ${esc(x.storeState)}</p>${actionBtn('Refresh inventory', 'switch', 'tls', 'ghost')}<div class="healthbanner">Read-only local store and configured endpoint metadata. Valid dates and a reported private key do not establish certificate trust, SAN match, active selection or accessibility to the service.</div></div><div class="card card-spaced"><h3>Configured endpoints</h3><div class="tablewrap"><table><thead><tr><th>Listener</th><th>Scheme</th><th>Certificate reference</th></tr></thead><tbody>${listeners || '<tr><td colspan="3">No endpoint metadata reported.</td></tr>'}</tbody></table></div></div><div class="card card-spaced"><h3>Local certificate inventory</h3><div class="tablewrap"><table><thead><tr><th>Subject / issuer</th><th>Thumbprint</th><th>Not after (UTC)</th><th>Date status</th><th>Key / purpose</th></tr></thead><tbody>${rows || '<tr><td colspan="5">No certificates reported; verify the configured file/store separately.</td></tr>'}</tbody></table></div></div><div class="card card-spaced"><h3>ACME lifecycle availability</h3><p>Automatic renewal service: ${x.acmeRenewalConfigured === true ? 'Configured' : 'Not configured'}. Historical certificate revocation service: ${x.acmeRevocationConfigured === true ? 'Configured' : 'Not configured'}.</p><p class="subtle">${esc(x.acmeScope || 'Service capability is not reported; do not infer readiness.')}</p><h3>Certificate change workflow</h3><ol class="specialist-steps"><li>Identify traffic, management or backend client certificate usage and approved CA.</li><li>Provision the trusted chain and protected key via the documented host configuration. Never upload keys to the dashboard.</li><li>Review SAN, expiry, EKU, listener isolation, file/store ACL and renewal or rollback procedure.</li><li>Apply the approved change and test actual TLS and mTLS, then verify live selection and monitor expiration.</li></ol><p class="subtle">Traffic certificate import, ACME configuration and trust-store changes use the approved host runbook. Backend client identity can be added to a reviewed configuration draft below.</p>${actionBtn('Configure backend mTLS', 'backend-cert', '', 'primary')}</div>` + (x.acmeRevocationConfigured === true && currentRole === 'Administrator' ? '<div class="card card-spaced"><h3>Revoke historical ACME certificate</h3><p>Irreversible CA operation. Use only the public DER certificate (base64 without PEM headers), not a PFX or key. The server rejects the currently served certificate.</p><form id="acme-revoke-form" class="auth-form"><label>Public DER base64<textarea name="certificateDerBase64" rows="4" maxlength="30000" required autocomplete="off" spellcheck="false"></textarea></label><label>SHA-1 certificate thumbprint (40 uppercase hex)<input name="thumbprint" required maxlength="40" pattern="[A-F0-9]{40}" autocomplete="off"></label><label>Reason<select name="reason"><option value="Unspecified">Unspecified</option><option value="KeyCompromise">Key compromise</option><option value="Superseded">Superseded</option><option value="CessationOfOperation">Cessation of operation</option></select></label><label>Type REVOKE followed by a space and the exact thumbprint<input name="confirmation" required maxlength="47" autocomplete="off"></label><button type="submit" class="danger-btn">Request revocation</button></form><p id="acme-revoke-status" role="status"></p></div>' : '');
+        if (x.acmeRenewalConfigured === true && currentRole === 'Administrator') {
+            $('content').insertAdjacentHTML('beforeend', '<div class="card card-spaced"><h3>Check and renew configured ACME certificate</h3><p>Uses the preconfigured CA, DNS name and protected traffic certificate. Renews only when due; never forces early issuance. A check can take several minutes.</p><button id="acme-renew-due" type="button" class="primary">Check renewal now</button><p id="acme-renew-status" role="status"></p></div>');
+            wireAcmeRenewal();
+        }
+        if (x.stagedImportConfigured === true && currentRole === 'Administrator') {
+            $('content').insertAdjacentHTML('beforeend', '<div class="card card-spaced"><h3>Provision host-staged traffic certificate</h3><p>Place the approved encrypted PFX at the fixed host staging path. Uses the existing protected password; no private key upload. Preview and confirm exact bytes before activation.</p><button id="tls-stage-preview" type="button" class="primary">Preview staged PFX</button><p id="tls-stage-status" role="status"></p></div>');
+            wireStagedCertificate();
+        }
+        wireAcmeRevocation();
     }
     catch (e) {
         if (view === 'tls')
             $('content').innerHTML = `<div class="card"><h2>Certificate inventory unavailable</h2><p>${esc(String(e))}</p><p>No certificate readiness is claimed.</p></div>`;
     }
 }
+function wireStagedCertificate() {
+    const button = $('tls-stage-preview') as HTMLButtonElement;
+    const status = $('tls-stage-status');
+    const generation = authGeneration;
+    button.onclick = async () => {
+        if (button.disabled)
+            return;
+        button.disabled = true;
+        try {
+            const p = await api('/admin/api/tls/staged/preview', 'POST', {});
+            if (generation !== authGeneration || view !== 'tls' || !button.isConnected)
+                return;
+            if (!/^[A-F0-9]{64}$/.test(p.candidateDigest) || !/^[A-F0-9]{64}$/.test(p.activeDigest))
+                throw Error('Invalid preview digest.');
+            status.textContent = 'Candidate ' + String(p.thumbprint) + ' expires ' + String(p.notAfterUtc) + '; SHA-256 ' + p.candidateDigest;
+            const confirmation = prompt('Type ACTIVATE followed by the exact SHA-256 shown in the preview to validate and activate this candidate.');
+            if (confirmation !== 'ACTIVATE ' + p.candidateDigest)
+                return;
+            const result = await api('/admin/api/tls/staged/activate', 'POST', { candidateDigest: p.candidateDigest, activeDigest: p.activeDigest, confirmation });
+            if (generation === authGeneration && view === 'tls' && button.isConnected) {
+                if (result.activated !== true || result.thumbprint !== p.thumbprint)
+                    throw Error('Activation not confirmed.');
+                status.textContent = 'Activated ' + result.thumbprint + '. Verify an independent TLS handshake.';
+            }
+        }
+        catch (e) {
+            if (generation === authGeneration && view === 'tls' && button.isConnected)
+                status.textContent = String(e);
+        }
+        finally {
+            button.disabled = false;
+        }
+    };
+}
+function wireAcmeRenewal() {
+    const button = $('acme-renew-due') as HTMLButtonElement;
+    const status = $('acme-renew-status');
+    const generation = authGeneration;
+    button.onclick = async () => {
+        if (button.disabled || !confirm('Check the configured traffic certificate and renew it only if due?'))
+            return;
+        button.disabled = true;
+        status.textContent = 'Checking configured certificate renewal…';
+        try {
+            const outcome = await api('/admin/api/tls/acme/renew-due', 'POST', {});
+            if (generation !== authGeneration || view !== 'tls' || !button.isConnected)
+                return;
+            if (outcome.renewed === true && outcome.reason === 'renewed-and-atomically-installed')
+                status.textContent = 'Renewal and listener activation reported; expiry: ' + String(outcome.notAfter || 'unknown') + '. Verify independent TLS handshake.';
+            else if (outcome.renewed === false && outcome.reason === 'certificate-is-outside-renewal-window')
+                status.textContent = 'Not due. Current certificate expiry: ' + String(outcome.notAfter || 'unknown');
+            else
+                throw Error('Unexpected renewal outcome; verify live certificate before retrying.');
+        }
+        catch (e) {
+            if (generation === authGeneration && view === 'tls' && button.isConnected)
+                status.textContent = String(e);
+        }
+        finally {
+            button.disabled = false;
+        }
+    };
+}
+function wireAcmeRevocation() {
+    const form = document.getElementById('acme-revoke-form') as HTMLFormElement | null;
+    if (!form)
+        return;
+    const status = $('acme-revoke-status');
+    const generation = authGeneration;
+    form.onsubmit = async (event) => {
+        event.preventDefault();
+        const submit = form.querySelector('button[type="submit"]') as HTMLButtonElement;
+        if (submit.disabled)
+            return;
+        const fields = new FormData(form);
+        const thumbprint = String(fields.get('thumbprint') || '');
+        const confirmation = String(fields.get('confirmation') || '');
+        const certificateDerBase64 = String(fields.get('certificateDerBase64') || '').replace(/\s/g, '');
+        const reason = String(fields.get('reason') || '');
+        if (!/^[A-F0-9]{40}$/.test(thumbprint) || confirmation !== 'REVOKE ' + thumbprint || !/^[A-Za-z0-9+/]+={0,2}$/.test(certificateDerBase64)) {
+            status.textContent = 'Enter exact public DER base64 and typed thumbprint confirmation.';
+            return;
+        }
+        submit.disabled = true;
+        status.textContent = 'Requesting CA revocation…';
+        try {
+            const reply = await api('/admin/api/tls/acme/revoke', 'POST', { certificateDerBase64, thumbprint, confirmation, reason });
+            if (generation !== authGeneration || view !== 'tls' || !form.isConnected)
+                return;
+            if (reply.revoked !== true || reply.thumbprint !== thumbprint)
+                throw Error('Revocation result was not confirmed. Verify CA status before retrying.');
+            form.reset();
+            status.textContent = 'CA reported revocation of ' + thumbprint + '. Verify independent certificate status.';
+        }
+        catch (e) {
+            if (generation === authGeneration && view === 'tls' && form.isConnected)
+                status.textContent = String(e);
+        }
+        finally {
+            submit.disabled = false;
+        }
+    };
+}
 function specialistDraftForm(id: string) {
     if (currentRole === 'Viewer')
         return '<div class="card"><p>Only authorized Operators and Administrators can prepare configuration candidates.</p></div>';
     if (id === 'waf')
-        return `<div class="card card-spaced"><h2>Prepare WAF policy</h2><p>Build exact unsigned policy bytes for independent signing and the existing external verifier. The observed ruleset and shadow evidence must come from independently collected files.</p><form id="specialist-draft" class="auth-form"><div class="setup-grid"><label>Policy revision<input name="revision" type="number" min="1" max="9007199254740991" required></label><label>Mode<select name="mode"><option value="detect">Detection only</option><option value="block">Blocking (requires reviewed evidence)</option></select></label><label>Observed ruleset SHA-256<input name="rulesetSha256" maxlength="64" pattern="[A-F0-9]{64}" required></label><label>Shadow evidence SHA-256 (blocking only)<input name="shadowEvidenceSha256" maxlength="64" pattern="[A-F0-9]{64}"></label><label>Validity in days<input name="validDays" type="number" min="1" max="45" value="7" required></label></div><details><summary>Optional exact-route exceptions</summary><p>One exception per line: ID | owner | route ID | GET or POST | exact path | content type | rule ID | reason | validity days. Maximum 64. No wildcards or broad bypass.</p><label>Scoped exceptions<textarea name="exceptions" rows="4" maxlength="32000" placeholder="exception-01 | security-owner | app-route | POST | /upload | application/pkix-cert | 920420 | Reviewed certificate upload | 7"></textarea></label></details><button class="primary" type="submit">Validate and prepare unsigned policy</button></form><div id="specialist-result" role="status"></div></div>`;
-    return `<div class="card card-spaced"><h2>Prepare a DNS / GSLB zone</h2><p>Build a new loopback-only initial configuration. Do not overwrite an existing signed multi-zone, DNSSEC or authority-fenced configuration with this candidate.</p><form id="specialist-draft" class="auth-form"><div class="setup-grid"><label>Zone name<input name="name" required maxlength="253" placeholder="app.example.test"></label><label>SOA contact (DNS notation)<input name="soaContact" required maxlength="253" placeholder="hostmaster.example.test"></label><label>SOA serial<input name="serial" type="number" min="1" max="4294967295" value="1" required></label><label>TTL (seconds)<input name="ttl" type="number" min="5" max="300" value="30" required></label><label>Traffic policy<select name="policy"><option value="Weighted">Weighted</option><option value="Failover">Failover</option><option value="WeightedFailover">Weighted failover</option></select></label><label>Probe interval (seconds)<input name="probeInterval" type="number" min="1" max="60" value="5" required></label><label>Consecutive failures<input name="failureThreshold" type="number" min="1" max="10" value="2" required></label><label>Consecutive successes<input name="successThreshold" type="number" min="1" max="10" value="2" required></label></div><label>Sites (IP | HTTPS readiness URL | weight 1–100 | priority 0–1000)<textarea name="sites" rows="4" required maxlength="32000" placeholder="10.0.0.10 | https://dc.example.test/ready | 1 | 0"></textarea></label><label>Authoritative nameservers (DNS name | IP)<textarea name="nameServers" rows="3" required maxlength="32000" placeholder="ns1.example.test | 10.0.0.53"></textarea></label><p>All-down response is fail-closed. Site addresses are not probed by this editor. Actual binding, DNSSEC, authority and delegation require separately approved configuration.</p><button class="primary" type="submit">Validate and prepare unsigned zone</button></form><div id="specialist-result" role="status"></div></div>`;
+        return `<div class="card card-spaced"><h2>Prepare WAF policy</h2><p>Build exact unsigned policy bytes for independent signing and the existing external verifier. For an intentional rollback select the previous mode and enter a fresh revision greater than the deployed revision. The observed ruleset and shadow evidence must come from independently collected files.</p><form id="specialist-draft" class="auth-form"><div class="setup-grid"><label>Policy revision<input name="revision" type="number" min="1" max="9007199254740991" required></label><label>Mode<select name="mode"><option value="detect">Detection only</option><option value="block">Blocking (requires reviewed evidence)</option></select></label><label>Observed ruleset SHA-256<input name="rulesetSha256" maxlength="64" pattern="[A-F0-9]{64}" required></label><label>Shadow evidence SHA-256 (blocking only)<input name="shadowEvidenceSha256" maxlength="64" pattern="[A-F0-9]{64}"></label><label>Validity in days<input name="validDays" type="number" min="1" max="45" value="7" required></label><label>Rollback from deployed revision (optional)<input name="rollbackFromRevision" type="number" min="1" max="9007199254740991"></label></div><details><summary>Optional exact-route exceptions</summary><p>One exception per line: ID | owner | route ID | GET or POST | exact path | content type | rule ID | reason | validity days. Maximum 64. No wildcards or broad bypass.</p><label>Scoped exceptions<textarea name="exceptions" rows="4" maxlength="32000" placeholder="exception-01 | security-owner | app-route | POST | /upload | application/pkix-cert | 920420 | Reviewed certificate upload | 7"></textarea></label></details><button class="primary" type="submit">Validate and prepare unsigned policy</button></form><div id="specialist-result" role="status"></div><details><summary>Signed deployment and rollback handoff</summary><ol><li>Export and obtain two independent signatures over the exact policy bytes.</li><li>On the authorized WAF operator host, run the repository signed-policy verifier and rollout controller preflight against actual ruleset bytes and the trusted revision floor.</li><li>Use ops/waf/waf_fleet_rollout.py on the authorized Linux controller: default read-only preflight, then explicit --execute after independent approval. Preserve receipts and verified compensation evidence.</li><li>For a deliberate rollback prepare a fresh signed revision; never reuse a stale signed policy. Confirm actual restored mode and traffic before acceptance.</li></ol><p>The dashboard does not execute Docker, grant leases or sign policies. No activation is claimed here.</p></details></div>`;
+    return `<div class="card card-spaced"><h2>Prepare a DNS / GSLB zone</h2><p>Build a new loopback-only initial configuration. Do not overwrite an existing signed multi-zone, DNSSEC or authority-fenced configuration with this candidate.</p><form id="specialist-draft" class="auth-form"><div class="setup-grid"><label>Zone name<input name="name" required maxlength="253" placeholder="app.example.test"></label><label>SOA contact (DNS notation)<input name="soaContact" required maxlength="253" placeholder="hostmaster.example.test"></label><label>SOA serial<input name="serial" type="number" min="1" max="4294967295" value="1" required></label><label>TTL (seconds)<input name="ttl" type="number" min="5" max="300" value="30" required></label><label>Traffic policy<select name="policy"><option value="Weighted">Weighted</option><option value="Failover">Failover</option><option value="WeightedFailover">Weighted failover</option></select></label><label>Probe interval (seconds)<input name="probeInterval" type="number" min="1" max="60" value="5" required></label><label>Consecutive failures<input name="failureThreshold" type="number" min="1" max="10" value="2" required></label><label>Consecutive successes<input name="successThreshold" type="number" min="1" max="10" value="2" required></label></div><label>Sites (IP | HTTPS readiness URL | weight 1–100 | priority 0–1000)<textarea name="sites" rows="4" required maxlength="32000" placeholder="10.0.0.10 | https://dc.example.test/ready | 1 | 0"></textarea></label><label>Authoritative nameservers (DNS name | IP)<textarea name="nameServers" rows="3" required maxlength="32000" placeholder="ns1.example.test | 10.0.0.53"></textarea></label><details><summary>DNSSEC and delegated authority</summary><p>Only pre-provisioned absolute key references are accepted; never paste keys. DNSSEC signing, parent DS publication and quorum must be verified on the target DNS hosts.</p><div class="setup-grid"><label>DNSSEC denial mode<select name="dnssecMode"><option value="Disabled">Disabled</option><option value="Nsec">NSEC</option><option value="Nsec3">NSEC3</option></select></label><label>Active private key path<input name="dnssecKeyPath" maxlength="512"></label><label>NSEC3 salt (hex)<input name="dnssecSalt" maxlength="64"></label><label>NSEC3 iterations<input name="dnssecIterations" type="number" min="0" max="50"></label></div><label>Prepublish public key paths (one per line, max 2)<textarea name="dnssecPrepublishPaths" rows="2" maxlength="1024"></textarea></label><label>Additional signing key paths (one per line, max 2)<textarea name="dnssecAdditionalPaths" rows="2" maxlength="1024"></textarea></label><label>Child delegations (child zone | nameserver | IP)<textarea name="delegations" rows="3" maxlength="12000"></textarea></label><label>Child DS records (child zone | key tag | algorithm | digest type | digest hex)<textarea name="delegationDs" rows="3" maxlength="12000"></textarea></label></details><p>All-down response is fail-closed. Site addresses are not probed by this editor. Actual binding, signing, authority and delegation require separately approved configuration.</p><button class="primary" type="submit">Validate and prepare unsigned zone</button></form><div id="specialist-result" role="status"></div></div>`;
+}
+async function wireWafDeployment() {
+    const generation = authGeneration;
+    try {
+        const config = await api('/admin/api/specialist/waf-deployment');
+        if (generation !== authGeneration || view !== 'waf')
+            return;
+        if (config.configured !== true)
+            return;
+        $('content').insertAdjacentHTML('beforeend', '<div class="card card-spaced"><h3>Deploy independently signed WAF policy</h3><p>Only the policy independently staged on the Linux operator host can be executed. The broker verifies signatures, live lease and both pinned nodes. Applied is not an authority commit.</p><form id="waf-deploy-form" class="auth-form"><label>Approved revision<input name="revision" type="number" min="1" max="9007199254740991" required></label><label>Approved policy SHA-256<input name="digest" pattern="[A-F0-9]{64}" maxlength="64" required></label><label>Operation<select name="operation"><option value="preflight">Read-only preflight</option><option value="execute">Execute signed rollout</option></select></label><label>Type operation (PREFLIGHT or EXECUTE), space, SHA-256<input name="confirmation" maxlength="74" required></label><button class="primary" type="submit">Submit approved operation</button></form><p id="waf-deploy-status" role="status"></p></div>');
+        const form = $('waf-deploy-form') as HTMLFormElement;
+        const status = $('waf-deploy-status');
+        form.onsubmit = async (event) => {
+            event.preventDefault();
+            const button = form.querySelector('button') as HTMLButtonElement;
+            if (button.disabled)
+                return;
+            const fields = new FormData(form);
+            const revision = Number(fields.get('revision'));
+            const digest = String(fields.get('digest') || '');
+            const operation = String(fields.get('operation') || '');
+            const confirmation = String(fields.get('confirmation') || '');
+            if (!Number.isSafeInteger(revision) || revision < 1 || !/^[A-F0-9]{64}$/.test(digest) || confirmation !== operation.toUpperCase() + ' ' + digest) {
+                status.textContent = 'Exact approved revision, digest and confirmation required.';
+                return;
+            }
+            button.disabled = true;
+            status.textContent = 'Running approved broker operation…';
+            try {
+                const result = await api('/admin/api/specialist/waf-deployment', 'POST', { revision, digest, operation, confirmation });
+                if (generation !== authGeneration || view !== 'waf' || !form.isConnected)
+                    return;
+                if (result.outcome === 'preflight-only')
+                    status.textContent = 'Preflight passed; no mutation performed.';
+                else if (result.outcome === 'applied-uncommitted')
+                    status.textContent = 'Both nodes verified; independent authority commit still required.';
+                else
+                    throw Error('Outcome unconfirmed. Reconcile before retrying.');
+            }
+            catch (e) {
+                if (generation === authGeneration && view === 'waf' && form.isConnected)
+                    status.textContent = String(e);
+            }
+            finally {
+                button.disabled = false;
+            }
+        };
+    }
+    catch {
+        // Optional capability: absence never grants deployment authority.
+    }
 }
 function wireSpecialistDraft(id: string) {
+    if (id === 'waf' && currentRole === 'Administrator')
+        void wireWafDeployment();
     const form = document.getElementById('specialist-draft') as HTMLFormElement | null;
     if (!form)
         return;
@@ -393,6 +558,8 @@ function wireSpecialistDraft(id: string) {
             fields.forEach((v, k) => { value[k] = String(v); });
             const numeric = id === 'waf' ? ['revision', 'validDays'] : ['serial', 'ttl', 'probeInterval', 'failureThreshold', 'successThreshold'];
             numeric.forEach(k => { value[k] = Number(value[k]); });
+            const optionalNumber = id === 'waf' ? 'rollbackFromRevision' : 'dnssecIterations';
+            value[optionalNumber] = value[optionalNumber] === '' ? null : Number(value[optionalNumber]);
             const reply = await api('/admin/api/specialist/' + id + '-draft', 'POST', value);
             if (generation !== authGeneration || view !== id || !form.isConnected)
                 return;
@@ -726,6 +893,8 @@ function updateDest(id=''){
  })
 }
 function act(type:string,id:string){
+ if(type==='invite-add'){inviteEmployee();return}
+ if(type==='invite-revoke'){void revokeEmployeeInvite(id);return}
  if(type==='backend-cert'){backendCertificateWizard();return}
  if(type==='runtime-health'){void refreshDestinationRuntime();return}
  if(type==='dest-drain'){const [c,d]=id.split('::');const destination=data.clusters[c]?.Destinations?.[d];if(!destination)return show('Only enabled destinations can be drained',true);destination.Metadata={...(destination.Metadata||{}),TrafficState:String(destination.Metadata?.TrafficState||'active').toLowerCase()==='draining'?'active':'draining'};edit();show('Traffic state changed in the unsaved draft. New requests stop after independent approval and rollout; this does not terminate in-flight work.');return}
@@ -874,10 +1043,57 @@ function addInventory(){modal('Register infrastructure asset','Inventory only: t
 {name:'type',label:'Asset type',value:'Application Server',options:['YARP Gateway','Application Server','Pgpool','Database','Service']},
 {name:'address',label:'Address or hostname',value:''},{name:'notes',label:'Notes',value:''}
 ],async v=>{try{await api('/admin/api/inventory','POST',v);show('Asset registered');await inventory()}catch(e){show(String(e),true)}})}
+async function employeeInvitationPanel() {
+    try {
+        const methods = await api('/admin/api/auth-methods');
+        if (!methods.employeeInvitations)
+            return '<div class="card card-spaced"><h3>Employee invitations</h3><p>Available on an ordinary local-account gateway with verified SMTP. Enterprise and multi-gateway enrollment use their approved identity workflows.</p></div>';
+        const pending = await api('/admin/api/users/invitations');
+        const rows = pending.map((x: Obj) => `<tr><td>${esc(x.username)}</td><td>${esc(x.emailHint)}</td><td>${esc(x.role)}</td><td>${esc(x.status)}</td><td>${esc(x.expiresUtc)}</td><td>${actionBtn('Revoke invitation', 'invite-revoke', x.id, 'danger-btn mini')}</td></tr>`).join('');
+        return `<div class="card card-spaced"><div class="toolbar"><div><h3>Employee invitations</h3><p>Assign a role and send a one-time email code. Employees choose their own password. Pending invitations expire or are lost on service restart.</p></div>${actionBtn('+ Invite employee', 'invite-add', '', 'primary')}</div><div class="tablewrap"><table><thead><tr><th>Username</th><th>Email</th><th>Role</th><th>Status</th><th>Expiry (UTC)</th><th>Action</th></tr></thead><tbody>${rows || '<tr><td colspan="6">No pending invitations.</td></tr>'}</tbody></table></div></div>`;
+    }
+    catch (e) {
+        return '<div class="card card-spaced"><h3>Employee invitations</h3><p>Invitation status unavailable. No invitation availability is claimed.</p></div>';
+    }
+}
+function inviteEmployee() {
+    if (currentRole !== 'Administrator')
+        return show('Administrator role required', true);
+    modal('Invite employee', 'Use the employee’s company mailbox. The invitation expires in 30 minutes; the employee chooses their own password after verifying the emailed code.', [
+        { name: 'username', label: 'Named employee username', value: '' },
+        { name: 'email', label: 'Employee company email', value: '', kind: 'email' },
+        { name: 'role', label: 'Employee role', value: 'Viewer', options: ['Viewer', 'Operator'] }
+    ], async (v) => {
+        try {
+            await api('/admin/api/users/invitations', 'POST', v);
+            if (view === 'users')
+                await users();
+            show('Invitation sent. Ask the employee to open the approved dashboard and accept the emailed code.');
+        }
+        catch (e) {
+            show(String(e), true);
+        }
+    }, 'Send invitation');
+}
+async function revokeEmployeeInvite(id: string) {
+    if (currentRole !== 'Administrator' || !confirm('Revoke this pending invitation? The employee must receive a new invitation.'))
+        return;
+    try {
+        await api('/admin/api/users/invitations/' + encodeURIComponent(id) + '/revoke', 'POST', {});
+        if (view === 'users')
+            await users();
+        show('Invitation revoked');
+    }
+    catch (e) {
+        show(String(e), true);
+    }
+}
 async function users(){try{const list=await api('/admin/api/users');
- if(view!=='users')return;
+ const invitationPanel = await employeeInvitationPanel();
+ if (view !== 'users')
+     return;
  const rows=list.map((x:Obj)=>`<tr><td><b>${esc(x.username)}</b></td><td>${esc(x.email||'—')}</td><td>${esc(x.role)}</td><td>${esc(x.provider||'Local')}</td><td><span class="chip ${x.enabled?'good':'bad'}">${x.enabled?'Enabled':'Disabled'}</span></td><td>${x.provider==='AD'?'AD password managed by directory':actionBtn('Reset password','password-reset',x.username)} ${actionBtn(x.enabled?'Offboard':'Re-enable',x.enabled?'user-disable':'user-enable',x.username)}</td></tr>`).join('');
- $('content').innerHTML=`<div class="toolbar"><div><h2>Administrator accounts</h2><p class="subtle">Administrators onboard/offboard users; Operators manage routes; Viewers read only. Disabling an account blocks new sign-ins and invalidates existing sessions. Inactive sessions expire after 30 minutes.</p></div>${actionBtn('+ Add account','user-add','')} ${actionBtn('Mail & OTP','switch','mail')} ${actionBtn('Active Directory','switch','directory')}</div><div class="tablewrap"><table><thead><tr><th>Username</th><th>Email</th><th>Role</th><th>Authentication</th><th>Status</th><th>Action</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+ $('content').innerHTML=`<div class="toolbar"><div><h2>Administrator accounts</h2><p class="subtle">Administrators onboard/offboard users; Operators manage routes; Viewers read only. Disabling an account blocks new sign-ins and invalidates existing sessions. Inactive sessions expire after 30 minutes.</p></div>${actionBtn('+ Add account','user-add','')} ${actionBtn('Mail & OTP','switch','mail')} ${actionBtn('Active Directory','switch','directory')}</div><div class="tablewrap"><table><thead><tr><th>Username</th><th>Email</th><th>Role</th><th>Authentication</th><th>Status</th><th>Action</th></tr></thead><tbody>${rows}</tbody></table></div>${invitationPanel}`;
  }catch(e){show(String(e),true)}}
 function addUser(){modal('Create management user','Passwords must contain 16 to 256 characters.',[
 {name:'username',label:'Username',value:''},{name:'role',label:'Role',value:'Viewer',options:['Viewer','Operator','Administrator']},

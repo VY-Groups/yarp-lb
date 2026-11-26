@@ -9,6 +9,20 @@ public static class EngineConfigContract
 {
     public static bool ValidEngineId(string id) => id is "l4" or "gslb";
 
+    // Called under the agent's revision lock. The transaction directory is
+    // private host state, not a path accepted from a management request.
+    public static bool IsRollbackFenced(string transactionDirectory) =>
+        Path.Exists(Path.Combine(transactionDirectory, "rollback-fence"));
+
+    public static void MarkRollback(string transactionDirectory)
+    {
+        var path = Path.Combine(transactionDirectory, "rollback-fence");
+        if (File.Exists(path)) return;
+        using var journal = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+        journal.WriteByte(1);
+        journal.Flush(flushToDisk: true);
+    }
+
     private static JsonObject Envelope(string engineId, JsonObject payload)
     {
         if (!ValidEngineId(engineId)) throw new ArgumentException("Unknown engine");

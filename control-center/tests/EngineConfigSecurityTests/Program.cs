@@ -201,6 +201,21 @@ publicDns53["AllowNonLoopbackListeners"] = false;
 Must(!EngineConfigContract.Validate("gslb",publicDns53,true),
     "DNS port 53 listener rejects missing engine opt-in");
 Must(!EngineConfigContract.Validate("waf",l4,false), "unimplemented WAF schema fails closed");
+var rollbackFixture = Directory.CreateTempSubdirectory("gc-engine-rollback-");
+try
+{
+    var current = Directory.CreateDirectory(Path.Combine(rollbackFixture.FullName, "current")).FullName;
+    var successor = Directory.CreateDirectory(Path.Combine(rollbackFixture.FullName, "successor")).FullName;
+    Must(!EngineConfigContract.IsRollbackFenced(current), "new engine transaction is not fenced");
+    EngineConfigContract.MarkRollback(current);
+    Must(EngineConfigContract.IsRollbackFenced(current) &&
+        File.ReadAllBytes(Path.Combine(current, "rollback-fence")).SequenceEqual(new byte[] { 1 }),
+        "engine rollback persists its activation-denial marker");
+    EngineConfigContract.MarkRollback(current);
+    Must(EngineConfigContract.IsRollbackFenced(current) && !EngineConfigContract.IsRollbackFenced(successor),
+        "engine rollback is idempotent and does not fence a different transaction");
+}
+finally { rollbackFixture.Delete(recursive: true); }
 var signed=EngineConfigContract.Sign(privatePem,"l4",tx,revision,l4,now+120,4);
 Must(EngineConfigContract.Verify(trust,"l4",tx,revision,l4,signed,now),
     "signed engine config validated against pinned controller key");

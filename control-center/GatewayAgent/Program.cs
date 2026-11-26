@@ -46,6 +46,7 @@ async Task<bool> VerifyFleetFence(string tx,long epoch,bool rollback=false)
 var allowEngineConfigChanges = builder.Configuration.GetValue<bool>("Agent:EnableEngineConfigChanges");
 var allowEnginePublicBind = builder.Configuration.GetValue<bool>("Agent:AllowEngineNonLoopbackListeners");
 var gslbMetricsPort = builder.Configuration.GetValue<int>("Agent:GslbMetricsPort");
+var gslbRestartEnabled = builder.Configuration.GetValue<bool>("Agent:EnableGslbSignedRestart");
 var enginePaths = builder.Configuration.GetSection("Agent:EngineConfigPaths")
     .Get<Dictionary<string,string>>() ?? new Dictionary<string,string>();
 var gatewayConfigPath = builder.Configuration["Agent:GatewayConfigPath"] ?? "";
@@ -76,6 +77,14 @@ if (allowEngineConfigChanges &&
      enginePaths.Any(e => !EngineConfigContract.ValidEngineId(e.Key) ||
          !Path.IsPathFullyQualified(e.Value) || !File.Exists(e.Value))))
     throw new InvalidOperationException("Engine changes require explicit allowlisted L4/GSLB file paths and an absolute staging directory");
+if (gslbRestartEnabled && (!OperatingSystem.IsLinux() || !allowEngineConfigChanges ||
+    gslbMetricsPort == 0 || !enginePaths.ContainsKey("gslb") || !File.Exists("/usr/bin/systemctl")))
+    throw new InvalidOperationException("Signed GSLB restart requires Linux, explicit engine staging, loopback revision metrics and systemctl.");
+#if GATEWAYCORE_COMMERCIAL
+if (allowEngineConfigChanges && (fleetQuorum is null ||
+    (!recoveryOnly && fleetQuorum.Scope != engineLicense!.FleetScope())))
+    throw new InvalidOperationException("Commercial engine changes require the authenticated deployment quorum.");
+#endif
 if (allowConfigChanges || allowEngineConfigChanges) Directory.CreateDirectory(stageRoot);
 var sequencePath = Path.Combine(stageRoot, "last-accepted-sequence.txt");
 var revisionLock = new SemaphoreSlim(1,1);
@@ -542,6 +551,9 @@ app.MapPost("/agent/v1/engines/{engineId}/config/prepare", async (string engineI
         var seqPath=Path.Combine(staging,"last-accepted-sequence.txt");
         if (input.Sequence <= FleetSequenceState.Read(seqPath))
             return Results.Conflict(new {error="Signed sequence reused"});
+#if GATEWAYCORE_COMMERCIAL
+        if (!await VerifyFleetFence(input.TransactionId,input.Sequence)) return Results.StatusCode(409);
+#endif
         FleetSequenceState.Accept(seqPath,input.Sequence);
         Directory.CreateDirectory(tx);
         var proposed=Encoding.UTF8.GetBytes(candidate.ToJsonString(new JsonSerializerOptions{WriteIndented=true}));
@@ -570,6 +582,8 @@ app.MapPost("/agent/v1/engines/{engineId}/config/activate", async (string engine
         var seqFile=Path.Combine(tx,"sequence.txt");
         if (!File.Exists(prepared) || !File.Exists(originalPath) || !File.Exists(seqFile))
             return Results.NotFound();
+        if (EngineConfigContract.IsRollbackFenced(tx))
+            return Results.Conflict(new {error="Engine transaction fenced by rollback"});
         if (!long.TryParse(await File.ReadAllTextAsync(seqFile),out var sequence) ||
             sequence != FleetSequenceState.Read(Path.Combine(stage,"last-accepted-sequence.txt")))
             return Results.Conflict(new {error="Transaction superseded"});
@@ -580,6 +594,10 @@ app.MapPost("/agent/v1/engines/{engineId}/config/activate", async (string engine
         if (Sha(await File.ReadAllBytesAsync(configPath)) != Sha(original))
             return Results.Conflict(new {error="Engine config changed after prepare"});
         await File.WriteAllBytesAsync(configPath+".next",proposed);
+#if GATEWAYCORE_COMMERCIAL
+        if (!await VerifyFleetFence(input.TransactionId,sequence))
+        { File.Delete(configPath+".next"); return Results.StatusCode(409); }
+#endif
         File.Move(configPath+".next",configPath,true);
         app.Logger.LogWarning("Engine {Engine} config activated transaction {Tx}; restart NOT performed",SafeLogField(engineId),SafeLogField(input.TransactionId));
         return Results.Ok(new {engineId,state="activated-file-only",revision=Sha(proposed),requiresRestart=true});
@@ -610,11 +628,116 @@ app.MapPost("/agent/v1/engines/{engineId}/config/rollback", async (string engine
         var actual=Sha(await File.ReadAllBytesAsync(configPath));
         if (actual != Sha(original) && actual != Sha(proposed))
             return Results.Conflict(new {error="Engine config drift; manual recovery required"});
-        await File.WriteAllBytesAsync(configPath+".next",original);
-        File.Move(configPath+".next",configPath,true);
+        if (File.Exists(Path.Combine(tx,"restart-intent")))
+            return Results.Conflict(new {error="Runtime restart may have published this revision; forward recovery required"});
+#if GATEWAYCORE_COMMERCIAL
+        if (!await VerifyFleetFence(input.TransactionId,sequence,rollback:true)) return Results.StatusCode(409);
+#endif
+        // Persist the fence before restoring bytes. Even rollback of a merely
+        // prepared transaction must prohibit a delayed activation after restart.
+        EngineConfigContract.MarkRollback(tx);
+        if (actual != Sha(original))
+        {
+            var next = configPath+".next";
+            using (var journal = new FileStream(next, FileMode.Create, FileAccess.Write, FileShare.None))
+            {
+                journal.Write(original);
+                journal.Flush(flushToDisk: true);
+            }
+            File.Move(next,configPath,true);
+        }
         app.Logger.LogWarning("Engine {Engine} config rolled back transaction {Tx}; restart NOT performed",SafeLogField(engineId),SafeLogField(input.TransactionId));
-        return Results.Ok(new {engineId,state="rolled-back-file-only",revision=Sha(original),requiresRestart=true});
+        return Results.Ok(new {engineId,state="rolled-back-file-only",revision=Sha(original),requiresRestart=true,rollbackFenced=true});
     }
+    finally {revisionLock.Release();}
+});
+
+async Task<string?> LoadedGslbRevision(CancellationToken token)
+{
+    if (gslbMetricsPort == 0) return null;
+    using var handler = new HttpClientHandler { AllowAutoRedirect = false, UseProxy = false };
+    using var client = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(2), MaxResponseContentBufferSize = 1024 };
+    using var response = await client.GetAsync($"http://127.0.0.1:{gslbMetricsPort}/config-revision", token);
+    if (!response.IsSuccessStatusCode) return null;
+    using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync(token));
+    var root = document.RootElement;
+    if (root.ValueKind != JsonValueKind.Object || !root.TryGetProperty("type",out var type) ||
+        type.GetString() != "gslb-loaded-config-revision" || !root.TryGetProperty("revision",out var item))
+        return null;
+    var digest = item.GetString();
+    return digest is not null && Regex.IsMatch(digest,"^[A-F0-9]{64}$") ? digest : null;
+}
+
+app.MapGet("/agent/v1/engines/gslb/config/revision", async (CancellationToken token) =>
+{
+    if (!allowEngineConfigChanges || !enginePaths.TryGetValue("gslb",out var path)) return Results.NotFound();
+    try
+    {
+        var loaded = await LoadedGslbRevision(token);
+        return Results.Ok(new { fileRevision=Sha(await File.ReadAllBytesAsync(path,token)),
+            loadedRevision=loaded, restartEnabled=gslbRestartEnabled });
+    }
+    catch (Exception ex) when (ex is HttpRequestException or IOException or JsonException or TaskCanceledException or InvalidOperationException)
+    { return Results.StatusCode(503); }
+});
+
+app.MapPost("/agent/v1/engines/gslb/config/restart", async (EngineActivate input) =>
+{
+    if (!gslbRestartEnabled || !enginePaths.TryGetValue("gslb",out var path)) return Results.StatusCode(403);
+    if (!ValidTx(input.TransactionId)) return Results.BadRequest();
+    await revisionLock.WaitAsync();
+    try
+    {
+        var stage=Path.Combine(stageRoot,"engines","gslb");
+        var tx=Path.Combine(stage,input.TransactionId);
+        var prepared=Path.Combine(tx,"prepared.json");
+        var original=Path.Combine(tx,"original.json");
+        var sequenceFile=Path.Combine(tx,"sequence.txt");
+        if (!File.Exists(prepared) || !File.Exists(original) || !File.Exists(sequenceFile)) return Results.NotFound();
+        if (EngineConfigContract.IsRollbackFenced(tx) || File.Exists(Path.Combine(tx,"restart-intent")) ||
+            !long.TryParse(await File.ReadAllTextAsync(sequenceFile),out var sequence) ||
+            sequence != FleetSequenceState.Read(Path.Combine(stage,"last-accepted-sequence.txt")))
+            return Results.Conflict(new {error="Restart superseded, fenced or already attempted"});
+        var digest=Sha(await File.ReadAllBytesAsync(prepared));
+        var originalDigest=Sha(await File.ReadAllBytesAsync(original));
+        if (digest != input.PreparedRevision || digest != Sha(await File.ReadAllBytesAsync(path)) ||
+            digest == originalDigest || await LoadedGslbRevision(CancellationToken.None) != originalDigest)
+            return Results.Conflict(new {error="File activation or original runtime revision not confirmed"});
+#if GATEWAYCORE_COMMERCIAL
+        if (!await VerifyFleetFence(input.TransactionId,sequence)) return Results.StatusCode(409);
+#endif
+        // A restart may publish a new SOA serial. Record uncertainty before
+        // dispatch; never automatically replay or restore the older serial.
+        using (var intent = new FileStream(Path.Combine(tx,"restart-intent"),FileMode.CreateNew,FileAccess.Write,FileShare.None))
+        { intent.WriteByte(1); intent.Flush(flushToDisk:true); }
+        using var timeout=new CancellationTokenSource(TimeSpan.FromSeconds(60));
+        var processInfo=new ProcessStartInfo("/usr/bin/systemctl") { UseShellExecute=false, CreateNoWindow=true };
+        processInfo.ArgumentList.Add("--no-ask-password");
+        processInfo.ArgumentList.Add("restart");
+        processInfo.ArgumentList.Add("gatewaycore-gslb.service");
+        using var process=Process.Start(processInfo) ?? throw new InvalidOperationException("GSLB restart launch failed");
+        await process.WaitForExitAsync(timeout.Token);
+        if (process.ExitCode != 0) return Results.StatusCode(503);
+        while (!timeout.IsCancellationRequested)
+        {
+            try
+            {
+                if (await LoadedGslbRevision(timeout.Token) == digest &&
+                    Sha(await File.ReadAllBytesAsync(path,timeout.Token)) == digest)
+                {
+#if GATEWAYCORE_COMMERCIAL
+                    if (!await VerifyFleetFence(input.TransactionId,sequence)) return Results.StatusCode(409);
+#endif
+                    return Results.Ok(new {state="restarted-revision-confirmed",revision=digest,requiresDnsProbe=true});
+                }
+            }
+            catch (Exception ex) when (ex is HttpRequestException or IOException or JsonException or TaskCanceledException or InvalidOperationException) { }
+            await Task.Delay(250,timeout.Token);
+        }
+        return Results.StatusCode(503);
+    }
+    catch (Exception ex) when (ex is IOException or HttpRequestException or JsonException or OperationCanceledException or InvalidOperationException or System.ComponentModel.Win32Exception)
+    { return Results.StatusCode(503); }
     finally {revisionLock.Release();}
 });
 
