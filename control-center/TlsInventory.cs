@@ -69,6 +69,7 @@ public static class TlsInventory
                 acmeIntegration = renewalConfigured ? "configured" : "not-configured",
                 acmeRenewalConfigured = renewalConfigured,
                 acmeRevocationConfigured = revocationConfigured,
+                stagedImportConfigured = registrations?.IsService(typeof(StagedTrafficCertificate)) == true,
                 acmeScope = "Local service registration only; CA connectivity, last renewal, active certificate and revocation are not verified.",
                 trafficCertificateRotation = "opt-in via TrafficCertificateDnsNames in isolated listener configuration",
                 backendMutualTlsProvisioning = "installed-client-certificate-and-approved-cluster-draft"

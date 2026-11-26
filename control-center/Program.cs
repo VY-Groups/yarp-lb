@@ -215,6 +215,17 @@ else if (ec2Lab)
     Console.Error.WriteLine("WARNING: CI-only EC2 lab uses temporary, unencrypted local Data Protection keys. Never use in production.");
 else
     throw new PlatformNotSupportedException("Unsupported OS Data Protection mode");
+var stagedImportEnabled = !ec2Lab && isolatedListeners?.Config.TrafficCertificateDnsNames is { Length: > 0 } &&
+    string.Equals(Environment.GetEnvironmentVariable("YARP_STAGED_TRAFFIC_CERTIFICATE_IMPORT"), "true", StringComparison.OrdinalIgnoreCase);
+if (stagedImportEnabled || acmeRenewalSettings is not null)
+    builder.Services.AddSingleton<AcmeCertificateLifecycleGate>();
+if (stagedImportEnabled)
+{
+    var settings = isolatedListeners!.Config;
+    builder.Services.AddSingleton(services => new StagedTrafficCertificate(settings.TrafficPfxPath,
+        settings.TrafficPfxPasswordFile, settings.TrafficCertificateDnsNames!,
+        isolatedListeners.IsTrafficCertificateActive, services.GetRequiredService<AcmeCertificateLifecycleGate>()));
+}
 if (acmeRenewalSettings is { } renewalSettings)
 {
     var activeListeners = isolatedListeners ?? throw new InvalidOperationException(
@@ -225,7 +236,6 @@ if (acmeRenewalSettings is { } renewalSettings)
     IAcmeDns01Publisher? dns01Publisher = renewalSettings.EnableDns01Renewal
         ? renewalSettings.Dns01Publisher!.CreateVerifiedPublisher()
         : null;
-    builder.Services.AddSingleton<AcmeCertificateLifecycleGate>();
     var accountKeyPath = Path.Combine(privateDir, "acme-account.encrypted");
     builder.Services.AddSingleton<IAcmeCertificateIssuer>(services => new CertesAcmeCertificateIssuer(
         new AcmeAccountKeyStore(accountKeyPath,
@@ -354,6 +364,7 @@ builder.Services.AddRateLimiter(options =>
     options.AddFixedWindowLimiter("mailtest", cfg => { cfg.PermitLimit = 3; cfg.Window = TimeSpan.FromMinutes(5); cfg.QueueLimit = 0; });
     options.AddFixedWindowLimiter("ldaptest", cfg => { cfg.PermitLimit = 4; cfg.Window = TimeSpan.FromMinutes(5); cfg.QueueLimit = 0; });
     options.AddFixedWindowLimiter("acme-revoke", cfg => { cfg.PermitLimit = 2; cfg.Window = TimeSpan.FromMinutes(5); cfg.QueueLimit = 0; });
+    options.AddFixedWindowLimiter("tls-stage-import", cfg => { cfg.PermitLimit = 4; cfg.Window = TimeSpan.FromMinutes(1); cfg.QueueLimit = 0; });
     options.AddFixedWindowLimiter("acme-renew-due", cfg => { cfg.PermitLimit = 1; cfg.Window = TimeSpan.FromMinutes(10); cfg.QueueLimit = 0; });
     options.AddFixedWindowLimiter("employee-invite-issue", cfg =>
     { cfg.PermitLimit = 8; cfg.Window = TimeSpan.FromMinutes(5); cfg.QueueLimit = 0; });
@@ -3230,6 +3241,47 @@ if (peerSyncSettings is not null && peerStateJournal is not null && peerSigner i
 }
 app.MapOrganizationProfile(privateDir, Audit);
 app.MapTlsInventory();
+if (stagedImportEnabled)
+{
+    app.MapPost("/admin/api/tls/staged/preview", async (HttpContext ctx, StagedTrafficCertificate service) =>
+    {
+        if (!await AuditActorCurrent(ctx, true)) return Results.StatusCode(403);
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ctx.RequestAborted);
+        timeout.CancelAfter(TimeSpan.FromSeconds(10));
+        try { return Results.Ok(await service.PreviewAsync(timeout.Token)); }
+        catch (Exception ex)
+        {
+            await Audit(Actor(ctx), "TLS_STAGED_PREVIEW_FAILED", new { failureType = ex.GetType().Name });
+            return Results.Conflict(new { error = "No usable staged PFX or active certificate drift. Check host provisioning." });
+        }
+    }).RequireAuthorization(p => p.RequireRole("Administrator")).RequireRateLimiting("tls-stage-import");
+    app.MapPost("/admin/api/tls/staged/activate", async (HttpContext ctx, StagedTrafficCertificate service, StagedActivationInput input) =>
+    {
+        if (input.CandidateDigest is null || input.ActiveDigest is null ||
+            !Regex.IsMatch(input.CandidateDigest, "^[A-F0-9]{64}$") || !Regex.IsMatch(input.ActiveDigest, "^[A-F0-9]{64}$") ||
+            input.Confirmation != "ACTIVATE " + input.CandidateDigest)
+            return Results.BadRequest(new { error = "Exact preview digests and typed confirmation required." });
+        if (!await AuditActorCurrent(ctx, true)) return Results.StatusCode(403);
+        // Do not introduce an external-audit or enterprise mutation bypass.
+        if (externalAuditIntent is not null || oidcPolicy is not null || OnboardingApi.IsMultiGatewayDesign(privateDir))
+            return Results.Conflict(new { error = "Staged local import requires the independently approved fleet/enterprise procedure." });
+        await Audit(Actor(ctx), "TLS_STAGED_ACTIVATION_REQUEST", new { input.CandidateDigest, input.ActiveDigest });
+        if (!await AuditActorCurrent(ctx, true)) return Results.StatusCode(403);
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ctx.RequestAborted, app.Lifetime.ApplicationStopping);
+        timeout.CancelAfter(TimeSpan.FromSeconds(45));
+        try
+        {
+            var result = await service.ActivateAsync(input.CandidateDigest, input.ActiveDigest, timeout.Token);
+            await Audit(Actor(ctx), "TLS_STAGED_ACTIVATED", new { result.Thumbprint, result.NotAfterUtc });
+            return Results.Ok(new { activated = true, result.Thumbprint, result.NotAfterUtc });
+        }
+        catch (Exception ex)
+        {
+            await Audit(Actor(ctx), "TLS_STAGED_ACTIVATION_UNCONFIRMED", new { failureType = ex.GetType().Name });
+            return Results.Conflict(new { error = "Activation not confirmed. Verify live TLS and reconcile before retrying." });
+        }
+    }).RequireAuthorization(p => p.RequireRole("Administrator")).RequireRateLimiting("tls-stage-import");
+}
 app.MapSpecialistDrafts();
 app.MapReverseProxy(proxyPipeline =>
 {
@@ -3546,6 +3598,7 @@ record MailSettingsInput(bool Enabled, string Host, int Port, string From, strin
 record EmployeeInvitationInput(string? Username, string? Email, string? Role);
 sealed class EmployeeInvitationRedemptionEndpoint { }
 record EmployeeInvitationRedeem(string? Action, string? Code, string? Password = null);
+record StagedActivationInput(string? CandidateDigest, string? ActiveDigest, string? Confirmation);
 record EmployeeInvitation(string Id, string Username, string Email, string Role, string Issuer, string IssuerStamp,
     string MailFingerprint, byte[] CodeHash, DateTimeOffset ExpiresUtc, bool Verified)
 {

@@ -564,12 +564,50 @@ async function certificatePage() {
             $('content').insertAdjacentHTML('beforeend', '<div class="card card-spaced"><h3>Check and renew configured ACME certificate</h3><p>Uses the preconfigured CA, DNS name and protected traffic certificate. Renews only when due; never forces early issuance. A check can take several minutes.</p><button id="acme-renew-due" type="button" class="primary">Check renewal now</button><p id="acme-renew-status" role="status"></p></div>');
             wireAcmeRenewal();
         }
+        if (x.stagedImportConfigured === true && currentRole === 'Administrator') {
+            $('content').insertAdjacentHTML('beforeend', '<div class="card card-spaced"><h3>Provision host-staged traffic certificate</h3><p>Place the approved encrypted PFX at the fixed host staging path. Uses the existing protected password; no private key upload. Preview and confirm exact bytes before activation.</p><button id="tls-stage-preview" type="button" class="primary">Preview staged PFX</button><p id="tls-stage-status" role="status"></p></div>');
+            wireStagedCertificate();
+        }
         wireAcmeRevocation();
     }
     catch (e) {
         if (view === 'tls')
             $('content').innerHTML = `<div class="card"><h2>Certificate inventory unavailable</h2><p>${esc(String(e))}</p><p>No certificate readiness is claimed.</p></div>`;
     }
+}
+function wireStagedCertificate() {
+    const button = $('tls-stage-preview');
+    const status = $('tls-stage-status');
+    const generation = authGeneration;
+    button.onclick = async () => {
+        if (button.disabled)
+            return;
+        button.disabled = true;
+        try {
+            const p = await api('/admin/api/tls/staged/preview', 'POST', {});
+            if (generation !== authGeneration || view !== 'tls' || !button.isConnected)
+                return;
+            if (!/^[A-F0-9]{64}$/.test(p.candidateDigest) || !/^[A-F0-9]{64}$/.test(p.activeDigest))
+                throw Error('Invalid preview digest.');
+            status.textContent = 'Candidate ' + String(p.thumbprint) + ' expires ' + String(p.notAfterUtc) + '; SHA-256 ' + p.candidateDigest;
+            const confirmation = prompt('Type ACTIVATE followed by the exact SHA-256 shown in the preview to validate and activate this candidate.');
+            if (confirmation !== 'ACTIVATE ' + p.candidateDigest)
+                return;
+            const result = await api('/admin/api/tls/staged/activate', 'POST', { candidateDigest: p.candidateDigest, activeDigest: p.activeDigest, confirmation });
+            if (generation === authGeneration && view === 'tls' && button.isConnected) {
+                if (result.activated !== true || result.thumbprint !== p.thumbprint)
+                    throw Error('Activation not confirmed.');
+                status.textContent = 'Activated ' + result.thumbprint + '. Verify an independent TLS handshake.';
+            }
+        }
+        catch (e) {
+            if (generation === authGeneration && view === 'tls' && button.isConnected)
+                status.textContent = String(e);
+        }
+        finally {
+            button.disabled = false;
+        }
+    };
 }
 function wireAcmeRenewal() {
     const button = $('acme-renew-due');

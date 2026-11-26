@@ -663,6 +663,21 @@ internal static class AcmeRenewalAcceptance
             var concurrentRenewalResult = await renewalInFlight;
             Check(concurrentRenewalResult.Renewed && rotation.Current.Thumbprint == nextLeaf.Thumbprint,
                 "certificate rotation proceeds after the serialized revocation transaction completes");
+            var stagedPath = activePfxPath + ".pending.pfx";
+            await File.WriteAllBytesAsync(stagedPath, ToPfx(replacementLeaf));
+            SetPrivate(stagedPath);
+            var staged = new StagedTrafficCertificate(activePfxPath, passwordPath, [DnsName],
+                thumb => rotation.Current.Thumbprint == thumb, lifecycleGate, chainPolicy);
+            var preview = await staged.PreviewAsync(CancellationToken.None);
+            var rejectedDigest = false;
+            try { await staged.ActivateAsync(new string('0', 64), preview.ActiveDigest, CancellationToken.None); }
+            catch (InvalidOperationException) { rejectedDigest = true; }
+            Check(rejectedDigest && rotation.Current.Thumbprint == nextLeaf.Thumbprint,
+                "staged certificate rejects stale or substituted digest");
+            var imported = await staged.ActivateAsync(preview.CandidateDigest, preview.ActiveDigest, CancellationToken.None);
+            Check(imported.Thumbprint == replacementLeaf.Thumbprint &&
+                await GetPeerThumbprintAsync(new Uri(httpsAddress)) == replacementLeaf.Thumbprint,
+                "host staged certificate activates through real TLS listener");
             Console.WriteLine("PASS: bounded HTTP revocation body, serialized ACME certificate lifecycle, deterministic fake-CA renewal and revocation");
         }
         finally
