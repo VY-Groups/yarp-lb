@@ -25,6 +25,16 @@ static bool RejectsOtlpEndpoint(string value)
 Must(OtlpEndpointPolicy.Parse(null) is null && OtlpEndpointPolicy.Parse(" ") is null,
     "OTLP remains disabled without an endpoint");
 GatewayTelemetryLifecycleTests.Run();
+var linuxGslbCommand = GslbServiceRestart.Build(false, "/usr/bin/systemctl");
+var windowsGslbCommand = GslbServiceRestart.Build(true, @"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe");
+Must(!linuxGslbCommand.UseShellExecute && linuxGslbCommand.ArgumentList.SequenceEqual(
+    new[] { "--no-ask-password", "restart", "gatewaycore-gslb.service" }),
+    "Linux GSLB restart is fixed to the authorized service");
+Must(!windowsGslbCommand.UseShellExecute &&
+    windowsGslbCommand.ArgumentList.Contains("-NonInteractive") &&
+    windowsGslbCommand.ArgumentList.Last().Contains("GatewayCoreGslb", StringComparison.Ordinal) &&
+    !windowsGslbCommand.ArgumentList.Last().Contains("-Force", StringComparison.Ordinal),
+    "Windows GSLB restart uses bounded fixed SCM controls without forcing dependents");
 Must(OtlpEndpointPolicy.Parse("https://collector.example:4318") is not null,
     "remote OTLP collector requires and accepts HTTPS");
 Must(OtlpEndpointPolicy.Parse("http://127.0.0.1:4318") is not null &&

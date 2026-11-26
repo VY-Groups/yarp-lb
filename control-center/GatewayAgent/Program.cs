@@ -77,9 +77,10 @@ if (allowEngineConfigChanges &&
      enginePaths.Any(e => !EngineConfigContract.ValidEngineId(e.Key) ||
          !Path.IsPathFullyQualified(e.Value) || !File.Exists(e.Value))))
     throw new InvalidOperationException("Engine changes require explicit allowlisted L4/GSLB file paths and an absolute staging directory");
-if (gslbRestartEnabled && (!OperatingSystem.IsLinux() || !allowEngineConfigChanges ||
-    gslbMetricsPort == 0 || !enginePaths.ContainsKey("gslb") || !File.Exists("/usr/bin/systemctl")))
-    throw new InvalidOperationException("Signed GSLB restart requires Linux, explicit engine staging, loopback revision metrics and systemctl.");
+var gslbRestartCommand = gslbRestartEnabled ? GslbServiceRestart.ForHost() : null;
+if (gslbRestartEnabled && (!allowEngineConfigChanges || gslbMetricsPort == 0 ||
+    !enginePaths.ContainsKey("gslb") || gslbRestartCommand is null))
+    throw new InvalidOperationException("Signed GSLB restart requires explicit engine staging, loopback revision metrics and supported host service control.");
 #if GATEWAYCORE_COMMERCIAL
 if (allowEngineConfigChanges && (fleetQuorum is null ||
     (!recoveryOnly && fleetQuorum.Scope != engineLicense!.FleetScope())))
@@ -711,13 +712,8 @@ app.MapPost("/agent/v1/engines/gslb/config/restart", async (EngineActivate input
         using (var intent = new FileStream(Path.Combine(tx,"restart-intent"),FileMode.CreateNew,FileAccess.Write,FileShare.None))
         { intent.WriteByte(1); intent.Flush(flushToDisk:true); }
         using var timeout=new CancellationTokenSource(TimeSpan.FromSeconds(60));
-        var processInfo=new ProcessStartInfo("/usr/bin/systemctl") { UseShellExecute=false, CreateNoWindow=true };
-        processInfo.ArgumentList.Add("--no-ask-password");
-        processInfo.ArgumentList.Add("restart");
-        processInfo.ArgumentList.Add("gatewaycore-gslb.service");
-        using var process=Process.Start(processInfo) ?? throw new InvalidOperationException("GSLB restart launch failed");
-        await process.WaitForExitAsync(timeout.Token);
-        if (process.ExitCode != 0) return Results.StatusCode(503);
+        if (!await GslbServiceRestart.RunAsync(gslbRestartCommand!, timeout.Token))
+            return Results.StatusCode(503);
         while (!timeout.IsCancellationRequested)
         {
             try
