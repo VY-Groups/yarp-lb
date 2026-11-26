@@ -55,6 +55,8 @@ class Origin(BaseHTTPRequestHandler):
     connection_max_active = 0
     replacement_release = threading.Event()
     replacement_attempts = []
+    compound_started = threading.Event()
+    compound_disconnected = threading.Event()
 
     @classmethod
     def reset_connection_counts(cls):
@@ -63,6 +65,22 @@ class Origin(BaseHTTPRequestHandler):
             cls.connection_max_active = 0
 
     def do_GET(self):
+        if self.path == "/compound-fail":
+            self.send_error(503)
+            return
+        if self.path == "/compound-stall":
+            # No response headers: observe the real upstream socket being
+            # closed by the gateway deadline or downstream cancellation.
+            Origin.compound_started.set()
+            self.connection.settimeout(7)
+            try:
+                if not self.connection.recv(1):
+                    Origin.compound_disconnected.set()
+            except ConnectionResetError:
+                Origin.compound_disconnected.set()
+            except (TimeoutError, OSError):
+                pass
+            return
         if self.path == "/ws-hold":
             key = self.headers.get("Sec-WebSocket-Key", "")
             if self.headers.get("Upgrade", "").lower() != "websocket" or not key:
@@ -598,6 +616,86 @@ def verify_max_connections_per_server(base:str,admin:Client,reviewer:Client):
         time.sleep(.1)
     check(constrained==1,"MaxConnectionsPerServer=1 limits actual concurrent upstream connections to one")
 
+def verify_compound_probe_endpoint(base, admin, operator, reviewer, viewer, origin_port):
+    """Exercise the shipping authenticated probe API, not a mocked handler."""
+    def apply(mode, path="/compound-fail"):
+        state=admin.request("GET","/admin/api/state")
+        clusters=json.loads(json.dumps(state["clusters"]))
+        if mode is None:
+            clusters.pop("compound-e2e",None)
+        else:
+            clusters["compound-e2e"]={
+                "HealthCheck":{"Active":{"Enabled":False,"Path":"/compound-ok"}},
+                "Metadata":{"ADC.Diagnostics.CompoundMode":mode,
+                            "ADC.Diagnostics.SecondaryPath":path},
+                "Destinations":{"origin":{"Address":f"http://127.0.0.1:{origin_port}/"}}}
+        payload={"routes":state["routes"],"clusters":clusters,"disabled":state["disabled"],
+                 "revision":state["revision"]}
+        pending=operator.request("POST","/admin/api/change-requests",
+            {"reason":"Disposable compound diagnostic acceptance","payload":payload})
+        reviewer.request("POST",f"/admin/api/change-requests/{pending['id']}/decision",
+            {"decision":"approve","reason":"Independent compound diagnostic fixture approval"})
+    def result():
+        reply=operator.request("POST","/admin/api/probe",{})
+        check("not YARP health state" in reply["type"],"diagnostic scope is explicit in endpoint response")
+        return next(r for r in reply["results"] if r["cluster"]=="compound-e2e")
+    def checks(row):
+        return {r["check"]:(r["passed"],r["httpStatus"]) for r in row["checks"]}
+    apply("AND")
+    try:
+        viewer.request("POST","/admin/api/probe",{},expect=403)
+        operator.request("POST","/admin/api/probe",{},csrf=False,expect=403)
+        row=result()
+        check(row["compoundMode"]=="AND" and row["status"]=="unreachable" and
+              checks(row)=={"tcp-connect":(True,None),"http-primary":(True,200),
+                            "http-secondary":(False,503)},
+              "real endpoint AND rejects failed secondary HTTP")
+        apply("OR")
+        row=result()
+        check(row["compoundMode"]=="OR" and row["status"]=="reachable" and
+              checks(row)["http-secondary"]==(False,503),
+              "real endpoint OR reports partial success")
+        apply("AND","/compound-stall")
+        Origin.compound_started.clear()
+        Origin.compound_disconnected.clear()
+        started=time.monotonic()
+        row=result()
+        elapsed=time.monotonic()-started
+        check(2.5<=elapsed<6 and row["status"]=="unreachable" and
+              checks(row)["http-primary"]==(True,200) and
+              checks(row)["http-secondary"]==(False,None),
+              "real endpoint shared deadline bounds stalled HTTP and reports failed AND")
+        check(Origin.compound_disconnected.wait(2),"deadline closes actual upstream socket")
+        Origin.compound_started.clear()
+        Origin.compound_disconnected.clear()
+        # Preserve real session cookie and CSRF token, then disconnect the
+        # actual client while the upstream is waiting for response headers.
+        req=Request(base+"/admin/api/probe",data=b"{}",method="POST")
+        for handler in operator.opener.handlers:
+            if isinstance(handler,HTTPCookieProcessor):
+                handler.cookiejar.add_cookie_header(req)
+        cookie=req.get_header("Cookie")
+        check(bool(cookie) and bool(operator.csrf),"cancellation fixture uses authenticated session")
+        host=base.split("://",1)[1]
+        with socket.create_connection(("127.0.0.1",int(host.rsplit(":",1)[1])),timeout=3) as sock:
+            request=(f"POST /admin/api/probe HTTP/1.1\r\nHost: {host}\r\n"
+                     f"Cookie: {cookie}\r\nX-CSRF-Token: {operator.csrf}\r\n"
+                     "Content-Type: application/json\r\nContent-Length: 2\r\n"
+                     "Connection: close\r\n\r\n{}")
+            sock.sendall(request.encode("ascii"))
+            check(Origin.compound_started.wait(2),"real authenticated request reaches stalled origin")
+        check(Origin.compound_disconnected.wait(1.5),
+              "client disconnect cancels upstream before the three-second deadline")
+        apply("AND","/compound-ok-secondary")
+        row=result()
+        check(row["status"]=="reachable" and all(v[0] for v in checks(row).values()),
+              "real endpoint AND succeeds when every check passes")
+    finally:
+        apply(None)
+    check(not any(r["cluster"]=="compound-e2e" for r in
+                  operator.request("POST","/admin/api/probe",{})["results"]),
+          "reviewed removal removes compound diagnostic fixture")
+
 def acceptance(base:str,https_base:str,origin_port:int):
     anonymous=Client(base)
     check(not anonymous.session()["initialized"],"clean state requires bootstrap")
@@ -756,6 +854,7 @@ def acceptance(base:str,https_base:str,origin_port:int):
     admin.request("POST","/admin/api/restore/"+rollback_backup,{})
     check("e2e" not in admin.request("GET","/admin/api/state")["routes"],
         "authorized restore rolls routing config back")
+    verify_compound_probe_endpoint(base,admin,operator,reviewer,viewer,origin_port)
     check(admin.request("GET","/admin/api/mail")["enabled"] is False,"SMTP starts disabled")
     admin.request("POST","/admin/api/mail/test",{},expect=409)
     admin.request("POST","/admin/api/mail",{"enabled":True,"host":"smtp.invalid","port":587,
@@ -798,7 +897,7 @@ def acceptance(base:str,https_base:str,origin_port:int):
     check(not reviewer.session()["authenticated"],"logout revokes browser session")
     check("status" in anonymous.request("GET","/gateway/health"),"live traffic remains independent of management login")
     return {"auth":True,"roleIsolation":True,"onboarding":True,"approval":True,"routing":True,
-            "rollback":True,"freeze":True,"mailGuard":True,"directoryGuard":True}
+            "rollback":True,"freeze":True,"mailGuard":True,"directoryGuard":True,"compoundDiagnostics":True}
 
 def main():
     parser=argparse.ArgumentParser()

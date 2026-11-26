@@ -2354,17 +2354,20 @@ app.MapPost("/admin/api/probe", async (IHttpClientFactory factory, HttpContext c
                 if (Uri.TryCreate(addr, UriKind.Absolute, out var baseUri) && (baseUri.Scheme == "https" || baseUri.Scheme == "http"))
                 {
                     using var client = factory.CreateClient("probe");
-                    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+                    using var cts = CancellationTokenSource.CreateLinkedTokenSource(ctx.RequestAborted);
+                    cts.CancelAfter(TimeSpan.FromSeconds(3));
                     var target = new Uri(baseUri, path.TrimStart('/'));
                     using var response = await client.GetAsync(target, cts.Token);
                     code = (int)response.StatusCode;
                     status = response.IsSuccessStatusCode ? "reachable" : "http-error";
                 }
             }
+            catch (OperationCanceledException) when (ctx.RequestAborted.IsCancellationRequested) { throw; }
             catch { }
             results.Add(new { cluster = cluster.Key, destination = dest.Key, address = addr, status, httpStatus = code });
         }
     }
+    ctx.RequestAborted.ThrowIfCancellationRequested();
     return Results.Ok(new { checkedAt = DateTimeOffset.UtcNow, type = "On-demand HTTP/compound diagnostics (not YARP health state)", results });
 }).RequireAuthorization(p => p.RequireRole("Administrator", "Operator"));
 
