@@ -290,3 +290,5 @@ dialog{border-color:#4a607a;box-shadow:0 24px 85px rgba(0,0,0,.75)}
 #first-run-message{color:#f5cc8b;line-height:1.5}
 #first-run-message:empty{display:none}
 @media(max-width:520px){.first-run-screen{padding:20px 12px}.first-run-progress{grid-template-columns:repeat(2,minmax(0,1fr))}.first-run-pair{grid-template-columns:1fr}.first-run-actions button{flex:1}}
+
+.operator-next{margin:12px 0 16px}

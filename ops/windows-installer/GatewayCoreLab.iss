@@ -44,6 +44,7 @@ Name: "{group}\Installation and rollback instructions ({#SourceCommit})"; Filena
 Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ""{app}\ops\windows-installer\Remove-GatewayCoreLabService.ps1"" -InstallRoot ""{app}"""; RunOnceId: RemoveGatewayCoreService; Flags: runhidden waituntilterminated
 [Run]
 Filename: "http://127.0.0.1:8080/dashboard"; Flags: shellexec runasoriginaluser skipifsilent; Check: DashboardReady
+Filename: "{sys}\notepad.exe"; Parameters: """{commonappdata}\GatewayCoreYarp\ControlPlane\first-run-code.txt"""; Description: "Open protected one-time setup code (local administrator only)"; Flags: postinstall unchecked nowait skipifsilent runascurrentuser; Check: FirstRunCodeReady
 [Code]
 var
   ServiceInstallFailed: Boolean;
@@ -92,6 +93,11 @@ end;
 function DashboardReady(): Boolean;
 begin
   Result := ServiceInstallAttempted and (not ServiceInstallFailed) and FileExists(ExpandConstant('{app}\.dashboard-ready'));
+end;
+
+function FirstRunCodeReady(): Boolean;
+begin
+  Result := DashboardReady() and FileExists(ExpandConstant('{commonappdata}\GatewayCoreYarp\ControlPlane\first-run-code.txt'));
 end;
 
 procedure GatewayCoreInstallerOutput(const S: String; const Error, FirstLine: Boolean);
@@ -160,5 +166,7 @@ begin
   if (CurPageID = wpFinished) and ServiceInstallFailed then begin
     WizardForm.FinishedHeadingLabel.Caption := 'GatewayCore installation failed';
     WizardForm.FinishedLabel.Caption := 'Service setup or health verification failed. Inspect the Setup log and protected backup before retrying.';
+  end else if (CurPageID = wpFinished) and FirstRunCodeReady() then begin
+    WizardForm.FinishedLabel.Caption := 'GatewayCore is installed and healthy. Open the one-time setup code using the option below, then follow the dashboard enrollment wizard. Keep the code private.';
   end;
 end;

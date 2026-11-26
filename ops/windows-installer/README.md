@@ -27,7 +27,8 @@ The `Windows offline lab Setup EXE` GitHub Actions workflow builds and executes 
 ### Verified first-run registration
 On a fresh ordinary lab installation, Setup opens a local six-step wizard. Open
 `C:\ProgramData\GatewayCoreYarp\ControlPlane\first-run-code.txt` as an
-elevated local administrator. Do not share the code, attach it to support
+elevated local administrator, or select the protected code option on the Setup
+Finish page. Do not share the code, attach it to support
 tickets or copy it into installer logs. Configure the existing approved
 company sender/SMTP relay, verify a code received in a readable inbox,
 then register and verify the first administrator email and create the
