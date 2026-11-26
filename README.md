@@ -1,5 +1,7 @@
 # GatewayCore / YARP Control Center — v0.1
 
+**[End-user manual and SOP](control-center/docs/END_USER_SOP.md)** — L0–L3 operating procedures, troubleshooting and escalation; also available offline in the dashboard User guide.
+
 **[Visual architecture and workflow atlas](docs/diagrams/README.md)** — system, traffic, security, licensing, fencing, recovery and CI diagrams.
 
 ## Ownership and future commercial licensing
