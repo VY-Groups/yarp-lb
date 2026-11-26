@@ -352,6 +352,8 @@ builder.Services.AddRateLimiter(options =>
     options.AddFixedWindowLimiter("mailtest", cfg => { cfg.PermitLimit = 3; cfg.Window = TimeSpan.FromMinutes(5); cfg.QueueLimit = 0; });
     options.AddFixedWindowLimiter("ldaptest", cfg => { cfg.PermitLimit = 4; cfg.Window = TimeSpan.FromMinutes(5); cfg.QueueLimit = 0; });
     options.AddFixedWindowLimiter("acme-revoke", cfg => { cfg.PermitLimit = 2; cfg.Window = TimeSpan.FromMinutes(5); cfg.QueueLimit = 0; });
+    options.AddFixedWindowLimiter("first-run", cfg =>
+    { cfg.PermitLimit = 24; cfg.Window = TimeSpan.FromMinutes(5); cfg.QueueLimit = 0; });
     options.AddFixedWindowLimiter("login", cfg =>
     {
         cfg.PermitLimit = 8;
@@ -454,6 +456,15 @@ app.MapGet("/admin/api/logging-health", () => Results.Ok(new {
 var directoryAuth = app.Services.GetRequiredService<DirectoryAuthService>();
 var root = app.Environment.ContentRootPath;
 var usersPath = Path.Combine(privateDir, "admin-users.json");
+var setupCodePath = Path.Combine(privateDir, "first-run-code.txt");
+#if GATEWAYCORE_COMMERCIAL
+const bool setupEnrollmentRequired = false;
+#else
+// Windows lab Setup provisions a private, installation-bound local claim.
+var setupEnrollmentRequired = Environment.GetEnvironmentVariable("GATEWAYCORE_REQUIRE_SETUP_OTP") == "1"
+    || File.Exists(setupCodePath);
+SetupEnrollment? setupEnrollment = null;
+#endif
 var inventoryPath = Path.Combine(privateDir, "inventory.json");
 var backupFolder = Path.Combine(privateDir, "config-backups");
 Directory.CreateDirectory(backupFolder);
@@ -1277,6 +1288,7 @@ async Task SignIn(AdminUser user, HttpContext ctx)
 
 app.MapGet("/admin/api/session", (HttpContext ctx) => Results.Ok(new {
     initialized = ReadUsers().Count != 0,
+    setupRequired = setupEnrollmentRequired && ReadUsers().Count == 0,
     authenticated = ctx.User.Identity?.IsAuthenticated == true,
     username = ctx.User.Identity?.Name,
     role = ctx.User.FindFirst(ClaimTypes.Role)?.Value,
@@ -1338,6 +1350,8 @@ app.MapPost("/admin/api/bootstrap", async (HttpContext ctx, LoginInput input) =>
     try
     {
         if (ReadUsers().Count > 0) return Results.Conflict(new { error = "Already initialized" });
+        if (setupEnrollmentRequired)
+            return Results.Conflict(new { error = "Complete the verified first-run wizard before creating an administrator." });
         if (!ValidUser(input.Username) || !ValidPassword(input.Password) || !ValidEmail(input.Email))
             return Results.BadRequest(new { error = "Username: 3–40 letters/numbers/_/-. Password: at least 16 characters." });
         var user = NewUser(input.Username, "Administrator", input.Password, input.Email);
@@ -1348,6 +1362,124 @@ app.MapPost("/admin/api/bootstrap", async (HttpContext ctx, LoginInput input) =>
     }
     finally { loginGate.Release(); }
 }).RequireRateLimiting("login");
+
+
+#if !GATEWAYCORE_COMMERCIAL
+// Local setup only; each step requires the protected claim and is serialized
+// by the same lock as account bootstrap. No generic unauthenticated SMTP API.
+app.MapPost("/admin/api/bootstrap/setup", async (HttpContext ctx, SetupEnrollmentInput input) =>
+{
+    if (!setupEnrollmentRequired || oidcPolicy is not null || externalAuditIntent is not null ||
+        ctx.Connection.RemoteIpAddress is not { } address || !IPAddress.IsLoopback(address) ||
+        !(ctx.Request.Host.Host.Equals("localhost", StringComparison.OrdinalIgnoreCase) ||
+          ctx.Request.Host.Host is "127.0.0.1" or "[::1]" or "::1"))
+        return Results.StatusCode(403);
+    await loginGate.WaitAsync(ctx.RequestAborted);
+    try
+    {
+        if (ReadUsers().Count != 0)
+            return Results.Conflict(new { error = "GatewayCore is already initialized." });
+        if (!File.Exists(setupCodePath) || (File.GetAttributes(setupCodePath) & FileAttributes.ReparsePoint) != 0)
+            return Results.Json(new { error = "Protected setup code unavailable; ask the local system administrator to repair Setup." }, statusCode: 503);
+        var secret = File.ReadAllText(setupCodePath).Trim();
+        if (secret.Length != 64 || !Regex.IsMatch(secret, "^[A-Fa-f0-9]{64}$") ||
+            input.SetupCode is null || input.SetupCode.Length != 64 ||
+            !CryptographicOperations.FixedTimeEquals(Encoding.UTF8.GetBytes(secret), Encoding.UTF8.GetBytes(input.SetupCode)))
+            return Results.Json(new { error = "Installation setup code is invalid." }, statusCode: 403);
+        if (input.Action == "unlock")
+            return Results.Ok(new { authorized = true });
+        if (input.Action == "sender")
+        {
+            var m = input.Mail;
+            if (m is null || string.IsNullOrWhiteSpace(m.Host) || m.Host.Length > 255 ||
+                m.Port is < 1 or > 65535 or 465 || !m.StartTls ||
+                !ValidEmail(m.From) || !ValidEmail(input.Email) ||
+                m.Username is null || m.Username.Length > 254 ||
+                m.Password is null || m.Password.Length > 4096 ||
+                (m.OAuthClientSecret?.Length ?? 0) > 4096 || (m.OAuthRefreshToken?.Length ?? 0) > 16384)
+                return Results.BadRequest(new { error = "Enter a sender, readable verification mailbox, SMTP host and STARTTLS port (465 unsupported)." });
+            var mode = string.IsNullOrEmpty(m.AuthMode) ? MailProviderAuth.PasswordMode : m.AuthMode;
+            var oauth = MailProviderAuth.UsesOAuth(mode);
+            var validation = MailProviderAuth.Validate(mode, m.Host, m.Username, m.OAuthTenant,
+                m.OAuthClientId, !string.IsNullOrEmpty(m.OAuthClientSecret), !string.IsNullOrEmpty(m.OAuthRefreshToken));
+            if (validation is not null) return Results.BadRequest(new { error = validation });
+            if (mode == MailProviderAuth.PasswordMode && !string.IsNullOrWhiteSpace(m.Username) && string.IsNullOrWhiteSpace(m.Password))
+                return Results.BadRequest(new { error = "Enter an approved SMTP app password, or use an authorized relay without a username." });
+            var cfg = new MailSettings(true, m.Host, m.Port, m.From, m.Username,
+                !oauth && !string.IsNullOrEmpty(m.Password) ? protector.Protect(m.Password) : "",
+                true, mode, oauth ? m.OAuthClientId : "",
+                oauth ? protector.Protect(m.OAuthClientSecret) : "",
+                oauth && mode != MailProviderAuth.MicrosoftApp ? protector.Protect(m.OAuthRefreshToken) : "",
+                oauth ? m.OAuthTenant : "");
+            var code = RandomNumberGenerator.GetInt32(0, 1000000).ToString("D6");
+            var flow = SetupEnrollment.Issue(Convert.ToHexString(RandomNumberGenerator.GetBytes(24)), cfg, input.Email!, "sender-code", code);
+            // Invalidate previous challenges before dispatch. Do not persist
+            // an unverified sender configuration or enable login prematurely.
+            setupEnrollment = null;
+            await SendMailMessage(input.Email!, "GatewayCore sender verification code",
+                $"Your sender verification code is {code}. It expires in 5 minutes. Do not share this code.", cfg);
+            setupEnrollment = flow;
+            return Results.Ok(new { flowId = flow.Id, emailHint = MaskEmail(flow.Email) });
+        }
+        var current = setupEnrollment;
+        if (current is null || input.FlowId != current.Id || current.ExpiresAt <= DateTimeOffset.UtcNow)
+            return Results.Conflict(new { error = "Setup verification expired or changed. Restart the wizard." });
+        if (input.Action is "verify-sender" or "verify-admin")
+        {
+            var expected = input.Action == "verify-sender" ? "sender-code" : "admin-code";
+            if (current.Stage != expected)
+                return Results.Conflict(new { error = "Complete the preceding verification step first." });
+            if (!current.Matches(input.Code))
+            {
+                setupEnrollment = current.Attempts + 1 >= 5 ? null : current with { Attempts = current.Attempts + 1 };
+                return Results.Json(new { error = "Verification code is incorrect or expired." }, statusCode: 401);
+            }
+            setupEnrollment = current with { Stage = expected == "sender-code" ? "sender-verified" : "admin-verified",
+                Nonce = "", Hash = "", Attempts = 0, ExpiresAt = DateTimeOffset.UtcNow.AddMinutes(10) };
+            return Results.Ok(new { verified = true });
+        }
+        if (input.Action == "administrator")
+        {
+            if (current.Stage != "sender-verified" || !ValidEmail(input.Email))
+                return Results.BadRequest(new { error = "Verify sender delivery first and enter a valid administrator email." });
+            var code = RandomNumberGenerator.GetInt32(0, 1000000).ToString("D6");
+            var flow = SetupEnrollment.Issue(current.Id, current.Mail, input.Email!, "admin-code", code);
+            await SendMailMessage(input.Email!, "GatewayCore administrator registration code",
+                $"Your administrator registration code is {code}. It expires in 5 minutes. Do not share this code.", current.Mail);
+            setupEnrollment = flow;
+            return Results.Ok(new { flowId = flow.Id, emailHint = MaskEmail(flow.Email) });
+        }
+        if (input.Action == "finish")
+        {
+            if (current.Stage != "admin-verified")
+                return Results.Conflict(new { error = "Verify administrator email before creating a password." });
+            if (!ValidUser(input.Username) || !ValidPassword(input.Password))
+                return Results.BadRequest(new { error = "Username: 3–40 letters/numbers/_/-. Password: 16–256 characters." });
+            // Save verified mail and proof before users. An interruption
+            // cannot create an account without enabled, verified email OTP.
+            WriteAuditedState(mailPath, JsonSerializer.SerializeToUtf8Bytes(current.Mail));
+            WriteAuditedState(mailProofPath, Encoding.UTF8.GetBytes(MailFingerprint(current.Mail)));
+            var user = NewUser(input.Username!, "Administrator", input.Password!, current.Email);
+            WriteUsers(new List<AdminUser> { user });
+            setupEnrollment = null;
+            try { File.Delete(setupCodePath); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            { app.Logger.LogWarning("Completed first-run claim cleanup requires local administrator; initialized account gate remains closed."); }
+            await Audit(user.Username, "BOOTSTRAP_ADMIN_EMAIL_VERIFIED");
+            await SignIn(user, ctx);
+            return SignInResult(user, ctx);
+        }
+        return Results.BadRequest(new { error = "Unknown setup step." });
+    }
+    catch (Exception ex)
+    {
+        // Do not record secrets, OTPs or raw mail-provider errors.
+        app.Logger.LogWarning("FIRST_RUN_SETUP_FAILED type={ErrorType}", ex.GetType().Name);
+        return Results.Json(new { error = "Setup could not complete. Check SMTP reachability, trusted TLS, credentials and mailbox permissions, or contact the local administrator." }, statusCode: 503);
+    }
+    finally { loginGate.Release(); }
+}).RequireRateLimiting("first-run");
+#endif
 
 app.MapGet("/admin/api/auth-methods", () => Results.Ok(new {
     local = true, activeDirectory = oidcPolicy is null && directoryAuth.Read().Enabled,
@@ -1832,6 +1964,7 @@ app.MapGet("/dashboard/license.js", () => Results.File(Path.Combine(root, "wwwro
 #endif
 app.MapGet("/dashboard/privacy", () => Results.Content(ManagementPrivacyPolicy.Page(), "text/html; charset=utf-8"));
 app.MapGet("/dashboard/app.js", () => Results.File(Path.Combine(root, "wwwroot", "app.js"), "text/javascript; charset=utf-8"));
+app.MapGet("/dashboard/first-run.js", () => Results.File(Path.Combine(root, "wwwroot", "first-run.js"), "text/javascript; charset=utf-8"));
 app.MapGet("/dashboard/style.css", () => Results.File(Path.Combine(root, "wwwroot", "style.css"), "text/css; charset=utf-8"));
 app.MapGet("/gateway/health", () => Results.Ok(new { status = "healthy", gateway = Environment.MachineName, utc = DateTimeOffset.UtcNow }));
 app.MapHttp01Challenge(acmeHttp01PublicEntrypointEnabled,
@@ -3183,6 +3316,20 @@ static bool ValidPassword(string? password) => password is not null && password.
 
 record LoginInput(string Username, string Password, string? Email = null, string Provider = "local");
 record VerifyOtpInput(string ChallengeId, string Code);
+record SetupEnrollmentInput(string? Action, string? SetupCode, string? FlowId = null, string? Code = null,
+    string? Email = null, string? Username = null, string? Password = null, MailSettingsInput? Mail = null);
+record SetupEnrollment(string Id, MailSettings Mail, string Email, string Stage, string Nonce, string Hash,
+    DateTimeOffset ExpiresAt, int Attempts)
+{
+    public static SetupEnrollment Issue(string id, MailSettings mail, string email, string stage, string code)
+    {
+        var nonce = Convert.ToHexString(RandomNumberGenerator.GetBytes(24));
+        return new(id, mail, email, stage, nonce,
+            Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(nonce + code))), DateTimeOffset.UtcNow.AddMinutes(5), 0);
+    }
+    public bool Matches(string? code) => Attempts < 5 && code is not null && Regex.IsMatch(code, "^[0-9]{6}$") &&
+        CryptographicOperations.FixedTimeEquals(SHA256.HashData(Encoding.UTF8.GetBytes(Nonce + code)), Convert.FromHexString(Hash));
+}
 record OtpChallenge(string Username, string Nonce, string Hash, DateTimeOffset ExpiresAt, int Attempts);
 record MailSettings(bool Enabled = false, string Host = "", int Port = 25, string From = "", string Username = "", string EncryptedPassword = "", bool StartTls = false,
     string AuthMode = "password", string OAuthClientId = "", string EncryptedOAuthClientSecret = "", string EncryptedOAuthRefreshToken = "", string OAuthTenant = "");

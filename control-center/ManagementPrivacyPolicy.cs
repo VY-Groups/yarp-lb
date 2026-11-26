@@ -76,7 +76,7 @@ internal static class ManagementPrivacyPolicy
 
     internal static bool Exempt(PathString path) =>
         path == "/admin/api/session" || path == "/admin/api/auth-methods" ||
-        path == "/admin/api/bootstrap" || path == "/admin/api/login" ||
+        path == "/admin/api/bootstrap" || path == "/admin/api/bootstrap/setup" || path == "/admin/api/login" ||
         path == "/admin/api/login/verify" || path == "/admin/api/logout" ||
         path == AcceptancePath;
 
