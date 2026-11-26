@@ -93,6 +93,12 @@ test('browser: bootstrap, navigation, onboarding, websites, route edit, users an
     await expect(page.locator('.journey-checklist section').nth(1)).toContainText('Confirmed');
     const design=await page.evaluate(async()=>await (await fetch('/admin/api/onboarding')).json());
     expect(design.status).toBe('design-confirmed');
+    const overview=await page.evaluate(async()=>await (await fetch('/admin/api/setup/overview')).json());
+    expect(overview.topologyConfirmed).toBe(true);
+    expect(overview.mode).toBe('standalone');
+    expect(overview.stages.find(s=>s.id==='topology').status).toBe('design-confirmed');
+    expect(overview.stages.find(s=>s.id==='fleet').status).toBe('not-applicable');
+    expect(overview.activeAdministratorCount).toBe(1);
   });
 
   await test.step('Simple website form creates an approval-only single-server draft',async()=>{

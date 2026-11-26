@@ -142,7 +142,7 @@ function reasonDialog(title, help, minimum, label, perform) {
     const generation = authGeneration;
     dlg.oncancel = e => { if (pending)
         e.preventDefault(); };
-    form.onsubmit = async e => {
+    form.onsubmit = async (e) => {
         if (e.submitter?.getAttribute('value') === 'cancel' && !pending)
             return;
         e.preventDefault();
@@ -175,7 +175,7 @@ function reasonDialog(title, help, minimum, label, perform) {
 async function save() {
     if (!dirty || currentRole === 'Viewer')
         return;
-    reasonDialog('Submit configuration for approval', 'Your draft contains ' + keys(data.routes).length + ' route(s) and ' + keys(data.clusters).length + ' backend group(s). Nothing goes live until a different authorized administrator approves this exact revision.', 12, 'Submit request', async reason => {
+    reasonDialog('Submit configuration for approval', 'Your draft contains ' + keys(data.routes).length + ' route(s) and ' + keys(data.clusters).length + ' backend group(s). Nothing goes live until a different authorized administrator approves this exact revision.', 12, 'Submit request', async (reason) => {
         const x = await api('/admin/api/change-requests', 'POST', { reason, payload: { routes: data.routes, clusters: data.clusters, disabled: data.disabled, revision: data.revision } });
         dirty = false;
         await reload();
@@ -1032,7 +1032,7 @@ function act(type, id) {
         return;
     }
     if (type === 'approval-approve' || type === 'approval-reject') {
-        reasonDialog(type === 'approval-approve' ? 'Approve configuration' : 'Reject configuration', 'This decision applies to the exact saved request. Approving may change live routing. Verify the configuration and operational change window before continuing.', 10, type === 'approval-approve' ? 'Approve request' : 'Reject request', async reason => {
+        reasonDialog(type === 'approval-approve' ? 'Approve configuration' : 'Reject configuration', 'This decision applies to the exact saved request. Approving may change live routing. Verify the configuration and operational change window before continuing.', 10, type === 'approval-approve' ? 'Approve request' : 'Reject request', async (reason) => {
             const r = await api('/admin/api/change-requests/' + encodeURIComponent(id) + '/decision', 'POST', { decision: type === 'approval-approve' ? 'approve' : 'reject', reason });
             await reload();
             view = 'approvals';

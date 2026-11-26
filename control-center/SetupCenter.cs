@@ -62,8 +62,8 @@ public static class SetupCenter
             var routeCount = proxy.GetSection("Routes").GetChildren().Count();
             var destinationCount = clusters.Sum(c => c.GetSection("Destinations").GetChildren().Count());
             var activeChecks = clusters.Count(c => bool.TryParse(c.GetSection("HealthCheck:Active:Enabled").Value, out var v) && v);
-            var mode = topology?["Plan"]?["Mode"]?.ToString() ?? "unselected";
-            var confirmed = string.Equals(topology?["Status"]?.ToString(), "design-confirmed", StringComparison.OrdinalIgnoreCase);
+            var mode = topology?["plan"]?["mode"]?.ToString() ?? "unselected";
+            var confirmed = string.Equals(topology?["status"]?.ToString(), "design-confirmed", StringComparison.OrdinalIgnoreCase);
             var mailEnabled = bool.TryParse(mail?["Enabled"]?.ToString(), out var m) && m;
             var directoryEnabled = bool.TryParse(directory?["Enabled"]?.ToString(), out var d) && d;
             var stages = new object[]
