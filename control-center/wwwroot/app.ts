@@ -767,6 +767,7 @@ function addInventory(){modal('Register infrastructure asset','Inventory only: t
 {name:'address',label:'Address or hostname',value:''},{name:'notes',label:'Notes',value:''}
 ],async v=>{try{await api('/admin/api/inventory','POST',v);show('Asset registered');await inventory()}catch(e){show(String(e),true)}})}
 async function users(){try{const list=await api('/admin/api/users');
+ if(view!=='users')return;
  const rows=list.map((x:Obj)=>`<tr><td><b>${esc(x.username)}</b></td><td>${esc(x.email||'—')}</td><td>${esc(x.role)}</td><td>${esc(x.provider||'Local')}</td><td><span class="chip ${x.enabled?'good':'bad'}">${x.enabled?'Enabled':'Disabled'}</span></td><td>${x.provider==='AD'?'AD password managed by directory':actionBtn('Reset password','password-reset',x.username)} ${actionBtn(x.enabled?'Offboard':'Re-enable',x.enabled?'user-disable':'user-enable',x.username)}</td></tr>`).join('');
  $('content').innerHTML=`<div class="toolbar"><div><h2>Administrator accounts</h2><p class="subtle">Administrators onboard/offboard users; Operators manage routes; Viewers read only. Disabling an account blocks new sign-ins and invalidates existing sessions. Inactive sessions expire after 30 minutes.</p></div>${actionBtn('+ Add account','user-add','')} ${actionBtn('Mail & OTP','switch','mail')} ${actionBtn('Active Directory','switch','directory')}</div><div class="tablewrap"><table><thead><tr><th>Username</th><th>Email</th><th>Role</th><th>Authentication</th><th>Status</th><th>Action</th></tr></thead><tbody>${rows}</tbody></table></div>`;
  }catch(e){show(String(e),true)}}
