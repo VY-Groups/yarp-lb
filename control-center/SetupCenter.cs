@@ -98,7 +98,7 @@ public static class SetupCenter
             return Results.Ok(new {
                 version = ProductVersion, channel = "development", verifiedForProduction = false,
                 gateway = Environment.MachineName, mode,
-                topologyConfirmed = confirmed, routeCount, clusterCount = clusters.Length, destinationCount,
+                topologyConfirmed = confirmed, activeAdministratorCount = activeAdmins, routeCount, clusterCount = clusters.Length, destinationCount,
                 activeHealthClusterCount = activeChecks, fleetEntries = fleet?.Count ?? 0,
                 transport = ctx.Request.IsHttps ? "https" : "http-loopback",
                 freeze = ReadFreeze(privateDir), stages,
