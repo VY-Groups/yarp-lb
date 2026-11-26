@@ -64,6 +64,17 @@ internal static class FleetAdcContractTests
         Check(FleetAdcContract.Validate(bad,snapshot) is not null,"HTTP compression and mandatory HTTPS conflict rejected");
         bad["Routes"]!["web"]!["Metadata"] = new JsonObject { [ApplicationAccessPolicy.CompressionKey]=true };
         Check(FleetAdcContract.Validate(bad,snapshot) is not null,"malformed signed compression policy rejected");
+        bad = snapshot.DeepClone().AsObject();
+        bad["Routes"]!["web"]!["Metadata"] = new JsonObject { [ApplicationAccessPolicy.MethodsKey]="GET,HEAD" };
+        Check(FleetAdcContract.Validate(bad,snapshot) is null,"signed method allowlist accepted");
+        Check(ApplicationAccessPolicy.TryParse(new Dictionary<string,string> { [ApplicationAccessPolicy.MethodsKey]="GET,HEAD" },out var methodPolicy) &&
+            methodPolicy.PermitsMethod("GET") && methodPolicy.PermitsMethod("HEAD") &&
+            !methodPolicy.PermitsMethod("POST") && !methodPolicy.PermitsMethod("get"),"method admission is exact and case sensitive");
+        foreach (var invalid in new[] {"","GET,GET","GET,","get","TRACE","CONNECT","*"})
+        {
+            bad["Routes"]!["web"]!["Metadata"]![ApplicationAccessPolicy.MethodsKey] = invalid;
+            Check(FleetAdcContract.Validate(bad,snapshot) is not null,"invalid method contract rejected: "+invalid);
+        }
         using var key=ECDsa.Create(ECCurve.NamedCurves.nistP256);
         var pub=key.ExportSubjectPublicKeyInfoPem();
         var trusted=new Dictionary<string,string> { [FleetConfigSignature.KeyIdFromPublicKey(pub)] = pub };

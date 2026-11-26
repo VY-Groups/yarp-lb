@@ -2,11 +2,12 @@ using System.Net;
 using System.Text.Json.Nodes;
 
 /// <summary>Opt-in route TLS and actual peer-network access, not user authentication.</summary>
-public sealed record ApplicationAccessPolicy(bool RequireHttps, IPNetwork[] AllowedNetworks, bool PublicHttpCompression = false)
+public sealed record ApplicationAccessPolicy(bool RequireHttps, IPNetwork[] AllowedNetworks, bool PublicHttpCompression = false, string[]? AllowedMethods = null)
 {
     public const string HttpsKey = "ADC.Access.RequireHttps";
     public const string NetworksKey = "ADC.Access.AllowedNetworks";
     public const string CompressionKey = "ADC.Acceleration.PublicHttpCompression";
+    public const string MethodsKey = "ADC.Traffic.AllowedMethods";
     public static bool TryParse(IReadOnlyDictionary<string,string>? metadata, out ApplicationAccessPolicy policy)
     {
         policy = new(false, []);
@@ -14,6 +15,16 @@ public sealed record ApplicationAccessPolicy(bool RequireHttps, IPNetwork[] Allo
         if (metadata.Keys.Any(key => key.StartsWith("ADC.Access.", StringComparison.OrdinalIgnoreCase) &&
             key is not (HttpsKey or NetworksKey))) return false;
         if (metadata.Keys.Any(key => key.StartsWith("ADC.Acceleration.", StringComparison.OrdinalIgnoreCase) && key != CompressionKey)) return false;
+        if (metadata.Keys.Any(key => key.StartsWith("ADC.Traffic.", StringComparison.OrdinalIgnoreCase) && key != MethodsKey)) return false;
+        string[]? methods = null;
+        if (metadata.TryGetValue(MethodsKey, out var methodsText))
+        {
+            if (string.IsNullOrWhiteSpace(methodsText) || methodsText.Length > 64) return false;
+            methods = methodsText.Split(',', StringSplitOptions.TrimEntries);
+            if (methods.Length is < 1 or > 7 ||
+                methods.Distinct(StringComparer.Ordinal).Count() != methods.Length ||
+                methods.Any(method => method is not ("GET" or "HEAD" or "POST" or "PUT" or "PATCH" or "DELETE" or "OPTIONS"))) return false;
+        }
         bool compress = false;
         if (metadata.TryGetValue(CompressionKey, out var compression))
         {
@@ -42,7 +53,7 @@ public sealed record ApplicationAccessPolicy(bool RequireHttps, IPNetwork[] Allo
             }
         }
         if (tls && compress) return false; // this initial compression profile is HTTP only
-        policy = new(tls, networks.ToArray(), compress);
+        policy = new(tls, networks.ToArray(), compress, methods);
         return true;
     }
 
@@ -55,6 +66,8 @@ public sealed record ApplicationAccessPolicy(bool RequireHttps, IPNetwork[] Allo
         return AllowedNetworks.Any(network => network.Contains(peer));
     }
 
+    public bool PermitsMethod(string method) => AllowedMethods is null || AllowedMethods.Contains(method, StringComparer.Ordinal);
+
     public static bool Validate(JsonObject route)
     {
         if (route["Metadata"] is not JsonObject meta) return route["Metadata"] is null;
@@ -62,8 +75,9 @@ public sealed record ApplicationAccessPolicy(bool RequireHttps, IPNetwork[] Allo
         foreach (var (key,node) in meta)
         {
             if (!key.StartsWith("ADC.Access.", StringComparison.OrdinalIgnoreCase) &&
-                !key.StartsWith("ADC.Acceleration.", StringComparison.OrdinalIgnoreCase)) continue;
-            if (key is not (HttpsKey or NetworksKey or CompressionKey) || node is not JsonValue value ||
+                !key.StartsWith("ADC.Acceleration.", StringComparison.OrdinalIgnoreCase) &&
+                !key.StartsWith("ADC.Traffic.", StringComparison.OrdinalIgnoreCase)) continue;
+            if (key is not (HttpsKey or NetworksKey or CompressionKey or MethodsKey) || node is not JsonValue value ||
                 !value.TryGetValue<string>(out var text) || text is null) return false;
             relevant.Add(key,text);
         }
