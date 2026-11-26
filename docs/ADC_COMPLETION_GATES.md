@@ -31,3 +31,5 @@ Hardware acceleration and upstream volumetric DDoS absorption are deployment-dep
 - L4 weighted rotation (TCP and new UDP sessions) and weighted least TCP connections added in engine and signed staging, with real socket acceptance. Exact-head verification pending; L4 dashboard configuration editor and runtime rollout remain incomplete.
 
 - L7 cyclic weighted round robin added through existing reviewed cluster editor/API, runtime and real request tests. Stable weights/membership give exact complete-cycle ratio; not smooth weighted rotation or fleet-shared scheduling. Existing weighted-random scratch span explicitly initialized to zero so draining entries never consume tickets.
+
+- Guided HTTP active-monitor editor and snapshot reuse across service groups, retaining unrelated passive health and metadata. Browser regression covers bounded timing and copied configuration. Persistent shared monitors, compound protocol probes and fleet runtime validation remain pending.

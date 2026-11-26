@@ -217,7 +217,67 @@ function adcServiceMap() {
 }
 function overview() { let routes = keys(data.routes).slice(0, 5).map(id => `<div class="rowline"><div><b>${esc(id)}</b><div class="subtle mono">${esc(data.routes[id]?.Match?.Path || '—')}</div></div><span class="chip">${esc(data.routes[id]?.ClusterId || '—')}</span></div>`).join('') || '<div class="empty">No routes configured</div>'; let nodes = destinationRows().slice(0, 6).map(d => `<div class="rowline"><div><b>${esc(d.did)}</b><div class="subtle mono">${esc(d.address)}</div></div><span class="chip ${d.enabled ? '' : 'bad'}">${d.enabled ? 'Configured' : 'Disabled'}</span></div>`).join('') || '<div class="empty">No destinations configured</div>'; return summary() + adcServiceMap() + `<div class="grid2"><div class="card"><div class="flex"><h2 class="section-title">Traffic architecture</h2><span class="chip">Design view</span></div><div class="arch"><div class="archnode">Clients / Public & internal ingress</div><div class="arrow">↓</div><div class="archnode">Firewall / upstream HA VIP</div><div class="arrow">↓</div><div class="archnode accent">${esc(topologyModeName(topologyResponse?.plan?.mode || 'standalone'))} (design topology)</div><div class="arrow">↓</div><div class="twonodes"><div class="archnode">Backend node 01</div><div class="archnode">Backend node 02</div></div><div class="arrow">↓</div><div class="archnode">Application-specific data services (optional)</div></div><div class="healthbanner">This gateway is one running instance. The onboarding design is metadata, not proof that a gateway fleet, VIP or backend is healthy.</div></div><div><div class="card"><h2 class="section-title">Route snapshot</h2>${routes}${actionBtn('Manage routes', 'switch', 'routes')}</div><div class="card card-spaced"><h2 class="section-title">Destinations</h2>${nodes}${actionBtn('Manage backends', 'switch', 'backends')}</div></div></div>`; }
 function routes() { const rows = keys(data.routes).map(id => { const r = data.routes[id]; return `<tr><td><b>${esc(id)}</b></td><td class="mono">${esc((r.Match?.Hosts || []).join(', ') || 'Any host')}</td><td class="mono">${esc(r.Match?.Path)}</td><td>${esc(r.ClusterId)}</td><td>${actionBtn('Edit', 'route-edit', id)} ${actionBtn('Advanced', 'route-advanced', id)} ${actionBtn('Delete', 'route-delete', id, 'danger-btn mini')}</td></tr>`; }).join(''); return `<div class="toolbar"><div><h2>Websites &amp; routes</h2><p class="subtle">A route matches the client hostname and path, then forwards to a backend group (cluster). Draft changes need approval.</p></div>${actionBtn('+ Add website / API', 'setup-simple-website', '', 'primary')} ${actionBtn('Advanced: add route', 'route-add', '')}</div><div class="tablewrap"><table><thead><tr><th>Route ID</th><th>Hosts</th><th>Path</th><th>Cluster</th><th>Actions</th></tr></thead><tbody>${rows || '<tr><td colspan="5" class="empty">No routes configured. Use Add website / API to create your first draft.</td></tr>'}</tbody></table></div>`; }
-function clusters() { const rows = keys(data.clusters).map(id => { const c = data.clusters[id]; const active = !!c.HealthCheck?.Active?.Enabled, passive = !!c.HealthCheck?.Passive?.Enabled; const health = active && passive ? '<span class="chip good">Active + passive</span>' : active ? '<span class="chip good">Active</span>' : passive ? '<span class="chip warn">Passive only</span>' : '<span class="chip">Disabled</span>'; return `<tr><td><b>${esc(id)}</b></td><td>${esc(c.LoadBalancingPolicy || 'Default')}</td><td>${keys(c.Destinations || {}).length}</td><td>${health}</td><td>${actionBtn('Edit', 'cluster-edit', id)} ${actionBtn('Advanced', 'cluster-advanced', id)} ${actionBtn('Delete', 'cluster-delete', id, 'danger-btn mini')}</td></tr>`; }).join(''); return `<div class="toolbar"><div><h2>Backend groups (clusters)</h2><p class="subtle">A group contains the servers for one application and defines traffic distribution. Use the policy guide below.</p></div>${actionBtn('+ Add cluster', 'cluster-add', '')}</div><div class="tablewrap"><table><thead><tr><th>Cluster</th><th>Policy</th><th>Active backends</th><th>Health checks</th><th>Actions</th></tr></thead><tbody>${rows || '<tr><td colspan="5" class="empty">No clusters configured</td></tr>'}</tbody></table></div>${policyReference()}`; }
+function editActiveMonitor(id) {
+    if (currentRole === 'Viewer' || !Object.hasOwn(data.clusters, id))
+        return show('An authorized existing service group is required', true);
+    const cluster = data.clusters[id];
+    const old = cluster.HealthCheck?.Active || {};
+    const meta = cluster.Metadata || {};
+    const seconds = (value, fallback) => {
+        const parsed = /^(\d{2}):(\d{2}):(\d{2})$/.exec(String(value || ''));
+        return parsed ? String(Number(parsed[1]) * 3600 + Number(parsed[2]) * 60 + Number(parsed[3])) : fallback;
+    };
+    modal('HTTP health monitor', 'Choose actual application readiness. This edits the group draft; it does not probe or deploy. Passive checks and other metadata remain unchanged.', [
+        { name: 'enabled', label: 'Enable active monitor', value: String(!!old.Enabled), options: ['true', 'false'] },
+        { name: 'path', label: 'Readiness path', value: old.Path || '/health/ready' },
+        { name: 'interval', label: 'Probe interval (seconds, 1–60)', value: seconds(old.Interval, '15') },
+        { name: 'timeout', label: 'Probe timeout (seconds, 1–60)', value: seconds(old.Timeout, '5') },
+        { name: 'policy', label: 'Failure / recovery policy', value: old.Policy || 'ConsecutiveFailures', options: ['ConsecutiveFailures', 'RiseFall'] },
+        { name: 'fall', label: 'Consecutive failures (1–10)', value: String(old.Policy === 'RiseFall' ? meta['RiseFall.Fall'] || '3' : meta['ConsecutiveFailuresHealthPolicy.Threshold'] || '3') },
+        { name: 'rise', label: 'Consecutive successes for RiseFall (1–10)', value: String(meta['RiseFall.Rise'] || '2') }
+    ], v => {
+        const bounded = (raw, max) => /^\d{1,2}$/.test(raw) && Number(raw) >= 1 && Number(raw) <= max;
+        if (!bounded(v.interval, 60) || !bounded(v.timeout, 60) || Number(v.timeout) > Number(v.interval) || !bounded(v.rise, 10) || !bounded(v.fall, 10))
+            throw Error('Use bounded whole seconds, timeout no greater than interval, and 1–10 thresholds.');
+        if (!v.path.startsWith('/') || v.path.length > 300 || v.path.includes('\\') || /[\r\n]/.test(v.path))
+            throw Error('Invalid readiness path.');
+        if (cluster.LoadBalancingPolicy === 'PrimaryBackup' && v.enabled !== 'true')
+            throw Error('PrimaryBackup requires active health checks.');
+        if (!['ConsecutiveFailures', 'RiseFall'].includes(v.policy))
+            throw Error('Unsupported health policy.');
+        const duration = (raw) => '00:' + String(Math.floor(Number(raw) / 60)).padStart(2, '0') + ':' + String(Number(raw) % 60).padStart(2, '0');
+        cluster.HealthCheck = { ...cluster.HealthCheck, Active: { ...old, Enabled: v.enabled === 'true', Path: v.path, Interval: duration(v.interval), Timeout: duration(v.timeout), Policy: v.policy } };
+        cluster.Metadata = { ...meta, 'RiseFall.Rise': v.rise, 'RiseFall.Fall': v.fall, 'ConsecutiveFailuresHealthPolicy.Threshold': v.fall };
+        edit();
+    });
+}
+function copyActiveMonitor(id) {
+    if (currentRole === 'Viewer' || !Object.hasOwn(data.clusters, id))
+        return show('An authorized existing service group is required', true);
+    const candidates = keys(data.clusters).filter(key => key !== id && data.clusters[key].HealthCheck?.Active?.Enabled === true && ['ConsecutiveFailures', 'RiseFall'].includes(data.clusters[key].HealthCheck.Active.Policy || 'ConsecutiveFailures'));
+    if (!candidates.length)
+        return show('No other group has an enabled supported HTTP monitor.', true);
+    modal('Reuse existing HTTP monitor', 'Copies the active health monitor and three threshold settings into this draft. It is a snapshot, not a live shared profile. Verify the same readiness path on every target server.', [{ name: 'source', label: 'Copy from service group', value: candidates[0], options: candidates }], v => {
+        if (!candidates.includes(v.source) || !Object.hasOwn(data.clusters, id))
+            throw Error('Invalid monitor source.');
+        const source = data.clusters[v.source];
+        const target = data.clusters[id];
+        const active = source.HealthCheck?.Active;
+        if (!active?.Enabled)
+            throw Error('Source monitor is no longer enabled.');
+        target.HealthCheck = { ...target.HealthCheck, Active: JSON.parse(JSON.stringify(active)) };
+        const metadata = { ...(target.Metadata || {}) };
+        for (const key of ['RiseFall.Rise', 'RiseFall.Fall', 'ConsecutiveFailuresHealthPolicy.Threshold']) {
+            if (Object.hasOwn(source.Metadata || {}, key))
+                metadata[key] = source.Metadata[key];
+            else
+                delete metadata[key];
+        }
+        target.Metadata = metadata;
+        edit();
+    });
+}
+function clusters() { const rows = keys(data.clusters).map(id => { const c = data.clusters[id]; const active = !!c.HealthCheck?.Active?.Enabled, passive = !!c.HealthCheck?.Passive?.Enabled; const health = active && passive ? '<span class="chip good">Active + passive</span>' : active ? '<span class="chip good">Active</span>' : passive ? '<span class="chip warn">Passive only</span>' : '<span class="chip">Disabled</span>'; return `<tr><td><b>${esc(id)}</b></td><td>${esc(c.LoadBalancingPolicy || 'Default')}</td><td>${keys(c.Destinations || {}).length}</td><td>${health}</td><td>${actionBtn('Edit', 'cluster-edit', id)} ${currentRole === 'Viewer' ? '' : actionBtn('Health monitor', 'monitor-edit', id) + ' ' + actionBtn('Copy monitor', 'monitor-copy', id)} ${actionBtn('Advanced', 'cluster-advanced', id)} ${actionBtn('Delete', 'cluster-delete', id, 'danger-btn mini')}</td></tr>`; }).join(''); return `<div class="toolbar"><div><h2>Backend groups (clusters)</h2><p class="subtle">A group contains the servers for one application and defines traffic distribution. Use the policy guide below.</p></div>${actionBtn('+ Add cluster', 'cluster-add', '')}</div><div class="tablewrap"><table><thead><tr><th>Cluster</th><th>Policy</th><th>Active backends</th><th>Health checks</th><th>Actions</th></tr></thead><tbody>${rows || '<tr><td colspan="5" class="empty">No clusters configured</td></tr>'}</tbody></table></div>${policyReference()}`; }
 function backends() { const rows = destinationRows().map(d => { const live = liveDestinationHealth?.find(x => x.clusterId === d.cid && x.destinationId === d.did); const configuredState = !d.enabled ? 'Disabled' : d.trafficState === 'draining' ? 'Draining' : 'Active'; const stateClass = configuredState === 'Active' ? 'good' : configuredState === 'Draining' ? 'warn' : 'bad'; const runtime = live ? `<span class="chip">A: ${esc(live.activeHealth || 'Unknown')}</span> <span class="chip">P: ${esc(live.passiveHealth || 'Unknown')}</span><div class="subtle">In-flight: ${esc(String(live.concurrentRequests ?? '—'))}</div>` : '<span class="subtle">Not inspected</span>'; const drainButton = d.enabled ? actionBtn(d.trafficState === 'draining' ? 'Restore traffic' : 'Drain new traffic', 'dest-drain', d.cid + '::' + d.did) : ''; return `<tr><td><b>${esc(d.did)}</b><div class="subtle">${esc(d.cid)} · weight ${esc(d.weight)} · ${esc(d.trafficRole)}</div></td><td class="mono">${esc(d.address)}</td><td><span class="chip ${stateClass}">${configuredState}</span><div class="subtle">Configured draft state; runtime health shown separately</div></td><td>${runtime}<div>${drainButton} ${actionBtn(d.enabled ? 'Disable' : 'Enable', 'dest-toggle', d.cid + '::' + d.did)} ${actionBtn('Edit', 'dest-edit', d.cid + '::' + d.did)} ${actionBtn('Advanced', 'dest-advanced', d.cid + '::' + d.did)} ${actionBtn('Delete', 'dest-delete', d.cid + '::' + d.did, 'danger-btn mini')}</div></td></tr>`; }).join(''); const liveNote = liveDestinationHealth ? `<p class="subtle">Live YARP snapshot checked ${esc(liveDestinationHealthAt)} · single local process. Unsaved changes do not affect this runtime snapshot.</p>` : '<p class="subtle">Runtime health has not been inspected in this session.</p>'; return `<div class="toolbar"><div><h2>Backend servers (destinations)</h2><p class="subtle">Each application route points to its own cluster. Runtime health is per gateway; draining is a reviewed configuration change.</p></div>${actionBtn('Inspect live health', 'runtime-health', '')} ${actionBtn('+ Add backend', 'dest-add', '')}</div>${liveNote}<div class="tablewrap"><table><thead><tr><th>Destination / pool</th><th>Address</th><th>Traffic state</th><th>Runtime health and actions</th></tr></thead><tbody>${rows || '<tr><td colspan="4" class="empty">No backend servers. Add a website first, or add a server to an existing backend group.</td></tr>'}</tbody></table></div><div class="healthbanner">Drain removes a destination from new-request selection after an approved config rollout; in-flight requests continue. A host match separates routes, but private API access still requires a restricted listener and firewall policy. Runtime health is an authenticated, point-in-time view of this process only.</div>`; }
 async function refreshDestinationRuntime() { try {
     const r = await api('/admin/api/runtime/destinations');
@@ -1294,6 +1354,14 @@ function updateDest(id = '') {
     });
 }
 function act(type, id) {
+    if (type === 'monitor-edit') {
+        editActiveMonitor(id);
+        return;
+    }
+    if (type === 'monitor-copy') {
+        copyActiveMonitor(id);
+        return;
+    }
     if (type === 'invite-add') {
         inviteEmployee();
         return;
