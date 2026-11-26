@@ -125,30 +125,64 @@ catch (e) {
     show(String(e), true);
 } }
 function edit() { dirty = true; render(); }
+function reasonDialog(title, help, minimum, label, perform) {
+    modal(title, help, [{ name: 'reason', label: 'Reason (' + minimum + '–500 characters)', value: '', minLength: minimum }], () => { }, label);
+    const dlg = $('modal');
+    const form = $('editor');
+    const input = $('f-reason');
+    const confirmButton = $('confirm');
+    const closeButton = $('modal-close');
+    const cancelButton = form.querySelector('button[value="cancel"]');
+    const error = document.createElement('p');
+    error.className = 'journey-error';
+    error.setAttribute('role', 'alert');
+    $('modal-fields').append(error);
+    input.maxLength = 500;
+    let pending = false;
+    const generation = authGeneration;
+    dlg.oncancel = e => { if (pending)
+        e.preventDefault(); };
+    form.onsubmit = async e => {
+        if (e.submitter?.getAttribute('value') === 'cancel' && !pending)
+            return;
+        e.preventDefault();
+        if (pending)
+            return;
+        const reason = input.value.trim();
+        if (reason.length < minimum || reason.length > 500) {
+            error.textContent = 'Enter a reason of ' + minimum + '–500 characters.';
+            return;
+        }
+        pending = true;
+        confirmButton.disabled = closeButton.disabled = cancelButton.disabled = true;
+        error.textContent = '';
+        try {
+            await perform(reason);
+            if (generation === authGeneration && dlg.open)
+                dlg.close();
+        }
+        catch (err) {
+            if (generation === authGeneration)
+                error.textContent = String(err);
+        }
+        finally {
+            pending = false;
+            confirmButton.disabled = closeButton.disabled = cancelButton.disabled = false;
+            dlg.oncancel = null;
+        }
+    };
+}
 async function save() {
     if (!dirty || currentRole === 'Viewer')
         return;
-    modal('Submit configuration for approval', 'Your draft contains ' + keys(data.routes).length + ' route(s) and ' + keys(data.clusters).length + ' backend group(s). Nothing goes live until a different authorized administrator approves this exact revision.', [
-        { name: 'reason', label: 'Reason for this change (12–500 characters)', value: '', minLength: 12 }
-    ], v => {
-        const reason = String(v.reason).trim();
-        if (reason.length < 12 || reason.length > 500)
-            throw Error('Enter a change reason of 12–500 characters.');
-        void submitDraft(reason);
-    }, 'Submit request');
-}
-async function submitDraft(reason) {
-    try {
+    reasonDialog('Submit configuration for approval', 'Your draft contains ' + keys(data.routes).length + ' route(s) and ' + keys(data.clusters).length + ' backend group(s). Nothing goes live until a different authorized administrator approves this exact revision.', 12, 'Submit request', async reason => {
         const x = await api('/admin/api/change-requests', 'POST', { reason, payload: { routes: data.routes, clusters: data.clusters, disabled: data.disabled, revision: data.revision } });
         dirty = false;
         await reload();
         view = 'approvals';
         render();
         show('Request ' + x.id + ' submitted for independent approval. No live routing changed.');
-    }
-    catch (e) {
-        show(String(e), true);
-    }
+    });
 }
 function actionBtn(text, action, id, klass = 'small-btn mini') { return `<button class="${klass}" data-action="${esc(action)}" data-id="${esc(id)}">${esc(text)}</button>`; }
 function destinationRows() { const arr = []; for (const cid of keys(data.clusters)) {
@@ -212,6 +246,8 @@ function changeReview(r) {
 async function approvals() {
     try {
         const items = await api('/admin/api/change-requests');
+        if (view !== 'approvals')
+            return;
         const rows = items.map((x) => `<tr><td class="mono">${esc(x.id)}</td><td>${esc(x.requestedBy)}</td><td>${esc(x.changeReason)}</td><td>${esc(x.routeCount)} / ${esc(x.clusterCount)}</td><td><span class="chip ${x.status === 'Approved' ? 'good' : x.status === 'Rejected' ? 'bad' : ''}">${esc(x.status)}</span></td><td>${esc(x.reviewedBy || '—')}</td><td>${actionBtn('Review full draft', 'approval-review', x.id)} </td></tr>`).join('');
         $('content').innerHTML = `<div class="toolbar"><div><h2>Two-person configuration approval</h2><p class="subtle">Submitting a change does not update live routing. A different Administrator must approve the exact saved draft; revision conflicts block outdated submissions.</p></div></div><div class="tablewrap"><table><thead><tr><th>Request</th><th>Requester</th><th>Reason</th><th>Routes / Clusters</th><th>Status</th><th>Reviewer</th><th>Actions</th></tr></thead><tbody>${rows || '<tr><td colspan="7" class="empty">No change requests submitted. Create or edit a website, then select Submit for approval.</td></tr>'}</tbody></table></div>`;
     }
@@ -396,13 +432,13 @@ async function setupPage() {
         const configured = x.stages.filter(s => ['configured', 'design-confirmed'].includes(s.status)).length;
         $('content').innerHTML = `<div class="setup-hero card"><div><div class="setup-eyebrow">FIRST-RUN BOOTSTRAP & OPERATIONS</div><h2>Set up your YARP gateway</h2><p>Follow the setup checklist. Advanced checks are available when needed.</p><span class="chip">Version ${esc(x.version)} · ${esc(x.channel)}</span><span class="chip">${esc(x.gateway)}</span></div><div class="setup-score"><strong>${configured}/${x.stages.length}</strong><span>Configured setup controls, not a production-readiness score</span></div></div>
    <div class="setup-alert">${x.freeze.frozen ? `<b>Routing change freeze is ON.</b> ${esc(x.freeze.reason)}` : `<b>Routing changes are allowed with approval.</b> A local emergency freeze can stop route/change operations.`} ${currentRole === 'Administrator' ? `<button class="ghost mini" data-action="setup-toggle-freeze" data-id="${x.freeze.frozen ? 'off' : 'on'}">${x.freeze.frozen ? 'Unfreeze' : 'Freeze routing changes'}</button>` : ''}</div>
-   <div class="card operator-intro"><h2>Start with a website</h2><p><b>Next: ${esc(nextTask)}</b></p><div class="operator-next">${nextButton}</div><p class="journey-role"><b>Your role: ${esc(currentRole)}</b> · ${currentRole==='Administrator'?'Configure the gateway and review other people’s changes.':currentRole==='Operator'?'Prepare configuration drafts and request approval. An administrator owns setup and approvals.':'Read status and documentation. Ask an administrator to configure the gateway.'}</p><p>Follow the steps in order. Creating a draft never changes live traffic.</p><div class="operator-flow"><span>Client</span><span aria-hidden="true">→</span><span>GatewayCore</span><span aria-hidden="true">→</span><span>Backend servers</span></div></div><div class="journey-checklist" aria-label="Setup checklist">
-   <section><b>1. Organization</b><span class="chip ${orgProfile?.organizationName?'good':'warn'}">${orgProfile?.organizationName?'Saved':'Required'}</span><p>Identify the company and environment.</p></section>
-   <section><b>2. Gateway design</b><span class="chip ${x.topologyConfirmed?'good':'warn'}">${x.topologyConfirmed?'Confirmed':'Required'}</span><p>Single gateway or HA design; this does not deploy a VIP.</p></section>
-   <section><b>3. Approval team</b><span class="chip ${x.activeAdministratorCount>=2?'good':'warn'}">${x.activeAdministratorCount>=2?'Accounts configured':'Needs attention'}</span><p>${esc(String(x.activeAdministratorCount??'Unknown'))} enabled administrators. Verify the second administrator can sign in before approving changes.</p></section>
-   <section><b>4. Application configuration</b><span class="chip ${dirty?'warn':x.routeCount>0?'good':'warn'}">${dirty?'Draft — not live':x.routeCount>0?'Routes configured':'Not configured'}</span><p>Submit a reviewed draft before testing traffic.</p></section>
+   <div class="card operator-intro"><h2>Start with a website</h2><p><b>Next: ${esc(nextTask)}</b></p><div class="operator-next">${nextButton}</div><p class="journey-role"><b>Your role: ${esc(currentRole)}</b> · ${currentRole === 'Administrator' ? 'Configure the gateway and review other people’s changes.' : currentRole === 'Operator' ? 'Prepare configuration drafts and request approval. An administrator owns setup and approvals.' : 'Read status and documentation. Ask an administrator to configure the gateway.'}</p><p>Follow the steps in order. Creating a draft never changes live traffic.</p><div class="operator-flow"><span>Client</span><span aria-hidden="true">→</span><span>GatewayCore</span><span aria-hidden="true">→</span><span>Backend servers</span></div></div><div class="journey-checklist" aria-label="Setup checklist">
+   <section><b>1. Organization</b><span class="chip ${orgProfile?.organizationName ? 'good' : 'warn'}">${orgProfile?.organizationName ? 'Saved' : 'Required'}</span><p>Identify the company and environment.</p></section>
+   <section><b>2. Gateway design</b><span class="chip ${x.topologyConfirmed ? 'good' : 'warn'}">${x.topologyConfirmed ? 'Confirmed' : 'Required'}</span><p>Single gateway or HA design; this does not deploy a VIP.</p></section>
+   <section><b>3. Approval team</b><span class="chip ${x.activeAdministratorCount >= 2 ? 'good' : 'warn'}">${x.activeAdministratorCount >= 2 ? 'Accounts configured' : 'Needs attention'}</span><p>${esc(String(x.activeAdministratorCount ?? 'Unknown'))} enabled administrators. Verify the second administrator can sign in before approving changes.</p></section>
+   <section><b>4. Application configuration</b><span class="chip ${dirty ? 'warn' : x.routeCount > 0 ? 'good' : 'warn'}">${dirty ? 'Draft — not live' : x.routeCount > 0 ? 'Routes configured' : 'Not configured'}</span><p>Submit a reviewed draft before testing traffic.</p></section>
    <section><b>5. Verify traffic</b><span class="chip">Manual evidence required</span><p>Check actual backend health and make a client request. Never assume configuration equals availability.</p></section>
-   </div><div class="operator-steps"><section class="card"><span class="operator-number">1</span><h3>Gateway setup</h3><p>Set your organization and choose one gateway or a multi-gateway design.</p><button class="ghost" data-action="setup-open" data-id="organization">Organization</button> <button class="ghost" data-action="setup-open" data-id="onboarding">Gateway architecture</button></section><section class="card"><span class="operator-number">2</span><h3>Prepare your approval team</h3><p>Set up a separate authorized administrator to review changes. Never share accounts or passwords. Verify that both people can sign in.</p>${currentRole==='Administrator'?actionBtn('Manage admin accounts','setup-open','users','ghost'):'<p class="subtle">Ask your administrator to complete this step.</p>'}</section><section class="card"><span class="operator-number">3</span><h3>Add a website or API</h3><p>Enter a hostname and backend URL. For a local test use an existing IIS, Apache or Nginx site.</p><button class="primary" data-action="setup-simple-website">+ Add website / API</button> <button class="ghost" data-action="setup-local-web">Local website test</button></section><section class="card"><span class="operator-number">4</span><h3>Review and approve</h3><p>Check your draft, submit it, then ask a different administrator to approve.</p><button class="ghost" data-action="setup-open" data-id="routes">Review websites &amp; routes</button> <button class="ghost" data-action="setup-open" data-id="approvals">Change requests</button></section><section class="card"><span class="operator-number">5</span><h3>Verify live traffic</h3><p>After approval, inspect health and test real requests. Unknown is not healthy.</p><button class="ghost" data-action="setup-live-health">Check backend health</button> <button class="ghost" data-action="setup-open" data-id="metrics">Traffic metrics</button></section></div><div class="operator-help"><button class="ghost" data-action="setup-open" data-id="guide">Read the step-by-step user guide →</button></div><details class="card operator-advanced"><summary>Advanced setup &amp; deployment evidence</summary><div class="setup-summary"><div class="card"><b>${x.routeCount}</b><span>Routes</span></div><div class="card"><b>${x.clusterCount}</b><span>Clusters</span></div><div class="card"><b>${x.destinationCount}</b><span>Enabled backend entries</span></div><div class="card"><b>${x.fleetEntries}</b><span>Gateway agent records</span></div></div>
+   </div><div class="operator-steps"><section class="card"><span class="operator-number">1</span><h3>Gateway setup</h3><p>Set your organization and choose one gateway or a multi-gateway design.</p><button class="ghost" data-action="setup-open" data-id="organization">Organization</button> <button class="ghost" data-action="setup-open" data-id="onboarding">Gateway architecture</button></section><section class="card"><span class="operator-number">2</span><h3>Prepare your approval team</h3><p>Set up a separate authorized administrator to review changes. Never share accounts or passwords. Verify that both people can sign in.</p>${currentRole === 'Administrator' ? actionBtn('Manage admin accounts', 'setup-open', 'users', 'ghost') : '<p class="subtle">Ask your administrator to complete this step.</p>'}</section><section class="card"><span class="operator-number">3</span><h3>Add a website or API</h3><p>Enter a hostname and backend URL. For a local test use an existing IIS, Apache or Nginx site.</p><button class="primary" data-action="setup-simple-website">+ Add website / API</button> <button class="ghost" data-action="setup-local-web">Local website test</button></section><section class="card"><span class="operator-number">4</span><h3>Review and approve</h3><p>Check your draft, submit it, then ask a different administrator to approve.</p><button class="ghost" data-action="setup-open" data-id="routes">Review websites &amp; routes</button> <button class="ghost" data-action="setup-open" data-id="approvals">Change requests</button></section><section class="card"><span class="operator-number">5</span><h3>Verify live traffic</h3><p>After approval, inspect health and test real requests. Unknown is not healthy.</p><button class="ghost" data-action="setup-live-health">Check backend health</button> <button class="ghost" data-action="setup-open" data-id="metrics">Traffic metrics</button></section></div><div class="operator-help"><button class="ghost" data-action="setup-open" data-id="guide">Read the step-by-step user guide →</button></div><details class="card operator-advanced"><summary>Advanced setup &amp; deployment evidence</summary><div class="setup-summary"><div class="card"><b>${x.routeCount}</b><span>Routes</span></div><div class="card"><b>${x.clusterCount}</b><span>Clusters</span></div><div class="card"><b>${x.destinationCount}</b><span>Enabled backend entries</span></div><div class="card"><b>${x.fleetEntries}</b><span>Gateway agent records</span></div></div>
    <div class="toolbar"><div><h2>Bootstrap checklist</h2><p class="subtle">“Configured” is not the same as operationally tested or production certified.</p></div><div><button class="ghost" data-action="setup-add-esign-pools">Advanced public / private pools (eSign preset)</button> <button class="ghost" data-action="setup-add-application">Advanced public HTTPS application</button> <button class="ghost" data-action="setup-refresh">Refresh evidence</button></div></div>
    <div class="setup-stage-grid">${x.stages.map((s, i) => `<div class="card setup-stage"><div class="setup-stage-head"><span class="setup-number">${String(i + 1).padStart(2, '0')}</span><span class="chip ${readyClass(s.status)}">${esc(s.status.replace(/-/g, ' '))}</span></div><h3>${esc(s.title)}</h3><p>${esc(s.evidence)}</p><button class="ghost mini" data-action="setup-open" data-id="${esc(s.action)}">${esc(setupActionText(s))} →</button></div>`).join('')}</div>
    </details><div class="grid2"><div class="card"><h3>Live YARP health states</h3><p class="subtle">Queries YARP's internal active/passive destination states. Unknown means the policy has not classified the backend.</p><p>Use Check backend health in step 5 to refresh this result.</p><div id="setup-live-output" class="setup-live-output">No runtime query made yet.</div></div><div class="card"><h3>Production safety gates</h3><p class="subtle">The following are not magically provisioned by this setup page:</p><ul class="setup-bullets"><li>Remote gateway agents, mTLS and network admission</li><li>AD/SMTP delivery and phishing-resistant SSO</li><li>Independent immutable audit retention</li><li>OCSP/CRL and CA issuance failover acceptance</li></ul><p class="subtle">The console deliberately refuses to call this instance production certified.</p></div></div>`;
@@ -996,12 +1032,13 @@ function act(type, id) {
         return;
     }
     if (type === 'approval-approve' || type === 'approval-reject') {
-        modal(type === 'approval-approve' ? 'Approve configuration' : 'Reject configuration', 'This decision applies to the exact saved request. Approving may change live routing. Verify the configuration and operational change window before continuing.', [{ name: 'reason', label: 'Independent review note (10–500 characters)', value: '', minLength: 10 }], v => {
-            const reason = String(v.reason).trim();
-            if (reason.length < 10 || reason.length > 500)
-                throw Error('Enter a review note of 10–500 characters.');
-            void api('/admin/api/change-requests/' + encodeURIComponent(id) + '/decision', 'POST', { decision: type === 'approval-approve' ? 'approve' : 'reject', reason }).then(async (r) => { await reload(); view = 'approvals'; render(); show('Request ' + r.status); }).catch(e => show(String(e), true));
-        }, type === 'approval-approve' ? 'Approve request' : 'Reject request');
+        reasonDialog(type === 'approval-approve' ? 'Approve configuration' : 'Reject configuration', 'This decision applies to the exact saved request. Approving may change live routing. Verify the configuration and operational change window before continuing.', 10, type === 'approval-approve' ? 'Approve request' : 'Reject request', async reason => {
+            const r = await api('/admin/api/change-requests/' + encodeURIComponent(id) + '/decision', 'POST', { decision: type === 'approval-approve' ? 'approve' : 'reject', reason });
+            await reload();
+            view = 'approvals';
+            render();
+            show('Request ' + r.status);
+        });
         return;
     }
     if (type === 'route-advanced' || type === 'cluster-advanced' || type === 'dest-advanced') {

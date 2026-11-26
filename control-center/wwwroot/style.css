@@ -292,3 +292,15 @@ dialog{border-color:#4a607a;box-shadow:0 24px 85px rgba(0,0,0,.75)}
 @media(max-width:520px){.first-run-screen{padding:20px 12px}.first-run-progress{grid-template-columns:repeat(2,minmax(0,1fr))}.first-run-pair{grid-template-columns:1fr}.first-run-actions button{flex:1}}
 
 .operator-next{margin:12px 0 16px}
+
+/* First shift: show completion evidence and the next action, not a dense score. */
+.journey-checklist{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px;margin:16px 0}
+.journey-checklist section{min-width:0;background:#142338;border:1px solid #30455e;border-radius:10px;padding:14px;display:flex;flex-direction:column;align-items:flex-start;gap:9px}
+.journey-checklist section b{font-size:14px}
+.journey-checklist section p{font-size:12px;line-height:1.55;margin:0;color:#b9ccdf}
+.journey-role{border-top:1px solid #36506a;padding-top:12px}
+.journey-error{color:#f5cc8b;line-height:1.5;margin:8px 0}
+.journey-error:empty{display:none}
+@media(max-width:1250px){.journey-checklist{grid-template-columns:repeat(3,minmax(0,1fr))}}
+@media(max-width:720px){.journey-checklist{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:420px){.journey-checklist{grid-template-columns:1fr}}
