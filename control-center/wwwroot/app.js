@@ -207,7 +207,7 @@ function adcServiceMap() {
     for (const id of keys(data.routes)) {
         const route = data.routes[id];
         const groupId = String(route.ClusterId || '');
-        const group = Object.hasOwn(data.clusters, groupId) ? data.clusters[groupId] : null;
+        const group = Object.prototype.hasOwnProperty.call(data.clusters, groupId) ? data.clusters[groupId] : null;
         const groupMembers = members.filter(d => d.cid === groupId);
         const servers = groupMembers.map(d => `<li><strong>${esc(d.did)}</strong><span class="mono">${esc(d.address)}</span><span class="chip">${d.enabled ? esc(d.trafficState) : 'Disabled'} · weight ${esc(d.weight)}</span></li>`).join('');
         services.push(`<article class="adc-service"><div><strong>${esc(id)}</strong><div class="subtle">${esc((route.Match?.Hosts || []).join(', ') || 'Any host')}</div><div class="mono">${esc(route.Match?.Path || 'Any path')}</div></div><div><strong>${esc(groupId || 'Missing group')}</strong><div class="subtle">${group ? esc(group.LoadBalancingPolicy || 'Default') : 'Unresolved group reference'}</div><div class="subtle">${group ? groupMembers.length + ' configured members' : 'Resolve before approval'}</div></div><div><ul class="adc-members">${servers || '<li>No configured destinations</li>'}</ul></div></article>`);
@@ -218,7 +218,7 @@ function adcServiceMap() {
 function overview() { let routes = keys(data.routes).slice(0, 5).map(id => `<div class="rowline"><div><b>${esc(id)}</b><div class="subtle mono">${esc(data.routes[id]?.Match?.Path || '—')}</div></div><span class="chip">${esc(data.routes[id]?.ClusterId || '—')}</span></div>`).join('') || '<div class="empty">No routes configured</div>'; let nodes = destinationRows().slice(0, 6).map(d => `<div class="rowline"><div><b>${esc(d.did)}</b><div class="subtle mono">${esc(d.address)}</div></div><span class="chip ${d.enabled ? '' : 'bad'}">${d.enabled ? 'Configured' : 'Disabled'}</span></div>`).join('') || '<div class="empty">No destinations configured</div>'; return summary() + adcServiceMap() + `<div class="grid2"><div class="card"><div class="flex"><h2 class="section-title">Traffic architecture</h2><span class="chip">Design view</span></div><div class="arch"><div class="archnode">Clients / Public & internal ingress</div><div class="arrow">↓</div><div class="archnode">Firewall / upstream HA VIP</div><div class="arrow">↓</div><div class="archnode accent">${esc(topologyModeName(topologyResponse?.plan?.mode || 'standalone'))} (design topology)</div><div class="arrow">↓</div><div class="twonodes"><div class="archnode">Backend node 01</div><div class="archnode">Backend node 02</div></div><div class="arrow">↓</div><div class="archnode">Application-specific data services (optional)</div></div><div class="healthbanner">This gateway is one running instance. The onboarding design is metadata, not proof that a gateway fleet, VIP or backend is healthy.</div></div><div><div class="card"><h2 class="section-title">Route snapshot</h2>${routes}${actionBtn('Manage routes', 'switch', 'routes')}</div><div class="card card-spaced"><h2 class="section-title">Destinations</h2>${nodes}${actionBtn('Manage backends', 'switch', 'backends')}</div></div></div>`; }
 function routes() { const rows = keys(data.routes).map(id => { const r = data.routes[id]; return `<tr><td><b>${esc(id)}</b></td><td class="mono">${esc((r.Match?.Hosts || []).join(', ') || 'Any host')}</td><td class="mono">${esc(r.Match?.Path)}</td><td>${esc(r.ClusterId)}</td><td>${actionBtn('Edit', 'route-edit', id)} ${actionBtn('Advanced', 'route-advanced', id)} ${actionBtn('Delete', 'route-delete', id, 'danger-btn mini')}</td></tr>`; }).join(''); return `<div class="toolbar"><div><h2>Websites &amp; routes</h2><p class="subtle">A route matches the client hostname and path, then forwards to a backend group (cluster). Draft changes need approval.</p></div>${actionBtn('+ Add website / API', 'setup-simple-website', '', 'primary')} ${actionBtn('Advanced: add route', 'route-add', '')}</div><div class="tablewrap"><table><thead><tr><th>Route ID</th><th>Hosts</th><th>Path</th><th>Cluster</th><th>Actions</th></tr></thead><tbody>${rows || '<tr><td colspan="5" class="empty">No routes configured. Use Add website / API to create your first draft.</td></tr>'}</tbody></table></div>`; }
 function editActiveMonitor(id) {
-    if (currentRole === 'Viewer' || !Object.hasOwn(data.clusters, id))
+    if (currentRole === 'Viewer' || !Object.prototype.hasOwnProperty.call(data.clusters, id))
         return show('An authorized existing service group is required', true);
     const cluster = data.clusters[id];
     const old = cluster.HealthCheck?.Active || {};
@@ -252,13 +252,13 @@ function editActiveMonitor(id) {
     });
 }
 function copyActiveMonitor(id) {
-    if (currentRole === 'Viewer' || !Object.hasOwn(data.clusters, id))
+    if (currentRole === 'Viewer' || !Object.prototype.hasOwnProperty.call(data.clusters, id))
         return show('An authorized existing service group is required', true);
     const candidates = keys(data.clusters).filter(key => key !== id && data.clusters[key].HealthCheck?.Active?.Enabled === true && ['ConsecutiveFailures', 'RiseFall'].includes(data.clusters[key].HealthCheck.Active.Policy || 'ConsecutiveFailures'));
     if (!candidates.length)
         return show('No other group has an enabled supported HTTP monitor.', true);
     modal('Reuse existing HTTP monitor', 'Copies the active health monitor and three threshold settings into this draft. It is a snapshot, not a live shared profile. Verify the same readiness path on every target server.', [{ name: 'source', label: 'Copy from service group', value: candidates[0], options: candidates }], v => {
-        if (!candidates.includes(v.source) || !Object.hasOwn(data.clusters, id))
+        if (!candidates.includes(v.source) || !Object.prototype.hasOwnProperty.call(data.clusters, id))
             throw Error('Invalid monitor source.');
         const source = data.clusters[v.source];
         const target = data.clusters[id];
@@ -268,7 +268,7 @@ function copyActiveMonitor(id) {
         target.HealthCheck = { ...target.HealthCheck, Active: JSON.parse(JSON.stringify(active)) };
         const metadata = { ...(target.Metadata || {}) };
         for (const key of ['RiseFall.Rise', 'RiseFall.Fall', 'ConsecutiveFailuresHealthPolicy.Threshold']) {
-            if (Object.hasOwn(source.Metadata || {}, key))
+            if (Object.prototype.hasOwnProperty.call(source.Metadata || {}, key))
                 metadata[key] = source.Metadata[key];
             else
                 delete metadata[key];
