@@ -57,6 +57,19 @@ test('browser: bootstrap, navigation, onboarding, websites, route edit, users an
     await openNav('setup');
   });
 
+  await test.step('New employee completes organization from the next-step card',async()=>{
+    await expect(page.locator('.journey-checklist')).toBeVisible();
+    await expect(page.locator('.operator-next')).toContainText('Configure organization');
+    await page.locator('.operator-next button').click();
+    await page.locator('[data-action="org-edit"]').click();
+    await page.locator('#f-name').fill('Example Operations');
+    await page.locator('#f-region').fill('Lab');
+    await page.locator('#confirm').click();
+    await expect(page.locator('.operator-next')).toContainText('Choose gateway architecture');
+    await expect(page.locator('.journey-checklist section').first()).toContainText('Saved');
+    await expect(page.locator('.sidebar [data-organization-name]')).toHaveText('Example Operations');
+  });
+
   await test.step('Architecture has working back and hosting choices',async()=>{
     await openNav('onboarding');
     await expect(page.locator('#content')).toContainText('Gateway onboarding');
@@ -70,29 +83,17 @@ test('browser: bootstrap, navigation, onboarding, websites, route edit, users an
     await expect(page.locator('#page-title')).toContainText('Setup Center');
   });
 
-  // Seed ONLY the architecture metadata through the real authenticated API
-  // so this UI test can exercise the independent websites/forms. The separate
-  // HTTP E2E test already checks revision conflicts and RBAC for this endpoint.
-  await page.evaluate(async () => {
-    const session=await (await fetch('/admin/api/session')).json();
-    const current=await (await fetch('/admin/api/onboarding')).json();
-    const plan={
-      mode:'standalone',controlPlane:'local',dataStore:'local-file',
-      accessPattern:'segmented',
-      gateways:[{id:'browser-gateway',hostname:'127.0.0.1',agentUrl:''}],
-      workloads:[{id:'browser-origin',application:'browser-site',
-        url:'http://127.0.0.1/',zone:'public',hostingEngine:'iis'}]
-    };
-    const r=await fetch('/admin/api/onboarding',{
-      method:'POST',credentials:'same-origin',
-      headers:{'Content-Type':'application/json','X-CSRF-Token':session.csrf},
-      body:JSON.stringify({plan,expectedRevision:current.revision,confirmDesign:true})
-    });
-    if(!r.ok)throw Error('Real API topology confirmation failed: '+r.status+': '+await r.text());
+  await test.step('Confirm single-gateway design using the real guided workflow',async()=>{
+    await openNav('onboarding');
+    await page.locator('[data-action="setup-quick-lab"]').click();
+    await expect(page.locator('[data-action="setup-confirm"]')).toBeVisible();
+    await page.locator('[data-action="setup-confirm"]').click();
+    await expect(page.locator('.journey-checklist')).toBeVisible();
+    await expect(page.locator('.operator-next')).toContainText('Prepare a second administrator');
+    await expect(page.locator('.journey-checklist section').nth(1)).toContainText('Confirmed');
+    const design=await page.evaluate(async()=>await (await fetch('/admin/api/onboarding')).json());
+    expect(design.status).toBe('design-confirmed');
   });
-  await page.reload({waitUntil:'domcontentloaded'});
-  await expect(page.locator('#app-shell')).toBeVisible();
-  await openNav('setup');
 
   await test.step('Simple website form creates an approval-only single-server draft',async()=>{
     await page.locator('[data-action="setup-simple-website"]').click();
@@ -336,6 +337,55 @@ test('browser: bootstrap, navigation, onboarding, websites, route edit, users an
     expect(await page.evaluate(async()=> (await (await fetch('/admin/api/session')).json()).privacyAccepted)).toBe(false);
     await page.locator('#privacy-accept').click();
     await expect(page.locator('#app-shell')).toBeVisible();
+  });
+
+  await test.step('Two distinct administrators submit and review a website using guided dialogs',async()=>{
+    await page.setViewportSize({width:1280,height:900});
+    await openNav('users');
+    await page.locator('[data-action="user-add"]').click();
+    await page.locator('#f-username').fill('browser_reviewer');
+    await page.locator('#f-role').selectOption('Administrator');
+    await page.locator('#f-email').fill('reviewer@example.invalid');
+    await page.locator('#f-password').fill('Browser-reviewer-long-pass!');
+    await page.locator('#confirm').click();
+    await expect(page.locator('#content')).toContainText('browser_reviewer');
+    await openNav('setup');
+    await expect(page.locator('.journey-checklist section').nth(2)).toContainText('Accounts configured');
+    await page.locator('[data-action="setup-simple-website"]').click();
+    await page.locator('#f-id').fill('employee-site');
+    await page.locator('#f-hostname').fill('employee.example.invalid');
+    await page.locator('#f-backend1').fill('https://app.example.invalid/');
+    await page.locator('#confirm').click();
+    await page.locator('#save').click();
+    await expect(page.locator('#modal-title')).toHaveText('Submit configuration for approval');
+    await page.locator('#f-reason').fill('Add the employee test website');
+    await page.locator('#confirm').click();
+    await expect(page.locator('#modal')).toBeHidden();
+    await expect(page.locator('#content')).toContainText('Add the employee test website');
+    await page.locator('[data-action="approval-review"]').first().click();
+    await expect(page.locator('#content')).toContainText('Proposed websites and routes');
+    await expect(page.locator('#content')).toContainText('Your request is waiting for a different authorized administrator');
+    await expect(page.locator('[data-action="approval-approve"]')).toHaveCount(0);
+    expect(await page.evaluate(async()=> (await (await fetch('/admin/api/state')).json()).routes['employee-site-route'])).toBeUndefined();
+    await page.locator('#logout').click();
+    await expect(page.locator('#auth-screen')).toBeVisible();
+    await page.locator('#auth-username').fill('browser_reviewer');
+    await page.locator('#auth-password').fill('Browser-reviewer-long-pass!');
+    await page.locator('#auth-submit').click();
+    await expect(page.locator('#privacy-screen')).toBeVisible();
+    await page.locator('#privacy-accept').click();
+    await expect(page.locator('#app-shell')).toBeVisible();
+    await openNav('approvals');
+    await page.locator('[data-action="approval-review"]').first().click();
+    await expect(page.locator('#content')).toContainText('employee.example.invalid');
+    await page.locator('[data-action="approval-approve"]').click();
+    await expect(page.locator('#modal-title')).toHaveText('Approve configuration');
+    await page.locator('#f-reason').fill('Reviewed the exact saved draft');
+    await page.locator('#confirm').click();
+    await expect(page.locator('#modal')).toBeHidden();
+    await expect(page.locator('#content')).toContainText('Approved');
+    const active=await page.evaluate(async()=>await (await fetch('/admin/api/state')).json());
+    expect(active.routes['employee-site-route'].ClusterId).toBe('employee-site-cluster');
   });
 
   expect(pageErrors,'Unhandled JavaScript exceptions in real Chromium').toEqual([]);
