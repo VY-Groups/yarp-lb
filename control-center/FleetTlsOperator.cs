@@ -28,7 +28,7 @@ internal static class FleetTlsOperator
     internal static FileStream OpenExclusive(string dir) =>
         new(Path.Combine(dir, "fleet-tls-operation.lock"), PrivateOptions(FileMode.OpenOrCreate));
 
-    private static T Read<T>(string path)
+    private static T Read<T>(string path) where T : class
     {
         var raw = PrivateKeyFileSecurity.ReadPrivateFileBytes(path, "Fleet TLS authority", 16384,
             requireSingleLink: true);

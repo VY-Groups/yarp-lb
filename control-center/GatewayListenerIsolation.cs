@@ -221,7 +221,7 @@ public sealed class GatewayListenerIsolation : IDisposable
             return 0;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException or
-            CryptographicException or ArgumentException or PlatformNotSupportedException)
+            InvalidDataException or CryptographicException or ArgumentException or PlatformNotSupportedException)
         {
             Console.Error.WriteLine("Listener bootstrap refused: " + ex.GetType().Name);
             return 78;

@@ -36,14 +36,14 @@ GatewayTelemetryLifecycleTests.Run();
         "certificate fleet quorum transaction is installation-bound");
     using var signer = ECDsa.Create(ECCurve.NamedCurves.nistP256);
     var pem = signer.ExportSubjectPublicKeyInfoPem();
-    var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-    var signed = FleetConfigSignature.SignV2(signer.ExportECPrivateKeyPem(), plan.TransactionId,
-        plan.ActiveDigest, plan.Payload("activate", ""), now + 120, plan.Epoch);
-    var grant = new FleetTlsGrant("activate", "", signed.KeyId, signed.Sequence,
-        signed.ExpiresUnixSeconds, signed.Signature);
-    Must(plan.Verify(grant, pem, now) && !other.Verify(grant, pem, now) &&
-        !plan.Verify(grant with { Purpose = "activated", EvidenceSha256 = new string('2', 64) }, pem, now) &&
-        !plan.Verify(grant, pem, now + 121),
+    var tlsGrantNow = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+    var tlsGrantSignature = FleetConfigSignature.SignV2(signer.ExportECPrivateKeyPem(), plan.TransactionId,
+        plan.ActiveDigest, plan.Payload("activate", ""), tlsGrantNow + 120, plan.Epoch);
+    var grant = new FleetTlsGrant("activate", "", tlsGrantSignature.KeyId, tlsGrantSignature.Sequence,
+        tlsGrantSignature.ExpiresUnixSeconds, tlsGrantSignature.Signature);
+    Must(plan.Verify(grant, pem, tlsGrantNow) && !other.Verify(grant, pem, tlsGrantNow) &&
+        !plan.Verify(grant with { Purpose = "activated", EvidenceSha256 = new string('2', 64) }, pem, tlsGrantNow) &&
+        !plan.Verify(grant, pem, tlsGrantNow + 121),
         "fleet TLS grant cannot authorize another installation, completion phase or expired epoch");
 }
 var linuxGslbCommand = GslbServiceRestart.Build(false, "/usr/bin/systemctl");
