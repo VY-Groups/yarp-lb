@@ -87,12 +87,20 @@ test('browser: bootstrap, navigation, onboarding, websites, route edit, users an
     await openNav('onboarding');
     await page.locator('[data-action="setup-quick-lab"]').click();
     await expect(page.locator('[data-action="setup-confirm"]')).toBeVisible();
+    await page.locator('[data-action="setup-step"][data-id="1"]').click();
+    await page.locator('[data-setup-array="gateways"][data-setup-property="site"]').selectOption('dc');
+    await page.locator('[data-action="setup-step"][data-id="2"]').click();
+    await page.locator('[data-setup-array="workloads"][data-setup-property="site"]').selectOption('dc');
+    await page.locator('[data-action="setup-step"][data-id="5"]').click();
+    await expect(page.locator('.specialist-topology')).toContainText('Primary data center (DC)');
     await page.locator('[data-action="setup-confirm"]').click();
     await expect(page.locator('.journey-checklist')).toBeVisible();
     await expect(page.locator('.operator-next')).toContainText('Prepare a second administrator');
     await expect(page.locator('.journey-checklist section').nth(1)).toContainText('Confirmed');
     const design=await page.evaluate(async()=>await (await fetch('/admin/api/onboarding')).json());
     expect(design.status).toBe('design-confirmed');
+    expect(design.plan.gateways[0].site).toBe('dc');
+    expect(design.plan.workloads[0].site).toBe('dc');
     const overview=await page.evaluate(async()=>await (await fetch('/admin/api/setup/overview')).json());
     expect(overview.topologyConfirmed).toBe(true);
     expect(overview.mode).toBe('standalone');
@@ -245,6 +253,31 @@ test('browser: bootstrap, navigation, onboarding, websites, route edit, users an
     await page.locator('#confirm').click();
     await expect(page.locator('#modal')).toBeHidden();
     await expect(page.locator('#content')).toContainText('browser_viewer');
+  });
+
+  await test.step('Specialist navigation, real certificate inventory and policy help',async()=>{
+    await openNav('tls');
+    await expect(page.locator('#content')).toContainText('Local certificate inventory');
+    await expect(page.locator('#content')).toContainText('Read-only local store');
+    const inventory=await page.evaluate(async()=>{const r=await fetch('/admin/api/tls/inventory');return {status:r.status,body:await r.json()}});
+    expect(inventory.status).toBe(200);
+    expect(Array.isArray(inventory.body.configuredEndpoints)).toBe(true);
+    await expect(page.locator('#context-help-text')).toContainText('certificate');
+    await openNav('waf');
+    await expect(page.locator('#content')).toContainText('No direct activation from this page');
+    await expect(page.locator('#content')).toContainText('signed two-node transaction');
+    await openNav('gslb');
+    await expect(page.locator('#content')).toContainText('separate authoritative engine');
+    await expect(page.locator('#content')).toContainText('Manual deployment evidence required');
+    await openNav('clusters');
+    await page.locator('details.operator-advanced summary').click();
+    await expect(page.locator('#content')).toContainText('Weighted capacity');
+    await page.locator('[data-action="cluster-edit"]').first().click();
+    await page.locator('#f-policy').selectOption('PrimaryBackup');
+    await expect(page.locator('#modal-help')).toContainText('explicit backend roles');
+    await page.locator('#f-policy').selectOption('SourceIpHash');
+    await expect(page.locator('#modal-help')).toContainText('trusted client-IP');
+    await page.locator('#modal-close').click();
   });
 
   await test.step('All major management screens render without JS exceptions',async()=>{

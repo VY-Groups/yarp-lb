@@ -52,3 +52,12 @@ The same guide is available inside the dashboard through **User guide**. No netw
 | Need rollback | Locate the correct backup and follow the documented recovery procedure with change authorization; do not delete protected state. |
 
 A new employee is ready to operate only after demonstrating the approved workflow with two distinct accounts and a real test request. Production traffic, VIP failover, capacity and recovery require separate physical acceptance.
+
+## Specialist workflows
+
+- **Configuration → Gateway architecture:** assign planned DC or DR sites to gateway hosts and application origins, inspect the design diagram and confirm it. Site labels are metadata only. Physical VIP/ECMP, distinct site trust, signed rollout, data replication and failback must be configured and verified independently.
+- **Configuration → Backend groups:** open the policy reference or Edit. Selecting a policy explains its purpose and constraints; review backend weights, roles and active readiness checks. Submit for independent approval; the wizard does not change live traffic.
+- **Security & accounts → Certificates & TLS:** authenticated local certificate inventory and configured listener references, with expiry and EKU information. Date validity alone is not chain validation or live certificate selection. Certificate installation, ACME, backend mTLS and trust-store mutation remain host-level approved operations. See `control-center/docs/ACME_IMPLEMENTATION_STATUS.md` and the listener/runbook documentation.
+- **Multi-gateway & modules → WAF policy workflow:** use the ordered signed policy, representative corpus, capacity and two-node rollback workflow. See `ops/waf/SIGNED_POLICY_ACCEPTANCE.md`, `ops/waf/CORPUS_EVIDENCE_GATE.md` and `ops/waf/REMOTE_FENCED_NODE.md`. No browser policy activation is provided.
+- **Multi-gateway & modules → DNS & GSLB workflow:** plan zone, addresses, trust and observer quorum, then use the existing signed agent and DNS tooling. The multi-gateway view can open authenticated GSLB agent status. See `engines/GslbDns/README.md`. Actual delegation and direct DNS acceptance remain external.
+- Each management page has a collapsible **Help with this page** section. It explains the purpose and what evidence to verify. The local account creation and OTP enrollment flows are unchanged; invitation-based employee self-registration is not implemented by these changes.
