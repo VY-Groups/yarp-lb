@@ -176,7 +176,7 @@ async function save() {
     if (!dirty || currentRole === 'Viewer')
         return;
     reasonDialog('Submit configuration for approval', 'Your draft contains ' + keys(data.routes).length + ' route(s) and ' + keys(data.clusters).length + ' backend group(s). Nothing goes live until a different authorized administrator approves this exact revision.', 12, 'Submit request', async (reason) => {
-        const x = await api('/admin/api/change-requests', 'POST', { reason, payload: { routes: data.routes, clusters: data.clusters, disabled: data.disabled, monitorProfiles: data.monitorProfiles || {}, revision: data.revision } });
+        const x = await api('/admin/api/change-requests', 'POST', { reason, payload: { routes: data.routes, clusters: data.clusters, disabled: data.disabled, monitorProfiles: data.monitorProfiles || {}, realServers: data.realServers || {}, revision: data.revision } });
         dirty = false;
         await reload();
         view = 'approvals';
@@ -447,7 +447,79 @@ function monitorRegistryPanel() {
     return `<div class="card"><div class="toolbar"><div><h2>Reusable monitor profiles</h2><p class="subtle">Independent templates; assign a snapshot to a service group. All changes require approval.</p></div>${currentRole === 'Viewer' ? '' : actionBtn('+ Create monitor profile', 'profile-add', '')}</div><div class="tablewrap"><table><thead><tr><th>Profile</th><th>Readiness path</th><th>Mode</th><th>Interval / timeout</th><th>Actions</th></tr></thead><tbody>${rows || '<tr><td colspan="5">No reusable profiles</td></tr>'}</tbody></table></div></div>`;
 }
 function clusters() { const rows = keys(data.clusters).map(id => { const c = data.clusters[id]; const active = !!c.HealthCheck?.Active?.Enabled, passive = !!c.HealthCheck?.Passive?.Enabled; const health = active && passive ? '<span class="chip good">Active + passive</span>' : active ? '<span class="chip good">Active</span>' : passive ? '<span class="chip warn">Passive only</span>' : '<span class="chip">Disabled</span>'; return `<tr><td><b>${esc(id)}</b></td><td>${esc(c.LoadBalancingPolicy || 'Default')}</td><td>${keys(c.Destinations || {}).length}</td><td>${health}${c.Metadata?.[monitorSourceKey] ? `<div class="subtle">Linked to ${esc(c.Metadata[monitorSourceKey])}</div>` : ""}</td><td>${actionBtn('Edit', 'cluster-edit', id)} ${currentRole === 'Viewer' ? '' : actionBtn('Health monitor', 'monitor-edit', id) + ' ' + actionBtn('Reuse monitor', 'monitor-copy', id) + ' ' + actionBtn('Assign profile', 'profile-assign', id) + (c.Metadata?.[monitorSourceKey] ? ' ' + actionBtn('Unlink monitor', 'monitor-unlink', id) : '')} ${actionBtn('Advanced', 'cluster-advanced', id)} ${actionBtn('Delete', 'cluster-delete', id, 'danger-btn mini')}</td></tr>`; }).join(''); return `<div class="toolbar"><div><h2>Backend groups (clusters)</h2><p class="subtle">A group contains the servers for one application and defines traffic distribution. Use the policy guide below.</p></div>${actionBtn('+ Add cluster', 'cluster-add', '')}</div><div class="tablewrap"><table><thead><tr><th>Cluster</th><th>Policy</th><th>Active backends</th><th>Health checks</th><th>Actions</th></tr></thead><tbody>${rows || '<tr><td colspan="5" class="empty">No clusters configured</td></tr>'}</tbody></table></div>${policyReference()}${monitorRegistryPanel()}`; }
-function backends() { const rows = destinationRows().map(d => { const live = liveDestinationHealth?.find(x => x.clusterId === d.cid && x.destinationId === d.did); const configuredState = !d.enabled ? 'Disabled' : d.trafficState === 'draining' ? 'Draining' : 'Active'; const stateClass = configuredState === 'Active' ? 'good' : configuredState === 'Draining' ? 'warn' : 'bad'; const runtime = live ? `<span class="chip">A: ${esc(live.activeHealth || 'Unknown')}</span> <span class="chip">P: ${esc(live.passiveHealth || 'Unknown')}</span><div class="subtle">In-flight: ${esc(String(live.concurrentRequests ?? '—'))}</div>` : '<span class="subtle">Not inspected</span>'; const drainButton = d.enabled ? actionBtn(d.trafficState === 'draining' ? 'Restore traffic' : 'Drain new traffic', 'dest-drain', d.cid + '::' + d.did) : ''; return `<tr><td><b>${esc(d.did)}</b><div class="subtle">${esc(d.cid)} · weight ${esc(d.weight)} · ${esc(d.trafficRole)}</div></td><td class="mono">${esc(d.address)}</td><td><span class="chip ${stateClass}">${configuredState}</span><div class="subtle">Configured draft state; runtime health shown separately</div></td><td>${runtime}<div>${drainButton} ${actionBtn(d.enabled ? 'Disable' : 'Enable', 'dest-toggle', d.cid + '::' + d.did)} ${actionBtn('Edit', 'dest-edit', d.cid + '::' + d.did)} ${actionBtn('Advanced', 'dest-advanced', d.cid + '::' + d.did)} ${actionBtn('Delete', 'dest-delete', d.cid + '::' + d.did, 'danger-btn mini')}</div></td></tr>`; }).join(''); const liveNote = liveDestinationHealth ? `<p class="subtle">Live YARP snapshot checked ${esc(liveDestinationHealthAt)} · single local process. Unsaved changes do not affect this runtime snapshot.</p>` : '<p class="subtle">Runtime health has not been inspected in this session.</p>'; return `<div class="toolbar"><div><h2>Backend servers (destinations)</h2><p class="subtle">Each application route points to its own cluster. Runtime health is per gateway; draining is a reviewed configuration change.</p></div>${actionBtn('Inspect live health', 'runtime-health', '')} ${actionBtn('+ Add backend', 'dest-add', '')}</div>${liveNote}<div class="tablewrap"><table><thead><tr><th>Destination / pool</th><th>Address</th><th>Traffic state</th><th>Runtime health and actions</th></tr></thead><tbody>${rows || '<tr><td colspan="4" class="empty">No backend servers. Add a website first, or add a server to an existing backend group.</td></tr>'}</tbody></table></div><div class="healthbanner">Drain removes a destination from new-request selection after an approved config rollout; in-flight requests continue. A host match separates routes, but private API access still requires a restricted listener and firewall policy. Runtime health is an authenticated, point-in-time view of this process only.</div>`; }
+function validCatalogOrigin(value) {
+    try {
+        const uri = new URL(value);
+        return value.length <= 2048 && /^https?:\/\//i.test(value) && value.endsWith('/') && !/[\s\\?#]/.test(value) && !!uri.hostname && !uri.username && !uri.password;
+    }
+    catch {
+        return false;
+    }
+}
+function editRealServer(id = '') {
+    if (currentRole === 'Viewer')
+        return;
+    const servers = data.realServers || {};
+    const old = id ? servers[id] : undefined;
+    if (id && !Object.prototype.hasOwnProperty.call(servers, id))
+        return show('Server not found.', true);
+    modal(id ? 'Edit real server' : 'Create real server', 'A reusable origin template. Existing destination snapshots are not changed when this template changes.', [
+        { name: 'id', label: 'Real server ID (cannot rename)', value: id },
+        { name: 'address', label: 'HTTP(S) origin URL ending in /', value: old?.Address || 'https://app.internal.example.com/' },
+        { name: 'description', label: 'Description (optional)', value: old?.Description || '', optional: true }
+    ], v => {
+        if (!validId(v.id) || (id && v.id !== id) || keys(servers).some(key => key !== id && key.toLowerCase() === v.id.toLowerCase()))
+            throw Error('Use a unique server ID; renaming is not supported.');
+        if (!id && keys(servers).length >= 200)
+            throw Error('At most 200 real servers are supported.');
+        if (!validCatalogOrigin(v.address) || v.description.length > 250 || /[\x00-\x1f\x7f]/.test(v.description))
+            throw Error('Invalid origin URL or description. No credentials, query, fragment or control characters.');
+        data.realServers = { ...servers, [v.id]: { Address: v.address, Description: v.description } };
+        edit();
+    });
+}
+function deleteRealServer(id) {
+    if (currentRole === 'Viewer' || !Object.prototype.hasOwnProperty.call(data.realServers || {}, id))
+        return;
+    if (!confirm('Delete real server template ' + id + '? Existing destinations remain unchanged.'))
+        return;
+    const servers = { ...data.realServers };
+    delete servers[id];
+    data.realServers = servers;
+    edit();
+}
+function assignRealServer(id) {
+    if (currentRole === 'Viewer' || !Object.prototype.hasOwnProperty.call(data.realServers || {}, id))
+        return;
+    const groups = keys(data.clusters);
+    if (!groups.length)
+        return show('Create a backend group first.', true);
+    const server = data.realServers?.[id];
+    modal('Assign real server', 'Create a destination snapshot with its own weight and role. Existing destinations cannot be overwritten.', [
+        { name: 'cluster', label: 'Backend group', value: groups[0], options: groups },
+        { name: 'id', label: 'Destination ID', value: id },
+        { name: 'weight', label: 'Weight (1–100)', value: '1' },
+        { name: 'role', label: 'Traffic role', value: 'primary', options: ['primary', 'backup'] }
+    ], v => {
+        if (!groups.includes(v.cluster) || !Object.prototype.hasOwnProperty.call(data.clusters, v.cluster) || !validId(v.id) || !/^(?:[1-9]|[1-9][0-9]|100)$/.test(v.weight) || !['primary', 'backup'].includes(v.role) || !validCatalogOrigin(server.Address))
+            throw Error('Invalid destination, weight, role or server address.');
+        const group = data.clusters[v.cluster];
+        const destinations = group.Destinations || {};
+        if (keys(destinations).length >= 40 || keys(destinations).some(key => key.toLowerCase() === v.id.toLowerCase()) || keys(data.disabled).some(key => key.toLowerCase() === (v.cluster + '::' + v.id).toLowerCase()))
+            throw Error('Destination already exists or group capacity is reached.');
+        group.Destinations = { ...destinations, [v.id]: { Address: server.Address, Metadata: { Weight: v.weight, TrafficRole: v.role, TrafficState: 'active' } } };
+        edit();
+    });
+}
+function realServerPanel() {
+    const servers = data.realServers || {};
+    const rows = keys(servers).map(id => {
+        const server = servers[id];
+        return `<tr><td>${esc(id)}</td><td class="mono">${esc(server.Address)}</td><td>${esc(server.Description || '—')}</td><td>${currentRole === 'Viewer' ? '' : actionBtn('Assign server', 'real-server-assign', id) + ' ' + actionBtn('Edit server', 'real-server-edit', id) + ' ' + actionBtn('Delete server', 'real-server-delete', id, 'danger-btn mini')}</td></tr>`;
+    }).join('');
+    return `<div class="card"><div class="toolbar"><div><h2>Reusable real servers</h2><p class="subtle">Create origin templates once and assign independent destination snapshots to backend groups. Approval required.</p></div>${currentRole === 'Viewer' ? '' : actionBtn('+ Create real server', 'real-server-add', '')}</div><div class="tablewrap"><table><thead><tr><th>Server ID</th><th>Origin URL</th><th>Description</th><th>Actions</th></tr></thead><tbody>${rows || '<tr><td colspan="4">No reusable real servers</td></tr>'}</tbody></table></div></div>`;
+}
+function backends() { const rows = destinationRows().map(d => { const live = liveDestinationHealth?.find(x => x.clusterId === d.cid && x.destinationId === d.did); const configuredState = !d.enabled ? 'Disabled' : d.trafficState === 'draining' ? 'Draining' : 'Active'; const stateClass = configuredState === 'Active' ? 'good' : configuredState === 'Draining' ? 'warn' : 'bad'; const runtime = live ? `<span class="chip">A: ${esc(live.activeHealth || 'Unknown')}</span> <span class="chip">P: ${esc(live.passiveHealth || 'Unknown')}</span><div class="subtle">In-flight: ${esc(String(live.concurrentRequests ?? '—'))}</div>` : '<span class="subtle">Not inspected</span>'; const drainButton = d.enabled ? actionBtn(d.trafficState === 'draining' ? 'Restore traffic' : 'Drain new traffic', 'dest-drain', d.cid + '::' + d.did) : ''; return `<tr><td><b>${esc(d.did)}</b><div class="subtle">${esc(d.cid)} · weight ${esc(d.weight)} · ${esc(d.trafficRole)}</div></td><td class="mono">${esc(d.address)}</td><td><span class="chip ${stateClass}">${configuredState}</span><div class="subtle">Configured draft state; runtime health shown separately</div></td><td>${runtime}<div>${drainButton} ${actionBtn(d.enabled ? 'Disable' : 'Enable', 'dest-toggle', d.cid + '::' + d.did)} ${actionBtn('Edit', 'dest-edit', d.cid + '::' + d.did)} ${actionBtn('Advanced', 'dest-advanced', d.cid + '::' + d.did)} ${actionBtn('Delete', 'dest-delete', d.cid + '::' + d.did, 'danger-btn mini')}</div></td></tr>`; }).join(''); const liveNote = liveDestinationHealth ? `<p class="subtle">Live YARP snapshot checked ${esc(liveDestinationHealthAt)} · single local process. Unsaved changes do not affect this runtime snapshot.</p>` : '<p class="subtle">Runtime health has not been inspected in this session.</p>'; return `<div class="toolbar"><div><h2>Backend servers (destinations)</h2><p class="subtle">Each application route points to its own cluster. Runtime health is per gateway; draining is a reviewed configuration change.</p></div>${actionBtn('Inspect live health', 'runtime-health', '')} ${actionBtn('+ Add backend', 'dest-add', '')}</div>${liveNote}<div class="tablewrap"><table><thead><tr><th>Destination / pool</th><th>Address</th><th>Traffic state</th><th>Runtime health and actions</th></tr></thead><tbody>${rows || '<tr><td colspan="4" class="empty">No backend servers. Add a website first, or add a server to an existing backend group.</td></tr>'}</tbody></table></div><div class="healthbanner">Drain removes a destination from new-request selection after an approved config rollout; in-flight requests continue. A host match separates routes, but private API access still requires a restricted listener and firewall policy. Runtime health is an authenticated, point-in-time view of this process only.</div>${realServerPanel()}`; }
 async function refreshDestinationRuntime() { try {
     const r = await api('/admin/api/runtime/destinations');
     const clusters = Array.isArray(r.clusters) ? r.clusters : [];
@@ -1541,6 +1613,18 @@ function act(type, id) {
     }
     if (type === 'profile-delete') {
         deleteMonitorProfile(id);
+        return;
+    }
+    if (type === 'real-server-add' || type === 'real-server-edit') {
+        editRealServer(type === 'real-server-edit' ? id : '');
+        return;
+    }
+    if (type === 'real-server-delete') {
+        deleteRealServer(id);
+        return;
+    }
+    if (type === 'real-server-assign') {
+        assignRealServer(id);
         return;
     }
     if (type === 'profile-assign') {
