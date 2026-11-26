@@ -48,6 +48,15 @@ catch (Exception ex) when (ex is IOException or CryptographicException or
 }
 #endif
 
+// Initial TLS cannot depend on a web dashboard that has not started yet.
+// This local command validates existing host-provisioned credentials and
+// writes only a new configuration file; no listeners or runtime state start.
+if (args.Length > 0 && args[0] == "--listener-bootstrap-wizard")
+{
+    Environment.ExitCode = GatewayListenerIsolation.RunBootstrapWizard(args);
+    return;
+}
+
 // Explicit local operator command, never a remote management endpoint.
 // Handle before constructing any listener, audit worker or other hosted service.
 if(args.Length>0 && args[0]=="--linux-dp-key-issue")
@@ -3263,17 +3272,53 @@ if (stagedImportEnabled)
             input.Confirmation != "ACTIVATE " + input.CandidateDigest)
             return Results.BadRequest(new { error = "Exact preview digests and typed confirmation required." });
         if (!await AuditActorCurrent(ctx, true)) return Results.StatusCode(403);
-        // Do not introduce an external-audit or enterprise mutation bypass.
-        if (externalAuditIntent is not null || oidcPolicy is not null || OnboardingApi.IsMultiGatewayDesign(privateDir))
-            return Results.Conflict(new { error = "Staged local import requires the independently approved fleet/enterprise procedure." });
+        // A local enterprise change requires a fresh external intent and
+        // step-up authorization. Multi-gateway activation remains a separate
+        // signed fleet workflow, not a local bypass.
+        if (OnboardingApi.IsMultiGatewayDesign(privateDir))
+            return Results.Conflict(new { error = "Staged local import requires the independently approved fleet procedure." });
+        if (externalAuditIntent is not null && auditOutbox is null)
+            return Results.Conflict(new { error = "Enterprise certificate import requires a configured durable audit outbox." });
+        if (SetupCenter.ReadFreeze(privateDir).Frozen)
+            return Results.Conflict(new { error = "Local change freeze is active." });
         await Audit(Actor(ctx), "TLS_STAGED_ACTIVATION_REQUEST", new { input.CandidateDigest, input.ActiveDigest });
         if (!await AuditActorCurrent(ctx, true)) return Results.StatusCode(403);
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ctx.RequestAborted, app.Lifetime.ApplicationStopping);
         timeout.CancelAfter(TimeSpan.FromSeconds(45));
         try
         {
-            var result = await service.ActivateAsync(input.CandidateDigest, input.ActiveDigest, timeout.Token);
-            await Audit(Actor(ctx), "TLS_STAGED_ACTIVATED", new { result.Thumbprint, result.NotAfterUtc });
+            string? intentId = null;
+            async Task<IDisposable> AuthorizeCertificateCommit(CancellationToken token)
+            {
+                if (!await AuditActorCurrent(ctx, true))
+                    throw new InvalidOperationException("Certificate authorization no longer current.");
+                if (externalAuditIntent is not null)
+                {
+                    intentId = await externalAuditIntent.ConfirmWithIdAsync(Actor(ctx), "tls-staged-activate",
+                        input.ActiveDigest, input.CandidateDigest, token);
+                    if (intentId is null) throw new InvalidOperationException("External certificate intent unavailable.");
+                }
+                await loginGate.WaitAsync(token);
+                try
+                {
+                    if (!await AuditActorCurrent(ctx, true) || SetupCenter.ReadFreeze(privateDir).Frozen ||
+                        OnboardingApi.IsMultiGatewayDesign(privateDir))
+                        throw new InvalidOperationException("Certificate authorization or topology changed.");
+                    if (intentId is not null)
+                        await localAudit.AppendAsync(Actor(ctx), "TLS_STAGED_MUTATION_PREPARED",
+                            new { input.ActiveDigest, input.CandidateDigest }, intentId);
+                    if (!await AuditActorCurrent(ctx, true) || SetupCenter.ReadFreeze(privateDir).Frozen ||
+                        OnboardingApi.IsMultiGatewayDesign(privateDir))
+                        throw new InvalidOperationException("Certificate authorization changed during audit.");
+                    token.ThrowIfCancellationRequested();
+                    return new StagedActivationGateLease(loginGate);
+                }
+                catch { loginGate.Release(); throw; }
+            }
+            var result = await service.ActivateAsync(input.CandidateDigest, input.ActiveDigest, timeout.Token,
+                AuthorizeCertificateCommit);
+            await localAudit.AppendAsync(Actor(ctx), "TLS_STAGED_ACTIVATED",
+                new { result.Thumbprint, result.NotAfterUtc, input.CandidateDigest }, intentId);
             return Results.Ok(new { activated = true, result.Thumbprint, result.NotAfterUtc });
         }
         catch (Exception ex)
@@ -3670,6 +3715,11 @@ record EmployeeInvitationInput(string? Username, string? Email, string? Role);
 sealed class EmployeeInvitationRedemptionEndpoint { }
 record EmployeeInvitationRedeem(string? Action, string? Code, string? Password = null);
 record StagedActivationInput(string? CandidateDigest, string? ActiveDigest, string? Confirmation);
+sealed class StagedActivationGateLease(SemaphoreSlim gate) : IDisposable
+{
+    private SemaphoreSlim? held = gate;
+    public void Dispose() => Interlocked.Exchange(ref held, null)?.Release();
+}
 record EmployeeInvitation(string Id, string Username, string Email, string Role, string Issuer, string IssuerStamp,
     string MailFingerprint, byte[] CodeHash, DateTimeOffset ExpiresUtc, bool Verified)
 {

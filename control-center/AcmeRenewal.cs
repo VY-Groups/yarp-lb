@@ -832,7 +832,7 @@ public sealed class StagedTrafficCertificate(string activePath, string passwordP
     }
 
     public async Task<StagedCertificatePreview> ActivateAsync(string expectedDigest, string expectedActiveDigest,
-        CancellationToken token)
+        CancellationToken token, Func<CancellationToken, Task<IDisposable>>? authorizeCommit = null)
     {
         using var lease = await gate.EnterAsync(token);
         var candidate = await AcmeRenewalCoordinator.ReadBoundedPfxAsync(StagedPath, token);
@@ -855,10 +855,16 @@ public sealed class StagedTrafficCertificate(string activePath, string passwordP
             using (var checkedRotation = new TrafficCertificateRotation(temp, passwordPath, dnsNames, testChainPolicy))
                 if (checkedRotation.Current.Thumbprint != result.Thumbprint)
                     throw new CryptographicException("Candidate leaf mismatch.");
-            if (!await AcmeRenewalCoordinator.MatchesActiveAsync(activePath, passwordPath, original, password, token))
-                throw new InvalidOperationException("Active certificate or password changed.");
-            token.ThrowIfCancellationRequested();
-            File.Move(temp, activePath, true);
+            // Authorize after costly certificate validation and immediately
+            // before replacement. The caller can hold its account gate through
+            // the exact file commit; no gate is held during listener polling.
+            using (var authority = authorizeCommit is null ? null : await authorizeCommit(token))
+            {
+                if (!await AcmeRenewalCoordinator.MatchesActiveAsync(activePath, passwordPath, original, password, token))
+                    throw new InvalidOperationException("Active certificate or password changed.");
+                token.ThrowIfCancellationRequested();
+                File.Move(temp, activePath, true);
+            }
             temp = null;
             try
             {

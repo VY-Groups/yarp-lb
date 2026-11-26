@@ -144,6 +144,90 @@ public sealed class GatewayListenerIsolation : IDisposable
         return cert;
     }
 
+    // This is deliberately a local first-start wizard. It never issues a CA
+    // certificate or imports a password over HTTP. The exact shipping listener
+    // constructor validates the prepared inputs before a new file is written.
+    internal static int RunBootstrapWizard(string[] args)
+    {
+        if (args.Length != 2 || !Path.IsPathFullyQualified(args[1]) || !Directory.Exists(args[1]) ||
+            Console.IsInputRedirected)
+        {
+            Console.Error.WriteLine("Usage: --listener-bootstrap-wizard <existing absolute private directory> (interactive local console)");
+            return 64;
+        }
+        try
+        {
+            var directory = Path.GetFullPath(args[1]);
+            if (OperatingSystem.IsWindows()) WindowsStateProtection.ValidateOfflineKeyRingDirectory(directory);
+            else GatewayCore.Gslb.Contracts.PrivateKeyFileSecurity.ValidateLinuxPrivateStateDirectory(directory, "Listener bootstrap");
+            var output = Path.Combine(directory, "listeners.json");
+            if (Path.Exists(output)) throw new InvalidOperationException("Existing listener configuration will not be overwritten.");
+            Console.WriteLine("GatewayCore listener bootstrap — provision encrypted PFX files, password files and trust anchors with the host administrator first.");
+            string Ask(string label)
+            {
+                Console.Write(label + ": ");
+                var value = Console.ReadLine()?.Trim();
+                return string.IsNullOrWhiteSpace(value) ? throw new InvalidDataException("Required input missing.") : value;
+            }
+            int Port(string label) => int.TryParse(Ask(label), out var port) && port is >= 1 and <= 65535
+                ? port : throw new InvalidDataException("Invalid listener port.");
+            string[] List(string label) => Ask(label).Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+            var trafficIp = Ask("Traffic IP (not wildcard)");
+            var trafficHttp = Port("Traffic HTTP port");
+            var trafficHttps = Port("Traffic HTTPS port");
+            var managementIp = Ask("Management IP (different from traffic)");
+            var adminPort = Port("Management HTTPS port");
+            var metricsPort = Port("Metrics HTTPS port");
+            var trafficPfx = Ask("Absolute encrypted traffic PFX path");
+            var trafficPass = Ask("Absolute traffic password FILE path (not password)");
+            var managementPfx = Ask("Absolute encrypted management PFX path");
+            var managementPass = Ask("Absolute management password FILE path (not password)");
+            var ca = Ask("Absolute management client CA public PEM path");
+            var pins = List("Approved management client certificate thumbprints (comma separated)");
+            var cidrs = List("Management CIDR allowlist (comma separated)");
+            if (!long.TryParse(Ask("Measured maximum concurrent connections"), out var connections) || connections <= 0)
+                throw new InvalidDataException("Measured positive connection limit required.");
+            var protocol = Ask("Traffic HTTP version (1.1, 2 or 3)");
+            var names = List("Explicit traffic certificate DNS names (comma separated)");
+            if (names.Length == 0) throw new InvalidDataException("Explicit traffic DNS names required.");
+            var managementName = Ask("Management TLS DNS name used by clients");
+            var settings = new Settings(trafficIp, trafficHttp, trafficHttps, managementIp, adminPort, metricsPort,
+                trafficPfx, trafficPass, managementPfx, managementPass, ca, pins, cidrs, connections, protocol, names);
+            using var validated = new GatewayListenerIsolation(settings);
+            var leaf = validated._managementCertificate;
+            if (Uri.CheckHostName(managementName) != UriHostNameType.Dns ||
+                !leaf.Extensions.Cast<X509Extension>().Any(x => x.Oid?.Value == "2.5.29.17") ||
+                !leaf.MatchesHostname(managementName) ||
+                !leaf.Extensions.OfType<X509EnhancedKeyUsageExtension>().Any(e =>
+                    e.EnhancedKeyUsages.Cast<Oid>().Any(oid => oid.Value == "1.3.6.1.5.5.7.3.1")))
+                throw new InvalidOperationException("Management certificate must have matching SAN and server authentication EKU.");
+            using var chain = new X509Chain();
+            chain.ChainPolicy.ApplicationPolicy.Add(new Oid("1.3.6.1.5.5.7.3.1"));
+            chain.ChainPolicy.RevocationMode = X509RevocationMode.Online;
+            chain.ChainPolicy.UrlRetrievalTimeout = TimeSpan.FromSeconds(5);
+            if (!chain.Build(leaf)) throw new CryptographicException("Management certificate trust verification failed.");
+            Console.WriteLine("Traffic and management certificate checks passed locally; no port binding or live client handshake tested.");
+            if (Ask("Type CREATE to write the new listener configuration") != "CREATE") return 2;
+            var bytes = JsonSerializer.SerializeToUtf8Bytes(settings,
+                new JsonSerializerOptions(JsonSerializerDefaults.Web) { WriteIndented = true });
+            var options = new FileStreamOptions { Mode = FileMode.CreateNew, Access = FileAccess.Write, Share = FileShare.None };
+            if (OperatingSystem.IsLinux()) options.UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
+            using (var file = new FileStream(output, options))
+            {
+                file.Write(bytes);
+                file.Flush(flushToDisk: true);
+            }
+            Console.WriteLine("LISTENER_BOOTSTRAP_CREATED. Configure YARP_LISTENERS_CONFIG_FILE under the service identity, then verify actual isolated TLS/mTLS.");
+            return 0;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException or
+            CryptographicException or ArgumentException or PlatformNotSupportedException)
+        {
+            Console.Error.WriteLine("Listener bootstrap refused: " + ex.GetType().Name);
+            return 78;
+        }
+    }
+
     public static GatewayListenerIsolation? FromEnvironment()
     {
         var path = Environment.GetEnvironmentVariable("YARP_LISTENERS_CONFIG_FILE");
