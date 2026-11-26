@@ -138,7 +138,15 @@ jobs:
                 for result in results:
                     rule = result.get("ruleId") or "(unknown rule)"
                     counts[rule] += 1
-                    for location in result.get("locations", [])[:5]:
+                    trace = []
+                    for flow in result.get("codeFlows", [])[:3]:
+                        for thread in flow.get("threadFlows", [])[:3]:
+                            trace.extend(item.get("location", {}) for item in thread.get("locations", [])[:50])
+                    primary = result.get("locations", [])[:5]
+                    related = result.get("relatedLocations", [])[:10]
+                    for kind, location in ([("primary", item) for item in primary] +
+                                           [("related", item) for item in related] +
+                                           [("trace", item) for item in trace]):
                         physical = location.get("physicalLocation", {})
                         artifact = physical.get("artifactLocation", {})
                         uri = artifact.get("uri", "")
@@ -150,7 +158,7 @@ jobs:
                             and ".." not in uri.split("/") and all(
                                 ch.isascii() and (ch.isalnum() or ch in "/._-") for ch in uri)):
                             locations.append({"rule": rule, "path": uri,
-                                              "line": region.get("startLine")})
+                                              "line": region.get("startLine"), "kind": kind})
         inventory = {
             "commit": os.environ["GITHUB_SHA"],
             "ref": os.environ["GITHUB_REF"],

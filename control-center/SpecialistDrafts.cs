@@ -207,9 +207,14 @@ public static class SpecialistDrafts
     {
         // Initial loopback configuration; key paths are references only.
         // This process never reads or provisions DNS signing keys.
-        if (!Host(x.Name) || !Host(x.SoaContact) || x.Serial == 0 || x.Ttl is < 5 or > 300 ||
-            x.Policy is not ("Weighted" or "Failover" or "WeightedFailover") ||
-            x.ProbeInterval is < 1 or > 60 || x.FailureThreshold is < 1 or > 10 || x.SuccessThreshold is < 1 or > 10)
+        // Evaluate every independent input predicate. No supplied field can
+        // short-circuit another check, and endpoint authorization is separate.
+        var namesValid = Host(x.Name) & Host(x.SoaContact);
+        var timingValid = (x.Serial != 0) & (x.Ttl is >= 5 and <= 300) &
+            (x.ProbeInterval is >= 1 and <= 60) & (x.FailureThreshold is >= 1 and <= 10) &
+            (x.SuccessThreshold is >= 1 and <= 10);
+        var policyValid = x.Policy is "Weighted" or "Failover" or "WeightedFailover";
+        if (!(namesValid & timingValid & policyValid))
             throw new ArgumentException("Enter valid zone/SOA DNS names, positive serial, TTL (5–300), health intervals and a supported policy.");
         var sites = new JsonArray();
         var addresses = new HashSet<IPAddress>();

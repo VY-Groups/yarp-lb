@@ -733,7 +733,6 @@ async function wireWafDeployment() {
         };
     }
     catch {
-        // Optional capability: absence never grants deployment authority.
     }
 }
 function wireSpecialistDraft(id) {
