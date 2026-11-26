@@ -221,6 +221,28 @@ var dns=JsonNode.Parse("""
  "Sites":[{"Address":"10.0.0.20","HealthUrl":"http://127.0.0.1:8888/ready","Weight":1}]}]}
 """)!.AsObject();
 Must(EngineConfigContract.Validate("l4",l4,false), "loopback L4 candidate is valid");
+{
+    var weightedConfig = l4.DeepClone().AsObject();
+    var weightedListener = weightedConfig["Tcp"]![0]!.AsObject();
+    weightedListener["BalancingPolicy"] = "WeightedLeastConnections";
+    weightedListener["Backends"]![0]!["Weight"] = 5;
+    Must(EngineConfigContract.Validate("l4",weightedConfig,false), "signed TCP weighted least connections schema accepted");
+    foreach (var bad in new[] {0,101,-1})
+    {
+        weightedListener["Backends"]![0]!["Weight"] = bad;
+        Must(!EngineConfigContract.Validate("l4",weightedConfig,false), "invalid signed L4 weight rejected");
+    }
+    weightedListener["Backends"]![0]!["Weight"] = 1;
+    weightedListener["BalancingPolicy"] = "UnknownPolicy";
+    Must(!EngineConfigContract.Validate("l4",weightedConfig,false), "unknown L4 policy rejected");
+    weightedListener["BalancingPolicy"] = "WeightedLeastConnections";
+    weightedConfig["Udp"] = new JsonArray(weightedListener.DeepClone());
+    weightedConfig["Tcp"] = new JsonArray();
+    Must(!EngineConfigContract.Validate("l4",weightedConfig,false), "TCP least connections cannot be applied to UDP");
+    weightedConfig["Udp"]![0]!["BalancingPolicy"] = "WeightedRoundRobin";
+    Must(EngineConfigContract.Validate("l4",weightedConfig,false), "signed UDP weighted rotation accepted");
+}
+
 Must(EngineConfigContract.Validate("gslb",dns,false), "loopback GSLB candidate is valid");
 var publicDns53 = dns.DeepClone().AsObject();
 publicDns53["ListenHost"] = "0.0.0.0";
