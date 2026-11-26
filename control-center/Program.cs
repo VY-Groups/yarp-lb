@@ -1797,7 +1797,7 @@ app.MapPost("/admin/api/users/invitations", async (HttpContext ctx, EmployeeInvi
         return Results.Json(new { error = "Invitation could not be issued. Check verified SMTP and audit availability." }, statusCode: 503);
     }
     finally { loginGate.Release(); }
-}).RequireRateLimiting("employee-invite-issue").RequireAuthorization(p => p.RequireRole("Administrator"));
+}).WithMetadata(new Microsoft.AspNetCore.Mvc.RequestSizeLimitAttribute(4096)).RequireRateLimiting("employee-invite-issue").RequireAuthorization(p => p.RequireRole("Administrator"));
 
 app.MapPost("/admin/api/users/invitations/{id}/revoke", async (HttpContext ctx, string id) =>
 {
@@ -1868,7 +1868,7 @@ app.MapPost("/admin/api/employee-invitation/redeem", async (HttpContext ctx, Emp
         return Results.Json(new { error = "Registration could not be completed. Contact your administrator." }, statusCode: 503);
     }
     finally { loginGate.Release(); }
-}).RequireRateLimiting("employee-invite-redeem");
+}).WithMetadata(new Microsoft.AspNetCore.Mvc.RequestSizeLimitAttribute(4096)).RequireRateLimiting("employee-invite-redeem");
 #endif
 
 app.MapPost("/admin/api/users/{username}/password", async (HttpContext ctx, string username, PasswordInput input) =>
