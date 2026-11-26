@@ -19,3 +19,5 @@ await ActiveCompoundHealthTests.RunAsync();
 MonitorProfileRegistryTests.Run();
 
 RealServerCatalogTests.Run();
+
+ServiceGroupCatalogTests.Run();

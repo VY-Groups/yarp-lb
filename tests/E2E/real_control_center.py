@@ -616,6 +616,46 @@ def verify_max_connections_per_server(base:str,admin:Client,reviewer:Client):
         time.sleep(.1)
     check(constrained==1,"MaxConnectionsPerServer=1 limits actual concurrent upstream connections to one")
 
+def verify_reusable_adc_catalogs(base, admin, operator, reviewer, origin_port):
+    """Validate actual approved catalog storage, references and materialized traffic."""
+    def payload():
+        state=admin.request("GET","/admin/api/state")
+        return {key:state[key] for key in ("routes","clusters","disabled","revision")}
+    def approve(p, expected=200):
+        pending=operator.request("POST","/admin/api/change-requests",
+            {"reason":"Disposable ADC catalog acceptance","payload":p})
+        reviewer.request("POST",f"/admin/api/change-requests/{pending['id']}/decision",
+            {"decision":"approve","reason":"Independent ADC catalog fixture review"},expect=expected)
+    p=payload()
+    addr=f"http://127.0.0.1:{origin_port}/"
+    active={"Enabled":True,"Path":"/compound-ok","Interval":"00:00:05","Timeout":"00:00:02","Policy":"RiseFall"}
+    metadata={"RiseFall.Rise":"2","RiseFall.Fall":"3","ConsecutiveFailuresHealthPolicy.Threshold":"3"}
+    p["monitorProfiles"]={"catalog-health":{"Active":active,"Metadata":metadata}}
+    p["realServers"]={"catalog-origin":{"Address":addr,"Description":"Disposable origin"}}
+    p["serviceGroups"]={"catalog-template":{"Policy":"RoundRobin","MonitorProfile":"catalog-health",
+        "Members":{"catalog-origin":{"Weight":"7","TrafficRole":"primary"}}}}
+    p["clusters"]["catalog-pool"]={"LoadBalancingPolicy":"RoundRobin",
+        "HealthCheck":{"Active":active},"Metadata":metadata,
+        "Destinations":{"catalog-origin":{"Address":addr,"Metadata":{"Weight":"7","TrafficRole":"primary"}}}}
+    p["routes"]["catalog-route"]={"ClusterId":"catalog-pool","Match":{"Path":"/catalog-test/{**catch-all}"}}
+    approve(p)
+    state=admin.request("GET","/admin/api/state")
+    check(state["monitorProfiles"]==p["monitorProfiles"] and state["realServers"]==p["realServers"]
+          and state["serviceGroups"]==p["serviceGroups"],"approved ADC catalog state round trip")
+    eventually(Client(base),"/catalog-test/ready","e2e-origin:/catalog-test/ready",seconds=20)
+    invalid=payload()
+    invalid["realServers"]={}
+    approve(invalid,expected=400)
+    check("catalog-origin" in admin.request("GET","/admin/api/state")["realServers"],
+          "referenced server deletion rejected without changing storage")
+    legacy=payload()
+    legacy["routes"].pop("catalog-route")
+    legacy["clusters"].pop("catalog-pool")
+    approve(legacy)
+    state=admin.request("GET","/admin/api/state")
+    check("catalog-template" in state["serviceGroups"] and "catalog-origin" in state["realServers"]
+          and "catalog-health" in state["monitorProfiles"],"legacy draft preserves ADC catalogs")
+
 def verify_compound_probe_endpoint(base, admin, operator, reviewer, viewer, origin_port):
     """Exercise the shipping authenticated probe API, not a mocked handler."""
     def apply(mode, path="/compound-fail"):
@@ -855,6 +895,7 @@ def acceptance(base:str,https_base:str,origin_port:int):
     check("e2e" not in admin.request("GET","/admin/api/state")["routes"],
         "authorized restore rolls routing config back")
     verify_compound_probe_endpoint(base,admin,operator,reviewer,viewer,origin_port)
+    verify_reusable_adc_catalogs(base,admin,operator,reviewer,origin_port)
     check(admin.request("GET","/admin/api/mail")["enabled"] is False,"SMTP starts disabled")
     admin.request("POST","/admin/api/mail/test",{},expect=409)
     admin.request("POST","/admin/api/mail",{"enabled":True,"host":"smtp.invalid","port":587,
@@ -925,6 +966,9 @@ def main():
                 "topology survives process restart with protected key ring")
             check("e2e" not in admin.request("GET","/admin/api/state")["routes"],
                 "approved rollback survives restart")
+            catalog=admin.request("GET","/admin/api/state")
+            check("catalog-template" in catalog["serviceGroups"] and "catalog-origin" in catalog["realServers"]
+                  and "catalog-health" in catalog["monitorProfiles"],"approved ADC catalogs survive process restart")
         print("E2E_SUCCESS "+json.dumps(results,sort_keys=True),flush=True)
 
 if __name__=="__main__":
