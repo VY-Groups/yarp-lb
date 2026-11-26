@@ -565,7 +565,7 @@ async function certificatePage() {
             wireAcmeRenewal();
         }
         if (x.stagedImportConfigured === true && currentRole === 'Administrator') {
-            $('content').insertAdjacentHTML('beforeend', '<div class="card card-spaced"><h3>Provision host-staged traffic certificate</h3><p>Place the approved encrypted PFX at the fixed host staging path. Uses the existing protected password; no private key upload. Preview and confirm exact bytes before activation.</p><button id="tls-stage-preview" type="button" class="primary">Preview staged PFX</button><p id="tls-stage-status" role="status"></p></div>');
+            $('content').insertAdjacentHTML('beforeend', '<div class="card card-spaced"><h3>Provision host-staged traffic certificate</h3><p>Place the approved encrypted PFX at the fixed host staging path. Uses the existing protected password; no private key upload. Preview and confirm exact bytes before activation.</p><button id="tls-stage-preview" type="button" class="primary">1. Preview staged PFX</button><p id="tls-stage-status" role="status"></p><form id="tls-stage-confirm" class="auth-form" hidden><label>2. Type ACTIVATE, a space and the candidate SHA-256<input id="tls-stage-confirmation" maxlength="73" autocomplete="off" required></label><button id="tls-stage-activate" type="submit" class="primary" disabled>3. Activate approved certificate</button></form></div>');
             wireStagedCertificate();
         }
         wireAcmeRevocation();
@@ -577,32 +577,72 @@ async function certificatePage() {
 }
 function wireStagedCertificate() {
     const button = $('tls-stage-preview');
+    const form = $('tls-stage-confirm');
+    const confirmation = $('tls-stage-confirmation');
+    const activate = $('tls-stage-activate');
     const status = $('tls-stage-status');
     const generation = authGeneration;
+    let preview = null;
+    const current = () => generation === authGeneration && view === 'tls' && button.isConnected;
+    const reset = () => {
+        preview = null;
+        confirmation.value = '';
+        activate.disabled = true;
+        form.hidden = true;
+    };
+    confirmation.oninput = () => {
+        activate.disabled = !preview || confirmation.value !== 'ACTIVATE ' + preview.candidateDigest;
+    };
     button.onclick = async () => {
         if (button.disabled)
             return;
+        reset();
         button.disabled = true;
+        status.textContent = 'Reading host-staged certificate and current approval…';
         try {
             const p = await api('/admin/api/tls/staged/preview', 'POST', {});
-            if (generation !== authGeneration || view !== 'tls' || !button.isConnected)
+            if (!current())
                 return;
             if (!/^[A-F0-9]{64}$/.test(p.candidateDigest) || !/^[A-F0-9]{64}$/.test(p.activeDigest))
                 throw Error('Invalid preview digest.');
-            status.textContent = 'Candidate ' + String(p.thumbprint) + ' expires ' + String(p.notAfterUtc) + '; SHA-256 ' + p.candidateDigest;
-            const confirmation = prompt('Type ACTIVATE followed by the exact SHA-256 shown in the preview to validate and activate this candidate.');
-            if (confirmation !== 'ACTIVATE ' + p.candidateDigest)
+            status.textContent = 'Candidate ' + String(p.thumbprint) + ' expires ' + String(p.notAfterUtc) + '; candidate SHA-256 ' + p.candidateDigest + '; active SHA-256 ' + p.activeDigest;
+            if (p.fleetMode === true && p.fleetGrantReady !== true) {
+                status.textContent += '. Fleet activation blocked: obtain independent signed approval and current quorum, then refresh preview.';
                 return;
-            const result = await api('/admin/api/tls/staged/activate', 'POST', { candidateDigest: p.candidateDigest, activeDigest: p.activeDigest, confirmation });
-            if (generation === authGeneration && view === 'tls' && button.isConnected) {
-                if (result.activated !== true || result.thumbprint !== p.thumbprint)
-                    throw Error('Activation not confirmed.');
-                status.textContent = 'Activated ' + result.thumbprint + '. Verify an independent TLS handshake.';
             }
+            if (p.fleetMode === true)
+                status.textContent += '. Fleet grant observed; the server will recheck it at commit. Independent completion remains mandatory.';
+            preview = p;
+            form.hidden = false;
         }
         catch (e) {
-            if (generation === authGeneration && view === 'tls' && button.isConnected)
+            if (current())
                 status.textContent = String(e);
+        }
+        finally {
+            button.disabled = false;
+        }
+    };
+    form.onsubmit = async (event) => {
+        event.preventDefault();
+        if (!current() || !preview || activate.disabled || button.disabled || confirmation.value !== 'ACTIVATE ' + preview.candidateDigest)
+            return;
+        const approved = preview;
+        const typed = confirmation.value;
+        reset();
+        button.disabled = true;
+        status.textContent = 'Validating and applying the approved certificate…';
+        try {
+            const result = await api('/admin/api/tls/staged/activate', 'POST', { candidateDigest: approved.candidateDigest, activeDigest: approved.activeDigest, confirmation: typed });
+            if (!current())
+                return;
+            if (result.activated !== true || result.thumbprint !== approved.thumbprint)
+                throw Error('Activation not confirmed.');
+            status.textContent = 'Activated ' + result.thumbprint + (result.independentFleetCompletionRequired === true ? '. Verify live TLS and peer traffic, obtain the signed completion grant and release the original quorum fence before rotating another gateway.' : '. Verify an independent TLS handshake.');
+        }
+        catch (e) {
+            if (current())
+                status.textContent = String(e) + ' Reconcile the current certificate before retrying.';
         }
         finally {
             button.disabled = false;

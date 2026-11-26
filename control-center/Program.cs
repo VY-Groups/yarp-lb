@@ -3263,7 +3263,34 @@ if (stagedImportEnabled)
         if (!await AuditActorCurrent(ctx, true)) return Results.StatusCode(403);
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ctx.RequestAborted);
         timeout.CancelAfter(TimeSpan.FromSeconds(10));
-        try { return Results.Ok(await service.PreviewAsync(timeout.Token)); }
+        try
+        {
+            var preview = await service.PreviewAsync(timeout.Token);
+            var fleetMode = OnboardingApi.IsMultiGatewayDesign(privateDir);
+            var fleetGrantReady = false;
+#if GATEWAYCORE_COMMERCIAL
+            if (fleetMode && fleetQuorum is not null && externalAuditIntent is not null &&
+                auditOutbox is not null && acmeRenewalSettings is null)
+            {
+                try
+                {
+                    using var fleetLock = FleetTlsOperator.OpenExclusive(privateDir);
+                    var plan = FleetTlsOperator.ReadActivation(privateDir, commercialLicense,
+                        preview.ActiveDigest, preview.CandidateDigest);
+                    if (fleetQuorum.Scope == plan.Scope)
+                    {
+                        await fleetQuorum.Assert(plan.TransactionId, plan.Epoch, timeout.Token);
+                        fleetGrantReady = true;
+                    }
+                }
+                catch (Exception ex) when (ex is IOException or InvalidDataException or UnauthorizedAccessException or
+                    InvalidOperationException or CryptographicException or OperationCanceledException or ArgumentException)
+                { }
+            }
+#endif
+            return Results.Ok(new { preview.CandidateDigest, preview.ActiveDigest, preview.Thumbprint,
+                preview.NotAfterUtc, fleetMode, fleetGrantReady });
+        }
         catch (Exception ex)
         {
             await Audit(Actor(ctx), "TLS_STAGED_PREVIEW_FAILED", new { failureType = ex.GetType().Name });

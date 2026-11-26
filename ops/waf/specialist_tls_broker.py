@@ -79,7 +79,7 @@ def pinned_peer(connection, pin):
     return bool(der) and hashlib.sha256(der).hexdigest().upper() == pin
 
 
-def serve(args, dispatch):
+def create_server(args, dispatch):
     ip = ipaddress.IPv4Address(args.bind)
     if not (ip.is_private or ip.is_loopback) or ip.is_unspecified or ip.is_multicast or ip.is_link_local:
         raise ValueError("explicit private IPv4 management bind required")
@@ -118,7 +118,11 @@ def serve(args, dispatch):
             self.wfile.write((result + "\n").encode("ascii"))
 
     # Serial handling prevents concurrent operator transactions through one broker.
-    with Server((str(ip), args.port), Handler) as server:
+    return Server((str(ip), args.port), Handler)
+
+
+def serve(args, dispatch):
+    with create_server(args, dispatch) as server:
         server.serve_forever()
 
 
