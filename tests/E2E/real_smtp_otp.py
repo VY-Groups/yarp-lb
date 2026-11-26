@@ -15,6 +15,7 @@ import os
 import re
 import smtplib
 import ssl
+import secrets
 import subprocess
 import tempfile
 import time
@@ -215,7 +216,62 @@ def acceptance(root:Path):
                 })
                 check(admin.session()["authenticated"],
                       "correct 6-digit OTP completes real cookie login after wrong-code rejection")
-                return {"smtpStartTls":"pass","smtpAuthentication":"pass",
+                # A second isolated gateway exercises the installed first-run
+                # contract using the same real authenticated STARTTLS relay.
+                enrollment_root = root/"first-run"
+                openssl_state(enrollment_root,originport)
+                claim = secrets.token_hex(32).upper()
+                claim_path = enrollment_root/"state"/"first-run-code.txt"
+                claim_path.write_text(claim)
+                claim_path.chmod(0o600)
+                previous_required = os.environ.get("GATEWAYCORE_REQUIRE_SETUP_OTP")
+                os.environ["GATEWAYCORE_REQUIRE_SETUP_OTP"]="1"
+                try:
+                    with gateway(appdir,dll,enrollment_root,port()) as setup_base:
+                        first = Client(setup_base)
+                        check(first.session()["setupRequired"],"installed enrollment is required")
+                        first.request("POST","/admin/api/bootstrap",{"username":"first_admin","password":ADMIN_PASSWORD,"email":"first@example.invalid"},expect=409)
+                        endpoint="/admin/api/bootstrap/setup"
+                        def post(action,**kwargs):
+                            return first.request("POST",endpoint,{"action":action,"setupCode":claim,**kwargs})
+                        first.request("POST",endpoint,{"action":"unlock","setupCode":"invalid"},expect=403)
+                        check(post("unlock")["authorized"],"local claim authorizes initial setup")
+                        initial_messages=len(mailbox.messages)
+                        sender=post("sender",email="verification@example.invalid",mail={
+                            "enabled":True,"host":"127.0.0.1","port":mailport,"from":"noreply@example.invalid",
+                            "username":MAIL_USER,"password":MAIL_PASSWORD,"startTls":True})
+                        flow=sender["flowId"]
+                        check(len(mailbox.messages)==initial_messages+1,"sender verification delivered over authenticated STARTTLS")
+                        check("sender verification code" in mailbox.messages[-1]["Subject"],"first message verifies sender delivery")
+                        check(not (enrollment_root/"state"/"mail-settings.json").exists(),"unverified sender not persisted")
+                        first.request("POST",endpoint,{"action":"finish","setupCode":claim,"flowId":flow,"username":"first_admin","password":ADMIN_PASSWORD},expect=409)
+                        code=re.findall(r"\b[0-9]{6}\b",plaintext_mail(mailbox.messages[-1]))[0]
+                        first.request("POST",endpoint,{"action":"verify-sender","setupCode":claim,"flowId":flow,"code":"000000" if code!="000000" else "111111"},expect=401)
+                        check(post("verify-sender",flowId=flow,code=code)["verified"],"sender receipt verified")
+                        post("administrator",flowId=flow,email="first@example.invalid")
+                        check(len(mailbox.messages)==initial_messages+2,"separate administrator registration code delivered")
+                        code=re.findall(r"\b[0-9]{6}\b",plaintext_mail(mailbox.messages[-1]))[0]
+                        first.request("POST",endpoint,{"action":"finish","setupCode":claim,"flowId":flow,"username":"first_admin","password":ADMIN_PASSWORD},expect=409)
+                        check(post("verify-admin",flowId=flow,code=code)["verified"],"administrator email verified")
+                        check(not (enrollment_root/"state"/"admin-users.json").exists(),"no user exists before password creation")
+                        check(post("finish",flowId=flow,username="first_admin",password=ADMIN_PASSWORD)["authenticated"],"verified registration created administrator")
+                        check(first.session()["initialized"] and not first.session()["setupRequired"],"initial enrollment completed")
+                        check(not claim_path.exists(),"one-time local claim consumed")
+                        first.request("POST",endpoint,{"action":"unlock","setupCode":claim},expect=409)
+                        saved=first.request("GET","/admin/api/mail")
+                        check(saved["enabled"] and saved["deliveryVerified"],"verified sender and login OTP persisted")
+                        raw=(enrollment_root/"state"/"mail-settings.json").read_text()
+                        check(MAIL_PASSWORD not in raw,"first-run mail credentials encrypted at rest")
+                        first.request("POST","/admin/api/logout",{})
+                        login=first.request("POST","/admin/api/login",{"username":"first_admin","password":ADMIN_PASSWORD,"provider":"local"})
+                        check(login["otpRequired"],"new administrator requires OTP on subsequent login")
+                        code=re.findall(r"\b[0-9]{6}\b",plaintext_mail(mailbox.messages[-1]))[0]
+                        first.request("POST","/admin/api/login/verify",{"challengeId":login["challengeId"],"code":code})
+                        check(first.session()["authenticated"],"first-run administrator completes normal OTP sign-in")
+                finally:
+                    if previous_required is None: os.environ.pop("GATEWAYCORE_REQUIRE_SETUP_OTP",None)
+                    else: os.environ["GATEWAYCORE_REQUIRE_SETUP_OTP"]=previous_required
+                return {"firstRunEnrollment":"pass","smtpStartTls":"pass","smtpAuthentication":"pass",
                         "smtpCertificateValidation":"pass",
                         "smtpDeliveryLocalCI":"pass","otpSignIn":"pass",
                         "externalZohoDelivery":"NOT VERIFIED"}
