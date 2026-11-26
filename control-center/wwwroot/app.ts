@@ -138,6 +138,29 @@ function adcServiceMap() {
     return `<section class="card card-spaced" id="adc-service-map"><h2 class="section-title">ADC service map</h2><p class="subtle">${dirty ? 'Unsaved draft' : 'Current configuration snapshot'} · HTTP routes → service groups → real server destinations. These are configuration objects, not confirmed listener VIPs, live health or physical network bindings.</p><div class="adc-service adc-map-head"><strong>HTTP virtual service (route)</strong><strong>Service group (cluster)</strong><strong>Real server destinations</strong></div>${services.join('') || '<p class="empty">No HTTP services configured.</p>'}<p class="subtle">Unreferenced groups: ${unused.length ? esc(unused.join(', ')) : 'None'}</p><div class="adc-map-actions">${actionBtn('Manage services', 'switch', 'routes')} ${actionBtn('Manage service groups', 'switch', 'clusters')} ${actionBtn('Manage real servers', 'switch', 'backends')} ${actionBtn('Inspect health', 'switch', 'health')}</div></section>`;
 }
 function overview(){let routes=keys(data.routes).slice(0,5).map(id=>`<div class="rowline"><div><b>${esc(id)}</b><div class="subtle mono">${esc(data.routes[id]?.Match?.Path||'—')}</div></div><span class="chip">${esc(data.routes[id]?.ClusterId||'—')}</span></div>`).join('')||'<div class="empty">No routes configured</div>';let nodes=destinationRows().slice(0,6).map(d=>`<div class="rowline"><div><b>${esc(d.did)}</b><div class="subtle mono">${esc(d.address)}</div></div><span class="chip ${d.enabled?'':'bad'}">${d.enabled?'Configured':'Disabled'}</span></div>`).join('')||'<div class="empty">No destinations configured</div>';return summary()+adcServiceMap()+`<div class="grid2"><div class="card"><div class="flex"><h2 class="section-title">Traffic architecture</h2><span class="chip">Design view</span></div><div class="arch"><div class="archnode">Clients / Public & internal ingress</div><div class="arrow">↓</div><div class="archnode">Firewall / upstream HA VIP</div><div class="arrow">↓</div><div class="archnode accent">${esc(topologyModeName(topologyResponse?.plan?.mode||'standalone'))} (design topology)</div><div class="arrow">↓</div><div class="twonodes"><div class="archnode">Backend node 01</div><div class="archnode">Backend node 02</div></div><div class="arrow">↓</div><div class="archnode">Application-specific data services (optional)</div></div><div class="healthbanner">This gateway is one running instance. The onboarding design is metadata, not proof that a gateway fleet, VIP or backend is healthy.</div></div><div><div class="card"><h2 class="section-title">Route snapshot</h2>${routes}${actionBtn('Manage routes','switch','routes')}</div><div class="card card-spaced"><h2 class="section-title">Destinations</h2>${nodes}${actionBtn('Manage backends','switch','backends')}</div></div></div>`}
+function editApplicationAccess(id: string) {
+    if (currentRole === 'Viewer' || !Object.prototype.hasOwnProperty.call(data.routes, id))
+        return;
+    const route = data.routes[id];
+    const meta = route.Metadata || {};
+    modal('Application access policy', 'Restrict this route using actual connection source networks and TLS. Forwarded headers are not trusted. This is not user authentication. Empty allowlist permits all peers.', [
+        { name: 'tls', label: 'Require HTTPS', value: meta['ADC.Access.RequireHttps'] || 'false', options: ['false', 'true'] },
+        { name: 'networks', label: 'Allowed CIDRs (comma separated, optional)', value: meta['ADC.Access.AllowedNetworks'] || '', optional: true }
+    ], v => {
+        const networks = v.networks.trim();
+        if (!['true', 'false'].includes(v.tls) || networks.length > 2048 || (networks && (networks.split(',').length > 32 || networks.split(',').some(part => !/^[0-9a-fA-F:.]+\/[0-9]{1,3}$/.test(part.trim())))))
+            throw Error('Use at most 32 IPv4/IPv6 CIDRs. The server validates address and prefix semantics.');
+        const metadata = { ...meta };
+        delete metadata['ADC.Access.RequireHttps'];
+        delete metadata['ADC.Access.AllowedNetworks'];
+        if (v.tls === 'true')
+            metadata['ADC.Access.RequireHttps'] = 'true';
+        if (networks)
+            metadata['ADC.Access.AllowedNetworks'] = networks;
+        route.Metadata = metadata;
+        edit();
+    });
+}
 async function bindVirtualService(id: string) {
     if (currentRole === 'Viewer' || !Object.prototype.hasOwnProperty.call(data.routes, id))
         return;
@@ -165,7 +188,7 @@ async function bindVirtualService(id: string) {
         show(String(error), true);
     }
 }
-function routes(){const rows=keys(data.routes).map(id=>{const r=data.routes[id];return `<tr><td><b>${esc(id)}</b><div class="subtle">${esc(r.Metadata?.['ADC.VirtualServer.Id'] || 'Default listener')}</div></td><td class="mono">${esc((r.Match?.Hosts||[]).join(', ')||'Any host')}</td><td class="mono">${esc(r.Match?.Path)}</td><td>${esc(r.ClusterId)}</td><td>${actionBtn('Edit','route-edit',id)} ${currentRole==='Viewer'?'':actionBtn('Bind virtual service','route-bind-socket',id)} ${actionBtn('Advanced','route-advanced',id)} ${actionBtn('Delete','route-delete',id,'danger-btn mini')}</td></tr>`}).join('');return `<div class="toolbar"><div><h2>Websites &amp; routes</h2><p class="subtle">A route matches the client hostname and path, then forwards to a backend group (cluster). Draft changes need approval.</p></div>${actionBtn('+ Add website / API','setup-simple-website','','primary')} ${actionBtn('Advanced: add route','route-add','')}</div><div class="tablewrap"><table><thead><tr><th>Route ID</th><th>Hosts</th><th>Path</th><th>Cluster</th><th>Actions</th></tr></thead><tbody>${rows||'<tr><td colspan="5" class="empty">No routes configured. Use Add website / API to create your first draft.</td></tr>'}</tbody></table></div>`}
+function routes(){const rows=keys(data.routes).map(id=>{const r=data.routes[id];return `<tr><td><b>${esc(id)}</b><div class="subtle">${esc(r.Metadata?.['ADC.VirtualServer.Id'] || 'Default listener')}</div></td><td class="mono">${esc((r.Match?.Hosts||[]).join(', ')||'Any host')}</td><td class="mono">${esc(r.Match?.Path)}</td><td>${esc(r.ClusterId)}</td><td>${actionBtn('Edit','route-edit',id)} ${currentRole==='Viewer'?'':actionBtn('Bind virtual service','route-bind-socket',id)+' '+actionBtn('Access policy','route-access',id)} ${actionBtn('Advanced','route-advanced',id)} ${actionBtn('Delete','route-delete',id,'danger-btn mini')}</td></tr>`}).join('');return `<div class="toolbar"><div><h2>Websites &amp; routes</h2><p class="subtle">A route matches the client hostname and path, then forwards to a backend group (cluster). Draft changes need approval.</p></div>${actionBtn('+ Add website / API','setup-simple-website','','primary')} ${actionBtn('Advanced: add route','route-add','')}</div><div class="tablewrap"><table><thead><tr><th>Route ID</th><th>Hosts</th><th>Path</th><th>Cluster</th><th>Actions</th></tr></thead><tbody>${rows||'<tr><td colspan="5" class="empty">No routes configured. Use Add website / API to create your first draft.</td></tr>'}</tbody></table></div>`}
 const monitorSourceKey = 'ADC.HealthMonitorSource';
 const compoundModeKey = 'ADC.Health.CompoundMode';
 const compoundPathKey = 'ADC.Health.SecondaryPath';
@@ -1430,6 +1453,7 @@ function act(type:string,id:string){
     if (type === 'service-group-delete') { deleteServiceGroup(id); return; }
     if (type === 'service-group-deploy') { deployServiceGroup(id); return; }
     if (type === 'persistence-edit') { editSecurePersistence(id); return; }
+    if (type === 'route-access') { editApplicationAccess(id); return; }
     if (type === 'route-bind-socket') { void bindVirtualService(id); return; }
     if (type === 'profile-assign') { assignMonitorProfile(id); return; }
     if (type === 'monitor-copy') { copyActiveMonitor(id); return; }

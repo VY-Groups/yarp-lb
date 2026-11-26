@@ -18,4 +18,5 @@
     <Compile Include="../CompoundDiagnostics.cs" Link="CompoundDiagnostics.cs" />
     <Compile Include="../SecureAffinityDraft.cs" Link="SecureAffinityDraft.cs" />
   </ItemGroup>
+  <ItemGroup><Compile Include="../ApplicationAccessPolicy.cs" Link="ApplicationAccessPolicy.cs" /></ItemGroup>
 </Project>

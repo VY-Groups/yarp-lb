@@ -43,6 +43,9 @@ public static class FleetAdcContract
             if (candidate["Routes"] is not JsonObject routes || candidate["Clusters"] is not JsonObject clusters ||
                 routes.Count > 100 || clusters.Count > 100)
                 return "Invalid signed routes or clusters.";
+            foreach (var (_, route) in routes)
+                if (route is not JsonObject row || !ApplicationAccessPolicy.Validate(row))
+                    return "Invalid signed application access policy.";
             var payload = new JsonObject();
             foreach (var (key, storage) in Sections)
             {

@@ -41,6 +41,22 @@ internal static class FleetAdcContractTests
         bad = snapshot.DeepClone().AsObject();
         bad["Clusters"]!["pool"]!["SessionAffinity"] = new JsonObject { ["Enabled"]=true,["Policy"]="GatewayCoreExpiringCookie" };
         Check(FleetAdcContract.Validate(bad,snapshot) is not null,"invalid signed secure affinity rejected");
+        bad = snapshot.DeepClone().AsObject();
+        bad["Routes"]!["web"]!["Metadata"] = new JsonObject { [ApplicationAccessPolicy.NetworksKey]="invalid" };
+        Check(FleetAdcContract.Validate(bad,snapshot) is not null,"invalid signed route access rejected");
+        var rules = new Dictionary<string,string> { [ApplicationAccessPolicy.HttpsKey]="true",
+            [ApplicationAccessPolicy.NetworksKey]="192.0.2.0/24,2001:db8::/32" };
+        Check(ApplicationAccessPolicy.TryParse(rules,out var access) &&
+            access.Permits(true,System.Net.IPAddress.Parse("192.0.2.7")) &&
+            access.Permits(true,System.Net.IPAddress.Parse("::ffff:192.0.2.7")) &&
+            access.Permits(true,System.Net.IPAddress.Parse("2001:db8::7")) &&
+            !access.Permits(false,System.Net.IPAddress.Parse("192.0.2.7")) &&
+            !access.Permits(true,System.Net.IPAddress.Parse("198.51.100.7")) &&
+            !access.Permits(true,null),"actual peer and TLS required; mapped IPv4 and IPv6 supported");
+        rules[ApplicationAccessPolicy.NetworksKey]="0.0.0.0/0";
+        Check(!ApplicationAccessPolicy.TryParse(rules,out _),"unbounded CIDR rejected");
+        rules[ApplicationAccessPolicy.NetworksKey]="192.0.2.0/24,";
+        Check(!ApplicationAccessPolicy.TryParse(rules,out _),"empty allowlist member rejected");
         using var key=ECDsa.Create(ECCurve.NamedCurves.nistP256);
         var pub=key.ExportSubjectPublicKeyInfoPem();
         var trusted=new Dictionary<string,string> { [FleetConfigSignature.KeyIdFromPublicKey(pub)] = pub };
