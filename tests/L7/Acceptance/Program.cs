@@ -327,6 +327,21 @@ try
     await Task.Delay(1600);
     Require(await RoutesOnly("B"), "weighted round robin excludes draining destinations");
     Record("weighted-round-robin", weightedRotation);
+    Configure("FastestResponse", 1, 1);
+    await Task.Delay(2500);
+    var fastResponses = 0;
+    for (var i = 0; i < 160; i++)
+    {
+        using var reply = await client.GetAsync(proxy + "/api/latency");
+        Require(reply.IsSuccessStatusCode, "fastest response real HTTP request");
+        using var result = JsonDocument.Parse(await reply.Content.ReadAsStringAsync());
+        if (result.RootElement.GetProperty("node").GetString() == "B" && i >= 80) fastResponses++;
+    }
+    Require(fastResponses >= 60, "fastest response favors measured faster backend after warmup");
+    Configure("FastestResponse", 1, 1, drainA: true);
+    await Task.Delay(1600);
+    Require(await RoutesOnly("B"), "fastest response excludes drained backend");
+    Record("fastest-response", new { fastResponses, measuredRequests = 80 });
     Configure("WeightedLeastRequests", 1, 1);
     await Task.Delay(2500);
     var heldWeightedRequest = client.GetAsync(proxy + "/api/hold");

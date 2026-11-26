@@ -33,3 +33,5 @@ Hardware acceleration and upstream volumetric DDoS absorption are deployment-dep
 - L7 cyclic weighted round robin added through existing reviewed cluster editor/API, runtime and real request tests. Stable weights/membership give exact complete-cycle ratio; not smooth weighted rotation or fleet-shared scheduling. Existing weighted-random scratch span explicitly initialized to zero so draining entries never consume tickets.
 
 - Guided HTTP active-monitor editor and snapshot reuse across service groups, retaining unrelated passive health and metadata. Browser regression covers bounded timing and copied configuration. Persistent shared monitors, compound protocol probes and fleet runtime validation remain pending.
+
+- FastestResponse L7: local EWMA of successful GET/HEAD completion latency, 60-second expiry, weak-reference state, one-in-eight exploration and drain exclusion. No retries or synthetic traffic. Full-response timing includes client/streaming effects; use homogeneous short-response workloads. Not fleet-shared or L4 response-time selection. Real delayed-origin and drain acceptance added; exact-head CI pending.

@@ -21,6 +21,11 @@ bool IsLoopback(HttpContext ctx) =>
 app.MapGet("/health/ready", () =>
     state.Ready ? (IResult)Results.Ok(new { ready = true, node }) : Results.StatusCode(503));
 app.MapGet("/api/identity", () => Results.Ok(new { node }));
+app.MapGet("/api/latency", async (HttpContext ctx) =>
+{
+    await Task.Delay(node == "A" ? 180 : 5, ctx.RequestAborted);
+    return Results.Ok(new { node });
+});
 app.MapGet("/api/slow", async (HttpContext ctx) =>
 {
     await Task.Delay(700, ctx.RequestAborted);

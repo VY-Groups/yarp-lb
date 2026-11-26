@@ -48,7 +48,7 @@ public static class CapabilityRegistry
         app.MapGet("/admin/api/capabilities", () => Results.Ok(new
         {
             productVersion = "0.1", source = "declared capabilities - not live infrastructure state",
-            policies = new[] { "RoundRobin", "PowerOfTwoChoices", "LeastRequests", "Random", "FirstAlphabetical", "WeightedRandom", "WeightedLeastRequests", "WeightedRoundRobin", "SourceIpHash", "PrimaryBackup" },
+            policies = new[] { "RoundRobin", "PowerOfTwoChoices", "LeastRequests", "Random", "FirstAlphabetical", "WeightedRandom", "WeightedLeastRequests", "WeightedRoundRobin", "FastestResponse", "SourceIpHash", "PrimaryBackup" },
             backupMetadata = new { key = "TrafficRole", primary = "primary", backup = "backup", @default = "primary", requiresActiveHealth = true },
             weightedMetadata = new { key = "Weight", min = LoadBalancingCore.MinWeight, max = LoadBalancingCore.MaxWeight, @default = 1 },
             capabilities = Items
