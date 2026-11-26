@@ -26,6 +26,18 @@ app.MapGet("/api/slow", async (HttpContext ctx) =>
     await Task.Delay(700, ctx.RequestAborted);
     return Results.Ok(new { node, slow=true });
 });
+// Disposable acceptance-only endpoint; permits observing concurrent requests
+// while the selected destination holds a real forwarded request open.
+app.MapGet("/api/hold", async (HttpContext ctx) =>
+{
+    Interlocked.Increment(ref state.InFlight);
+    try
+    {
+        await Task.Delay(TimeSpan.FromSeconds(5), ctx.RequestAborted);
+        return Results.Ok(new { node });
+    }
+    finally { Interlocked.Decrement(ref state.InFlight); }
+});
 var committed=new ConcurrentDictionary<string,int>(StringComparer.Ordinal);
 app.MapPost("/api/transaction/{id}",(string id) =>
 {

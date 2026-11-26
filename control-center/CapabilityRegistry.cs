@@ -15,6 +15,7 @@ public static class CapabilityRegistry
         new("power-of-two", "Power of Two Choices", "Balancing", "native-config", "YARP", "Built in and YARP default."),
         new("weighted-random", "Weighted Random", "Balancing", "lab-verified", "YARP Control Center extension", "Compiled and validated with real L7 distribution traffic on Windows and Ubuntu; production capacity and NAT identity still require testing."),
         new("source-hash", "Source-IP Rendezvous Hash", "Balancing", "lab-verified", "YARP Control Center extension", "Real HTTP affinity/rebalance tests passed on Windows and Ubuntu; source-IP identity depends on ingress/SNAT."),
+        new("weighted-least-requests", "Weighted least outstanding HTTP requests", "Balancing", "source-implemented-unverified", "GatewayCore managed YARP policy", "Chooses minimum projected local outstanding requests per effective destination weight; excludes draining destinations and respects existing eligibility. Not TCP connection count, measured response time or a shared fleet counter."),
         new("primary-backup", "Primary/backup HTTP server selection", "Balancing", "lab-verified", "GatewayCore managed YARP policy", "Opt-in PrimaryBackup policy; active health required; weighted healthy primaries take precedence, a fixed backup serves only if primaries fail. Real two-backend L7 failover, all-down and recovery CI passed. No transaction replay or physical HA claim."),
         new("latency-aware", "Least observed response time", "Balancing", "planned", "Custom policy", "Requires EWMA, outlier resistance, feedback isolation, load tests."),
         new("l4-tcp-udp", "Layer-4 TCP / UDP proxy", "L4", "external-lab-verified", "engines/L4 independent .NET process", "TCP bidirectional and UDP source-session real-socket CI passed on Windows/Ubuntu. No lifecycle integration, production health, distributed state or public deployment approval."),
@@ -46,7 +47,7 @@ public static class CapabilityRegistry
         app.MapGet("/admin/api/capabilities", () => Results.Ok(new
         {
             productVersion = "0.1", source = "declared capabilities - not live infrastructure state",
-            policies = new[] { "RoundRobin", "PowerOfTwoChoices", "LeastRequests", "Random", "FirstAlphabetical", "WeightedRandom", "SourceIpHash", "PrimaryBackup" },
+            policies = new[] { "RoundRobin", "PowerOfTwoChoices", "LeastRequests", "Random", "FirstAlphabetical", "WeightedRandom", "WeightedLeastRequests", "SourceIpHash", "PrimaryBackup" },
             backupMetadata = new { key = "TrafficRole", primary = "primary", backup = "backup", @default = "primary", requiresActiveHealth = true },
             weightedMetadata = new { key = "Weight", min = LoadBalancingCore.MinWeight, max = LoadBalancingCore.MaxWeight, @default = 1 },
             capabilities = Items

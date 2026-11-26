@@ -318,6 +318,27 @@ try
     Require(aPercent is >= 75 and <= 85, $"80:20 ratio in tolerance: A={aPercent:F2}%");
     Record("weighted-80-20", new { aPercent, weighted });
 
+    Configure("WeightedLeastRequests", 1, 1);
+    await Task.Delay(2500);
+    var heldWeightedRequest = client.GetAsync(proxy + "/api/hold");
+    await WaitFor("weighted least request holds one actual backend", async () =>
+        (await InFlight(aUrl)) + (await InFlight(bUrl)) == 1);
+    var heldNode = await InFlight(aUrl) > 0 ? "A" : "B";
+    var otherNode = heldNode == "A" ? "B" : "A";
+    using (var lessBusyReply = await client.GetAsync(proxy + "/api/identity"))
+    {
+        lessBusyReply.EnsureSuccessStatusCode();
+        using var lessBusyBody = JsonDocument.Parse(await lessBusyReply.Content.ReadAsStringAsync());
+        Require(lessBusyBody.RootElement.GetProperty("node").GetString() == otherNode,
+            "weighted least requests selects the idle equal-capacity backend");
+        Require(!heldWeightedRequest.IsCompleted, "selection occurred while original request remained in flight");
+    }
+    using (var heldReply = await heldWeightedRequest)
+        Require(heldReply.IsSuccessStatusCode, "weighted least requests preserves original request");
+    Configure("WeightedLeastRequests", 80, 20, drainA: true);
+    await Task.Delay(1600);
+    Require(await RoutesOnly("B"), "weighted least requests excludes drained higher-weight destination");
+    Record("weighted-least-requests", new { heldNode, otherNode, drained = true });
     Configure("WeightedRandom", 80, 20, drainA: true);
     await Task.Delay(1600);
     var drained = await Sample(300);

@@ -108,3 +108,43 @@ public sealed class SourceIpHashPolicy : ILoadBalancingPolicy
         }
     }
 }
+
+
+/// <summary>Capacity-aware HTTP request selection. Not a TCP connection count.
+/// Uses only local in-flight YARP counts and the eligible destination snapshot.</summary>
+public sealed class WeightedLeastRequestsPolicy : ILoadBalancingPolicy
+{
+    public string Name => "WeightedLeastRequests";
+
+    public DestinationState? PickDestination(HttpContext context, ClusterState cluster,
+        IReadOnlyList<DestinationState> availableDestinations)
+    {
+        DestinationState? best = null;
+        var bestCount = 0;
+        var bestWeight = 1;
+        var ties = 0;
+        for (var i = 0; i < availableDestinations.Count; i++)
+        {
+            var candidate = availableDestinations[i];
+            if (TrafficLifecycle.IsDraining(candidate)) continue;
+            var weight = TrafficLifecycle.EffectiveWeightedRandomWeight(candidate, WeightedRandomPolicy.WeightOf(candidate));
+            var count = candidate.ConcurrentRequestCount;
+            var comparison = best is null ? -1 :
+                LoadBalancingCore.CompareProjectedLoad(count, weight, bestCount, bestWeight);
+            if (comparison < 0)
+            {
+                best = candidate;
+                bestCount = count;
+                bestWeight = weight;
+                ties = 1;
+            }
+            else if (comparison == 0 && Random.Shared.Next(++ties) == 0)
+            {
+                best = candidate;
+                bestCount = count;
+                bestWeight = weight;
+            }
+        }
+        return best;
+    }
+}
