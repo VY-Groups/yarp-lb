@@ -42,7 +42,7 @@ class OperatorTests(unittest.TestCase):
                 def observed_rule_digest(self): return DIGEST
                 def smoke(self,mode): pass
             nodes={"node-a":Provider(),"node-b":Provider()}
-            fence=mock.Mock()
+            fence=mock.Mock(spec=cli.EtcdQuorumFence)
             fence.assert_current.return_value=True
             self.assertEqual(cli.preflight(nodes,fence,"block",7,DIGEST,DIGEST,receipt),"preflight-only")
             self.assertFalse(receipt.exists())
