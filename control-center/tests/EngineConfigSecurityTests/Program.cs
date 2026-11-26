@@ -25,6 +25,39 @@ static bool RejectsOtlpEndpoint(string value)
 Must(OtlpEndpointPolicy.Parse(null) is null && OtlpEndpointPolicy.Parse(" ") is null,
     "OTLP remains disabled without an endpoint");
 GatewayTelemetryLifecycleTests.Run();
+{
+    var scope = new string('A', 64);
+    var identity = new string('B', 64);
+    var plan = FleetTlsPlan.Create(scope, identity, new string('C', 64),
+        new string('D', 64), new string('E', 64), new string('F', 32)) with { Epoch = 7 };
+    var other = FleetTlsPlan.Create(scope, new string('1', 64), plan.ActiveDigest,
+        plan.CandidateDigest, plan.PeerEvidenceSha256, plan.Nonce) with { Epoch = 7 };
+    Must(plan.Valid() && other.Valid() && plan.TransactionId != other.TransactionId,
+        "certificate fleet quorum transaction is installation-bound");
+    using var signer = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+    var pem = signer.ExportSubjectPublicKeyInfoPem();
+    var tlsGrantNow = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+    var tlsGrantSignature = FleetConfigSignature.SignV2(signer.ExportECPrivateKeyPem(), plan.TransactionId,
+        plan.ActiveDigest, plan.Payload("activate", ""), tlsGrantNow + 120, plan.Epoch);
+    var grant = new FleetTlsGrant("activate", "", tlsGrantSignature.KeyId, tlsGrantSignature.Sequence,
+        tlsGrantSignature.ExpiresUnixSeconds, tlsGrantSignature.Signature);
+    Must(plan.Verify(grant, pem, tlsGrantNow) && !other.Verify(grant, pem, tlsGrantNow) &&
+        !plan.Verify(grant with { Purpose = "activated", EvidenceSha256 = new string('2', 64) }, pem, tlsGrantNow) &&
+        !plan.Verify(grant, pem, tlsGrantNow + 121),
+        "fleet TLS grant cannot authorize another installation, completion phase or expired epoch");
+}
+if (OperatingSystem.IsLinux())
+    await FleetTlsSignerAcceptance.RunAsync();
+var linuxGslbCommand = GslbServiceRestart.Build(false, "/usr/bin/systemctl");
+var windowsGslbCommand = GslbServiceRestart.Build(true, @"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe");
+Must(!linuxGslbCommand.UseShellExecute && linuxGslbCommand.ArgumentList.SequenceEqual(
+    new[] { "--no-ask-password", "restart", "gatewaycore-gslb.service" }),
+    "Linux GSLB restart is fixed to the authorized service");
+Must(!windowsGslbCommand.UseShellExecute &&
+    windowsGslbCommand.ArgumentList.Contains("-NonInteractive") &&
+    windowsGslbCommand.ArgumentList.Last().Contains("GatewayCoreGslb", StringComparison.Ordinal) &&
+    !windowsGslbCommand.ArgumentList.Last().Contains("-Force", StringComparison.Ordinal),
+    "Windows GSLB restart uses bounded fixed SCM controls without forcing dependents");
 Must(OtlpEndpointPolicy.Parse("https://collector.example:4318") is not null,
     "remote OTLP collector requires and accepts HTTPS");
 Must(OtlpEndpointPolicy.Parse("http://127.0.0.1:4318") is not null &&

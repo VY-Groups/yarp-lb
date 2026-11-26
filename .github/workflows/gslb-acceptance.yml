@@ -27,6 +27,10 @@ jobs:
       - name: Signed rolling DNS operator transaction contracts
         run: python ops/acceptance/test_gslb_signed_rollout.py
       - run: dotnet build engines/GslbDns/GslbDns.csproj -c Release
+      - name: Native Windows SCM DNS service stop/start and served revision acceptance
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: tests/GslbAcceptance/verify_windows_scm.ps1
       - run: dotnet run --project tests/GslbAcceptance/GslbAcceptance.csproj -c Release -- "${{ github.workspace }}"
       - name: Real authoritative DNS UDP/TCP/EDNS/negative-answer wire acceptance
         run: python tests/GslbAcceptance/wire_probe_acceptance.py

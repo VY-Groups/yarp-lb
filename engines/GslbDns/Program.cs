@@ -18,6 +18,8 @@ if(args.Length != 1 || !File.Exists(args[0]))
     Console.Error.WriteLine("Usage: dotnet GslbDns.dll <absolute JSON configuration>");
     return 64;
 }
+using var stop=new CancellationTokenSource();
+await using var windowsService = await WindowsGslbServiceHost.StartIfServiceAsync(stop);
 var options = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
 var configBytes = File.ReadAllBytes(args[0]);
 var loadedConfigRevision = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(configBytes));
@@ -382,7 +384,6 @@ await using var metricsServer = config.MetricsListenPort == 0 ? null : new DnsMe
     groups.Values.ToArray(), reportStore, reportTargets, authorityFenceStore, loadedConfigRevision);
 using var validation = groups.Values.SelectMany(group => group.Sites).Any(site => site.Validators.Length > 0)
     ? new ExternalValidation(groups.Values.SelectMany(group => group.Sites).SelectMany(site => site.Validators)) : null;
-using var stop=new CancellationTokenSource();
 Console.CancelKeyPress += (_, e)=>{e.Cancel=true;stop.Cancel();};
 using var sigterm=OperatingSystem.IsLinux()
     ? System.Runtime.InteropServices.PosixSignalRegistration.Create(

@@ -366,7 +366,7 @@ async function certificatePage() {
             wireAcmeRenewal();
         }
         if (x.stagedImportConfigured === true && currentRole === 'Administrator') {
-            $('content').insertAdjacentHTML('beforeend', '<div class="card card-spaced"><h3>Provision host-staged traffic certificate</h3><p>Place the approved encrypted PFX at the fixed host staging path. Uses the existing protected password; no private key upload. Preview and confirm exact bytes before activation.</p><button id="tls-stage-preview" type="button" class="primary">Preview staged PFX</button><p id="tls-stage-status" role="status"></p></div>');
+            $('content').insertAdjacentHTML('beforeend', '<div class="card card-spaced"><h3>Provision host-staged traffic certificate</h3><p>Place the approved encrypted PFX at the fixed host staging path. Uses the existing protected password; no private key upload. Preview and confirm exact bytes before activation.</p><button id="tls-stage-preview" type="button" class="primary">1. Preview staged PFX</button><p id="tls-stage-status" role="status"></p><form id="tls-stage-confirm" class="auth-form" hidden><label>2. Type ACTIVATE, a space and the candidate SHA-256<input id="tls-stage-confirmation" maxlength="73" autocomplete="off" required></label><button id="tls-stage-activate" type="submit" class="primary" disabled>3. Activate approved certificate</button></form></div>');
             wireStagedCertificate();
         }
         wireAcmeRevocation();
@@ -378,32 +378,72 @@ async function certificatePage() {
 }
 function wireStagedCertificate() {
     const button = $('tls-stage-preview') as HTMLButtonElement;
+    const form = $('tls-stage-confirm') as HTMLFormElement;
+    const confirmation = $('tls-stage-confirmation') as HTMLInputElement;
+    const activate = $('tls-stage-activate') as HTMLButtonElement;
     const status = $('tls-stage-status');
     const generation = authGeneration;
+    let preview: Obj | null = null;
+    const current = () => generation === authGeneration && view === 'tls' && button.isConnected;
+    const reset = () => {
+        preview = null;
+        confirmation.value = '';
+        activate.disabled = true;
+        form.hidden = true;
+    };
+    confirmation.oninput = () => {
+        activate.disabled = !preview || confirmation.value !== 'ACTIVATE ' + preview.candidateDigest;
+    };
     button.onclick = async () => {
         if (button.disabled)
             return;
+        reset();
         button.disabled = true;
+        status.textContent = 'Reading host-staged certificate and current approval…';
         try {
             const p = await api('/admin/api/tls/staged/preview', 'POST', {});
-            if (generation !== authGeneration || view !== 'tls' || !button.isConnected)
+            if (!current())
                 return;
             if (!/^[A-F0-9]{64}$/.test(p.candidateDigest) || !/^[A-F0-9]{64}$/.test(p.activeDigest))
                 throw Error('Invalid preview digest.');
-            status.textContent = 'Candidate ' + String(p.thumbprint) + ' expires ' + String(p.notAfterUtc) + '; SHA-256 ' + p.candidateDigest;
-            const confirmation = prompt('Type ACTIVATE followed by the exact SHA-256 shown in the preview to validate and activate this candidate.');
-            if (confirmation !== 'ACTIVATE ' + p.candidateDigest)
+            status.textContent = 'Candidate ' + String(p.thumbprint) + ' expires ' + String(p.notAfterUtc) + '; candidate SHA-256 ' + p.candidateDigest + '; active SHA-256 ' + p.activeDigest;
+            if (p.fleetMode === true && p.fleetGrantReady !== true) {
+                status.textContent += '. Fleet activation blocked: obtain independent signed approval and current quorum, then refresh preview.';
                 return;
-            const result = await api('/admin/api/tls/staged/activate', 'POST', { candidateDigest: p.candidateDigest, activeDigest: p.activeDigest, confirmation });
-            if (generation === authGeneration && view === 'tls' && button.isConnected) {
-                if (result.activated !== true || result.thumbprint !== p.thumbprint)
-                    throw Error('Activation not confirmed.');
-                status.textContent = 'Activated ' + result.thumbprint + '. Verify an independent TLS handshake.';
             }
+            if (p.fleetMode === true)
+                status.textContent += '. Fleet grant observed; the server will recheck it at commit. Independent completion remains mandatory.';
+            preview = p;
+            form.hidden = false;
         }
         catch (e) {
-            if (generation === authGeneration && view === 'tls' && button.isConnected)
+            if (current())
                 status.textContent = String(e);
+        }
+        finally {
+            button.disabled = false;
+        }
+    };
+    form.onsubmit = async (event) => {
+        event.preventDefault();
+        if (!current() || !preview || activate.disabled || button.disabled || confirmation.value !== 'ACTIVATE ' + preview.candidateDigest)
+            return;
+        const approved = preview;
+        const typed = confirmation.value;
+        reset();
+        button.disabled = true;
+        status.textContent = 'Validating and applying the approved certificate…';
+        try {
+            const result = await api('/admin/api/tls/staged/activate', 'POST', { candidateDigest: approved.candidateDigest, activeDigest: approved.activeDigest, confirmation: typed });
+            if (!current())
+                return;
+            if (result.activated !== true || result.thumbprint !== approved.thumbprint)
+                throw Error('Activation not confirmed.');
+            status.textContent = 'Activated ' + result.thumbprint + (result.independentFleetCompletionRequired === true ? '. Verify live TLS and peer traffic, obtain the signed completion grant and release the original quorum fence before rotating another gateway.' : '. Verify an independent TLS handshake.');
+        }
+        catch (e) {
+            if (current())
+                status.textContent = String(e) + ' Reconcile the current certificate before retrying.';
         }
         finally {
             button.disabled = false;
@@ -486,15 +526,15 @@ function specialistDraftForm(id: string) {
         return `<div class="card card-spaced"><h2>Prepare WAF policy</h2><p>Build exact unsigned policy bytes for independent signing and the existing external verifier. For an intentional rollback select the previous mode and enter a fresh revision greater than the deployed revision. The observed ruleset and shadow evidence must come from independently collected files.</p><form id="specialist-draft" class="auth-form"><div class="setup-grid"><label>Policy revision<input name="revision" type="number" min="1" max="9007199254740991" required></label><label>Mode<select name="mode"><option value="detect">Detection only</option><option value="block">Blocking (requires reviewed evidence)</option></select></label><label>Observed ruleset SHA-256<input name="rulesetSha256" maxlength="64" pattern="[A-F0-9]{64}" required></label><label>Shadow evidence SHA-256 (blocking only)<input name="shadowEvidenceSha256" maxlength="64" pattern="[A-F0-9]{64}"></label><label>Validity in days<input name="validDays" type="number" min="1" max="45" value="7" required></label><label>Rollback from deployed revision (optional)<input name="rollbackFromRevision" type="number" min="1" max="9007199254740991"></label></div><details><summary>Optional exact-route exceptions</summary><p>One exception per line: ID | owner | route ID | GET or POST | exact path | content type | rule ID | reason | validity days. Maximum 64. No wildcards or broad bypass.</p><label>Scoped exceptions<textarea name="exceptions" rows="4" maxlength="32000" placeholder="exception-01 | security-owner | app-route | POST | /upload | application/pkix-cert | 920420 | Reviewed certificate upload | 7"></textarea></label></details><button class="primary" type="submit">Validate and prepare unsigned policy</button></form><div id="specialist-result" role="status"></div><details><summary>Signed deployment and rollback handoff</summary><ol><li>Export and obtain two independent signatures over the exact policy bytes.</li><li>On the authorized WAF operator host, run the repository signed-policy verifier and rollout controller preflight against actual ruleset bytes and the trusted revision floor.</li><li>Use ops/waf/waf_fleet_rollout.py on the authorized Linux controller: default read-only preflight, then explicit --execute after independent approval. Preserve receipts and verified compensation evidence.</li><li>For a deliberate rollback prepare a fresh signed revision; never reuse a stale signed policy. Confirm actual restored mode and traffic before acceptance.</li></ol><p>The dashboard does not execute Docker, grant leases or sign policies. No activation is claimed here.</p></details></div>`;
     return `<div class="card card-spaced"><h2>Prepare a DNS / GSLB zone</h2><p>Build a new loopback-only initial configuration. Do not overwrite an existing signed multi-zone, DNSSEC or authority-fenced configuration with this candidate.</p><form id="specialist-draft" class="auth-form"><div class="setup-grid"><label>Zone name<input name="name" required maxlength="253" placeholder="app.example.test"></label><label>SOA contact (DNS notation)<input name="soaContact" required maxlength="253" placeholder="hostmaster.example.test"></label><label>SOA serial<input name="serial" type="number" min="1" max="4294967295" value="1" required></label><label>TTL (seconds)<input name="ttl" type="number" min="5" max="300" value="30" required></label><label>Traffic policy<select name="policy"><option value="Weighted">Weighted</option><option value="Failover">Failover</option><option value="WeightedFailover">Weighted failover</option></select></label><label>Probe interval (seconds)<input name="probeInterval" type="number" min="1" max="60" value="5" required></label><label>Consecutive failures<input name="failureThreshold" type="number" min="1" max="10" value="2" required></label><label>Consecutive successes<input name="successThreshold" type="number" min="1" max="10" value="2" required></label></div><label>Sites (IP | HTTPS readiness URL | weight 1–100 | priority 0–1000)<textarea name="sites" rows="4" required maxlength="32000" placeholder="10.0.0.10 | https://dc.example.test/ready | 1 | 0"></textarea></label><label>Authoritative nameservers (DNS name | IP)<textarea name="nameServers" rows="3" required maxlength="32000" placeholder="ns1.example.test | 10.0.0.53"></textarea></label><details><summary>DNSSEC and delegated authority</summary><p>Only pre-provisioned absolute key references are accepted; never paste keys. DNSSEC signing, parent DS publication and quorum must be verified on the target DNS hosts.</p><div class="setup-grid"><label>DNSSEC denial mode<select name="dnssecMode"><option value="Disabled">Disabled</option><option value="Nsec">NSEC</option><option value="Nsec3">NSEC3</option></select></label><label>Active private key path<input name="dnssecKeyPath" maxlength="512"></label><label>NSEC3 salt (hex)<input name="dnssecSalt" maxlength="64"></label><label>NSEC3 iterations<input name="dnssecIterations" type="number" min="0" max="50"></label></div><label>Prepublish public key paths (one per line, max 2)<textarea name="dnssecPrepublishPaths" rows="2" maxlength="1024"></textarea></label><label>Additional signing key paths (one per line, max 2)<textarea name="dnssecAdditionalPaths" rows="2" maxlength="1024"></textarea></label><label>Child delegations (child zone | nameserver | IP)<textarea name="delegations" rows="3" maxlength="12000"></textarea></label><label>Child DS records (child zone | key tag | algorithm | digest type | digest hex)<textarea name="delegationDs" rows="3" maxlength="12000"></textarea></label></details><p>All-down response is fail-closed. Site addresses are not probed by this editor. Actual binding, signing, authority and delegation require separately approved configuration.</p><button class="primary" type="submit">Validate and prepare unsigned zone</button></form><div id="specialist-result" role="status"></div></div>`;
 }
-async function wireWafDeployment() {
+async function wireSpecialistDeployment(module: string) {
     const generation = authGeneration;
     try {
-        const config = await api('/admin/api/specialist/waf-deployment');
-        if (generation !== authGeneration || view !== 'waf')
+        const config = await api('/admin/api/specialist/' + module + '-deployment');
+        if (generation !== authGeneration || view !== module)
             return;
         if (config.configured !== true)
             return;
-        $('content').insertAdjacentHTML('beforeend', '<div class="card card-spaced"><h3>Deploy independently signed WAF policy</h3><p>Only the policy independently staged on the Linux operator host can be executed. The broker verifies signatures, live lease and both pinned nodes. Applied is not an authority commit.</p><form id="waf-deploy-form" class="auth-form"><label>Approved revision<input name="revision" type="number" min="1" max="9007199254740991" required></label><label>Approved policy SHA-256<input name="digest" pattern="[A-F0-9]{64}" maxlength="64" required></label><label>Operation<select name="operation"><option value="preflight">Read-only preflight</option><option value="execute">Execute signed rollout</option></select></label><label>Type operation (PREFLIGHT or EXECUTE), space, SHA-256<input name="confirmation" maxlength="74" required></label><button class="primary" type="submit">Submit approved operation</button></form><p id="waf-deploy-status" role="status"></p></div>');
+        $('content').insertAdjacentHTML('beforeend', '<div class="card card-spaced"><h3>Deploy independently signed specialist configuration</h3><p>Only the independently staged plan can be executed. The operator broker retains deployment credentials and authority. Preflight is read-only; actual agent signature checks apply at preparation. Applied is not an authority commit.</p><form id="waf-deploy-form" class="auth-form"><label>Approved revision<input name="revision" type="number" min="1" max="9007199254740991" required></label><label>Approved plan or policy SHA-256<input name="digest" pattern="[A-F0-9]{64}" maxlength="64" required></label><label>Operation<select name="operation"><option value="preflight">Read-only preflight</option><option value="execute">Execute signed rollout</option></select></label><label>Type operation (PREFLIGHT or EXECUTE), space, SHA-256<input name="confirmation" maxlength="74" required></label><button class="primary" type="submit">Submit approved operation</button></form><p id="waf-deploy-status" role="status"></p></div>');
         const form = $('waf-deploy-form') as HTMLFormElement;
         const status = $('waf-deploy-status');
         form.onsubmit = async (event) => {
@@ -508,14 +548,14 @@ async function wireWafDeployment() {
             const operation = String(fields.get('operation') || '');
             const confirmation = String(fields.get('confirmation') || '');
             if (!Number.isSafeInteger(revision) || revision < 1 || !/^[A-F0-9]{64}$/.test(digest) || confirmation !== operation.toUpperCase() + ' ' + digest) {
-                status.textContent = 'Exact approved revision, digest and confirmation required.';
+                status.textContent = 'Exact approved sequence or revision, digest and confirmation required.';
                 return;
             }
             button.disabled = true;
             status.textContent = 'Running approved broker operation…';
             try {
-                const result = await api('/admin/api/specialist/waf-deployment', 'POST', { revision, digest, operation, confirmation });
-                if (generation !== authGeneration || view !== 'waf' || !form.isConnected)
+                const result = await api('/admin/api/specialist/' + module + '-deployment', 'POST', { revision, digest, operation, confirmation });
+                if (generation !== authGeneration || view !== module || !form.isConnected)
                     return;
                 if (result.outcome === 'preflight-only')
                     status.textContent = 'Preflight passed; no mutation performed.';
@@ -525,7 +565,7 @@ async function wireWafDeployment() {
                     throw Error('Outcome unconfirmed. Reconcile before retrying.');
             }
             catch (e) {
-                if (generation === authGeneration && view === 'waf' && form.isConnected)
+                if (generation === authGeneration && view === module && form.isConnected)
                     status.textContent = String(e);
             }
             finally {
@@ -538,8 +578,8 @@ async function wireWafDeployment() {
     }
 }
 function wireSpecialistDraft(id: string) {
-    if (id === 'waf' && currentRole === 'Administrator')
-        void wireWafDeployment();
+    if ((id === 'waf' || id === 'gslb') && currentRole === 'Administrator')
+        void wireSpecialistDeployment(id);
     const form = document.getElementById('specialist-draft') as HTMLFormElement | null;
     if (!form)
         return;

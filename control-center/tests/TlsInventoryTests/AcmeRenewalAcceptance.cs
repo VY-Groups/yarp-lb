@@ -674,6 +674,17 @@ internal static class AcmeRenewalAcceptance
             catch (InvalidOperationException) { rejectedDigest = true; }
             Check(rejectedDigest && rotation.Current.Thumbprint == nextLeaf.Thumbprint,
                 "staged certificate rejects stale or substituted digest");
+            var denied = false;
+            var beforeDenied = await File.ReadAllBytesAsync(activePfxPath);
+            try
+            {
+                await staged.ActivateAsync(preview.CandidateDigest, preview.ActiveDigest, CancellationToken.None,
+                    _ => Task.FromException<IDisposable>(new InvalidOperationException("External audit unavailable")));
+            }
+            catch (InvalidOperationException) { denied = true; }
+            Check(denied && (await File.ReadAllBytesAsync(activePfxPath)).SequenceEqual(beforeDenied) &&
+                rotation.Current.Thumbprint == nextLeaf.Thumbprint,
+                "staged certificate commit authority failure leaves disk and listener unchanged");
             var imported = await staged.ActivateAsync(preview.CandidateDigest, preview.ActiveDigest, CancellationToken.None);
             Check(imported.Thumbprint == replacementLeaf.Thumbprint &&
                 await GetPeerThumbprintAsync(new Uri(httpsAddress)) == replacementLeaf.Thumbprint,

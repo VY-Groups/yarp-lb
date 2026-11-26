@@ -48,6 +48,15 @@ catch (Exception ex) when (ex is IOException or CryptographicException or
 }
 #endif
 
+// Initial TLS cannot depend on a web dashboard that has not started yet.
+// This local command validates existing host-provisioned credentials and
+// writes only a new configuration file; no listeners or runtime state start.
+if (args.Length > 0 && args[0] == "--listener-bootstrap-wizard")
+{
+    Environment.ExitCode = GatewayListenerIsolation.RunBootstrapWizard(args);
+    return;
+}
+
 // Explicit local operator command, never a remote management endpoint.
 // Handle before constructing any listener, audit worker or other hosted service.
 if(args.Length>0 && args[0]=="--linux-dp-key-issue")
@@ -126,6 +135,11 @@ if (args.Length == 1 && args[0] == "--license-init")
 }
 commercialLicense.Refresh();
 using var fleetQuorum=FleetQuorum.Open(Environment.GetEnvironmentVariable("GATEWAYCORE_FLEET_QUORUM_CONFIG"),true);
+if (args.Length > 0 && args[0] == "--fleet-tls-lock")
+{
+    Environment.ExitCode = await FleetTlsOperator.RunAsync(args, privateDir, commercialLicense, fleetQuorum);
+    return;
+}
 #endif
 var keyDir = Path.Combine(privateDir, "data-protection-keys");
 if (!OperatingSystem.IsLinux() || ec2Lab)
@@ -3249,7 +3263,34 @@ if (stagedImportEnabled)
         if (!await AuditActorCurrent(ctx, true)) return Results.StatusCode(403);
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ctx.RequestAborted);
         timeout.CancelAfter(TimeSpan.FromSeconds(10));
-        try { return Results.Ok(await service.PreviewAsync(timeout.Token)); }
+        try
+        {
+            var preview = await service.PreviewAsync(timeout.Token);
+            var fleetMode = OnboardingApi.IsMultiGatewayDesign(privateDir);
+            var fleetGrantReady = false;
+#if GATEWAYCORE_COMMERCIAL
+            if (fleetMode && fleetQuorum is not null && externalAuditIntent is not null &&
+                auditOutbox is not null && acmeRenewalSettings is null)
+            {
+                try
+                {
+                    using var fleetLock = FleetTlsOperator.OpenExclusive(privateDir);
+                    var plan = FleetTlsOperator.ReadActivation(privateDir, commercialLicense,
+                        preview.ActiveDigest, preview.CandidateDigest);
+                    if (fleetQuorum.Scope == plan.Scope)
+                    {
+                        await fleetQuorum.Assert(plan.TransactionId, plan.Epoch, timeout.Token);
+                        fleetGrantReady = true;
+                    }
+                }
+                catch (Exception ex) when (ex is IOException or InvalidDataException or UnauthorizedAccessException or
+                    InvalidOperationException or CryptographicException or OperationCanceledException or ArgumentException)
+                { }
+            }
+#endif
+            return Results.Ok(new { preview.CandidateDigest, preview.ActiveDigest, preview.Thumbprint,
+                preview.NotAfterUtc, fleetMode, fleetGrantReady });
+        }
         catch (Exception ex)
         {
             await Audit(Actor(ctx), "TLS_STAGED_PREVIEW_FAILED", new { failureType = ex.GetType().Name });
@@ -3263,18 +3304,77 @@ if (stagedImportEnabled)
             input.Confirmation != "ACTIVATE " + input.CandidateDigest)
             return Results.BadRequest(new { error = "Exact preview digests and typed confirmation required." });
         if (!await AuditActorCurrent(ctx, true)) return Results.StatusCode(403);
-        // Do not introduce an external-audit or enterprise mutation bypass.
-        if (externalAuditIntent is not null || oidcPolicy is not null || OnboardingApi.IsMultiGatewayDesign(privateDir))
-            return Results.Conflict(new { error = "Staged local import requires the independently approved fleet/enterprise procedure." });
+        // Multi-gateway import is supported only through the commercial,
+        // installation-bound, independently signed per-node quorum plan.
+        var fleetMode = OnboardingApi.IsMultiGatewayDesign(privateDir);
+#if GATEWAYCORE_COMMERCIAL
+        if (fleetMode && (fleetQuorum is null || externalAuditIntent is null ||
+            auditOutbox is null || acmeRenewalSettings is not null))
+            return Results.Conflict(new { error = "Fleet certificate import requires authenticated quorum, durable external audit and independently controlled renewal." });
+#else
+        if (fleetMode)
+            return Results.Conflict(new { error = "Fleet certificate import requires the licensed signed fleet workflow." });
+#endif
+        if (externalAuditIntent is not null && auditOutbox is null)
+            return Results.Conflict(new { error = "Enterprise certificate import requires a configured durable audit outbox." });
+        if (SetupCenter.ReadFreeze(privateDir).Frozen)
+            return Results.Conflict(new { error = "Local change freeze is active." });
         await Audit(Actor(ctx), "TLS_STAGED_ACTIVATION_REQUEST", new { input.CandidateDigest, input.ActiveDigest });
         if (!await AuditActorCurrent(ctx, true)) return Results.StatusCode(403);
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ctx.RequestAborted, app.Lifetime.ApplicationStopping);
         timeout.CancelAfter(TimeSpan.FromSeconds(45));
         try
         {
-            var result = await service.ActivateAsync(input.CandidateDigest, input.ActiveDigest, timeout.Token);
-            await Audit(Actor(ctx), "TLS_STAGED_ACTIVATED", new { result.Thumbprint, result.NotAfterUtc });
-            return Results.Ok(new { activated = true, result.Thumbprint, result.NotAfterUtc });
+            string? intentId = null;
+#if GATEWAYCORE_COMMERCIAL
+            using var fleetLock = fleetMode ? FleetTlsOperator.OpenExclusive(privateDir) : null;
+            var fleetPlan = fleetMode ? FleetTlsOperator.ReadActivation(privateDir, commercialLicense,
+                input.ActiveDigest, input.CandidateDigest) : null;
+#endif
+            async Task<IDisposable> AuthorizeCertificateCommit(CancellationToken token)
+            {
+                if (!await AuditActorCurrent(ctx, true))
+                    throw new InvalidOperationException("Certificate authorization no longer current.");
+                if (externalAuditIntent is not null)
+                {
+                    intentId = await externalAuditIntent.ConfirmWithIdAsync(Actor(ctx), "tls-staged-activate",
+                        input.ActiveDigest, input.CandidateDigest, token);
+                    if (intentId is null) throw new InvalidOperationException("External certificate intent unavailable.");
+                }
+                await loginGate.WaitAsync(token);
+                try
+                {
+                    if (!await AuditActorCurrent(ctx, true) || SetupCenter.ReadFreeze(privateDir).Frozen ||
+                        OnboardingApi.IsMultiGatewayDesign(privateDir) != fleetMode)
+                        throw new InvalidOperationException("Certificate authorization or topology changed.");
+                    if (intentId is not null)
+                        await localAudit.AppendAsync(Actor(ctx), "TLS_STAGED_MUTATION_PREPARED",
+                            new { input.ActiveDigest, input.CandidateDigest }, intentId);
+                    if (!await AuditActorCurrent(ctx, true) || SetupCenter.ReadFreeze(privateDir).Frozen ||
+                        OnboardingApi.IsMultiGatewayDesign(privateDir) != fleetMode)
+                        throw new InvalidOperationException("Certificate authorization changed during audit.");
+#if GATEWAYCORE_COMMERCIAL
+                    if (fleetMode)
+                    {
+                        if (fleetPlan is null || fleetQuorum is null)
+                            throw new InvalidOperationException("Fleet certificate plan unavailable.");
+                        await FleetTlsOperator.ConsumeAsync(privateDir, commercialLicense, fleetQuorum, fleetPlan, token);
+                        if (!await AuditActorCurrent(ctx, true) || SetupCenter.ReadFreeze(privateDir).Frozen ||
+                            !OnboardingApi.IsMultiGatewayDesign(privateDir))
+                            throw new InvalidOperationException("Certificate authority changed at fleet commit.");
+                    }
+#endif
+                    token.ThrowIfCancellationRequested();
+                    return new StagedActivationGateLease(loginGate);
+                }
+                catch { loginGate.Release(); throw; }
+            }
+            var result = await service.ActivateAsync(input.CandidateDigest, input.ActiveDigest, timeout.Token,
+                AuthorizeCertificateCommit);
+            await localAudit.AppendAsync(Actor(ctx), "TLS_STAGED_ACTIVATED",
+                new { result.Thumbprint, result.NotAfterUtc, input.CandidateDigest, fleetMode }, intentId);
+            return Results.Ok(new { activated = true, result.Thumbprint, result.NotAfterUtc,
+                independentFleetCompletionRequired = fleetMode });
         }
         catch (Exception ex)
         {
@@ -3285,9 +3385,44 @@ if (stagedImportEnabled)
 }
 app.MapSpecialistDrafts();
 var wafBroker = WafDashboardBroker.FromEnvironment();
+var dnsBroker = WafDashboardBroker.FromEnvironment("YARP_GSLB_DASHBOARD");
+app.MapGet("/admin/api/specialist/gslb-deployment", () => Results.Ok(new {
+    configured = dnsBroker is not null,
+    scope = "Independently staged signed DNS plan; separate authority commit required"
+})).RequireAuthorization(p => p.RequireRole("Administrator"));
+app.MapPost("/admin/api/specialist/gslb-deployment", async (HttpContext ctx, WafDashboardRequest request) =>
+{
+    if (dnsBroker is null) return Results.Conflict(new { error = "Host DNS deployment broker not configured." });
+    if (!await AuditActorCurrent(ctx, true)) return Results.StatusCode(403);
+    if (externalAuditIntent is not null || oidcPolicy is not null)
+        return Results.Conflict(new { error = "Enterprise deployments require the independent operator workflow." });
+    if (request.Operation is not ("preflight" or "execute") || request.Revision is < 1 or > 9007199254740991 ||
+        request.Digest is null || !Regex.IsMatch(request.Digest, "^[A-F0-9]{64}$") ||
+        request.Confirmation != request.Operation.ToUpperInvariant() + " " + request.Digest)
+        return Results.BadRequest(new { error = "Exact signed DNS plan sequence, digest and confirmation required." });
+    if (SetupCenter.ReadFreeze(privateDir).Frozen)
+        return Results.Conflict(new { error = "Local routing change freeze is active." });
+    await Audit(Actor(ctx), "DNS_BROKER_REQUESTED", new { request.Operation, request.Revision, request.Digest });
+    if (!await AuditActorCurrent(ctx, true)) return Results.StatusCode(403);
+    try
+    {
+        var outcome = await dnsBroker.RequestAsync(request, ctx.RequestAborted);
+        await Audit(Actor(ctx), "DNS_BROKER_OUTCOME", new { request.Revision, request.Digest, outcome });
+        return outcome == "refused-or-failed"
+            ? Results.Conflict(new { error = "Broker refused or failed. Reconcile independent DNS journal." })
+            : Results.Ok(new { outcome });
+    }
+    catch (Exception ex)
+    {
+        await Audit(Actor(ctx), "DNS_BROKER_UNCONFIRMED", new { failureType = ex.GetType().Name });
+        return Results.Json(new { error = "Result unconfirmed. Do not retry until independent reconciliation." }, statusCode: 503);
+    }
+}).WithMetadata(new RequestSizeLimitAttribute(2048))
+  .RequireAuthorization(p => p.RequireRole("Administrator"))
+  .RequireRateLimiting("waf-dashboard-deployment");
 app.MapGet("/admin/api/specialist/waf-deployment", () => Results.Ok(new {
     configured = wafBroker is not null,
-    scope = "Linux host-approved signed policy; independent quorum commit required"
+    scope = "Host-approved signed policy via local or mutually authenticated operator broker; independent quorum commit required"
 })).RequireAuthorization(p => p.RequireRole("Administrator"));
 app.MapPost("/admin/api/specialist/waf-deployment", async (HttpContext ctx, WafDashboardRequest request) =>
 {
@@ -3635,6 +3770,11 @@ record EmployeeInvitationInput(string? Username, string? Email, string? Role);
 sealed class EmployeeInvitationRedemptionEndpoint { }
 record EmployeeInvitationRedeem(string? Action, string? Code, string? Password = null);
 record StagedActivationInput(string? CandidateDigest, string? ActiveDigest, string? Confirmation);
+sealed class StagedActivationGateLease(SemaphoreSlim gate) : IDisposable
+{
+    private SemaphoreSlim? held = gate;
+    public void Dispose() => Interlocked.Exchange(ref held, null)?.Release();
+}
 record EmployeeInvitation(string Id, string Username, string Email, string Role, string Issuer, string IssuerStamp,
     string MailFingerprint, byte[] CodeHash, DateTimeOffset ExpiresUtc, bool Verified)
 {
