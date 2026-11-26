@@ -187,6 +187,9 @@ public static class EngineConfigContract
                 !used.Add(name) || !Ip(listener["ListenHost"],out var address) ||
                 !Num(listener["ListenPort"],1025,65535) ||
                 (!IPAddress.IsLoopback(address) && (!allowPublicBind || !publicOptIn)) ||
+                (listener.TryGetPropertyValue("BalancingPolicy", out var balancing) &&
+                 (!Str(balancing, out var policy) || policy is not ("RoundRobin" or "WeightedRoundRobin" or "WeightedLeastConnections") ||
+                  (ReferenceEquals(section, udp) && policy == "WeightedLeastConnections"))) ||
                 (listener.TryGetPropertyValue("TcpMaxConnections", out var tcpLimit) &&
                  !Num(tcpLimit,1,4096)) ||
                 (listener.TryGetPropertyValue("UdpMaxSessions", out var udpLimit) &&
@@ -205,6 +208,7 @@ public static class EngineConfigContract
             {
                 if (b is not JsonObject backend || !Ip(backend["Host"],out _) ||
                     !Num(backend["Port"],1,65535) ||
+                    (backend.TryGetPropertyValue("Weight", out var weight) && !Num(weight,1,100)) ||
                     (backend["DrainNewConnections"] is not null &&
                      !Bool(backend["DrainNewConnections"]))) return false;
             }

@@ -41,7 +41,9 @@ foreach (var listener in listeners)
         ((listener.UdpProbePayload is null) != (listener.UdpProbeExpectedResponse is null)) ||
         (listener.UdpProbePayload is { } probePayload && Encoding.UTF8.GetByteCount(probePayload) is < 1 or > 512) ||
         (listener.UdpProbeExpectedResponse is { } probeResponse && Encoding.UTF8.GetByteCount(probeResponse) is < 1 or > 512) ||
-        listener.Backends.Any(b => b.Port is < 1 or > 65535 ||
+        listener.BalancingPolicy is not ("RoundRobin" or "WeightedRoundRobin" or "WeightedLeastConnections") ||
+        (config.Udp.Contains(listener) && listener.BalancingPolicy == "WeightedLeastConnections") ||
+        listener.Backends.Any(b => b.Weight is < 1 or > 100 || b.Port is < 1 or > 65535 ||
             !IPAddress.TryParse(b.Host, out var ip) ||
             ip.AddressFamily != AddressFamily.InterNetwork))
         throw new InvalidDataException($"Invalid listener {listener.Name}; addresses must be IPv4 literals and public binds require explicit opt-in.");
@@ -208,6 +210,9 @@ async Task ProxyTcp(TcpClient downstream, L4Listener cfg, TcpTarget[] targets, l
     {
         downstream.NoDelay = true;
         TcpClient? upstream = null;
+        TcpTarget? reserved = null;
+        try
+        {
         // Draining targets never receive NEW streams. If every active probe fails,
         // attempt configured non-draining backends rather than creating a probe-only outage.
         var available = targets.Where(t => !t.Backend.DrainNewConnections).ToArray();
@@ -215,14 +220,18 @@ async Task ProxyTcp(TcpClient downstream, L4Listener cfg, TcpTarget[] targets, l
         var healthy = available.Where(t => Volatile.Read(ref t.Healthy) == 1).ToArray();
         var candidates = healthy.Length > 0 ? healthy : available;
         // Try another target only during CONNECT, before any application payload is sent.
-        for (var i = 0; i < candidates.Length; i++)
+        var ordered = OrderTcpCandidates(candidates, cfg.BalancingPolicy, chosen);
+        for (var i = 0; i < ordered.Length; i++)
         {
             if (stopToken.IsCancellationRequested) return;
 #if GATEWAYCORE_COMMERCIAL
             if(!engineLicense.Allows("l4"))return;
 #endif
-            var target = candidates[(int)((ulong)(chosen + i) % (ulong)candidates.Length)].Backend;
+            var selected = ordered[i];
+            var target = selected.Backend;
             var next = new TcpClient(AddressFamily.InterNetwork) { NoDelay = true };
+            Interlocked.Increment(ref selected.ActiveConnections);
+            reserved = selected;
             try
             {
                 using var timeout = CancellationTokenSource.CreateLinkedTokenSource(stopToken);
@@ -231,7 +240,11 @@ async Task ProxyTcp(TcpClient downstream, L4Listener cfg, TcpTarget[] targets, l
                 upstream = next; break;
             }
             catch (Exception ex) when (ex is SocketException or OperationCanceledException)
-            { next.Dispose(); }
+            {
+                next.Dispose();
+                Interlocked.Decrement(ref selected.ActiveConnections);
+                reserved = null;
+            }
         }
         if (upstream is null) return;
         using (upstream)
@@ -262,7 +275,34 @@ async Task ProxyTcp(TcpClient downstream, L4Listener cfg, TcpTarget[] targets, l
             var towardClient = Pump(serverStream, clientStream, downstream.Client, idle, timeout);
             await Task.WhenAll(towardBackend, towardClient);
         }
+        }
+        finally { if (reserved is not null) Interlocked.Decrement(ref reserved.ActiveConnections); }
     }
+}
+
+static int WeightedIndex(int[] weights, long cursor)
+{
+    var ticket = (int)((ulong)cursor % (ulong)weights.Sum());
+    for (var i = 0; i < weights.Length; i++)
+    {
+        if (ticket < weights[i]) return i;
+        ticket -= weights[i];
+    }
+    throw new InvalidOperationException("Invalid weighted selection");
+}
+static TcpTarget[] OrderTcpCandidates(TcpTarget[] candidates, string policy, long cursor)
+{
+    var start = policy == "WeightedRoundRobin"
+        ? WeightedIndex(candidates.Select(t => t.Backend.Weight).ToArray(), cursor)
+        : (int)((ulong)cursor % (ulong)candidates.Length);
+    var ordered = Enumerable.Range(0, candidates.Length)
+        .Select(i => candidates[(start + i) % candidates.Length]);
+    // Stable ties preserve the rotated order. Count connecting and established
+    // streams, never active health probes. Selection/reservation starts on the
+    // single accept loop before its first asynchronous connect.
+    if (policy == "WeightedLeastConnections")
+        ordered = ordered.OrderBy(t => ((double)Volatile.Read(ref t.ActiveConnections) + 1) / t.Backend.Weight);
+    return ordered.ToArray();
 }
 async Task Pump(Stream from, Stream to, Socket destination,
     CancellationTokenSource idle, TimeSpan timeout)
@@ -355,7 +395,11 @@ async Task RunUdp(L4Listener cfg, CancellationToken token)
             var candidates = healthyBackends.Length > 0 ? healthyBackends : eligibleBackends;
             if (session is null && sessions.Count < cfg.UdpMaxSessions && candidates.Length != 0)
             {
-                var selected = candidates[(int)((ulong)Interlocked.Increment(ref cursor) % (ulong)candidates.Length)].Backend;
+                var ticket = Interlocked.Increment(ref cursor);
+                var index = cfg.BalancingPolicy == "WeightedRoundRobin"
+                    ? WeightedIndex(candidates.Select(t => t.Backend.Weight).ToArray(), ticket)
+                    : (int)((ulong)ticket % (ulong)candidates.Length);
+                var selected = candidates[index].Backend;
                 var peer = new UdpClient(AddressFamily.InterNetwork);
                 peer.Connect(IPAddress.Parse(selected.Host), selected.Port);
                 session = new UdpSession(peer, remote, now);
@@ -442,6 +486,7 @@ async Task RelayUdpResponse(UdpSession session, Socket downstream, long idleMs, 
 sealed record L4Config(bool AllowNonLoopbackListeners, L4Listener[] Tcp, L4Listener[] Udp);
 sealed record L4Listener(string Name, string ListenHost, int ListenPort, L4Backend[] Backends)
 {
+    public string BalancingPolicy { get; init; } = "RoundRobin";
     public int TcpMaxConnections { get; init; } = 1024;
     public int UdpMaxSessions { get; init; } = 1024;
     public int TcpIdleTimeoutSeconds { get; init; } = 300;
@@ -454,12 +499,14 @@ sealed record L4Listener(string Name, string ListenHost, int ListenPort, L4Backe
 }
 sealed record L4Backend(string Host, int Port)
 {
+    public int Weight { get; init; } = 1;
     public bool DrainNewConnections { get; init; }
 }
 sealed class TcpTarget
 {
     public TcpTarget(L4Backend backend) => Backend = backend;
     public L4Backend Backend { get; }
+    public int ActiveConnections;
     public int Healthy = 1; // unknown until first probe; connect-time fallback still applies
 }
 sealed class UdpTarget
