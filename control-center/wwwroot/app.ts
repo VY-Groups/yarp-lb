@@ -147,7 +147,7 @@ function editApplicationAccess(id: string) {
         { name: 'tls', label: 'Require HTTPS', value: meta['ADC.Access.RequireHttps'] || 'false', options: ['false', 'true'] },
         { name: 'networks', label: 'Allowed CIDRs (comma separated, optional)', value: meta['ADC.Access.AllowedNetworks'] || '', optional: true }
     ], v => {
-        const networks = v.networks.trim();
+        const networks: string = v.networks.trim();
         if (!['true', 'false'].includes(v.tls) || networks.length > 2048 || (networks && (networks.split(',').length > 32 || networks.split(',').some(part => !/^[0-9a-fA-F:.]+\/[0-9]{1,3}$/.test(part.trim())))))
             throw Error('Use at most 32 IPv4/IPv6 CIDRs. The server validates address and prefix semantics.');
         const metadata = { ...meta };
