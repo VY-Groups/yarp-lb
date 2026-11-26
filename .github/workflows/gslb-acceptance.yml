@@ -2,9 +2,9 @@ name: GSLB authoritative DNS health/failover acceptance
 on:
   push:
     branches: [main, "feature/**"]
-    paths: ["engines/GslbDns/**", "engines/GslbObserver/**", "tests/GslbAcceptance/**", "ops/acceptance/dns_wire_probe.py", ".github/workflows/gslb-acceptance.yml"]
+    paths: ["engines/GslbDns/**", "engines/GslbObserver/**", "tests/GslbAcceptance/**", "ops/acceptance/dns_wire_probe.py", "ops/acceptance/gslb_signed_rollout.py", "ops/acceptance/test_gslb_signed_rollout.py", "control-center/GatewayAgent/**", ".github/workflows/gslb-acceptance.yml"]
   pull_request:
-    paths: ["engines/GslbDns/**", "engines/GslbObserver/**", "tests/GslbAcceptance/**", "ops/acceptance/dns_wire_probe.py", ".github/workflows/gslb-acceptance.yml"]
+    paths: ["engines/GslbDns/**", "engines/GslbObserver/**", "tests/GslbAcceptance/**", "ops/acceptance/dns_wire_probe.py", "ops/acceptance/gslb_signed_rollout.py", "ops/acceptance/test_gslb_signed_rollout.py", "control-center/GatewayAgent/**", ".github/workflows/gslb-acceptance.yml"]
   workflow_dispatch:
 permissions: {contents: read}
 jobs:
@@ -24,6 +24,8 @@ jobs:
         with: {python-version: "3.x"}
       - name: DNS wire probe unit regressions (UDP truncation fallback and header validation)
         run: python ops/acceptance/test_dns_wire_probe.py
+      - name: Signed rolling DNS operator transaction contracts
+        run: python ops/acceptance/test_gslb_signed_rollout.py
       - run: dotnet build engines/GslbDns/GslbDns.csproj -c Release
       - run: dotnet run --project tests/GslbAcceptance/GslbAcceptance.csproj -c Release -- "${{ github.workspace }}"
       - name: Real authoritative DNS UDP/TCP/EDNS/negative-answer wire acceptance
