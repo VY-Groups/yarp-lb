@@ -904,6 +904,14 @@ function updateDest(id = '') {
     });
 }
 function act(type, id) {
+    if (type === 'invite-add') {
+        inviteEmployee();
+        return;
+    }
+    if (type === 'invite-revoke') {
+        void revokeEmployeeInvite(id);
+        return;
+    }
     if (type === 'runtime-health') {
         void refreshDestinationRuntime();
         return;
@@ -1443,11 +1451,59 @@ function addInventory() {
         show(String(e), true);
     } });
 }
+async function employeeInvitationPanel() {
+    try {
+        const methods = await api('/admin/api/auth-methods');
+        if (!methods.employeeInvitations)
+            return '<div class="card card-spaced"><h3>Employee invitations</h3><p>Available on an ordinary local-account gateway with verified SMTP. Enterprise and multi-gateway enrollment use their approved identity workflows.</p></div>';
+        const pending = await api('/admin/api/users/invitations');
+        const rows = pending.map((x) => `<tr><td>${esc(x.username)}</td><td>${esc(x.emailHint)}</td><td>${esc(x.role)}</td><td>${esc(x.status)}</td><td>${esc(x.expiresUtc)}</td><td>${actionBtn('Revoke invitation', 'invite-revoke', x.id, 'danger-btn mini')}</td></tr>`).join('');
+        return `<div class="card card-spaced"><div class="toolbar"><div><h3>Employee invitations</h3><p>Assign a role and send a one-time email code. Employees choose their own password. Pending invitations expire or are lost on service restart.</p></div>${actionBtn('+ Invite employee', 'invite-add', '', 'primary')}</div><div class="tablewrap"><table><thead><tr><th>Username</th><th>Email</th><th>Role</th><th>Status</th><th>Expiry (UTC)</th><th>Action</th></tr></thead><tbody>${rows || '<tr><td colspan="6">No pending invitations.</td></tr>'}</tbody></table></div></div>`;
+    }
+    catch (e) {
+        return '<div class="card card-spaced"><h3>Employee invitations</h3><p>Invitation status unavailable. No invitation availability is claimed.</p></div>';
+    }
+}
+function inviteEmployee() {
+    if (currentRole !== 'Administrator')
+        return show('Administrator role required', true);
+    modal('Invite employee', 'Use the employee’s company mailbox. The invitation expires in 30 minutes; the employee chooses their own password after verifying the emailed code.', [
+        { name: 'username', label: 'Named employee username', value: '' },
+        { name: 'email', label: 'Employee company email', value: '', kind: 'email' },
+        { name: 'role', label: 'Employee role', value: 'Viewer', options: ['Viewer', 'Operator'] }
+    ], async (v) => {
+        try {
+            await api('/admin/api/users/invitations', 'POST', v);
+            if (view === 'users')
+                await users();
+            show('Invitation sent. Ask the employee to open the approved dashboard and accept the emailed code.');
+        }
+        catch (e) {
+            show(String(e), true);
+        }
+    }, 'Send invitation');
+}
+async function revokeEmployeeInvite(id) {
+    if (currentRole !== 'Administrator' || !confirm('Revoke this pending invitation? The employee must receive a new invitation.'))
+        return;
+    try {
+        await api('/admin/api/users/invitations/' + encodeURIComponent(id) + '/revoke', 'POST', {});
+        if (view === 'users')
+            await users();
+        show('Invitation revoked');
+    }
+    catch (e) {
+        show(String(e), true);
+    }
+}
 async function users() {
     try {
         const list = await api('/admin/api/users');
+        const invitationPanel = await employeeInvitationPanel();
+        if (view !== 'users')
+            return;
         const rows = list.map((x) => `<tr><td><b>${esc(x.username)}</b></td><td>${esc(x.email || '—')}</td><td>${esc(x.role)}</td><td>${esc(x.provider || 'Local')}</td><td><span class="chip ${x.enabled ? 'good' : 'bad'}">${x.enabled ? 'Enabled' : 'Disabled'}</span></td><td>${x.provider === 'AD' ? 'AD password managed by directory' : actionBtn('Reset password', 'password-reset', x.username)} ${actionBtn(x.enabled ? 'Offboard' : 'Re-enable', x.enabled ? 'user-disable' : 'user-enable', x.username)}</td></tr>`).join('');
-        $('content').innerHTML = `<div class="toolbar"><div><h2>Administrator accounts</h2><p class="subtle">Administrators onboard/offboard users; Operators manage routes; Viewers read only. Disabling an account blocks new sign-ins and invalidates existing sessions. Inactive sessions expire after 30 minutes.</p></div>${actionBtn('+ Add account', 'user-add', '')} ${actionBtn('Mail & OTP', 'switch', 'mail')} ${actionBtn('Active Directory', 'switch', 'directory')}</div><div class="tablewrap"><table><thead><tr><th>Username</th><th>Email</th><th>Role</th><th>Authentication</th><th>Status</th><th>Action</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+        $('content').innerHTML = `<div class="toolbar"><div><h2>Administrator accounts</h2><p class="subtle">Administrators onboard/offboard users; Operators manage routes; Viewers read only. Disabling an account blocks new sign-ins and invalidates existing sessions. Inactive sessions expire after 30 minutes.</p></div>${actionBtn('+ Add account', 'user-add', '')} ${actionBtn('Mail & OTP', 'switch', 'mail')} ${actionBtn('Active Directory', 'switch', 'directory')}</div><div class="tablewrap"><table><thead><tr><th>Username</th><th>Email</th><th>Role</th><th>Authentication</th><th>Status</th><th>Action</th></tr></thead><tbody>${rows}</tbody></table></div>${invitationPanel}`;
     }
     catch (e) {
         show(String(e), true);

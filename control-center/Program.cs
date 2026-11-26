@@ -1715,7 +1715,7 @@ bool EmployeeInvitationsAvailable()
 #if GATEWAYCORE_COMMERCIAL
     return false;
 #else
-    if (oidcPolicy is not null || externalAuditIntent is not null) return false;
+    if (oidcPolicy is not null || externalAuditIntent is not null || Onboarding.IsMultiGatewayDesign(privateDir)) return false;
     var mail = ReadMail();
     return mail.Enabled && MailDeliveryVerified(mail) &&
         ReadUsers().Any(u => u.Enabled && u.Role == "Administrator");

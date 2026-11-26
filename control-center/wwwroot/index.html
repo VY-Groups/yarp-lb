@@ -63,6 +63,19 @@
           <p id="auth-message" role="alert" aria-live="assertive"></p>
           <button id="auth-submit" class="primary" type="submit">Sign in</button>
         </form>
+        <details id="employee-invitation" class="card card-spaced" hidden>
+          <summary>Accept employee invitation</summary>
+          <form id="employee-invitation-form" class="auth-form">
+            <p id="employee-invitation-description">Enter the one-time code sent by your administrator to your company mailbox.</p>
+            <label id="employee-invitation-code-row">Email invitation code<input id="employee-invitation-code" type="password" autocomplete="off" minlength="64" maxlength="64" required spellcheck="false"></label>
+            <div id="employee-invitation-password-fields" class="first-run-fields" hidden>
+              <label>New password (16–256 characters)<input id="employee-invitation-password" type="password" autocomplete="new-password" minlength="16" maxlength="256"></label>
+              <label>Confirm password<input id="employee-invitation-confirm" type="password" autocomplete="new-password" minlength="16" maxlength="256"></label>
+            </div>
+            <p id="employee-invitation-message" role="alert" aria-live="polite"></p>
+            <button id="employee-invitation-submit" type="submit" class="primary">Verify invitation</button>
+          </form>
+        </details>
         <a id="auth-sso-link" href="/admin/oidc/start" hidden>Sign in with Enterprise SSO / passkey</a>
         <p><a class="privacy-link" href="/dashboard/privacy" target="_blank" rel="noopener">Privacy Policy</a></p>
         <div class="auth-security"><span aria-hidden="true">◈</span><span>For authorized operators only. Administrative access must use an approved secure listener in production.</span></div>

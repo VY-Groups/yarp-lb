@@ -93,3 +93,65 @@
   });
   render();
 })();
+
+// Invitation credentials never enter the URL, localStorage, screenshots or
+// the ordinary sign-in form. Hiding the authentication screen purges them.
+(() => {
+  const $ = id => document.getElementById(id);
+  const section = $('employee-invitation'), form = $('employee-invitation-form'), auth = $('auth-screen');
+  if (!section || !form || !auth) return;
+  const submit = $('employee-invitation-submit'), code = $('employee-invitation-code');
+  const password = $('employee-invitation-password'), confirmation = $('employee-invitation-confirm');
+  const message = $('employee-invitation-message'), description = $('employee-invitation-description');
+  let completion = '', generation = 0, availability = 0;
+  function reset() {
+    generation++; completion = ''; code.value = ''; password.value = ''; confirmation.value = '';
+    code.required = true; password.required = confirmation.required = false;
+    $('employee-invitation-code-row').hidden = false;
+    $('employee-invitation-password-fields').hidden = true;
+    description.textContent = 'Enter the one-time code sent by your administrator to your company mailbox.';
+    message.textContent = ''; submit.textContent = 'Verify invitation'; submit.disabled = false;
+  }
+  async function availabilityChanged() {
+    const current = ++availability;
+    if (auth.hidden) { section.hidden = true; section.open = false; reset(); return; }
+    try {
+      const r = await fetch('/admin/api/auth-methods', { credentials: 'same-origin', cache: 'no-store' });
+      const result = await r.json();
+      if (current === availability && !auth.hidden) section.hidden = !r.ok || result.employeeInvitations !== true;
+    } catch { if (current === availability) section.hidden = true; }
+  }
+  new MutationObserver(availabilityChanged).observe(auth, { attributes: true, attributeFilter: ['hidden'] });
+  section.addEventListener('toggle', () => { if (!section.open) reset(); });
+  form.addEventListener('submit', async event => {
+    event.preventDefault();
+    if (submit.disabled || auth.hidden || section.hidden) return;
+    if (completion && password.value !== confirmation.value) { message.textContent = 'Passwords do not match.'; return; }
+    const requestGeneration = generation;
+    const body = completion ? { action: 'finish', code: completion, password: password.value } : { action: 'verify', code: code.value.trim() };
+    submit.disabled = true; message.textContent = '';
+    try {
+      const response = await fetch('/admin/api/employee-invitation/redeem', {
+        method: 'POST', credentials: 'same-origin', cache: 'no-store',
+        headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+      });
+      const result = await response.json().catch(() => ({}));
+      if (generation !== requestGeneration || auth.hidden) return;
+      if (!response.ok) throw Error(result.error || (response.status === 429 ? 'Too many attempts. Try again later.' : 'Invitation unavailable.'));
+      if (!completion && result.verified && typeof result.completion === 'string' && /^[A-F0-9]{64}$/.test(result.completion)) {
+        completion = result.completion; code.value = ''; code.required = false;
+        $('employee-invitation-code-row').hidden = true;
+        $('employee-invitation-password-fields').hidden = false;
+        password.required = confirmation.required = true;
+        description.textContent = 'Email verified. Create your password for ' + result.username + ' (' + result.role + ').';
+        submit.textContent = 'Create account'; password.focus();
+      } else if (completion && result.created) {
+        reset();
+        message.textContent = 'Account created. Sign in above with your new password and email OTP.';
+      } else throw Error('Invitation completion was not confirmed.');
+    } catch (error) {
+      if (generation === requestGeneration) message.textContent = String(error.message || error);
+    } finally { if (generation === requestGeneration) submit.disabled = false; }
+  });
+  reset(); void availabilityChanged();
+})();
