@@ -748,7 +748,6 @@ def acceptance(base:str,https_base:str,origin_port:int):
     check(viewer.request("GET","/admin/api/setup/overview")["verifiedForProduction"] is False,
         "viewer can inspect honest unverified setup")
     admin.request("GET","/admin/api/setup/version")
-    verify_compound_probe_endpoint(base,admin,operator,reviewer,viewer,origin_port)
     initial=admin.request("GET","/admin/api/state")
     check("fixture" in initial["clusters"],"real proxy config inspection")
     eventually(anonymous,"/fixture/check","e2e-origin:/check")
@@ -855,6 +854,7 @@ def acceptance(base:str,https_base:str,origin_port:int):
     admin.request("POST","/admin/api/restore/"+rollback_backup,{})
     check("e2e" not in admin.request("GET","/admin/api/state")["routes"],
         "authorized restore rolls routing config back")
+    verify_compound_probe_endpoint(base,admin,operator,reviewer,viewer,origin_port)
     check(admin.request("GET","/admin/api/mail")["enabled"] is False,"SMTP starts disabled")
     admin.request("POST","/admin/api/mail/test",{},expect=409)
     admin.request("POST","/admin/api/mail",{"enabled":True,"host":"smtp.invalid","port":587,
