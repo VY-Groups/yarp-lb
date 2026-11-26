@@ -13,6 +13,14 @@ import time
 def hex_value(value, length=64):
     return isinstance(value,str) and re.fullmatch("[A-F0-9]{%d}" % length,value) is not None
 
+def unique_object(pairs):
+    result = {}
+    for name, value in pairs:
+        if name.casefold() in (key.casefold() for key in result):
+            raise ValueError("duplicate or aliased plan property")
+        result[name] = value
+    return result
+
 def canonical(value):
     return json.dumps(value, sort_keys=True, separators=(",",":"), ensure_ascii=True).encode("ascii")
 
@@ -54,8 +62,8 @@ def main():
         raw=f.read(16385)
     if len(raw)>16384:
         raise ValueError("oversized plan")
-    plan=json.loads(raw)
-    if set(plan)!={"scope","installation","activeDigest","candidateDigest","peerEvidenceSha256","nonce","transactionId","epoch"}:
+    plan=json.loads(raw, object_pairs_hook=unique_object)
+    if type(plan) is not dict or set(plan)!={"scope","installation","activeDigest","candidateDigest","peerEvidenceSha256","nonce","transactionId","epoch"}:
         raise ValueError("exact plan schema required")
     fields=["scope","installation","activeDigest","candidateDigest","peerEvidenceSha256"]
     if not all(hex_value(plan[x]) for x in fields) or not hex_value(plan["nonce"],32) or plan["activeDigest"]==plan["candidateDigest"] or type(plan["epoch"]) is not int or not 1<=plan["epoch"]<=2**63-1:

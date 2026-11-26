@@ -46,6 +46,8 @@ GatewayTelemetryLifecycleTests.Run();
         !plan.Verify(grant, pem, tlsGrantNow + 121),
         "fleet TLS grant cannot authorize another installation, completion phase or expired epoch");
 }
+if (OperatingSystem.IsLinux())
+    await FleetTlsSignerAcceptance.RunAsync();
 var linuxGslbCommand = GslbServiceRestart.Build(false, "/usr/bin/systemctl");
 var windowsGslbCommand = GslbServiceRestart.Build(true, @"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe");
 Must(!linuxGslbCommand.UseShellExecute && linuxGslbCommand.ArgumentList.SequenceEqual(
