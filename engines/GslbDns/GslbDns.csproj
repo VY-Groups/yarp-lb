@@ -8,5 +8,6 @@
 </ItemGroup>
 <ItemGroup>
   <PackageReference Include="MaxMind.Db" Version="5.2.0" />
+  <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" Version="10.0.15" />
 </ItemGroup>  <Import Project="../../src/CommercialEngine/CommercialEngine.props" />
 </Project>
