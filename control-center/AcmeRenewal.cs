@@ -748,7 +748,10 @@ public sealed class AcmeRevocationCoordinator(IAcmeCertificateIssuer issuer,
             catch (FormatException ex) { throw new ArgumentException("Certificate DER is not valid base64.", ex); }
             if (der.Length is < 128 or > 1_048_576)
                 throw new ArgumentException("Certificate DER is outside its accepted size bound.");
-            using var certificate = new X509Certificate2(der);
+            // A revocation request accepts a public DER certificate only, never PFX or private key material.
+            using var certificate = X509CertificateLoader.LoadCertificate(der);
+            if (!certificate.RawData.AsSpan().SequenceEqual(der))
+                throw new ArgumentException("Revocation requires exact public DER certificate bytes.");
             var thumbprint = certificate.Thumbprint.ToUpperInvariant();
             if (!CryptographicOperations.FixedTimeEquals(
                     Encoding.ASCII.GetBytes(thumbprint), Encoding.ASCII.GetBytes(request.Thumbprint)))
