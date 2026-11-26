@@ -176,7 +176,7 @@ async function save() {
     if (!dirty || currentRole === 'Viewer')
         return;
     reasonDialog('Submit configuration for approval', 'Your draft contains ' + keys(data.routes).length + ' route(s) and ' + keys(data.clusters).length + ' backend group(s). Nothing goes live until a different authorized administrator approves this exact revision.', 12, 'Submit request', async (reason) => {
-        const x = await api('/admin/api/change-requests', 'POST', { reason, payload: { routes: data.routes, clusters: data.clusters, disabled: data.disabled, revision: data.revision } });
+        const x = await api('/admin/api/change-requests', 'POST', { reason, payload: { routes: data.routes, clusters: data.clusters, disabled: data.disabled, monitorProfiles: data.monitorProfiles || {}, revision: data.revision } });
         dirty = false;
         await reload();
         view = 'approvals';
@@ -355,7 +355,98 @@ function copyActiveMonitor(id) {
         edit();
     });
 }
-function clusters() { const rows = keys(data.clusters).map(id => { const c = data.clusters[id]; const active = !!c.HealthCheck?.Active?.Enabled, passive = !!c.HealthCheck?.Passive?.Enabled; const health = active && passive ? '<span class="chip good">Active + passive</span>' : active ? '<span class="chip good">Active</span>' : passive ? '<span class="chip warn">Passive only</span>' : '<span class="chip">Disabled</span>'; return `<tr><td><b>${esc(id)}</b></td><td>${esc(c.LoadBalancingPolicy || 'Default')}</td><td>${keys(c.Destinations || {}).length}</td><td>${health}${c.Metadata?.[monitorSourceKey] ? `<div class="subtle">Linked to ${esc(c.Metadata[monitorSourceKey])}</div>` : ""}</td><td>${actionBtn('Edit', 'cluster-edit', id)} ${currentRole === 'Viewer' ? '' : actionBtn('Health monitor', 'monitor-edit', id) + ' ' + actionBtn('Reuse monitor', 'monitor-copy', id) + (c.Metadata?.[monitorSourceKey] ? ' ' + actionBtn('Unlink monitor', 'monitor-unlink', id) : '')} ${actionBtn('Advanced', 'cluster-advanced', id)} ${actionBtn('Delete', 'cluster-delete', id, 'danger-btn mini')}</td></tr>`; }).join(''); return `<div class="toolbar"><div><h2>Backend groups (clusters)</h2><p class="subtle">A group contains the servers for one application and defines traffic distribution. Use the policy guide below.</p></div>${actionBtn('+ Add cluster', 'cluster-add', '')}</div><div class="tablewrap"><table><thead><tr><th>Cluster</th><th>Policy</th><th>Active backends</th><th>Health checks</th><th>Actions</th></tr></thead><tbody>${rows || '<tr><td colspan="5" class="empty">No clusters configured</td></tr>'}</tbody></table></div>${policyReference()}`; }
+function editMonitorProfile(id = '') {
+    if (currentRole === 'Viewer')
+        return;
+    const profiles = data.monitorProfiles || {};
+    const old = id ? profiles[id] : undefined;
+    if (id && !Object.prototype.hasOwnProperty.call(profiles, id))
+        return show('Profile not found.', true);
+    const active = old?.Active || {};
+    const meta = old?.Metadata || {};
+    const seconds = (value, fallback) => {
+        const m = /^(\d{2}):(\d{2}):(\d{2})$/.exec(String(value || ''));
+        return m ? String(Number(m[1]) * 3600 + Number(m[2]) * 60 + Number(m[3])) : fallback;
+    };
+    modal(id ? 'Edit monitor profile' : 'Create monitor profile', 'Reusable independent template. Assign it to a backend group explicitly; editing or deleting a template does not change existing assignments.', [
+        { name: 'id', label: 'Profile ID (cannot rename)', value: id },
+        { name: 'path', label: 'Primary readiness path', value: active.Path || '/health/ready' },
+        { name: 'interval', label: 'Interval in seconds (1–60)', value: seconds(active.Interval, '15') },
+        { name: 'timeout', label: 'Timeout in seconds (1–60)', value: seconds(active.Timeout, '5') },
+        { name: 'policy', label: 'Health policy', value: active.Policy || 'RiseFall', options: ['RiseFall', 'ConsecutiveFailures'] },
+        { name: 'rise', label: 'Rise threshold (1–10)', value: meta['RiseFall.Rise'] || '2' },
+        { name: 'fall', label: 'Fall threshold (1–10)', value: meta['RiseFall.Fall'] || meta['ConsecutiveFailuresHealthPolicy.Threshold'] || '3' },
+        { name: 'compound', label: 'Active compound mode', value: meta[compoundModeKey] || 'off', options: ['off', 'AND', 'OR'] },
+        { name: 'secondary', label: 'Secondary readiness path', value: meta[compoundPathKey] || '/health/dependencies', optional: true }
+    ], v => {
+        if (!validId(v.id) || (id && v.id !== id) || keys(profiles).some(key => key !== id && key.toLowerCase() === v.id.toLowerCase()))
+            throw Error('Use a unique profile ID; renaming is not supported.');
+        if (!id && keys(profiles).length >= 100)
+            throw Error('At most 100 monitor profiles are supported.');
+        const bounded = (raw, max) => /^\d{1,2}$/.test(raw) && Number(raw) >= 1 && Number(raw) <= max;
+        if (!bounded(v.interval, 60) || !bounded(v.timeout, 60) || Number(v.timeout) > Number(v.interval) || !bounded(v.rise, 10) || !bounded(v.fall, 10))
+            throw Error('Use bounded whole seconds and thresholds; timeout cannot exceed interval.');
+        const valid = (path) => path.startsWith('/') && !path.startsWith('//') && path.length <= 300 && !path.includes('\\') && !path.includes('#') && !/[\x00-\x1f\x7f]/.test(path);
+        if (!valid(v.path) || !['RiseFall', 'ConsecutiveFailures'].includes(v.policy) || !['off', 'AND', 'OR'].includes(v.compound))
+            throw Error('Invalid readiness path or policy.');
+        if (v.compound !== 'off' && (!valid(v.secondary) || v.secondary === v.path))
+            throw Error('Compound mode requires a distinct secondary readiness path.');
+        const duration = (raw) => '00:' + String(Math.floor(Number(raw) / 60)).padStart(2, '0') + ':' + String(Number(raw) % 60).padStart(2, '0');
+        const metadata = { 'RiseFall.Rise': String(Number(v.rise)), 'RiseFall.Fall': String(Number(v.fall)), 'ConsecutiveFailuresHealthPolicy.Threshold': String(Number(v.fall)) };
+        if (v.compound !== 'off') {
+            metadata[compoundModeKey] = v.compound;
+            metadata[compoundPathKey] = v.secondary;
+        }
+        data.monitorProfiles = { ...profiles, [v.id]: { Active: { Enabled: true, Path: v.path, Interval: duration(v.interval), Timeout: duration(v.timeout), Policy: v.policy }, Metadata: metadata } };
+        edit();
+    });
+}
+function deleteMonitorProfile(id) {
+    if (currentRole === 'Viewer' || !Object.prototype.hasOwnProperty.call(data.monitorProfiles || {}, id))
+        return;
+    if (!confirm('Delete reusable profile ' + id + '? Existing assigned snapshots remain unchanged.'))
+        return;
+    const profiles = { ...data.monitorProfiles };
+    delete profiles[id];
+    data.monitorProfiles = profiles;
+    edit();
+}
+function assignMonitorProfile(id) {
+    if (currentRole === 'Viewer' || !Object.prototype.hasOwnProperty.call(data.clusters, id))
+        return;
+    const target = data.clusters[id];
+    if (target.Metadata?.[monitorSourceKey])
+        return show('Unlink this group before assigning an independent profile.', true);
+    const profiles = data.monitorProfiles || {};
+    const choices = keys(profiles);
+    if (!choices.length)
+        return show('Create a reusable monitor profile first.', true);
+    modal('Assign monitor profile', 'Copies an independent snapshot to this group and its linked dependents in the draft. Future template edits will not alter this assignment.', [{ name: 'profile', label: 'Reusable monitor profile', value: choices[0], options: choices }], v => {
+        if (!choices.includes(v.profile) || !Object.prototype.hasOwnProperty.call(profiles, v.profile))
+            throw Error('Invalid profile.');
+        const profile = profiles[v.profile];
+        const members = monitorMembers(id);
+        if (profile.Metadata?.[compoundModeKey]) {
+            checkCompoundTarget(target);
+            for (const member of members)
+                checkCompoundTarget(data.clusters[member]);
+        }
+        const source = { HealthCheck: { Active: profile.Active }, Metadata: profile.Metadata };
+        applyMonitorSnapshot(source, target);
+        for (const member of members)
+            applyMonitorSnapshot(source, data.clusters[member]);
+        edit();
+    });
+}
+function monitorRegistryPanel() {
+    const profiles = data.monitorProfiles || {};
+    const rows = keys(profiles).map(id => {
+        const p = profiles[id];
+        return `<tr><td>${esc(id)}</td><td>${esc(p.Active?.Path || '—')}</td><td>${esc(p.Metadata?.[compoundModeKey] || 'HTTP')}</td><td>${esc(p.Active?.Interval || '—')} / ${esc(p.Active?.Timeout || '—')}</td><td>${currentRole === 'Viewer' ? '' : actionBtn('Edit profile', 'profile-edit', id) + ' ' + actionBtn('Delete profile', 'profile-delete', id, 'danger-btn mini')}</td></tr>`;
+    }).join('');
+    return `<div class="card"><div class="toolbar"><div><h2>Reusable monitor profiles</h2><p class="subtle">Independent templates; assign a snapshot to a service group. All changes require approval.</p></div>${currentRole === 'Viewer' ? '' : actionBtn('+ Create monitor profile', 'profile-add', '')}</div><div class="tablewrap"><table><thead><tr><th>Profile</th><th>Readiness path</th><th>Mode</th><th>Interval / timeout</th><th>Actions</th></tr></thead><tbody>${rows || '<tr><td colspan="5">No reusable profiles</td></tr>'}</tbody></table></div></div>`;
+}
+function clusters() { const rows = keys(data.clusters).map(id => { const c = data.clusters[id]; const active = !!c.HealthCheck?.Active?.Enabled, passive = !!c.HealthCheck?.Passive?.Enabled; const health = active && passive ? '<span class="chip good">Active + passive</span>' : active ? '<span class="chip good">Active</span>' : passive ? '<span class="chip warn">Passive only</span>' : '<span class="chip">Disabled</span>'; return `<tr><td><b>${esc(id)}</b></td><td>${esc(c.LoadBalancingPolicy || 'Default')}</td><td>${keys(c.Destinations || {}).length}</td><td>${health}${c.Metadata?.[monitorSourceKey] ? `<div class="subtle">Linked to ${esc(c.Metadata[monitorSourceKey])}</div>` : ""}</td><td>${actionBtn('Edit', 'cluster-edit', id)} ${currentRole === 'Viewer' ? '' : actionBtn('Health monitor', 'monitor-edit', id) + ' ' + actionBtn('Reuse monitor', 'monitor-copy', id) + ' ' + actionBtn('Assign profile', 'profile-assign', id) + (c.Metadata?.[monitorSourceKey] ? ' ' + actionBtn('Unlink monitor', 'monitor-unlink', id) : '')} ${actionBtn('Advanced', 'cluster-advanced', id)} ${actionBtn('Delete', 'cluster-delete', id, 'danger-btn mini')}</td></tr>`; }).join(''); return `<div class="toolbar"><div><h2>Backend groups (clusters)</h2><p class="subtle">A group contains the servers for one application and defines traffic distribution. Use the policy guide below.</p></div>${actionBtn('+ Add cluster', 'cluster-add', '')}</div><div class="tablewrap"><table><thead><tr><th>Cluster</th><th>Policy</th><th>Active backends</th><th>Health checks</th><th>Actions</th></tr></thead><tbody>${rows || '<tr><td colspan="5" class="empty">No clusters configured</td></tr>'}</tbody></table></div>${policyReference()}${monitorRegistryPanel()}`; }
 function backends() { const rows = destinationRows().map(d => { const live = liveDestinationHealth?.find(x => x.clusterId === d.cid && x.destinationId === d.did); const configuredState = !d.enabled ? 'Disabled' : d.trafficState === 'draining' ? 'Draining' : 'Active'; const stateClass = configuredState === 'Active' ? 'good' : configuredState === 'Draining' ? 'warn' : 'bad'; const runtime = live ? `<span class="chip">A: ${esc(live.activeHealth || 'Unknown')}</span> <span class="chip">P: ${esc(live.passiveHealth || 'Unknown')}</span><div class="subtle">In-flight: ${esc(String(live.concurrentRequests ?? '—'))}</div>` : '<span class="subtle">Not inspected</span>'; const drainButton = d.enabled ? actionBtn(d.trafficState === 'draining' ? 'Restore traffic' : 'Drain new traffic', 'dest-drain', d.cid + '::' + d.did) : ''; return `<tr><td><b>${esc(d.did)}</b><div class="subtle">${esc(d.cid)} · weight ${esc(d.weight)} · ${esc(d.trafficRole)}</div></td><td class="mono">${esc(d.address)}</td><td><span class="chip ${stateClass}">${configuredState}</span><div class="subtle">Configured draft state; runtime health shown separately</div></td><td>${runtime}<div>${drainButton} ${actionBtn(d.enabled ? 'Disable' : 'Enable', 'dest-toggle', d.cid + '::' + d.did)} ${actionBtn('Edit', 'dest-edit', d.cid + '::' + d.did)} ${actionBtn('Advanced', 'dest-advanced', d.cid + '::' + d.did)} ${actionBtn('Delete', 'dest-delete', d.cid + '::' + d.did, 'danger-btn mini')}</div></td></tr>`; }).join(''); const liveNote = liveDestinationHealth ? `<p class="subtle">Live YARP snapshot checked ${esc(liveDestinationHealthAt)} · single local process. Unsaved changes do not affect this runtime snapshot.</p>` : '<p class="subtle">Runtime health has not been inspected in this session.</p>'; return `<div class="toolbar"><div><h2>Backend servers (destinations)</h2><p class="subtle">Each application route points to its own cluster. Runtime health is per gateway; draining is a reviewed configuration change.</p></div>${actionBtn('Inspect live health', 'runtime-health', '')} ${actionBtn('+ Add backend', 'dest-add', '')}</div>${liveNote}<div class="tablewrap"><table><thead><tr><th>Destination / pool</th><th>Address</th><th>Traffic state</th><th>Runtime health and actions</th></tr></thead><tbody>${rows || '<tr><td colspan="4" class="empty">No backend servers. Add a website first, or add a server to an existing backend group.</td></tr>'}</tbody></table></div><div class="healthbanner">Drain removes a destination from new-request selection after an approved config rollout; in-flight requests continue. A host match separates routes, but private API access still requires a restricted listener and firewall policy. Runtime health is an authenticated, point-in-time view of this process only.</div>`; }
 async function refreshDestinationRuntime() { try {
     const r = await api('/admin/api/runtime/destinations');
@@ -1442,6 +1533,18 @@ function act(type, id) {
     }
     if (type === 'monitor-unlink') {
         unlinkActiveMonitor(id);
+        return;
+    }
+    if (type === 'profile-add' || type === 'profile-edit') {
+        editMonitorProfile(type === 'profile-edit' ? id : '');
+        return;
+    }
+    if (type === 'profile-delete') {
+        deleteMonitorProfile(id);
+        return;
+    }
+    if (type === 'profile-assign') {
+        assignMonitorProfile(id);
         return;
     }
     if (type === 'monitor-copy') {
