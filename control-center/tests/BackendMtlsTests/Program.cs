@@ -13,3 +13,5 @@ Check(!BackendMutualTls.TryNormalizeThumbprint("", out _), "empty cert thumbprin
 Check(!BackendMutualTls.TryNormalizeThumbprint("ZZ" + thumb[2..], out _), "non-hex thumbprint rejected");
 Check(!BackendMutualTls.TryNormalizeThumbprint(thumb[..^1], out _), "truncated thumbprint rejected");
 Console.WriteLine("BACKEND MTLS CONFIG CONTRACT TESTS PASSED");
+
+await ActiveCompoundHealthTests.RunAsync();

@@ -5,6 +5,8 @@
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="Yarp.ReverseProxy" Version="2.3.0" />
+    <Compile Include="../../ActiveCompoundHealth.cs" Link="ActiveCompoundHealth.cs" />
+    <Compile Include="../../CompoundDiagnostics.cs" Link="CompoundDiagnostics.cs" />
     <Compile Include="../../BackendMutualTls.cs" Link="BackendMutualTls.cs" />
     <Compile Include="../../Ec2WorkflowLab.cs" Link="Ec2WorkflowLab.cs" />
   </ItemGroup>
