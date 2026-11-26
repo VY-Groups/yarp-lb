@@ -568,7 +568,14 @@ async function initSession(){
   const generation=authGeneration;
   try {
     const r=await api('/admin/api/session');
-    if(!r.authenticated){showLogin(!r.initialized);return}
+    if(!r.authenticated){
+      showLogin(!r.initialized);
+      if(r.setupRequired===true){
+        $('auth-screen').hidden=true;
+        $('first-run-screen').hidden=false;
+      }
+      return
+    }
     csrf=r.csrf;currentRole=r.role;currentUser=r.username;federatedOidcSession=r.federatedOidc===true;
     if(r.privacyAccepted!==true){showPrivacy(r);return}
     $('privacy-screen').hidden=true;
@@ -586,7 +593,7 @@ async function initSession(){
     await reload();
   } catch(err){if(generation!==authGeneration)return;$('privacy-screen').hidden=true;$('auth-message').textContent=String(err);$('auth-screen').hidden=false;$('app-shell').hidden=true}
 }
-function showLogin(first:boolean){$('privacy-screen').hidden=true;privacyVersion='';const dialog=$('modal') as HTMLDialogElement;if(dialog.open)dialog.close();$('modal-fields').innerHTML='';authGeneration++;readinessGeneration++;readinessAbort?.abort();readinessAbort=null;gatewayReadyLabel='● Backend readiness not checked';gatewayReadyWarn=true;csrf='';currentRole='';currentUser='';federatedOidcSession=false;otpChallenge='';view='setup';viewHistory=[];lastRenderedView='setup';
+function showLogin(first:boolean){$('first-run-screen').hidden=true;$('privacy-screen').hidden=true;privacyVersion='';const dialog=$('modal') as HTMLDialogElement;if(dialog.open)dialog.close();$('modal-fields').innerHTML='';authGeneration++;readinessGeneration++;readinessAbort?.abort();readinessAbort=null;gatewayReadyLabel='● Backend readiness not checked';gatewayReadyWarn=true;csrf='';currentRole='';currentUser='';federatedOidcSession=false;otpChallenge='';view='setup';viewHistory=[];lastRenderedView='setup';
  dirty=false;data={name:'GatewayCore',gateway:'unknown',time:'',routes:{},clusters:{},disabled:{},mode:'Local testing',telemetry:'',revision:''};
  probes=[];orgProfile=null;topologyResponse=null;topologyDraft=null;topologyStep=0;topologyChecks=[];topologyWarnings=[];
  $('content').innerHTML='';$('user-badge').textContent='';$('notice').hidden=true;

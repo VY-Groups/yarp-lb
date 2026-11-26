@@ -267,3 +267,26 @@ dialog{border-color:#4a607a;box-shadow:0 24px 85px rgba(0,0,0,.75)}
 .advanced-nav[open]>.nav{margin-left:8px;width:calc(100% - 8px)}
 @media(max-width:950px){.sidebar nav{display:block;overflow:visible}.nav-group.simple-nav{display:flex;flex-wrap:wrap;gap:5px}.nav-group.advanced-nav{display:block;margin:4px 0}.nav-group:not(:last-child)::after{display:none}.advanced-nav[open]>.nav{display:inline-flex;width:auto;margin:4px}.simple-nav .nav-group-title{display:none}}
 @media(max-width:650px){.operator-steps{grid-template-columns:1fr}.operator-flow{gap:5px}.operator-flow span:not([aria-hidden]){padding:6px 8px;font-size:12px}}
+
+/* Separate, focused first-run wizard; no daily navigation before enrollment. */
+.first-run-screen{min-height:100svh;background:#0e1728;padding:36px 20px}
+.first-run-shell{max-width:660px;margin:auto}
+.first-run-brand{display:flex;align-items:center;gap:12px;margin-bottom:26px}
+.first-run-brand strong{display:block;font-size:20px}
+.first-run-brand small{display:block;color:#a0b4c9;font-size:10px;letter-spacing:2px;margin-top:4px}
+.first-run-progress{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:7px;margin-bottom:18px}
+.first-run-progress span{border:1px solid #31465d;border-radius:7px;padding:9px;font-size:12px;color:#9eb3c8}
+.first-run-progress .current{border-color:#69e7d0;color:#baf8ee;background:#183b43;font-weight:700}
+.first-run-progress .complete{color:#79e3d5}
+.first-run-card{padding:clamp(20px,5vw,38px)}
+.first-run-card h1{font-size:28px;margin:6px 0 12px}
+.first-run-card .subtle{line-height:1.65}
+.first-run-kicker{font-size:11px;letter-spacing:1.4px;color:#7ae9d2;font-weight:700}
+.first-run-fields{display:grid;gap:14px}
+.first-run-fields[hidden]{display:none}
+.first-run-pair{display:grid;grid-template-columns:minmax(0,1fr) 110px;gap:12px}
+.first-run-path{overflow-wrap:anywhere;font-size:12px;color:#adc6db}
+.first-run-actions{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:10px}
+#first-run-message{color:#f5cc8b;line-height:1.5}
+#first-run-message:empty{display:none}
+@media(max-width:520px){.first-run-screen{padding:20px 12px}.first-run-progress{grid-template-columns:repeat(2,minmax(0,1fr))}.first-run-pair{grid-template-columns:1fr}.first-run-actions button{flex:1}}

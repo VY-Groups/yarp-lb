@@ -1205,6 +1205,10 @@ async function initSession() {
         const r = await api('/admin/api/session');
         if (!r.authenticated) {
             showLogin(!r.initialized);
+            if (r.setupRequired === true) {
+                $('auth-screen').hidden = true;
+                $('first-run-screen').hidden = false;
+            }
             return;
         }
         csrf = r.csrf;
@@ -1245,6 +1249,7 @@ async function initSession() {
     }
 }
 function showLogin(first) {
+    $('first-run-screen').hidden = true;
     $('privacy-screen').hidden = true;
     privacyVersion = '';
     const dialog = $('modal');
