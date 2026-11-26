@@ -135,6 +135,11 @@ if (args.Length == 1 && args[0] == "--license-init")
 }
 commercialLicense.Refresh();
 using var fleetQuorum=FleetQuorum.Open(Environment.GetEnvironmentVariable("GATEWAYCORE_FLEET_QUORUM_CONFIG"),true);
+if (args.Length > 0 && args[0] == "--fleet-tls-lock")
+{
+    Environment.ExitCode = await FleetTlsOperator.RunAsync(args, privateDir, commercialLicense, fleetQuorum);
+    return;
+}
 #endif
 var keyDir = Path.Combine(privateDir, "data-protection-keys");
 if (!OperatingSystem.IsLinux() || ec2Lab)
@@ -3272,11 +3277,17 @@ if (stagedImportEnabled)
             input.Confirmation != "ACTIVATE " + input.CandidateDigest)
             return Results.BadRequest(new { error = "Exact preview digests and typed confirmation required." });
         if (!await AuditActorCurrent(ctx, true)) return Results.StatusCode(403);
-        // A local enterprise change requires a fresh external intent and
-        // step-up authorization. Multi-gateway activation remains a separate
-        // signed fleet workflow, not a local bypass.
-        if (OnboardingApi.IsMultiGatewayDesign(privateDir))
-            return Results.Conflict(new { error = "Staged local import requires the independently approved fleet procedure." });
+        // Multi-gateway import is supported only through the commercial,
+        // installation-bound, independently signed per-node quorum plan.
+        var fleetMode = OnboardingApi.IsMultiGatewayDesign(privateDir);
+#if GATEWAYCORE_COMMERCIAL
+        if (fleetMode && (fleetQuorum is null || externalAuditIntent is null ||
+            auditOutbox is null || acmeRenewalSettings is not null))
+            return Results.Conflict(new { error = "Fleet certificate import requires authenticated quorum, durable external audit and independently controlled renewal." });
+#else
+        if (fleetMode)
+            return Results.Conflict(new { error = "Fleet certificate import requires the licensed signed fleet workflow." });
+#endif
         if (externalAuditIntent is not null && auditOutbox is null)
             return Results.Conflict(new { error = "Enterprise certificate import requires a configured durable audit outbox." });
         if (SetupCenter.ReadFreeze(privateDir).Frozen)
@@ -3288,6 +3299,11 @@ if (stagedImportEnabled)
         try
         {
             string? intentId = null;
+#if GATEWAYCORE_COMMERCIAL
+            using var fleetLock = fleetMode ? FleetTlsOperator.OpenExclusive(privateDir) : null;
+            var fleetPlan = fleetMode ? FleetTlsOperator.ReadActivation(privateDir, commercialLicense,
+                input.ActiveDigest, input.CandidateDigest) : null;
+#endif
             async Task<IDisposable> AuthorizeCertificateCommit(CancellationToken token)
             {
                 if (!await AuditActorCurrent(ctx, true))
@@ -3302,14 +3318,25 @@ if (stagedImportEnabled)
                 try
                 {
                     if (!await AuditActorCurrent(ctx, true) || SetupCenter.ReadFreeze(privateDir).Frozen ||
-                        OnboardingApi.IsMultiGatewayDesign(privateDir))
+                        OnboardingApi.IsMultiGatewayDesign(privateDir) != fleetMode)
                         throw new InvalidOperationException("Certificate authorization or topology changed.");
                     if (intentId is not null)
                         await localAudit.AppendAsync(Actor(ctx), "TLS_STAGED_MUTATION_PREPARED",
                             new { input.ActiveDigest, input.CandidateDigest }, intentId);
                     if (!await AuditActorCurrent(ctx, true) || SetupCenter.ReadFreeze(privateDir).Frozen ||
-                        OnboardingApi.IsMultiGatewayDesign(privateDir))
+                        OnboardingApi.IsMultiGatewayDesign(privateDir) != fleetMode)
                         throw new InvalidOperationException("Certificate authorization changed during audit.");
+#if GATEWAYCORE_COMMERCIAL
+                    if (fleetMode)
+                    {
+                        if (fleetPlan is null || fleetQuorum is null)
+                            throw new InvalidOperationException("Fleet certificate plan unavailable.");
+                        await FleetTlsOperator.ConsumeAsync(privateDir, commercialLicense, fleetQuorum, fleetPlan, token);
+                        if (!await AuditActorCurrent(ctx, true) || SetupCenter.ReadFreeze(privateDir).Frozen ||
+                            !OnboardingApi.IsMultiGatewayDesign(privateDir))
+                            throw new InvalidOperationException("Certificate authority changed at fleet commit.");
+                    }
+#endif
                     token.ThrowIfCancellationRequested();
                     return new StagedActivationGateLease(loginGate);
                 }
@@ -3318,8 +3345,9 @@ if (stagedImportEnabled)
             var result = await service.ActivateAsync(input.CandidateDigest, input.ActiveDigest, timeout.Token,
                 AuthorizeCertificateCommit);
             await localAudit.AppendAsync(Actor(ctx), "TLS_STAGED_ACTIVATED",
-                new { result.Thumbprint, result.NotAfterUtc, input.CandidateDigest }, intentId);
-            return Results.Ok(new { activated = true, result.Thumbprint, result.NotAfterUtc });
+                new { result.Thumbprint, result.NotAfterUtc, input.CandidateDigest, fleetMode }, intentId);
+            return Results.Ok(new { activated = true, result.Thumbprint, result.NotAfterUtc,
+                independentFleetCompletionRequired = fleetMode });
         }
         catch (Exception ex)
         {

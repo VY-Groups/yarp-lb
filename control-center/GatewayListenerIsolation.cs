@@ -228,15 +228,20 @@ public sealed class GatewayListenerIsolation : IDisposable
         }
     }
 
-    public static GatewayListenerIsolation? FromEnvironment()
+    internal static Settings? ReadSettingsFromEnvironment()
     {
         var path = Environment.GetEnvironmentVariable("YARP_LISTENERS_CONFIG_FILE");
-        if (string.IsNullOrEmpty(path)) return null;  // existing test-only legacy bootstrap
+        if (string.IsNullOrEmpty(path)) return null;
         CheckRegular(path, false);
         var opts = new JsonSerializerOptions(JsonSerializerDefaults.Web) { UnmappedMemberHandling = System.Text.Json.Serialization.JsonUnmappedMemberHandling.Disallow };
-        var config = JsonSerializer.Deserialize<Settings>(File.ReadAllText(path), opts)
+        return JsonSerializer.Deserialize<Settings>(File.ReadAllText(path), opts)
                      ?? throw new InvalidOperationException("Missing listener config");
-        return new GatewayListenerIsolation(config);
+    }
+
+    public static GatewayListenerIsolation? FromEnvironment()
+    {
+        var config = ReadSettingsFromEnvironment();
+        return config is null ? null : new GatewayListenerIsolation(config);
     }
 
     private bool ClientAllowed(X509Certificate2? certificate)
