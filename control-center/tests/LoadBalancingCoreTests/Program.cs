@@ -208,3 +208,5 @@ PeerSyncTests.Run();
 GatewayClientAddressTests.Run();
 
 GatewayMetricsTests.Run();
+
+SharedMonitorTests.Run();

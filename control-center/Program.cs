@@ -2358,6 +2358,8 @@ IResult? ValidateChangePayload(JsonObject submitted)
     var disabled = submitted["disabled"] as JsonObject ?? new JsonObject();
     if (routes is null || clusters is null) return Results.BadRequest(new { error = "Routes and clusters must be objects" });
     if (routes.Count > 100 || clusters.Count > 100) return Results.BadRequest(new { error = "Too many routes/clusters" });
+    if (SharedMonitorContract.Validate(clusters) is { } monitorError)
+        return Results.BadRequest(new { error = monitorError });
     foreach (var (key, clusterNode) in clusters)
     {
         if (!ValidId(key) || clusterNode is not JsonObject c) return Results.BadRequest(new { error = "Invalid cluster ID" });
