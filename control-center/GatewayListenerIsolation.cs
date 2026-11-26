@@ -30,7 +30,11 @@ public sealed class GatewayListenerIsolation : IDisposable
         string[] AllowedAdminCidrs,
         long MaxConcurrentConnections,
         string HttpVersion,
-        string[]? TrafficCertificateDnsNames = null);
+        string[]? TrafficCertificateDnsNames = null,
+        VirtualSocket[]? VirtualServices = null);
+
+    public sealed record VirtualSocket(string Id, string Ip, int Port, string Protocol);
+    private readonly (VirtualSocket Config, IPAddress Address)[] _virtualServices;
 
     public readonly Settings Config;
     private readonly IPAddress _traffic, _management;
@@ -50,6 +54,29 @@ public sealed class GatewayListenerIsolation : IDisposable
         var ports = new[] {config.TrafficHttpPort, config.TrafficHttpsPort, config.AdminPort, config.MetricsPort};
         if (ports.Any(p => p is < 1 or > 65535) || ports.Distinct().Count() != ports.Length)
             throw new InvalidOperationException("Four listener ports must be unique and between 1 and 65535");
+        var virtualServices = config.VirtualServices ?? [];
+        if (virtualServices.Length > 32) throw new InvalidOperationException("At most 32 virtual service sockets are supported.");
+        var ids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var bindings = new HashSet<(IPAddress, int)>
+        {
+            (_traffic, config.TrafficHttpPort), (_traffic, config.TrafficHttpsPort),
+            (_management, config.AdminPort), (_management, config.MetricsPort)
+        };
+        var validated = new List<(VirtualSocket, IPAddress)>();
+        foreach (var service in virtualServices)
+        {
+            if (service is null || !VirtualServiceBinding.ValidId(service.Id) || !ids.Add(service.Id) ||
+                service.Port is < 1 or > 65535 || service.Protocol is not ("HTTP" or "HTTPS"))
+                throw new InvalidOperationException("Invalid or duplicate virtual service identifier, port or protocol.");
+            var address = ParseBoundIp(service.Ip, "virtual service");
+            if (address.Equals(_management) || address.IsIPv4MappedToIPv6 ||
+                address.Equals(IPAddress.Broadcast) ||
+                (address.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork &&
+                    address.GetAddressBytes()[0] >= 224) || !bindings.Add((address, service.Port)))
+                throw new InvalidOperationException("Virtual service socket overlaps another binding or management IP.");
+            validated.Add((service, address));
+        }
+        _virtualServices = validated.ToArray();
         if (config.MaxConcurrentConnections <= 0)
             throw new InvalidOperationException("REQUIRED_INPUT MaxConcurrentConnections must be derived from measured peak");
         _ = TrafficHttpProtocols.Parse(config.HttpVersion);
@@ -276,6 +303,22 @@ public sealed class GatewayListenerIsolation : IDisposable
                         ServerCertificateSelector = (_, serverName) => _trafficCertificateRotation.Select(serverName)
                     });
             });
+            foreach (var service in _virtualServices)
+            {
+                options.Listen(service.Address, service.Config.Port, listen =>
+                {
+                    if (service.Config.Protocol == "HTTP") { listen.Protocols = HttpProtocols.Http1; return; }
+                    listen.Protocols = TrafficHttpProtocols.Parse(Config.HttpVersion);
+                    if (_trafficCertificateRotation is null)
+                        listen.UseHttps(_trafficCertificate!);
+                    else
+                        listen.UseHttps(new HttpsConnectionAdapterOptions
+                        {
+                            HandshakeTimeout = TimeSpan.FromSeconds(10),
+                            ServerCertificateSelector = (_, serverName) => _trafficCertificateRotation.Select(serverName)
+                        });
+                });
+            }
             void ConfigureManagement(ListenOptions listen)
             {
                 listen.Protocols = HttpProtocols.Http1;
@@ -298,7 +341,16 @@ public sealed class GatewayListenerIsolation : IDisposable
         string.Equals(_trafficCertificateRotation.Current.Thumbprint, thumbprint, StringComparison.OrdinalIgnoreCase);
 
     public bool OnData(HttpContext ctx) => OnSocket(ctx, _traffic, Config.TrafficHttpPort) ||
-                                            OnSocket(ctx, _traffic, Config.TrafficHttpsPort);
+                                            OnSocket(ctx, _traffic, Config.TrafficHttpsPort) ||
+                                            VirtualServiceId(ctx) is not null;
+    public string? VirtualServiceId(HttpContext ctx)
+    {
+        foreach (var service in _virtualServices)
+            if (OnSocket(ctx, service.Address, service.Config.Port)) return service.Config.Id;
+        return null;
+    }
+    public bool HasVirtualService(string id) => _virtualServices.Any(service => service.Config.Id == id);
+    public IReadOnlyList<VirtualSocket> VirtualServices => _virtualServices.Select(service => service.Config).ToArray();
     public bool OnTrafficHttp(HttpContext ctx) =>
         AcmeHttp01Endpoint.IsPublicTrafficHttpListener(ctx, _traffic, Config.TrafficHttpPort);
     private bool HasApprovedClient(HttpContext ctx)
