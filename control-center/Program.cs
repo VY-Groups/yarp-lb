@@ -299,6 +299,9 @@ builder.Services.AddSingleton<DestinationAdmissionManager>();
 builder.Services.AddHostedService<DestinationAdmissionRegistryReconciler>();
 // Custom policies are registered on every serving YARP instance, never on the UI alone.
 builder.Services.AddSingleton<ILoadBalancingPolicy, WeightedRandomPolicy>();
+builder.Services.AddSingleton<ILoadBalancingPolicy, WeightedLeastRequestsPolicy>();
+builder.Services.AddSingleton<ILoadBalancingPolicy, WeightedRoundRobinPolicy>();
+builder.Services.AddSingleton<ILoadBalancingPolicy, FastestResponsePolicy>();
 builder.Services.AddSingleton<ILoadBalancingPolicy, SourceIpHashPolicy>();
 builder.Services.AddSingleton<ILoadBalancingPolicy, PrimaryBackupPolicy>();
 // Poll YARP active-health state independently of incoming requests.
@@ -2373,7 +2376,7 @@ IResult? ValidateChangePayload(JsonObject submitted)
         if (c["HttpRequest"]?["Version"] is JsonNode version && version.ToString() is not ("1.0" or "1.1" or "2" or "3"))
             return Results.BadRequest(new { error = "Unsupported outbound HTTP version" });
         var policy = c["LoadBalancingPolicy"]?.ToString() ?? "RoundRobin";
-        if (policy is not ("RoundRobin" or "PowerOfTwoChoices" or "LeastRequests" or "Random" or "FirstAlphabetical" or "WeightedRandom" or "SourceIpHash" or "PrimaryBackup")) return Results.BadRequest(new { error = "Unsupported load-balancing policy" });
+        if (policy is not ("RoundRobin" or "PowerOfTwoChoices" or "LeastRequests" or "Random" or "FirstAlphabetical" or "WeightedRandom" or "WeightedLeastRequests" or "WeightedRoundRobin" or "FastestResponse" or "SourceIpHash" or "PrimaryBackup")) return Results.BadRequest(new { error = "Unsupported load-balancing policy" });
         if (policy == "PrimaryBackup" && c["HealthCheck"]?["Active"]?["Enabled"]?.ToString()?.ToLowerInvariant() != "true")
             return Results.BadRequest(new { error = $"Cluster {key}: PrimaryBackup requires enabled active health checks for safe fallback" });
         if (c["Destinations"] is not JsonObject dests || dests.Count > 40) return Results.BadRequest(new { error = "Invalid destinations" });
@@ -3538,6 +3541,22 @@ app.MapReverseProxy(proxyPipeline =>
     });
     proxyPipeline.UseSessionAffinity();
     proxyPipeline.UseLoadBalancing();
+    proxyPipeline.Use(async (context, next) =>
+    {
+        var feature = context.GetReverseProxyFeature();
+        if (feature.Cluster.Config.LoadBalancingPolicy != "FastestResponse" ||
+            !(HttpMethods.IsGet(context.Request.Method) || HttpMethods.IsHead(context.Request.Method)))
+        {
+            await next();
+            return;
+        }
+        var started = System.Diagnostics.Stopwatch.GetTimestamp();
+        await next();
+        if (!context.RequestAborted.IsCancellationRequested &&
+            context.Response.StatusCode is >= 200 and < 300 &&
+            feature.ProxiedDestination is { } destination)
+            FastestResponsePolicy.Observe(destination, System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds);
+    });
     // The selected destination is already fixed. Holding this lease around the
     // entire downstream pipeline covers body streaming, WebSockets and exceptions.
     proxyPipeline.Use(async (context, next) =>

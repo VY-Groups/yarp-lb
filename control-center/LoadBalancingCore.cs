@@ -36,6 +36,19 @@ public static class LoadBalancingCore
                && weight is >= MinWeight and <= MaxWeight;
     }
 
+    // Compare projected outstanding HTTP requests per unit of capacity.
+    // Cross multiplication avoids rounding and int overflow. Equal scores
+    // are explicitly a tie, resolved by the caller with reservoir sampling.
+    public static int CompareProjectedLoad(int outstanding, int weight, int otherOutstanding, int otherWeight)
+    {
+        if (outstanding < 0 || otherOutstanding < 0)
+            throw new ArgumentOutOfRangeException(nameof(outstanding));
+        if (weight is < MinWeight or > MaxWeight || otherWeight is < MinWeight or > MaxWeight)
+            throw new ArgumentOutOfRangeException(nameof(weight));
+        return (((long)outstanding + 1) * otherWeight)
+            .CompareTo(((long)otherOutstanding + 1) * weight);
+    }
+
     public static int PickWeightedIndex(IReadOnlyList<int> weights, int ticket)
     {
         if (weights.Count == 0) return -1;

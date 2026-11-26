@@ -72,11 +72,17 @@ File.WriteAllText(configFile, JsonSerializer.Serialize(new {
       new { Name = "tcp-all-drained", ListenHost="127.0.0.1", ListenPort=19029,
         Backends = new [] { new { Host="127.0.0.1", Port=19111, DrainNewConnections=true },
           new { Host="127.0.0.1", Port=19112, DrainNewConnections=true } } },
+      new { Name = "tcp-weighted", ListenHost="127.0.0.1", ListenPort=19031, BalancingPolicy="WeightedRoundRobin",
+        Backends = new [] { new { Host="127.0.0.1", Port=19111, Weight=3 }, new { Host="127.0.0.1", Port=19112, Weight=1 } } },
+      new { Name = "tcp-least", ListenHost="127.0.0.1", ListenPort=19032, BalancingPolicy="WeightedLeastConnections",
+        Backends = new [] { new { Host="127.0.0.1", Port=19111 }, new { Host="127.0.0.1", Port=19112 } } },
       new { Name = "tcp-drain", ListenHost="127.0.0.1", ListenPort=19014,
         Backends = new [] { new { Host="127.0.0.1", Port=19111, DrainNewConnections=true },
           new { Host="127.0.0.1", Port=19112, DrainNewConnections=false } } } },
     Udp = new object [] { new { Name = "udp-echo", ListenHost="127.0.0.1", ListenPort=19021, UdpIdleTimeoutSeconds=30,
       Backends = new [] { new { Host="127.0.0.1", Port=19121, DrainNewConnections=false }, new { Host="127.0.0.1", Port=19122, DrainNewConnections=false } } },
+      new { Name = "udp-weighted", ListenHost="127.0.0.1", ListenPort=19033, BalancingPolicy="WeightedRoundRobin",
+        Backends = new [] { new { Host="127.0.0.1", Port=19121, Weight=3 }, new { Host="127.0.0.1", Port=19122, Weight=1 } } },
       new { Name = "udp-drain", ListenHost="127.0.0.1", ListenPort=19022, UdpIdleTimeoutSeconds=30,
       Backends = new [] { new { Host="127.0.0.1", Port=19121, DrainNewConnections=true }, new { Host="127.0.0.1", Port=19122, DrainNewConnections=false } } },
       new { Name = "udp-idle", ListenHost="127.0.0.1", ListenPort=19024, UdpIdleTimeoutSeconds=2,
@@ -104,6 +110,9 @@ async Task<string> ReadProxyOutput()
     var output = new StringBuilder();
     var expected = new HashSet<string>(StringComparer.Ordinal)
     {
+        "L4_TCP_READY tcp-weighted 127.0.0.1:19031",
+        "L4_TCP_READY tcp-least 127.0.0.1:19032",
+        "L4_UDP_READY udp-weighted 127.0.0.1:19033",
         "L4_UDP_READY udp-echo 127.0.0.1:19021",
         "L4_UDP_READY udp-drain 127.0.0.1:19022",
         "L4_UDP_READY udp-all-drained 127.0.0.1:19023",
@@ -142,6 +151,32 @@ try
     // reports an early ICMP Port Unreachable as WSAECONNRESET (10054).
     // Wait for every actual UDP bind; never hide dropped test datagrams by retry.
     await udpReady.Task.WaitAsync(TimeSpan.FromSeconds(10));
+    var weightedTcpA = 0;
+    var weightedUdpA = 0;
+    var weightedClients = new List<UdpClient>();
+    try
+    {
+        for (var i = 0; i < 12; i++)
+        {
+            if ((await TcpRoundTrip("weighted-"+i,19031)).StartsWith("A|")) weightedTcpA++;
+            var u = new UdpClient(AddressFamily.InterNetwork);
+            weightedClients.Add(u);
+            u.Connect(IPAddress.Loopback,19033);
+            if ((await UdpRoundTrip(u,"weighted-"+i)).StartsWith("A|")) weightedUdpA++;
+        }
+        Assert(weightedTcpA==9 && weightedUdpA==9,"real TCP connections and UDP sessions honor 3:1 weighted rotation");
+    }
+    finally { foreach (var u in weightedClients) u.Dispose(); }
+    using (var held = new TcpClient(AddressFamily.InterNetwork))
+    {
+        await held.ConnectAsync(IPAddress.Loopback,19032);
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        await held.GetStream().WriteAsync(Encoding.UTF8.GetBytes("hold-weighted"), deadline.Token);
+        var response = new byte[128];
+        var n = await held.GetStream().ReadAsync(response,deadline.Token);
+        Assert(n>0 && response[0]==(byte)'A',"first least-connections stream reserves A");
+        Assert((await TcpRoundTrip("while-held",19032)).StartsWith("B|"),"least connections routes away from occupied target");
+    }
     var tcpNodes=new Dictionary<string,int> {["A"]=0,["B"]=0};
     for (var i=0;i<24;i++)
     {
@@ -731,6 +766,8 @@ static async Task TcpEcho(TcpListener listener,string id,CancellationToken token
                             var request = Encoding.UTF8.GetString(buffer,0,n);
                             record?.Invoke(request);
                             await stream.WriteAsync(Encoding.UTF8.GetBytes(id+"|"+request),token);
+                            if (request == "hold-weighted")
+                                await stream.ReadAsync(buffer,token);
                         }
                     }
                     catch(Exception ex) when(ex is IOException or OperationCanceledException or SocketException) {}

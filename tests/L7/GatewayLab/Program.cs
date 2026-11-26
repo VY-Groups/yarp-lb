@@ -57,6 +57,9 @@ builder.Configuration.AddJsonFile(configPath, optional: false, reloadOnChange: t
 builder.Services.AddReverseProxy()
     .LoadFromConfig(builder.Configuration.GetSection("ReverseProxy"));
 builder.Services.AddSingleton<ILoadBalancingPolicy, WeightedRandomPolicy>();
+builder.Services.AddSingleton<ILoadBalancingPolicy, WeightedLeastRequestsPolicy>();
+builder.Services.AddSingleton<ILoadBalancingPolicy, WeightedRoundRobinPolicy>();
+builder.Services.AddSingleton<ILoadBalancingPolicy, FastestResponsePolicy>();
 builder.Services.AddSingleton<ILoadBalancingPolicy, SourceIpHashPolicy>();
 builder.Services.AddSingleton<ILoadBalancingPolicy, PrimaryBackupPolicy>();
 builder.Services.AddHostedService<AutonomousRecoveryObserver>();
@@ -197,6 +200,22 @@ app.MapReverseProxy(proxyPipeline =>
     }
     proxyPipeline.UseSessionAffinity();
     proxyPipeline.UseLoadBalancing();
+    proxyPipeline.Use(async (context, next) =>
+    {
+        var feature = context.GetReverseProxyFeature();
+        if (feature.Cluster.Config.LoadBalancingPolicy != "FastestResponse" ||
+            !(HttpMethods.IsGet(context.Request.Method) || HttpMethods.IsHead(context.Request.Method)))
+        {
+            await next();
+            return;
+        }
+        var started = System.Diagnostics.Stopwatch.GetTimestamp();
+        await next();
+        if (!context.RequestAborted.IsCancellationRequested &&
+            context.Response.StatusCode is >= 200 and < 300 &&
+            feature.ProxiedDestination is { } destination)
+            FastestResponsePolicy.Observe(destination, System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds);
+    });
     proxyPipeline.UsePassiveHealthChecks();
 });
 app.Run();

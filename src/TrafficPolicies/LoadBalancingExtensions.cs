@@ -19,6 +19,7 @@ public sealed class WeightedRandomPolicy : ILoadBalancingPolicy
         Span<int> weights = availableDestinations.Count <= 128
             ? stackalloc int[availableDestinations.Count]
             : new int[availableDestinations.Count];
+        weights.Clear();
         var total = 0;
         for (var i = 0; i < availableDestinations.Count; i++)
         {
@@ -106,5 +107,142 @@ public sealed class SourceIpHashPolicy : ILoadBalancingPolicy
         {
             ArrayPool<DestinationState>.Shared.Return(active, clearArray: true);
         }
+    }
+}
+
+
+/// <summary>Capacity-aware HTTP request selection. Not a TCP connection count.
+/// Uses only local in-flight YARP counts and the eligible destination snapshot.</summary>
+public sealed class WeightedLeastRequestsPolicy : ILoadBalancingPolicy
+{
+    public string Name => "WeightedLeastRequests";
+
+    public DestinationState? PickDestination(HttpContext context, ClusterState cluster,
+        IReadOnlyList<DestinationState> availableDestinations)
+    {
+        DestinationState? best = null;
+        var bestCount = 0;
+        var bestWeight = 1;
+        var ties = 0;
+        for (var i = 0; i < availableDestinations.Count; i++)
+        {
+            var candidate = availableDestinations[i];
+            if (TrafficLifecycle.IsDraining(candidate)) continue;
+            var weight = TrafficLifecycle.EffectiveWeightedRandomWeight(candidate, WeightedRandomPolicy.WeightOf(candidate));
+            var count = candidate.ConcurrentRequestCount;
+            var comparison = best is null ? -1 :
+                LoadBalancingCore.CompareProjectedLoad(count, weight, bestCount, bestWeight);
+            if (comparison < 0)
+            {
+                best = candidate;
+                bestCount = count;
+                bestWeight = weight;
+                ties = 1;
+            }
+            else if (comparison == 0 && Random.Shared.Next(++ties) == 0)
+            {
+                best = candidate;
+                bestCount = count;
+                bestWeight = weight;
+            }
+        }
+        return best;
+    }
+}
+
+
+/// <summary>Deterministic cyclic weighted HTTP request selection. The cursor
+/// belongs to the live cluster, not a process-lifetime map of arbitrary IDs.</summary>
+public sealed class WeightedRoundRobinPolicy : ILoadBalancingPolicy
+{
+    public string Name => "WeightedRoundRobin";
+    private sealed class Cursor { internal long Value = -1; }
+    private readonly System.Runtime.CompilerServices.ConditionalWeakTable<ClusterState, Cursor> cursors = new();
+
+    public DestinationState? PickDestination(HttpContext context, ClusterState cluster,
+        IReadOnlyList<DestinationState> availableDestinations)
+    {
+        var count = availableDestinations.Count;
+        if (count == 0) return null;
+        Span<int> weights = count <= 128 ? stackalloc int[count] : new int[count];
+        weights.Clear();
+        var total = 0;
+        for (var i = 0; i < count; i++)
+        {
+            var candidate = availableDestinations[i];
+            if (TrafficLifecycle.IsDraining(candidate)) continue;
+            var weight = TrafficLifecycle.EffectiveWeightedRandomWeight(candidate, WeightedRandomPolicy.WeightOf(candidate));
+            weights[i] = weight;
+            total = checked(total + weight);
+        }
+        if (total == 0) return null;
+        var cursor = cursors.GetValue(cluster, static _ => new Cursor());
+        var ticket = (int)(unchecked((ulong)Interlocked.Increment(ref cursor.Value)) % (ulong)total);
+        for (var i = 0; i < count; i++)
+        {
+            if (ticket < weights[i]) return availableDestinations[i];
+            ticket -= weights[i];
+        }
+        throw new InvalidOperationException("Invalid weighted rotation");
+    }
+}
+
+
+/// <summary>Local successful GET/HEAD completion latency, with bounded lifetime
+/// samples and periodic exploration. No retry or synthetic request is issued.</summary>
+public sealed class FastestResponsePolicy : ILoadBalancingPolicy
+{
+    public string Name => "FastestResponse";
+    private sealed class Sample
+    {
+        internal double Milliseconds;
+        internal long Timestamp;
+    }
+    private sealed class Cursor { internal long Value = -1; }
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<DestinationState, Sample> Samples = new();
+    private readonly System.Runtime.CompilerServices.ConditionalWeakTable<ClusterState, Cursor> cursors = new();
+
+    public static void Observe(DestinationState destination, double milliseconds)
+    {
+        if (!double.IsFinite(milliseconds) || milliseconds < 0) return;
+        var sample = Samples.GetValue(destination, static _ => new Sample());
+        lock (sample)
+        {
+            var now = System.Diagnostics.Stopwatch.GetTimestamp();
+            sample.Milliseconds = sample.Timestamp == 0 ||
+                System.Diagnostics.Stopwatch.GetElapsedTime(sample.Timestamp, now).TotalSeconds >= 60
+                ? milliseconds : sample.Milliseconds * 0.8 + milliseconds * 0.2;
+            sample.Timestamp = now;
+        }
+    }
+
+    public DestinationState? PickDestination(HttpContext context, ClusterState cluster,
+        IReadOnlyList<DestinationState> availableDestinations)
+    {
+        DestinationState? best = null, exploration = null;
+        var bestScore = double.PositiveInfinity;
+        var count = 0;
+        var cursor = cursors.GetValue(cluster, static _ => new Cursor());
+        var ticket = unchecked((ulong)Interlocked.Increment(ref cursor.Value));
+        var now = System.Diagnostics.Stopwatch.GetTimestamp();
+        foreach (var candidate in availableDestinations)
+        {
+            if (TrafficLifecycle.IsDraining(candidate)) continue;
+            count++;
+            if (Random.Shared.Next(count) == 0) exploration = candidate;
+            if (!Samples.TryGetValue(candidate, out var sample)) continue;
+            lock (sample)
+            {
+                if (sample.Timestamp == 0 ||
+                    System.Diagnostics.Stopwatch.GetElapsedTime(sample.Timestamp, now).TotalSeconds >= 60)
+                    continue;
+                if (sample.Milliseconds < bestScore)
+                {
+                    bestScore = sample.Milliseconds;
+                    best = candidate;
+                }
+            }
+        }
+        return ticket % 8 == 0 ? exploration : best ?? exploration;
     }
 }

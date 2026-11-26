@@ -12,6 +12,8 @@
 |---|---|---|---|
 | `WeightedRandom` | Cryptographically uniform random draw over the sum of 1–100 destination weights | Simple canary/weighted traffic between healthy HTTP destinations | Per-request share is statistical, not exact; requests are not sticky |
 | `SourceIpHash` | Weighted rendezvous hash of immediate TCP peer address and destination ID | HTTP traffic with real, trusted client-IP visibility and stable backend IDs | Firewall SNAT collapses clients onto one identity; changed membership can remap some users; do not use to protect transaction state |
+| `WeightedRoundRobin` | Cyclic weighted ticket sequence over available non-draining destinations | Predictable request distribution with stable membership and weights | Local cursor, bursty at unequal weights, no distributed scheduling |
+| `WeightedLeastRequests` | Minimum (outstanding HTTP requests + 1) / effective weight | Unequal backend capacity and varying HTTP request duration | Local counts only; equal scores use random tie-breaking, not a fixed traffic ratio or TCP connection count |
 | `RoundRobin` | Built-in | Equal-weight backend distribution | No per-destination weight |
 | `LeastRequests` | Built-in | Uneven request duration | Not TCP connection count, not EWMA latency |
 | `PowerOfTwoChoices` | Built-in/default | General healthy-destination selection | Not actual least-response-time routing |
@@ -19,7 +21,7 @@
 
 ### Weight metadata
 
-In the browser: **Backends → Add/Edit backend → Traffic weight (1–100)**. To apply weighting, select `WeightedRandom` or `SourceIpHash` for the **Cluster**. Example:
+In the browser: **Backends → Add/Edit backend → Traffic weight (1–100)**. To apply weighting, select `WeightedRandom`, `WeightedRoundRobin`, `WeightedLeastRequests` or `SourceIpHash` for the **Cluster**. Example:
 
 ```json
 {

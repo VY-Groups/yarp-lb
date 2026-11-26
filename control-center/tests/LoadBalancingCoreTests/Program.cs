@@ -15,6 +15,18 @@ Check(LoadBalancingCore.TryWeight(null, out var missing) && missing == 1, "defau
 Check(LoadBalancingCore.TryWeight("100", out var maximum) && maximum == 100, "max weight");
 foreach (var invalid in new [] {"0", "101", "1.5", "-2", "oops", " 10"})
     Check(!LoadBalancingCore.TryWeight(invalid, out _), "reject invalid " + invalid);
+Check(LoadBalancingCore.CompareProjectedLoad(0, 80, 0, 20) < 0, "idle larger capacity preferred");
+Check(LoadBalancingCore.CompareProjectedLoad(1, 1, 0, 1) > 0, "equal weights prefer less busy backend");
+Check(LoadBalancingCore.CompareProjectedLoad(3, 4, 0, 1) == 0, "equal normalized projected load");
+Check(LoadBalancingCore.CompareProjectedLoad(10, 4, 1, 1) > 0, "busy high-weight backend can lose");
+Check(LoadBalancingCore.CompareProjectedLoad(int.MaxValue, 100, int.MaxValue - 1, 100) > 0, "wide integer arithmetic");
+foreach (var badWeight in new[] {0, 101})
+{
+    var invalidLoadWeight = false;
+    try { _ = LoadBalancingCore.CompareProjectedLoad(0, badWeight, 0, 1); }
+    catch (ArgumentOutOfRangeException) { invalidLoadWeight = true; }
+    Check(invalidLoadWeight, "invalid projected load weight refused");
+}
 var weights = new[] {1,3,6};
 Check(LoadBalancingCore.PickWeightedIndex(weights,0) == 0, "ticket first bound");
 Check(LoadBalancingCore.PickWeightedIndex(weights,1) == 1, "ticket second bound");
