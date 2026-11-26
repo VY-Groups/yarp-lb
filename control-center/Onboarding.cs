@@ -134,6 +134,7 @@ public static class OnboardingApi
                 if (g is null) { issues.Add("Gateway record cannot be null."); continue; }
                 if (!ValidId(g.Id)) issues.Add("Each gateway requires an ID of 1–64 letters, digits, hyphens or underscores.");
                 if (!seen.Add(g.Id)) issues.Add($"Duplicate gateway ID: {g.Id}");
+                if (g.Site is not ("unassigned" or "dc" or "dr")) issues.Add($"Invalid design site for gateway {g.Id}.");
                 if ((g.Hostname?.Length ?? 0) > 255 || (g.AgentUrl?.Length ?? 0) > 500) issues.Add("Gateway hostname or agent URL is too long.");
                 if (!string.IsNullOrWhiteSpace(g.Hostname) && !ValidHostname(g.Hostname)) issues.Add($"Gateway {g.Id}: hostname must be a DNS name or IP address.");
                 if (!string.IsNullOrWhiteSpace(g.AgentUrl) && !ValidHttpsOrigin(g.AgentUrl)) issues.Add($"Gateway {g.Id}: agent URL must be a valid HTTPS origin without credentials, query or fragment.");
@@ -147,6 +148,7 @@ public static class OnboardingApi
                 if (w is null) { issues.Add("Application destination cannot be null."); continue; }
                 if (!ValidId(w.Id)) issues.Add("Each application destination requires a valid ID.");
                 if (!seen.Add(w.Id)) issues.Add($"Duplicate application destination ID: {w.Id}");
+                if (w.Site is not ("unassigned" or "dc" or "dr")) issues.Add($"Invalid design site for destination {w.Id}.");
                 if ((w.Application?.Length ?? 0) > 100) issues.Add("Application name exceeds 100 characters.");
                 if (w.Zone is not ("public" or "restricted" or "trust")) issues.Add($"Invalid exposure zone for {w.Id}");
                 if (w.HostingEngine is not ("http" or "iis" or "apache" or "nginx" or "caddy" or "tomcat" or "kestrel" or "node" or "kubernetes-ingress" or "other"))
@@ -193,6 +195,8 @@ public static class OnboardingApi
             "Confirmation saves topology metadata; it does not deploy YARP, change firewall NAT, or enroll gateway agents.",
             "Existing Pgpool-II/PostgreSQL routing and CA trust services remain unchanged."
         };
+        if (p.Mode != "standalone" && (p.Gateways?.Any(g => g is not null && g.Site == "unassigned") == true || p.Workloads?.Any(w => w is not null && w.Site == "unassigned") == true))
+            messages.Add("Assign DC/DR design locations where applicable; unassigned locations are not proof of site redundancy.");
         if (p.Mode != "standalone") messages.Add("YARP instances are Active–Active data-plane proxies; controller leader/standby is a separate, not-yet-activated management-plane design.");
         if (p.Mode != "standalone" && p.DataStore == "local-file") messages.Add("A shared resilient control-plane database is recommended before production operation; this wizard currently persists local metadata only.");
         if (p.DataStore == "postgresql") messages.Add("PostgreSQL is selected for the future management store, but this release does not connect to or migrate a database.");
@@ -255,6 +259,7 @@ public sealed class OnboardingGateway
     public string Id { get; set; } = "";
     public string Hostname { get; set; } = "";
     public string AgentUrl { get; set; } = "";
+    public string Site { get; set; } = "unassigned";
 }
 public sealed class OnboardingWorkload
 {
@@ -262,6 +267,7 @@ public sealed class OnboardingWorkload
     public string Application { get; set; } = "";
     public string Url { get; set; } = "";
     public string Zone { get; set; } = "public";
+    public string Site { get; set; } = "unassigned";
     // Display-only origin classification. Does not provision or reconfigure the server.
     public string HostingEngine { get; set; } = "http";
 }

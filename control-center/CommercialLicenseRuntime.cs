@@ -215,7 +215,10 @@ internal sealed class CommercialLicenseRuntime : BackgroundService
             if (path.StartsWithSegments("/admin/api/fleet")) return Allows("fleet") && Allows("ha");
             if (path.StartsWithSegments("/admin/api/peer-sync")) return Allows("ha");
             if (path.StartsWithSegments("/admin/api/gitops")) return Allows("gitops");
-            if (path.StartsWithSegments("/admin/api/tls")) return Allows("tls");
+            if (path.StartsWithSegments("/admin/api/tls") ||
+                path == "/admin/api/specialist/backend-certificate-check") return Allows("tls");
+            if (path == "/admin/api/specialist/waf-draft") return Allows("waf");
+            if (path == "/admin/api/specialist/gslb-draft") return Allows("gslb");
             if (path.StartsWithSegments("/admin/api/audit")) return Allows("audit");
             if (path.StartsWithSegments("/admin/api/directory")) return Allows("enterprise-sso");
             if (path.StartsWithSegments("/admin/api/metrics") ||

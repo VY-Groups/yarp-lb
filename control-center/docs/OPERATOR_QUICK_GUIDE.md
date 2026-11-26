@@ -52,3 +52,20 @@ The same guide is available inside the dashboard through **User guide**. No netw
 | Need rollback | Locate the correct backup and follow the documented recovery procedure with change authorization; do not delete protected state. |
 
 A new employee is ready to operate only after demonstrating the approved workflow with two distinct accounts and a real test request. Production traffic, VIP failover, capacity and recovery require separate physical acceptance.
+
+## Specialist workflows
+
+- **Configuration → Gateway architecture:** assign planned DC or DR sites to gateway hosts and application origins, inspect the design diagram and confirm it. Site labels are metadata only. Physical VIP/ECMP, distinct site trust, signed rollout, data replication and failback must be configured and verified independently.
+- **Configuration → Backend groups:** open the policy reference or Edit. Selecting a policy explains its purpose and constraints; review backend weights, roles and active readiness checks. Submit for independent approval; the wizard does not change live traffic.
+- **Security & accounts → Certificates & TLS:** authenticated local certificate inventory and configured listener references, with expiry and EKU information. Date validity alone is not chain validation or live certificate selection. Certificate installation, ACME, backend mTLS and trust-store mutation remain host-level approved operations. See `control-center/docs/ACME_IMPLEMENTATION_STATUS.md` and the listener/runbook documentation.
+- **Multi-gateway & modules → WAF policy workflow:** use the ordered signed policy, representative corpus, capacity and two-node rollback workflow. See `ops/waf/SIGNED_POLICY_ACCEPTANCE.md`, `ops/waf/CORPUS_EVIDENCE_GATE.md` and `ops/waf/REMOTE_FENCED_NODE.md`. No browser policy activation is provided.
+- **Multi-gateway & modules → DNS & GSLB workflow:** plan zone, addresses, trust and observer quorum, then use the existing signed agent and DNS tooling. The multi-gateway view can open authenticated GSLB agent status. See `engines/GslbDns/README.md`. Actual delegation and direct DNS acceptance remain external.
+- Each management page has a collapsible **Help with this page** section. It explains the purpose and what evidence to verify. The local account creation and OTP enrollment flows are unchanged; invitation-based employee self-registration is not implemented by these changes.
+
+### Preparing unsigned specialist configuration candidates
+
+In WAF policy workflow, enter a new revision, independently observed ruleset SHA-256, policy lifetime and optional narrowly scoped exceptions. Blocking mode requires the independently reviewed evidence digest. The server validates field bounds and exports exact unsigned JSON. Use the existing two-reviewer signed policy and fenced transaction workflow; the draft editor does not validate runtime observations or authorize deployment.
+
+In DNS & GSLB workflow, prepare a new loopback-only zone, SOA serial, nameservers, site addresses, HTTPS readiness URLs, weights, priorities and health thresholds. The server uses the existing agent staging contract; it does not replace a signed active zone, validate a serial against live state, configure DNSSEC/fencing, bind external interfaces or delegate DNS. Use independently approved signed staging, DNSSEC and authority settings, and real query acceptance before deployment.
+
+In Certificates & TLS, use Configure backend mTLS to resolve an installed trusted client certificate locally. All configured origins must be HTTPS. The selected thumbprint is added to the unsaved YARP backend group, requiring independent approval before it can change traffic. Validate the actual remote TLS handshake on every gateway. Traffic certificate installation/rotation and ACME configuration remain host-provisioned operations.
