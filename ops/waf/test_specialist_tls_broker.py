@@ -66,6 +66,9 @@ class RealSpecialistTransportTests(unittest.TestCase):
                 try:
                     def exchange(identity, frame, pin=server_pin, hostname="127.0.0.1"):
                         context = ssl.create_default_context(cafile=ca)
+                        context.minimum_version = ssl.TLSVersion.TLSv1_2
+                        context.check_hostname = True
+                        context.verify_mode = ssl.CERT_REQUIRED
                         if identity:
                             context.load_cert_chain(*certs[identity][:2])
                         with socket.create_connection(server.server_address, timeout=3) as connection:
