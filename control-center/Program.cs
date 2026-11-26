@@ -3573,8 +3573,7 @@ app.MapReverseProxy(proxyPipeline =>
         if (feature.Cluster.Config.Metadata?.ContainsKey(ActiveCompoundSettings.ModeKey) == true)
         {
             feature.AvailableDestinations = feature.AvailableDestinations
-                .Where(d => d.Health.Active == DestinationHealth.Healthy &&
-                    d.Health.Passive != DestinationHealth.Unhealthy).ToArray();
+                .Where(d => CompoundReadinessEvidence.Eligible(feature.Cluster, d)).ToArray();
             if (feature.AvailableDestinations.Count == 0)
             {
                 context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;

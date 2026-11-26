@@ -3,6 +3,8 @@ using System.Net.Sockets;
 using System.Text.Json.Nodes;
 using Microsoft.Extensions.DependencyInjection;
 using Yarp.ReverseProxy.Health;
+using Yarp.ReverseProxy.Model;
+using Yarp.ReverseProxy.Configuration;
 
 internal static class ActiveCompoundHealthTests
 {
@@ -30,6 +32,21 @@ internal static class ActiveCompoundHealthTests
         cluster["HealthCheck"]!["AvailableDestinationsPolicy"] = "HealthyAndUnknown";
         cluster["Destinations"]!["d"]!["Health"] = "http://other.invalid/";
         Check(!ActiveCompoundSettings.ValidateDraft(cluster), "alternate health origin rejected");
+        using var evidenceClient = new HttpMessageInvoker(new OriginHandler());
+        var generation = new ClusterModel(new ClusterConfig { ClusterId = "test" }, evidenceClient);
+        var nextGeneration = new ClusterModel(new ClusterConfig { ClusterId = "test" }, evidenceClient);
+        var destination = new DestinationModel(new DestinationConfig { Address = "http://127.0.0.1/" });
+        var changedDestination = new DestinationModel(new DestinationConfig { Address = "http://127.0.0.1:81/" });
+        Check(!CompoundReadinessEvidence.IsReady(generation, destination), "unknown evidence fails closed");
+        var earlier = CompoundReadinessEvidence.Begin(generation, destination);
+        var later = CompoundReadinessEvidence.Begin(generation, destination);
+        later.Complete(false);
+        earlier.Complete(true);
+        Check(!CompoundReadinessEvidence.IsReady(generation, destination), "old success cannot override newer failure");
+        CompoundReadinessEvidence.Begin(generation, destination).Complete(true);
+        Check(CompoundReadinessEvidence.IsReady(generation, destination), "fresh successful evidence");
+        Check(!CompoundReadinessEvidence.IsReady(nextGeneration, destination), "changed cluster generation invalidates evidence");
+        Check(!CompoundReadinessEvidence.IsReady(generation, changedDestination), "changed destination generation invalidates evidence");
         var listener = new TcpListener(IPAddress.Loopback, 0);
         listener.Start();
         try

@@ -101,7 +101,7 @@ async Task<int> InFlight(string url)
     return json.RootElement.GetProperty("count").GetInt32();
 }
 
-void Configure(string policy, int aWeight, int bWeight, bool drainA = false, int slowStartA = 0, bool drainKillA = false, bool riseFall = false, bool backupB = false, bool activeHealth = true, bool passiveHealth = false)
+void Configure(string policy, int aWeight, int bWeight, bool drainA = false, int slowStartA = 0, bool drainKillA = false, bool riseFall = false, bool backupB = false, bool activeHealth = true, bool passiveHealth = false, string? compoundMode = null)
 {
     var config = new {
         ReverseProxy = new {
@@ -141,7 +141,14 @@ void Configure(string policy, int aWeight, int bWeight, bool drainA = false, int
     };
     var path = Path.Combine(gatewayDir, "lab.json");
     var staged = path + ".next";
-    File.WriteAllText(staged, JsonSerializer.Serialize(config, options), Encoding.UTF8);
+    var json = JsonSerializer.SerializeToNode(config, options)!;
+    if (compoundMode is not null)
+    {
+        var metadata = json["ReverseProxy"]!["Clusters"]!["api"]!["Metadata"]!;
+        metadata["ADC.Health.CompoundMode"] = compoundMode;
+        metadata["ADC.Health.SecondaryPath"] = "/health/secondary";
+    }
+    File.WriteAllText(staged, json.ToJsonString(options), Encoding.UTF8);
     if (File.Exists(path)) File.Move(staged, path, overwrite: true);
     else File.Move(staged, path);
 }
@@ -317,6 +324,40 @@ try
     var aPercent = 100.0 * weighted.Nodes.GetValueOrDefault("A") / 4000;
     Require(aPercent is >= 75 and <= 85, $"80:20 ratio in tolerance: A={aPercent:F2}%");
     Record("weighted-80-20", new { aPercent, weighted });
+
+    Configure("RoundRobin", 1, 1, compoundMode: "AND");
+    await WaitFor("compound AND initially distributes to both healthy origins", async () =>
+    {
+        var result = await Sample(40, 1);
+        return result.Success == 40 && result.Nodes.ContainsKey("A") && result.Nodes.ContainsKey("B");
+    });
+    using (var changed = await client.PostAsync(aUrl + "/lab/secondary/false", null))
+        changed.EnsureSuccessStatusCode();
+    await WaitFor("compound AND removes A on secondary HTTP failure", () => RoutesOnly("B"));
+    using (var changed = await client.PostAsync(bUrl + "/lab/secondary/false", null))
+        changed.EnsureSuccessStatusCode();
+    await WaitFor("compound AND fails closed when both secondary checks fail",
+        () => IsStatus(proxy + "/api/identity", HttpStatusCode.ServiceUnavailable));
+    Configure("RoundRobin", 1, 1, compoundMode: "OR");
+    await WaitFor("compound OR recovers from primary HTTP success on both origins", async () =>
+    {
+        var result = await Sample(40, 1);
+        return result.Success == 40 && result.Nodes.ContainsKey("A") && result.Nodes.ContainsKey("B");
+    });
+    await SetReady(aUrl, false);
+    await WaitFor("compound OR excludes A when both HTTP checks fail", () => RoutesOnly("B"));
+    await SetReady(aUrl, true);
+    using (var changed = await client.PostAsync(aUrl + "/lab/secondary/true", null))
+        changed.EnsureSuccessStatusCode();
+    using (var changed = await client.PostAsync(bUrl + "/lab/secondary/true", null))
+        changed.EnsureSuccessStatusCode();
+    Configure("RoundRobin", 1, 1, compoundMode: "AND");
+    await WaitFor("compound AND recovery after new configuration generation", async () =>
+    {
+        var result = await Sample(40, 1);
+        return result.Success == 40 && result.Nodes.ContainsKey("A") && result.Nodes.ContainsKey("B");
+    });
+    Record("compound-active-health", new { andFailover = true, allDown503 = true, orRecovery = true, generationRecovery = true });
 
     Configure("WeightedRoundRobin", 3, 1);
     await Task.Delay(2500);
