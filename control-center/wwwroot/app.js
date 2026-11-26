@@ -559,16 +559,122 @@ async function certificatePage() {
         const endpoints = Array.isArray(x.configuredEndpoints) ? x.configuredEndpoints : [];
         const rows = certs.map(c => `<tr><td><b>${esc(c.subject)}</b><div class="subtle">${esc(c.issuer)}</div></td><td class="mono">${esc(c.thumbprint)}</td><td>${esc(c.notAfterUtc)}</td><td><span class="chip ${c.expiryState === 'valid-date-only' ? '' : 'warn'}">${esc(c.expiryState)}</span></td><td>${c.privateKeyAvailable ? 'Reported present' : 'Not reported'} · ${c.serverAuthenticationEku ? 'Server EKU allowed' : 'Server EKU not allowed'}</td></tr>`).join('');
         const listeners = endpoints.map(e => `<tr><td>${esc(e.name)}</td><td>${esc(e.scheme)}</td><td>${e.certificateReferenceConfigured ? 'Reference configured' : 'No reference reported'}</td></tr>`).join('');
-        $('content').innerHTML = `<div class="card"><h2>Certificates &amp; TLS</h2><p>Inventory for ${esc(x.gateway)} · ${esc(x.timestampUtc)} · store ${esc(x.storeState)}</p>${actionBtn('Refresh inventory', 'switch', 'tls', 'ghost')}<div class="healthbanner">Read-only local store and configured endpoint metadata. Valid dates and a reported private key do not establish certificate trust, SAN match, active selection or accessibility to the service.</div></div><div class="card card-spaced"><h3>Configured endpoints</h3><div class="tablewrap"><table><thead><tr><th>Listener</th><th>Scheme</th><th>Certificate reference</th></tr></thead><tbody>${listeners || '<tr><td colspan="3">No endpoint metadata reported.</td></tr>'}</tbody></table></div></div><div class="card card-spaced"><h3>Local certificate inventory</h3><div class="tablewrap"><table><thead><tr><th>Subject / issuer</th><th>Thumbprint</th><th>Not after (UTC)</th><th>Date status</th><th>Key / purpose</th></tr></thead><tbody>${rows || '<tr><td colspan="5">No certificates reported; verify the configured file/store separately.</td></tr>'}</tbody></table></div></div><div class="card card-spaced"><h3>Certificate change workflow</h3><ol class="specialist-steps"><li>Identify traffic, management or backend client certificate usage and approved CA.</li><li>Provision the trusted chain and protected key via the documented host configuration. Never upload keys to the dashboard.</li><li>Review SAN, expiry, EKU, listener isolation, file/store ACL and renewal or rollback procedure.</li><li>Apply the approved change and test actual TLS and mTLS, then verify live selection and monitor expiration.</li></ol><p class="subtle">ACME, certificate import, trust store changes and rotation are not editable here. Follow the host certificate runbook.</p></div>`;
+        $('content').innerHTML = `<div class="card"><h2>Certificates &amp; TLS</h2><p>Inventory for ${esc(x.gateway)} · ${esc(x.timestampUtc)} · store ${esc(x.storeState)}</p>${actionBtn('Refresh inventory', 'switch', 'tls', 'ghost')}<div class="healthbanner">Read-only local store and configured endpoint metadata. Valid dates and a reported private key do not establish certificate trust, SAN match, active selection or accessibility to the service.</div></div><div class="card card-spaced"><h3>Configured endpoints</h3><div class="tablewrap"><table><thead><tr><th>Listener</th><th>Scheme</th><th>Certificate reference</th></tr></thead><tbody>${listeners || '<tr><td colspan="3">No endpoint metadata reported.</td></tr>'}</tbody></table></div></div><div class="card card-spaced"><h3>Local certificate inventory</h3><div class="tablewrap"><table><thead><tr><th>Subject / issuer</th><th>Thumbprint</th><th>Not after (UTC)</th><th>Date status</th><th>Key / purpose</th></tr></thead><tbody>${rows || '<tr><td colspan="5">No certificates reported; verify the configured file/store separately.</td></tr>'}</tbody></table></div></div><div class="card card-spaced"><h3>Certificate change workflow</h3><ol class="specialist-steps"><li>Identify traffic, management or backend client certificate usage and approved CA.</li><li>Provision the trusted chain and protected key via the documented host configuration. Never upload keys to the dashboard.</li><li>Review SAN, expiry, EKU, listener isolation, file/store ACL and renewal or rollback procedure.</li><li>Apply the approved change and test actual TLS and mTLS, then verify live selection and monitor expiration.</li></ol><p class="subtle">Traffic certificate import, ACME configuration and trust-store changes use the approved host runbook. Backend client identity can be added to a reviewed configuration draft below.</p>${actionBtn('Configure backend mTLS', 'backend-cert', '', 'primary')}</div>`;
     }
     catch (e) {
         if (view === 'tls')
             $('content').innerHTML = `<div class="card"><h2>Certificate inventory unavailable</h2><p>${esc(String(e))}</p><p>No certificate readiness is claimed.</p></div>`;
     }
 }
+function specialistDraftForm(id) {
+    if (currentRole === 'Viewer')
+        return '<div class="card"><p>Only authorized Operators and Administrators can prepare configuration candidates.</p></div>';
+    if (id === 'waf')
+        return `<div class="card card-spaced"><h2>Prepare WAF policy</h2><p>Build exact unsigned policy bytes for independent signing and the existing external verifier. The observed ruleset and shadow evidence must come from independently collected files.</p><form id="specialist-draft" class="auth-form"><div class="setup-grid"><label>Policy revision<input name="revision" type="number" min="1" max="9007199254740991" required></label><label>Mode<select name="mode"><option value="detect">Detection only</option><option value="block">Blocking (requires reviewed evidence)</option></select></label><label>Observed ruleset SHA-256<input name="rulesetSha256" maxlength="64" pattern="[A-F0-9]{64}" required></label><label>Shadow evidence SHA-256 (blocking only)<input name="shadowEvidenceSha256" maxlength="64" pattern="[A-F0-9]{64}"></label><label>Validity in days<input name="validDays" type="number" min="1" max="45" value="7" required></label></div><details><summary>Optional exact-route exceptions</summary><p>One exception per line: ID | owner | route ID | GET or POST | exact path | content type | rule ID | reason | validity days. Maximum 64. No wildcards or broad bypass.</p><label>Scoped exceptions<textarea name="exceptions" rows="4" maxlength="32000" placeholder="exception-01 | security-owner | app-route | POST | /upload | application/pkix-cert | 920420 | Reviewed certificate upload | 7"></textarea></label></details><button class="primary" type="submit">Validate and prepare unsigned policy</button></form><div id="specialist-result" role="status"></div></div>`;
+    return `<div class="card card-spaced"><h2>Prepare a DNS / GSLB zone</h2><p>Build a new loopback-only initial configuration. Do not overwrite an existing signed multi-zone, DNSSEC or authority-fenced configuration with this candidate.</p><form id="specialist-draft" class="auth-form"><div class="setup-grid"><label>Zone name<input name="name" required maxlength="253" placeholder="app.example.test"></label><label>SOA contact (DNS notation)<input name="soaContact" required maxlength="253" placeholder="hostmaster.example.test"></label><label>SOA serial<input name="serial" type="number" min="1" max="4294967295" value="1" required></label><label>TTL (seconds)<input name="ttl" type="number" min="5" max="300" value="30" required></label><label>Traffic policy<select name="policy"><option value="Weighted">Weighted</option><option value="Failover">Failover</option><option value="WeightedFailover">Weighted failover</option></select></label><label>Probe interval (seconds)<input name="probeInterval" type="number" min="1" max="60" value="5" required></label><label>Consecutive failures<input name="failureThreshold" type="number" min="1" max="10" value="2" required></label><label>Consecutive successes<input name="successThreshold" type="number" min="1" max="10" value="2" required></label></div><label>Sites (IP | HTTPS readiness URL | weight 1–100 | priority 0–1000)<textarea name="sites" rows="4" required maxlength="32000" placeholder="10.0.0.10 | https://dc.example.test/ready | 1 | 0"></textarea></label><label>Authoritative nameservers (DNS name | IP)<textarea name="nameServers" rows="3" required maxlength="32000" placeholder="ns1.example.test | 10.0.0.53"></textarea></label><p>All-down response is fail-closed. Site addresses are not probed by this editor. Actual binding, DNSSEC, authority and delegation require separately approved configuration.</p><button class="primary" type="submit">Validate and prepare unsigned zone</button></form><div id="specialist-result" role="status"></div></div>`;
+}
+function wireSpecialistDraft(id) {
+    const form = document.getElementById('specialist-draft');
+    if (!form)
+        return;
+    const result = $('specialist-result');
+    const generation = authGeneration;
+    form.onsubmit = async (event) => {
+        event.preventDefault();
+        const submit = form.querySelector('button[type="submit"]');
+        if (submit.disabled)
+            return;
+        submit.disabled = true;
+        result.textContent = 'Validating candidate…';
+        try {
+            const fields = new FormData(form);
+            const value = {};
+            fields.forEach((v, k) => { value[k] = String(v); });
+            const numeric = id === 'waf' ? ['revision', 'validDays'] : ['serial', 'ttl', 'probeInterval', 'failureThreshold', 'successThreshold'];
+            numeric.forEach(k => { value[k] = Number(value[k]); });
+            const reply = await api('/admin/api/specialist/' + id + '-draft', 'POST', value);
+            if (generation !== authGeneration || view !== id || !form.isConnected)
+                return;
+            if (reply.status !== 'unsigned-draft-only' || reply.deploymentReady !== false || typeof reply.json !== 'string')
+                throw Error('Candidate response could not be verified');
+            result.innerHTML = '<p>Candidate validated for export only. Not signed or deployed.</p><label>Exact candidate JSON<textarea readonly rows="12" id="specialist-json"></textarea></label><button type="button" class="ghost" id="specialist-download">Download unsigned JSON</button>';
+            $('specialist-json').value = reply.json;
+            $('specialist-download').onclick = () => {
+                const url = URL.createObjectURL(new Blob([reply.json], { type: 'application/json' }));
+                const link = document.createElement('a');
+                link.href = url;
+                link.download = id === 'waf' ? 'waf-policy-unsigned.json' : 'gslb-zone-unsigned.json';
+                document.body.append(link);
+                link.click();
+                link.remove();
+                setTimeout(() => URL.revokeObjectURL(url), 1000);
+            };
+        }
+        catch (e) {
+            if (generation === authGeneration && view === id && form.isConnected)
+                result.textContent = String(e);
+        }
+        finally {
+            submit.disabled = false;
+        }
+    };
+}
+function backendCertificateWizard() {
+    if (currentRole !== 'Administrator' && currentRole !== 'Operator')
+        return show('Authorized role required', true);
+    const groups = keys(data.clusters);
+    if (!groups.length)
+        return show('Create an HTTPS backend group before assigning a certificate', true);
+    modal('Configure backend client certificate', 'Use an installed and trusted client certificate. Verify it locally, then submit the backend group draft for independent approval. Every destination must use HTTPS.', [
+        { name: 'cluster', label: 'Backend group', value: groups[0], options: groups },
+        { name: 'thumbprint', label: 'Installed client certificate thumbprint', value: '' }
+    ], () => { }, 'Check and apply to draft');
+    const form = $('editor');
+    const dialog = $('modal');
+    const submit = $('confirm');
+    const error = document.createElement('p');
+    error.setAttribute('role', 'alert');
+    $('modal-fields').append(error);
+    const generation = authGeneration;
+    form.onsubmit = async (event) => {
+        if (event.submitter?.getAttribute('value') === 'cancel')
+            return;
+        event.preventDefault();
+        if (submit.disabled)
+            return;
+        const cluster = $('f-cluster').value;
+        const thumbprint = $('f-thumbprint').value;
+        const original = data.clusters[cluster];
+        const destinations = [...Object.values(original?.Destinations || {}), ...keys(data.disabled).filter(k => k.startsWith(cluster + '::')).map(k => data.disabled[k])];
+        if (!original || !destinations.length || destinations.some(d => !String(d.Address || '').toLowerCase().startsWith('https://'))) {
+            error.textContent = 'Every configured destination must use HTTPS.';
+            return;
+        }
+        submit.disabled = true;
+        error.textContent = '';
+        try {
+            const checked = await api('/admin/api/specialist/backend-certificate-check', 'POST', { thumbprint });
+            if (generation !== authGeneration || view !== 'tls' || !dialog.open || data.clusters[cluster] !== original)
+                return;
+            if (!checked.localResolverAccepted || !/^[A-F0-9]{40}$/.test(checked.thumbprint))
+                throw Error('Certificate resolution not confirmed');
+            original.Metadata = { ...(original.Metadata || {}), BackendClientCertificateThumbprint: checked.thumbprint };
+            dialog.close();
+            edit();
+            show('Client identity added to draft. Submit for independent approval and verify real backend mTLS.');
+        }
+        catch (e) {
+            if (generation === authGeneration && dialog.open)
+                error.textContent = String(e);
+        }
+        finally {
+            submit.disabled = false;
+        }
+    };
+}
 function modulePage(id) {
     const multi = topologyResponse?.plan?.mode !== 'standalone';
-    return specialistPlan(id) + (id === 'gslb' && multi ? `<div class="card"><h3>Authenticated DNS and agent evidence</h3><p>Inspect staged revisions and local observer quorum metrics via registered mTLS agents. This is not a direct DNS query.</p>${actionBtn('Inspect agent status', 'fleet-probe', '', 'primary')}</div>` : '') + `<div class="card"><h3>Related tools</h3>${actionBtn('Traffic engine & modules', 'switch', 'featurematrix', 'ghost')} ${actionBtn('User guide', 'switch', 'guide', 'ghost')}</div>`;
+    return specialistPlan(id) + specialistDraftForm(id) + (id === 'gslb' && multi ? `<div class="card"><h3>Authenticated DNS and agent evidence</h3><p>Inspect staged revisions and local observer quorum metrics via registered mTLS agents. This is not a direct DNS query.</p>${actionBtn('Inspect agent status', 'fleet-probe', '', 'primary')}</div>` : '') + `<div class="card"><h3>Related tools</h3>${actionBtn('Traffic engine & modules', 'switch', 'featurematrix', 'ghost')} ${actionBtn('User guide', 'switch', 'guide', 'ghost')}</div>`;
 }
 function render() {
     if (view !== lastRenderedView) {
@@ -601,7 +707,10 @@ function render() {
     else if (view === 'tls')
         void certificatePage();
     else if (view === 'waf' || view === 'gslb')
+    {
         $('content').innerHTML = modulePage(view);
+        wireSpecialistDraft(view);
+    }
     else if (view === 'setup')
         void setupPage();
     else if (view === 'onboarding')
@@ -965,6 +1074,10 @@ function updateDest(id = '') {
     });
 }
 function act(type, id) {
+    if (type === 'backend-cert') {
+        backendCertificateWizard();
+        return;
+    }
     if (type === 'runtime-health') {
         void refreshDestinationRuntime();
         return;
