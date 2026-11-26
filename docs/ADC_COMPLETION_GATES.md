@@ -23,3 +23,7 @@ No feature is complete on the basis of a page, schema, capability label or green
 | Release | existing installer and SOP | updated exact-source installer, approved tests and independent review; #36 physical gates unchanged |
 
 Hardware acceleration and upstream volumetric DDoS absorption are deployment-dependent, not promised software equivalence. No copied proprietary interface or assets.
+
+## Implemented in this PR (awaiting exact-head acceptance)
+- Weighted least outstanding HTTP request selection in shipping runtime, reviewed draft validator and UI, with pure and real L7 acceptance tests.
+- ADC service map on Overview, derived from actual route-to-cluster-to-destination configuration including disabled members, policies, unresolved references and unreferenced groups. Distinguishes draft/configured state from live traffic and routes through existing authorized editors. This is not the new VIP/object persistence model or a full ADC navigation redesign.

@@ -175,6 +175,12 @@ test('browser: bootstrap, navigation, onboarding, websites, route edit, users an
     await expect(page.locator('#content')).toContainText('esign-browser-private-route');
     await expect(page.locator('#content')).toContainText('esign-browser-public-pool');
     await expect(page.locator('#content')).toContainText('esign-browser-private-pool');
+    await openNav('overview');
+    const serviceMap = page.locator('#adc-service-map');
+    await expect(serviceMap).toContainText('Unsaved draft');
+    await expect(serviceMap.locator('.adc-service').filter({hasText:'esign-browser-public-route'})).toContainText('esign-public-01.example.invalid');
+    await expect(serviceMap.locator('.adc-service').filter({hasText:'esign-browser-private-route'})).toContainText('esign-private-01.example.invalid');
+    await expect(serviceMap).toContainText('not confirmed listener VIPs');
     await openNav('clusters');
     await expect(page.locator('#content')).toContainText('PrimaryBackup');
     await expect(page.locator('#content')).toContainText('Active');
