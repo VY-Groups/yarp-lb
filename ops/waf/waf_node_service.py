@@ -54,11 +54,11 @@ def build_agent(args):
         raise ValueError("signed exceptions require separate node deployment integration")
     if policy.get("mode") not in local.MODES:
         raise ValueError("unsupported signed WAF engine")
-    revision = signed.verify(
+    revision, verified_sha = signed.verify(
         args.policy, args.approval, keys, args.minimum_revision_file,
         args.observed_ruleset_sha256, policy["mode"],
-        shadow_evidence_path=args.shadow_evidence_file)
-    if (signed._read_file(args.policy) != raw or
+        shadow_evidence_path=args.shadow_evidence_file, return_digest=True)
+    if (verified_sha != approved_sha or signed._read_file(args.policy) != raw or
             policy.get("revision") != revision or
             policy.get("rulesetSha256") != args.observed_ruleset_sha256):
         raise ValueError("signed WAF policy changed during node startup")

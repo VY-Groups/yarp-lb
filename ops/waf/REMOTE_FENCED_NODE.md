@@ -123,3 +123,7 @@ provider is a fake local implementation: **not** Docker, a customer node,
 a separate OS host, or full production acceptance. CI runs these checks
 in `.github/workflows/waf-mtls-node.yml`. The existing real three-process
 etcd acceptance workflow remains independently required.
+
+## Operator fleet rollout command
+
+Use `python3 ops/waf/waf_fleet_rollout.py --help` for the standalone Linux coordinator. Supply the exact policy and two detached approvals, independent reviewer public keys and revision floor, observed CRS digest and any required shadow evidence file, the approved etcd member inventory and its read-only mTLS identity, two `--node ID HTTPS_URL LEAF_SHA256` records, the controller-to-node mTLS identity, an unused private receipt path, and explicit revision and policy SHA-256 confirmation. Default execution is read-only preflight. Add `--execute` only after independent change authorization. The command verifies the exact signed bytes, checks the live external lease and pinned remote node identities, and invokes the existing two-node coordinator (including compensation on failure). It never grants its own lease, skips signed exception rejection, or advances the trusted revision floor. A receipt labelled applied-uncommitted is not a final authority commit; independently reconcile and advance the revision floor. An intentional rollback requires a fresh independently approved policy for the previous mode. Never replay an unresolved intent or bypass expired authority.

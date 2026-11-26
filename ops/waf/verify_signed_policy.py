@@ -186,7 +186,8 @@ def _canonical_reviewer_key_digest(public_key):
 
 
 def verify(policy_path, approvals, reviewers, minimum_revision_path,
-           observed_ruleset, observed_mode, now=None, shadow_evidence_path=None):
+           observed_ruleset, observed_mode, now=None, shadow_evidence_path=None,
+           *, return_digest=False):
     now = now or dt.datetime.now(dt.timezone.utc)
     if (now.tzinfo is None or not _digest(observed_ruleset) or
             observed_mode not in ("detect", "block")):
@@ -252,7 +253,7 @@ def verify(policy_path, approvals, reviewers, minimum_revision_path,
         seen.add(who)
     if seen != set(reviewers):
         raise ValueError("one or more independent approvals missing")
-    return revision
+    return (revision, policy_digest) if return_digest else revision
 
 
 def main():
