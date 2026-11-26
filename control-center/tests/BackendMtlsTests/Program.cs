@@ -15,3 +15,7 @@ Check(!BackendMutualTls.TryNormalizeThumbprint(thumb[..^1], out _), "truncated t
 Console.WriteLine("BACKEND MTLS CONFIG CONTRACT TESTS PASSED");
 
 await ActiveCompoundHealthTests.RunAsync();
+
+MonitorProfileRegistryTests.Run();
+
+RealServerCatalogTests.Run();

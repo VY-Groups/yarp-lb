@@ -2302,6 +2302,8 @@ app.MapGet("/admin/api/state", () =>
     proxy.Remove("AdminDisabledDestinations");
     return Results.Ok(new { name = "YARP Control Center", gateway = "online", time = DateTimeOffset.UtcNow,
         routes = proxy["Routes"] ?? new JsonObject(), clusters = proxy["Clusters"] ?? new JsonObject(), disabled,
+        monitorProfiles = proxy[MonitorProfileRegistry.StorageKey] ?? new JsonObject(),
+        realServers = proxy[RealServerCatalog.StorageKey] ?? new JsonObject(),
         mode = "Authenticated local management", telemetry = "Local HTTP counters only; no backend or fleet metrics", revision = Convert.ToHexString(SHA256.HashData(snapshot)) });
 }).RequireAuthorization();
 
@@ -2383,6 +2385,10 @@ IResult? ValidateChangePayload(JsonObject submitted)
     var disabled = submitted["disabled"] as JsonObject ?? new JsonObject();
     if (routes is null || clusters is null) return Results.BadRequest(new { error = "Routes and clusters must be objects" });
     if (routes.Count > 100 || clusters.Count > 100) return Results.BadRequest(new { error = "Too many routes/clusters" });
+    if (RealServerCatalog.Validate(submitted) is { } serverError)
+        return Results.BadRequest(new { error = serverError });
+    if (MonitorProfileRegistry.Validate(submitted) is { } profileError)
+        return Results.BadRequest(new { error = profileError });
     if (SharedMonitorContract.Validate(clusters) is { } monitorError)
         return Results.BadRequest(new { error = monitorError });
     foreach (var (key, clusterNode) in clusters)
@@ -2534,11 +2540,15 @@ async Task<IResult> CommitReviewedChange(HttpContext ctx, JsonObject submitted)
         proxy["Routes"] = routes.DeepClone();
         proxy["Clusters"] = clusters.DeepClone();
         proxy["AdminDisabledDestinations"] = disabled.DeepClone();
+        if (submitted[MonitorProfileRegistry.PayloadKey] is JsonObject profiles)
+            proxy[MonitorProfileRegistry.StorageKey] = profiles.DeepClone();
+        if (submitted[RealServerCatalog.PayloadKey] is JsonObject realServers)
+            proxy[RealServerCatalog.StorageKey] = realServers.DeepClone();
         doc["ReverseProxy"] = proxy;
         var newConfig = doc.ToJsonString(new JsonSerializerOptions { WriteIndented = true });
         var (denied, backup) = await CommitRoutingBytes(ctx, snapshot, Encoding.UTF8.GetBytes(newConfig), "CONFIG_APPLY_INTENT");
         if (denied is not null) return denied;
-        await Audit(Actor(ctx), "CONFIG_APPLIED", new { routes = routes.Count, clusters = clusters.Count, backup = Path.GetFileName(backup) });
+        await Audit(Actor(ctx), "CONFIG_APPLIED", new { routes = routes.Count, clusters = clusters.Count, monitorProfiles = (proxy[MonitorProfileRegistry.StorageKey] as JsonObject)?.Count ?? 0, backup = Path.GetFileName(backup) });
         return Results.Ok(new { saved = true, backup = Path.GetFileName(backup), message = "Saved to appsettings.json; YARP config reload typically occurs automatically. Verify gateway logs." });
     }
     catch (Exception) { return Results.Problem("Configuration write failed. Check server logs."); }
@@ -2571,7 +2581,9 @@ app.MapPost("/admin/api/gitops/plan", async (HttpContext ctx) =>
     if (request is null || request.Count != 2 ||
         request["schemaVersion"] is not JsonValue version ||
         !version.TryGetValue<int>(out var schemaVersion) || schemaVersion != 1 ||
-        request["payload"] is not JsonObject payload || payload.Count != 4 ||
+        request["payload"] is not JsonObject payload ||
+        payload.Count != 4 + (payload.ContainsKey(MonitorProfileRegistry.PayloadKey) ? 1 : 0) +
+            (payload.ContainsKey(RealServerCatalog.PayloadKey) ? 1 : 0) ||
         payload["routes"] is not JsonObject routes ||
         payload["clusters"] is not JsonObject clusters ||
         payload["disabled"] is not JsonObject disabled ||
@@ -2602,7 +2614,11 @@ app.MapPost("/admin/api/gitops/plan", async (HttpContext ctx) =>
             approvalRequired = true, validationScope = "Control Center change payload; not YARP runtime acceptance",
             routes = Diff(current["Routes"] as JsonObject, routes),
             clusters = Diff(current["Clusters"] as JsonObject, clusters),
-            disabled = Diff(current["AdminDisabledDestinations"] as JsonObject, disabled) });
+            disabled = Diff(current["AdminDisabledDestinations"] as JsonObject, disabled),
+            monitorProfiles = Diff(current[MonitorProfileRegistry.StorageKey] as JsonObject,
+                payload[MonitorProfileRegistry.PayloadKey] as JsonObject ?? current[MonitorProfileRegistry.StorageKey] as JsonObject ?? new JsonObject()),
+            realServers = Diff(current[RealServerCatalog.StorageKey] as JsonObject,
+                payload[RealServerCatalog.PayloadKey] as JsonObject ?? current[RealServerCatalog.StorageKey] as JsonObject ?? new JsonObject()) });
     }
     finally { gate.Release(); }
 }).RequireAuthorization(p => p.RequireRole("Administrator", "Operator"));

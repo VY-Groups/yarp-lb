@@ -5,6 +5,9 @@
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="Yarp.ReverseProxy" Version="2.3.0" />
+    <Compile Include="../../RealServerCatalog.cs" Link="RealServerCatalog.cs" />
+    <Compile Include="../../MonitorProfileRegistry.cs" Link="MonitorProfileRegistry.cs" />
+    <Compile Include="../../SharedMonitorContract.cs" Link="SharedMonitorContract.cs" />
     <Compile Include="../../ActiveCompoundHealth.cs" Link="ActiveCompoundHealth.cs" />
     <Compile Include="../../CompoundDiagnostics.cs" Link="CompoundDiagnostics.cs" />
     <Compile Include="../../BackendMutualTls.cs" Link="BackendMutualTls.cs" />

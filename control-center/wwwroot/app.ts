@@ -1,5 +1,5 @@
 type Obj = Record<string, any>;
-type State = {name:string;gateway:string;time:string;routes:Obj;clusters:Obj;disabled:Obj;mode:string;telemetry:string;revision:string};
+type State = {name:string;gateway:string;time:string;routes:Obj;clusters:Obj;disabled:Obj;monitorProfiles?:Obj;realServers?:Obj;mode:string;telemetry:string;revision:string};
 let data:State = {name:'GatewayCore',gateway:'unknown',time:'',routes:{},clusters:{},disabled:{},mode:'Local testing',telemetry:'',revision:''};
 let viewHistory:string[]=[];let lastRenderedView='setup';let restoringNavigation=false;
 function navigateBack(){if(viewHistory.length){restoringNavigation=true;view=viewHistory.pop()!;render()}else if(view!=='setup'){restoringNavigation=true;view='setup';render()}}
@@ -92,7 +92,7 @@ async function save() {
     if (!dirty || currentRole === 'Viewer')
         return;
     reasonDialog('Submit configuration for approval', 'Your draft contains ' + keys(data.routes).length + ' route(s) and ' + keys(data.clusters).length + ' backend group(s). Nothing goes live until a different authorized administrator approves this exact revision.', 12, 'Submit request', async reason => {
-        const x = await api('/admin/api/change-requests', 'POST', { reason, payload: { routes: data.routes, clusters: data.clusters, disabled: data.disabled, revision: data.revision } });
+        const x = await api('/admin/api/change-requests', 'POST', { reason, payload: { routes: data.routes, clusters: data.clusters, disabled: data.disabled, monitorProfiles: data.monitorProfiles || {}, realServers: data.realServers || {}, revision: data.revision } });
         dirty = false;
         await reload();
         view = 'approvals';
@@ -140,19 +140,27 @@ function adcServiceMap() {
 function overview(){let routes=keys(data.routes).slice(0,5).map(id=>`<div class="rowline"><div><b>${esc(id)}</b><div class="subtle mono">${esc(data.routes[id]?.Match?.Path||'—')}</div></div><span class="chip">${esc(data.routes[id]?.ClusterId||'—')}</span></div>`).join('')||'<div class="empty">No routes configured</div>';let nodes=destinationRows().slice(0,6).map(d=>`<div class="rowline"><div><b>${esc(d.did)}</b><div class="subtle mono">${esc(d.address)}</div></div><span class="chip ${d.enabled?'':'bad'}">${d.enabled?'Configured':'Disabled'}</span></div>`).join('')||'<div class="empty">No destinations configured</div>';return summary()+adcServiceMap()+`<div class="grid2"><div class="card"><div class="flex"><h2 class="section-title">Traffic architecture</h2><span class="chip">Design view</span></div><div class="arch"><div class="archnode">Clients / Public & internal ingress</div><div class="arrow">↓</div><div class="archnode">Firewall / upstream HA VIP</div><div class="arrow">↓</div><div class="archnode accent">${esc(topologyModeName(topologyResponse?.plan?.mode||'standalone'))} (design topology)</div><div class="arrow">↓</div><div class="twonodes"><div class="archnode">Backend node 01</div><div class="archnode">Backend node 02</div></div><div class="arrow">↓</div><div class="archnode">Application-specific data services (optional)</div></div><div class="healthbanner">This gateway is one running instance. The onboarding design is metadata, not proof that a gateway fleet, VIP or backend is healthy.</div></div><div><div class="card"><h2 class="section-title">Route snapshot</h2>${routes}${actionBtn('Manage routes','switch','routes')}</div><div class="card card-spaced"><h2 class="section-title">Destinations</h2>${nodes}${actionBtn('Manage backends','switch','backends')}</div></div></div>`}
 function routes(){const rows=keys(data.routes).map(id=>{const r=data.routes[id];return `<tr><td><b>${esc(id)}</b></td><td class="mono">${esc((r.Match?.Hosts||[]).join(', ')||'Any host')}</td><td class="mono">${esc(r.Match?.Path)}</td><td>${esc(r.ClusterId)}</td><td>${actionBtn('Edit','route-edit',id)} ${actionBtn('Advanced','route-advanced',id)} ${actionBtn('Delete','route-delete',id,'danger-btn mini')}</td></tr>`}).join('');return `<div class="toolbar"><div><h2>Websites &amp; routes</h2><p class="subtle">A route matches the client hostname and path, then forwards to a backend group (cluster). Draft changes need approval.</p></div>${actionBtn('+ Add website / API','setup-simple-website','','primary')} ${actionBtn('Advanced: add route','route-add','')}</div><div class="tablewrap"><table><thead><tr><th>Route ID</th><th>Hosts</th><th>Path</th><th>Cluster</th><th>Actions</th></tr></thead><tbody>${rows||'<tr><td colspan="5" class="empty">No routes configured. Use Add website / API to create your first draft.</td></tr>'}</tbody></table></div>`}
 const monitorSourceKey = 'ADC.HealthMonitorSource';
+const compoundModeKey = 'ADC.Health.CompoundMode';
+const compoundPathKey = 'ADC.Health.SecondaryPath';
+function checkCompoundTarget(group: Obj) {
+    if (group.HttpClient?.WebProxy || keys(group.Destinations || {}).some(key => !!group.Destinations[key].Health))
+        throw Error('Compound health does not support web proxies or alternate destination health addresses.');
+}
 function monitorMembers(id: string) {
     return keys(data.clusters).filter(key => data.clusters[key].Metadata?.[monitorSourceKey] === id);
 }
 function applyMonitorSnapshot(source: Obj, target: Obj) {
     target.HealthCheck = { ...target.HealthCheck, Active: JSON.parse(JSON.stringify(source.HealthCheck.Active)) };
     const metadata = { ...(target.Metadata || {}) };
-    for (const key of ['RiseFall.Rise', 'RiseFall.Fall', 'ConsecutiveFailuresHealthPolicy.Threshold']) {
+    for (const key of ['RiseFall.Rise', 'RiseFall.Fall', 'ConsecutiveFailuresHealthPolicy.Threshold', compoundModeKey, compoundPathKey]) {
         if (Object.prototype.hasOwnProperty.call(source.Metadata || {}, key))
             metadata[key] = source.Metadata[key];
         else
             delete metadata[key];
     }
     target.Metadata = metadata;
+    if (metadata[compoundModeKey])
+        target.HealthCheck.AvailableDestinationsPolicy = 'HealthyAndUnknown';
 }
 function unlinkActiveMonitor(id: string) {
     if (currentRole === 'Viewer' || !Object.prototype.hasOwnProperty.call(data.clusters, id))
@@ -175,14 +183,16 @@ function editActiveMonitor(id: string) {
         const parsed = /^(\d{2}):(\d{2}):(\d{2})$/.exec(String(value || ''));
         return parsed ? String(Number(parsed[1]) * 3600 + Number(parsed[2]) * 60 + Number(parsed[3])) : fallback;
     };
-    modal('HTTP health monitor', 'Choose actual application readiness. This edits the group draft; it does not probe or deploy. Passive checks and other metadata remain unchanged.', [
+    modal('HTTP health monitor', 'Choose actual application readiness. This edits the group draft; it does not probe or deploy. TCP is mandatory in compound mode; AND requires both HTTP checks and OR requires at least one. Passive checks remain unchanged.', [
         { name: 'enabled', label: 'Enable active monitor', value: String(!!old.Enabled), options: ['true', 'false'] },
         { name: 'path', label: 'Readiness path', value: old.Path || '/health/ready' },
         { name: 'interval', label: 'Probe interval (seconds, 1–60)', value: seconds(old.Interval, '15') },
         { name: 'timeout', label: 'Probe timeout (seconds, 1–60)', value: seconds(old.Timeout, '5') },
         { name: 'policy', label: 'Failure / recovery policy', value: old.Policy || 'ConsecutiveFailures', options: ['ConsecutiveFailures', 'RiseFall'] },
         { name: 'fall', label: 'Consecutive failures (1–10)', value: String(old.Policy === 'RiseFall' ? meta['RiseFall.Fall'] || '3' : meta['ConsecutiveFailuresHealthPolicy.Threshold'] || '3') },
-        { name: 'rise', label: 'Consecutive successes for RiseFall (1–10)', value: String(meta['RiseFall.Rise'] || '2') }
+        { name: 'rise', label: 'Consecutive successes for RiseFall (1–10)', value: String(meta['RiseFall.Rise'] || '2') },
+        { name: 'compound', label: 'Active compound mode', value: meta[compoundModeKey] || 'off', options: ['off', 'AND', 'OR'] },
+        { name: 'secondary', label: 'Secondary HTTP readiness path (compound mode)', value: meta[compoundPathKey] || '/health/dependencies', optional: true }
     ], v => {
         const bounded = (raw: string, max: number) => /^\d{1,2}$/.test(raw) && Number(raw) >= 1 && Number(raw) <= max;
         if (!bounded(v.interval, 60) || !bounded(v.timeout, 60) || Number(v.timeout) > Number(v.interval) || !bounded(v.rise, 10) || !bounded(v.fall, 10))
@@ -195,9 +205,28 @@ function editActiveMonitor(id: string) {
             throw Error('PrimaryBackup requires active health checks.');
         if (!['ConsecutiveFailures', 'RiseFall'].includes(v.policy))
             throw Error('Unsupported health policy.');
+        if (!['off', 'AND', 'OR'].includes(v.compound))
+            throw Error('Unsupported compound mode.');
+        if (v.compound !== 'off') {
+            const valid = (path: string) => path.startsWith('/') && !path.startsWith('//') && path.length <= 300 && !path.includes('\\') && !path.includes('#') && !/[\x00-\x1f\x7f]/.test(path);
+            if (v.enabled !== 'true' || !valid(v.path) || !valid(v.secondary) || v.path === v.secondary)
+                throw Error('Compound monitoring requires active checks and two distinct same-origin readiness paths.');
+            checkCompoundTarget(cluster);
+            for (const member of monitorMembers(id))
+                checkCompoundTarget(data.clusters[member]);
+        }
         const duration = (raw: string) => '00:' + String(Math.floor(Number(raw) / 60)).padStart(2, '0') + ':' + String(Number(raw) % 60).padStart(2, '0');
         cluster.HealthCheck = { ...cluster.HealthCheck, Active: { ...old, Enabled: v.enabled === 'true', Path: v.path, Interval: duration(v.interval), Timeout: duration(v.timeout), Policy: v.policy } };
         cluster.Metadata = { ...meta, 'RiseFall.Rise': v.rise, 'RiseFall.Fall': v.fall, 'ConsecutiveFailuresHealthPolicy.Threshold': v.fall };
+        if (v.compound === 'off') {
+            delete cluster.Metadata[compoundModeKey];
+            delete cluster.Metadata[compoundPathKey];
+        }
+        else {
+            cluster.Metadata[compoundModeKey] = v.compound;
+            cluster.Metadata[compoundPathKey] = v.secondary;
+            cluster.HealthCheck.AvailableDestinationsPolicy = 'HealthyAndUnknown';
+        }
         for (const member of monitorMembers(id))
             applyMonitorSnapshot(cluster, data.clusters[member]);
         edit();
@@ -220,6 +249,8 @@ function copyActiveMonitor(id: string) {
             throw Error('Invalid or changed monitor source.');
         if (!['copy', 'linked'].includes(v.mode))
             throw Error('Invalid reuse mode.');
+        if (source.Metadata?.[compoundModeKey])
+            checkCompoundTarget(target);
         applyMonitorSnapshot(source, target);
         if (v.mode === 'linked')
             target.Metadata[monitorSourceKey] = v.source;
@@ -228,8 +259,171 @@ function copyActiveMonitor(id: string) {
         edit();
     });
 }
-function clusters(){const rows=keys(data.clusters).map(id=>{const c=data.clusters[id];const active=!!c.HealthCheck?.Active?.Enabled,passive=!!c.HealthCheck?.Passive?.Enabled;const health=active&&passive?'<span class="chip good">Active + passive</span>':active?'<span class="chip good">Active</span>':passive?'<span class="chip warn">Passive only</span>':'<span class="chip">Disabled</span>';return `<tr><td><b>${esc(id)}</b></td><td>${esc(c.LoadBalancingPolicy||'Default')}</td><td>${keys(c.Destinations||{}).length}</td><td>${health}${c.Metadata?.[monitorSourceKey]?`<div class="subtle">Linked to ${esc(c.Metadata[monitorSourceKey])}</div>`:""}</td><td>${actionBtn('Edit','cluster-edit',id)} ${currentRole==='Viewer'?'':actionBtn('Health monitor','monitor-edit',id)+' '+actionBtn('Reuse monitor','monitor-copy',id)+(c.Metadata?.[monitorSourceKey]?' '+actionBtn('Unlink monitor','monitor-unlink',id):'')} ${actionBtn('Advanced','cluster-advanced',id)} ${actionBtn('Delete','cluster-delete',id,'danger-btn mini')}</td></tr>`}).join('');return `<div class="toolbar"><div><h2>Backend groups (clusters)</h2><p class="subtle">A group contains the servers for one application and defines traffic distribution. Use the policy guide below.</p></div>${actionBtn('+ Add cluster','cluster-add','')}</div><div class="tablewrap"><table><thead><tr><th>Cluster</th><th>Policy</th><th>Active backends</th><th>Health checks</th><th>Actions</th></tr></thead><tbody>${rows||'<tr><td colspan="5" class="empty">No clusters configured</td></tr>'}</tbody></table></div>${policyReference()}`}
-function backends(){const rows=destinationRows().map(d=>{const live=liveDestinationHealth?.find(x=>x.clusterId===d.cid&&x.destinationId===d.did);const configuredState=!d.enabled?'Disabled':d.trafficState==='draining'?'Draining':'Active';const stateClass=configuredState==='Active'?'good':configuredState==='Draining'?'warn':'bad';const runtime=live?`<span class="chip">A: ${esc(live.activeHealth||'Unknown')}</span> <span class="chip">P: ${esc(live.passiveHealth||'Unknown')}</span><div class="subtle">In-flight: ${esc(String(live.concurrentRequests??'—'))}</div>`:'<span class="subtle">Not inspected</span>';const drainButton=d.enabled?actionBtn(d.trafficState==='draining'?'Restore traffic':'Drain new traffic','dest-drain',d.cid+'::'+d.did):'';return `<tr><td><b>${esc(d.did)}</b><div class="subtle">${esc(d.cid)} · weight ${esc(d.weight)} · ${esc(d.trafficRole)}</div></td><td class="mono">${esc(d.address)}</td><td><span class="chip ${stateClass}">${configuredState}</span><div class="subtle">Configured draft state; runtime health shown separately</div></td><td>${runtime}<div>${drainButton} ${actionBtn(d.enabled?'Disable':'Enable','dest-toggle',d.cid+'::'+d.did)} ${actionBtn('Edit','dest-edit',d.cid+'::'+d.did)} ${actionBtn('Advanced','dest-advanced',d.cid+'::'+d.did)} ${actionBtn('Delete','dest-delete',d.cid+'::'+d.did,'danger-btn mini')}</div></td></tr>`}).join('');const liveNote=liveDestinationHealth?`<p class="subtle">Live YARP snapshot checked ${esc(liveDestinationHealthAt)} · single local process. Unsaved changes do not affect this runtime snapshot.</p>`:'<p class="subtle">Runtime health has not been inspected in this session.</p>';return `<div class="toolbar"><div><h2>Backend servers (destinations)</h2><p class="subtle">Each application route points to its own cluster. Runtime health is per gateway; draining is a reviewed configuration change.</p></div>${actionBtn('Inspect live health','runtime-health','')} ${actionBtn('+ Add backend','dest-add','')}</div>${liveNote}<div class="tablewrap"><table><thead><tr><th>Destination / pool</th><th>Address</th><th>Traffic state</th><th>Runtime health and actions</th></tr></thead><tbody>${rows||'<tr><td colspan="4" class="empty">No backend servers. Add a website first, or add a server to an existing backend group.</td></tr>'}</tbody></table></div><div class="healthbanner">Drain removes a destination from new-request selection after an approved config rollout; in-flight requests continue. A host match separates routes, but private API access still requires a restricted listener and firewall policy. Runtime health is an authenticated, point-in-time view of this process only.</div>`}
+function editMonitorProfile(id: string = '') {
+    if (currentRole === 'Viewer')
+        return;
+    const profiles = data.monitorProfiles || {};
+    const old = id ? profiles[id] : undefined;
+    if (id && !Object.prototype.hasOwnProperty.call(profiles, id))
+        return show('Profile not found.', true);
+    const active = old?.Active || {};
+    const meta = old?.Metadata || {};
+    const seconds = (value: string | undefined, fallback: string) => {
+        const m = /^(\d{2}):(\d{2}):(\d{2})$/.exec(String(value || ''));
+        return m ? String(Number(m[1]) * 3600 + Number(m[2]) * 60 + Number(m[3])) : fallback;
+    };
+    modal(id ? 'Edit monitor profile' : 'Create monitor profile', 'Reusable independent template. Assign it to a backend group explicitly; editing or deleting a template does not change existing assignments.', [
+        { name: 'id', label: 'Profile ID (cannot rename)', value: id },
+        { name: 'path', label: 'Primary readiness path', value: active.Path || '/health/ready' },
+        { name: 'interval', label: 'Interval in seconds (1–60)', value: seconds(active.Interval, '15') },
+        { name: 'timeout', label: 'Timeout in seconds (1–60)', value: seconds(active.Timeout, '5') },
+        { name: 'policy', label: 'Health policy', value: active.Policy || 'RiseFall', options: ['RiseFall', 'ConsecutiveFailures'] },
+        { name: 'rise', label: 'Rise threshold (1–10)', value: meta['RiseFall.Rise'] || '2' },
+        { name: 'fall', label: 'Fall threshold (1–10)', value: meta['RiseFall.Fall'] || meta['ConsecutiveFailuresHealthPolicy.Threshold'] || '3' },
+        { name: 'compound', label: 'Active compound mode', value: meta[compoundModeKey] || 'off', options: ['off', 'AND', 'OR'] },
+        { name: 'secondary', label: 'Secondary readiness path', value: meta[compoundPathKey] || '/health/dependencies', optional: true }
+    ], v => {
+        if (!validId(v.id) || (id && v.id !== id) || keys(profiles).some(key => key !== id && key.toLowerCase() === v.id.toLowerCase()))
+            throw Error('Use a unique profile ID; renaming is not supported.');
+        if (!id && keys(profiles).length >= 100)
+            throw Error('At most 100 monitor profiles are supported.');
+        const bounded = (raw: string, max: number) => /^\d{1,2}$/.test(raw) && Number(raw) >= 1 && Number(raw) <= max;
+        if (!bounded(v.interval, 60) || !bounded(v.timeout, 60) || Number(v.timeout) > Number(v.interval) || !bounded(v.rise, 10) || !bounded(v.fall, 10))
+            throw Error('Use bounded whole seconds and thresholds; timeout cannot exceed interval.');
+        const valid = (path: string) => path.startsWith('/') && !path.startsWith('//') && path.length <= 300 && !path.includes('\\') && !path.includes('#') && !/[\x00-\x1f\x7f]/.test(path);
+        if (!valid(v.path) || !['RiseFall', 'ConsecutiveFailures'].includes(v.policy) || !['off', 'AND', 'OR'].includes(v.compound))
+            throw Error('Invalid readiness path or policy.');
+        if (v.compound !== 'off' && (!valid(v.secondary) || v.secondary === v.path))
+            throw Error('Compound mode requires a distinct secondary readiness path.');
+        const duration = (raw: string) => '00:' + String(Math.floor(Number(raw) / 60)).padStart(2, '0') + ':' + String(Number(raw) % 60).padStart(2, '0');
+        const metadata: Obj = { 'RiseFall.Rise': String(Number(v.rise)), 'RiseFall.Fall': String(Number(v.fall)), 'ConsecutiveFailuresHealthPolicy.Threshold': String(Number(v.fall)) };
+        if (v.compound !== 'off') {
+            metadata[compoundModeKey] = v.compound;
+            metadata[compoundPathKey] = v.secondary;
+        }
+        data.monitorProfiles = { ...profiles, [v.id]: { Active: { Enabled: true, Path: v.path, Interval: duration(v.interval), Timeout: duration(v.timeout), Policy: v.policy }, Metadata: metadata } };
+        edit();
+    });
+}
+function deleteMonitorProfile(id: string) {
+    if (currentRole === 'Viewer' || !Object.prototype.hasOwnProperty.call(data.monitorProfiles || {}, id))
+        return;
+    if (!confirm('Delete reusable profile ' + id + '? Existing assigned snapshots remain unchanged.'))
+        return;
+    const profiles = { ...data.monitorProfiles };
+    delete profiles[id];
+    data.monitorProfiles = profiles;
+    edit();
+}
+function assignMonitorProfile(id: string) {
+    if (currentRole === 'Viewer' || !Object.prototype.hasOwnProperty.call(data.clusters, id))
+        return;
+    const target = data.clusters[id];
+    if (target.Metadata?.[monitorSourceKey])
+        return show('Unlink this group before assigning an independent profile.', true);
+    const profiles = data.monitorProfiles || {};
+    const choices = keys(profiles);
+    if (!choices.length)
+        return show('Create a reusable monitor profile first.', true);
+    modal('Assign monitor profile', 'Copies an independent snapshot to this group and its linked dependents in the draft. Future template edits will not alter this assignment.', [{ name: 'profile', label: 'Reusable monitor profile', value: choices[0], options: choices }], v => {
+        if (!choices.includes(v.profile) || !Object.prototype.hasOwnProperty.call(profiles, v.profile))
+            throw Error('Invalid profile.');
+        const profile = profiles[v.profile];
+        const members = monitorMembers(id);
+        if (profile.Metadata?.[compoundModeKey]) {
+            checkCompoundTarget(target);
+            for (const member of members)
+                checkCompoundTarget(data.clusters[member]);
+        }
+        const source = { HealthCheck: { Active: profile.Active }, Metadata: profile.Metadata };
+        applyMonitorSnapshot(source, target);
+        for (const member of members)
+            applyMonitorSnapshot(source, data.clusters[member]);
+        edit();
+    });
+}
+function monitorRegistryPanel() {
+    const profiles = data.monitorProfiles || {};
+    const rows = keys(profiles).map(id => {
+        const p = profiles[id];
+        return `<tr><td>${esc(id)}</td><td>${esc(p.Active?.Path || '—')}</td><td>${esc(p.Metadata?.[compoundModeKey] || 'HTTP')}</td><td>${esc(p.Active?.Interval || '—')} / ${esc(p.Active?.Timeout || '—')}</td><td>${currentRole === 'Viewer' ? '' : actionBtn('Edit profile', 'profile-edit', id) + ' ' + actionBtn('Delete profile', 'profile-delete', id, 'danger-btn mini')}</td></tr>`;
+    }).join('');
+    return `<div class="card"><div class="toolbar"><div><h2>Reusable monitor profiles</h2><p class="subtle">Independent templates; assign a snapshot to a service group. All changes require approval.</p></div>${currentRole === 'Viewer' ? '' : actionBtn('+ Create monitor profile', 'profile-add', '')}</div><div class="tablewrap"><table><thead><tr><th>Profile</th><th>Readiness path</th><th>Mode</th><th>Interval / timeout</th><th>Actions</th></tr></thead><tbody>${rows || '<tr><td colspan="5">No reusable profiles</td></tr>'}</tbody></table></div></div>`;
+}
+function clusters(){const rows=keys(data.clusters).map(id=>{const c=data.clusters[id];const active=!!c.HealthCheck?.Active?.Enabled,passive=!!c.HealthCheck?.Passive?.Enabled;const health=active&&passive?'<span class="chip good">Active + passive</span>':active?'<span class="chip good">Active</span>':passive?'<span class="chip warn">Passive only</span>':'<span class="chip">Disabled</span>';return `<tr><td><b>${esc(id)}</b></td><td>${esc(c.LoadBalancingPolicy||'Default')}</td><td>${keys(c.Destinations||{}).length}</td><td>${health}${c.Metadata?.[monitorSourceKey]?`<div class="subtle">Linked to ${esc(c.Metadata[monitorSourceKey])}</div>`:""}</td><td>${actionBtn('Edit','cluster-edit',id)} ${currentRole==='Viewer'?'':actionBtn('Health monitor','monitor-edit',id)+' '+actionBtn('Reuse monitor','monitor-copy',id)+' '+actionBtn('Assign profile','profile-assign',id)+(c.Metadata?.[monitorSourceKey]?' '+actionBtn('Unlink monitor','monitor-unlink',id):'')} ${actionBtn('Advanced','cluster-advanced',id)} ${actionBtn('Delete','cluster-delete',id,'danger-btn mini')}</td></tr>`}).join('');return `<div class="toolbar"><div><h2>Backend groups (clusters)</h2><p class="subtle">A group contains the servers for one application and defines traffic distribution. Use the policy guide below.</p></div>${actionBtn('+ Add cluster','cluster-add','')}</div><div class="tablewrap"><table><thead><tr><th>Cluster</th><th>Policy</th><th>Active backends</th><th>Health checks</th><th>Actions</th></tr></thead><tbody>${rows||'<tr><td colspan="5" class="empty">No clusters configured</td></tr>'}</tbody></table></div>${policyReference()}${monitorRegistryPanel()}`}
+function validCatalogOrigin(value: string) {
+    try {
+        const uri = new URL(value);
+        return value.length <= 2048 && /^https?:\/\//i.test(value) && value.endsWith('/') && !/[\s\\?#]/.test(value) && !!uri.hostname && !uri.username && !uri.password;
+    }
+    catch {
+        return false;
+    }
+}
+function editRealServer(id: string = '') {
+    if (currentRole === 'Viewer')
+        return;
+    const servers = data.realServers || {};
+    const old = id ? servers[id] : undefined;
+    if (id && !Object.prototype.hasOwnProperty.call(servers, id))
+        return show('Server not found.', true);
+    modal(id ? 'Edit real server' : 'Create real server', 'A reusable origin template. Existing destination snapshots are not changed when this template changes.', [
+        { name: 'id', label: 'Real server ID (cannot rename)', value: id },
+        { name: 'address', label: 'HTTP(S) origin URL ending in /', value: old?.Address || 'https://app.internal.example.com/' },
+        { name: 'description', label: 'Description (optional)', value: old?.Description || '', optional: true }
+    ], v => {
+        if (!validId(v.id) || (id && v.id !== id) || keys(servers).some(key => key !== id && key.toLowerCase() === v.id.toLowerCase()))
+            throw Error('Use a unique server ID; renaming is not supported.');
+        if (!id && keys(servers).length >= 200)
+            throw Error('At most 200 real servers are supported.');
+        if (!validCatalogOrigin(v.address) || v.description.length > 250 || /[\x00-\x1f\x7f]/.test(v.description))
+            throw Error('Invalid origin URL or description. No credentials, query, fragment or control characters.');
+        data.realServers = { ...servers, [v.id]: { Address: v.address, Description: v.description } };
+        edit();
+    });
+}
+function deleteRealServer(id: string) {
+    if (currentRole === 'Viewer' || !Object.prototype.hasOwnProperty.call(data.realServers || {}, id))
+        return;
+    if (!confirm('Delete real server template ' + id + '? Existing destinations remain unchanged.'))
+        return;
+    const servers = { ...data.realServers };
+    delete servers[id];
+    data.realServers = servers;
+    edit();
+}
+function assignRealServer(id: string) {
+    if (currentRole === 'Viewer' || !Object.prototype.hasOwnProperty.call(data.realServers || {}, id))
+        return;
+    const groups = keys(data.clusters);
+    if (!groups.length)
+        return show('Create a backend group first.', true);
+    const server = data.realServers?.[id];
+    modal('Assign real server', 'Create a destination snapshot with its own weight and role. Existing destinations cannot be overwritten.', [
+        { name: 'cluster', label: 'Backend group', value: groups[0], options: groups },
+        { name: 'id', label: 'Destination ID', value: id },
+        { name: 'weight', label: 'Weight (1–100)', value: '1' },
+        { name: 'role', label: 'Traffic role', value: 'primary', options: ['primary', 'backup'] }
+    ], v => {
+        if (!groups.includes(v.cluster) || !Object.prototype.hasOwnProperty.call(data.clusters, v.cluster) || !validId(v.id) || !/^(?:[1-9]|[1-9][0-9]|100)$/.test(v.weight) || !['primary', 'backup'].includes(v.role) || !validCatalogOrigin(server.Address))
+            throw Error('Invalid destination, weight, role or server address.');
+        const group = data.clusters[v.cluster];
+        const destinations = group.Destinations || {};
+        if (keys(destinations).length >= 40 || keys(destinations).some(key => key.toLowerCase() === v.id.toLowerCase()) || keys(data.disabled).some(key => key.toLowerCase() === (v.cluster + '::' + v.id).toLowerCase()))
+            throw Error('Destination already exists or group capacity is reached.');
+        group.Destinations = { ...destinations, [v.id]: { Address: server.Address, Metadata: { Weight: v.weight, TrafficRole: v.role, TrafficState: 'active' } } };
+        edit();
+    });
+}
+function realServerPanel() {
+    const servers = data.realServers || {};
+    const rows = keys(servers).map(id => {
+        const server = servers[id];
+        return `<tr><td>${esc(id)}</td><td class="mono">${esc(server.Address)}</td><td>${esc(server.Description || '—')}</td><td>${currentRole === 'Viewer' ? '' : actionBtn('Assign server', 'real-server-assign', id) + ' ' + actionBtn('Edit server', 'real-server-edit', id) + ' ' + actionBtn('Delete server', 'real-server-delete', id, 'danger-btn mini')}</td></tr>`;
+    }).join('');
+    return `<div class="card"><div class="toolbar"><div><h2>Reusable real servers</h2><p class="subtle">Create origin templates once and assign independent destination snapshots to backend groups. Approval required.</p></div>${currentRole === 'Viewer' ? '' : actionBtn('+ Create real server', 'real-server-add', '')}</div><div class="tablewrap"><table><thead><tr><th>Server ID</th><th>Origin URL</th><th>Description</th><th>Actions</th></tr></thead><tbody>${rows || '<tr><td colspan="4">No reusable real servers</td></tr>'}</tbody></table></div></div>`;
+}
+function backends(){const rows=destinationRows().map(d=>{const live=liveDestinationHealth?.find(x=>x.clusterId===d.cid&&x.destinationId===d.did);const configuredState=!d.enabled?'Disabled':d.trafficState==='draining'?'Draining':'Active';const stateClass=configuredState==='Active'?'good':configuredState==='Draining'?'warn':'bad';const runtime=live?`<span class="chip">A: ${esc(live.activeHealth||'Unknown')}</span> <span class="chip">P: ${esc(live.passiveHealth||'Unknown')}</span><div class="subtle">In-flight: ${esc(String(live.concurrentRequests??'—'))}</div>`:'<span class="subtle">Not inspected</span>';const drainButton=d.enabled?actionBtn(d.trafficState==='draining'?'Restore traffic':'Drain new traffic','dest-drain',d.cid+'::'+d.did):'';return `<tr><td><b>${esc(d.did)}</b><div class="subtle">${esc(d.cid)} · weight ${esc(d.weight)} · ${esc(d.trafficRole)}</div></td><td class="mono">${esc(d.address)}</td><td><span class="chip ${stateClass}">${configuredState}</span><div class="subtle">Configured draft state; runtime health shown separately</div></td><td>${runtime}<div>${drainButton} ${actionBtn(d.enabled?'Disable':'Enable','dest-toggle',d.cid+'::'+d.did)} ${actionBtn('Edit','dest-edit',d.cid+'::'+d.did)} ${actionBtn('Advanced','dest-advanced',d.cid+'::'+d.did)} ${actionBtn('Delete','dest-delete',d.cid+'::'+d.did,'danger-btn mini')}</div></td></tr>`}).join('');const liveNote=liveDestinationHealth?`<p class="subtle">Live YARP snapshot checked ${esc(liveDestinationHealthAt)} · single local process. Unsaved changes do not affect this runtime snapshot.</p>`:'<p class="subtle">Runtime health has not been inspected in this session.</p>';return `<div class="toolbar"><div><h2>Backend servers (destinations)</h2><p class="subtle">Each application route points to its own cluster. Runtime health is per gateway; draining is a reviewed configuration change.</p></div>${actionBtn('Inspect live health','runtime-health','')} ${actionBtn('+ Add backend','dest-add','')}</div>${liveNote}<div class="tablewrap"><table><thead><tr><th>Destination / pool</th><th>Address</th><th>Traffic state</th><th>Runtime health and actions</th></tr></thead><tbody>${rows||'<tr><td colspan="4" class="empty">No backend servers. Add a website first, or add a server to an existing backend group.</td></tr>'}</tbody></table></div><div class="healthbanner">Drain removes a destination from new-request selection after an approved config rollout; in-flight requests continue. A host match separates routes, but private API access still requires a restricted listener and firewall policy. Runtime health is an authenticated, point-in-time view of this process only.</div>${realServerPanel()}`}
 async function refreshDestinationRuntime(){try{const r=await api('/admin/api/runtime/destinations');const clusters=Array.isArray(r.clusters)?r.clusters as Obj[]:[];liveDestinationHealth=clusters.flatMap((cluster:Obj)=>Array.isArray(cluster.destinations)?(cluster.destinations as Obj[]).map(destination=>({...destination,clusterId:String(cluster.clusterId||'')})):[]);liveDestinationHealthAt=String(r.timestampUtc||'unknown');if(view==='backends')render();show('Live local YARP health snapshot loaded. Unknown remains distinct from healthy.')}catch(e){show('Could not inspect live local YARP health: '+String(e),true)}}
 function health(){const p=probes.map(d=>`<tr><td>${esc(d.cluster)} / ${esc(d.destination)}</td><td class="mono">${esc(d.address)}</td><td><span class="chip ${d.status==='reachable'?'good':'bad'}">${esc(d.status)}</span></td><td>${esc(d.httpStatus??'—')}</td></tr>`).join('');return `<div class="toolbar"><div><h2>On-demand backend probes</h2><p class="subtle">Sends GET to the configured health-check path with a 3-second timeout.</p></div>${actionBtn('Run probes now','probe','')}</div><div class="healthbanner">This is an on-demand HTTP connectivity check, NOT YARP's internal destination health state, and not transaction readiness validation. Use HTTPS with trusted certificates for CA services.</div><div class="tablewrap table-spaced"><table><thead><tr><th>Backend</th><th>Destination URL</th><th>Probe</th><th>HTTP</th></tr></thead><tbody>${p||'<tr><td colspan="4" class="empty">No probes run yet. Select Run probes now to check saved backend endpoints.</td></tr>'}</tbody></table></div>`}
 async function backups(){try{const [b,a]=await Promise.all([api('/admin/api/backups'),api('/admin/api/audit')]);const bs=b.map((name:string)=>`<div class="rowline"><span class="mono">${esc(name)}</span>${actionBtn('Restore','restore',name)}</div>`).join('')||'<div class="empty">No saved backups yet. Review the installation backup and recovery guide before changing configuration.</div>';const audit=a.map((o:Obj)=>`<div class="rowline"><div><b>${esc(o.action)}</b><div class="subtle">${esc(o.timeUtc)}</div></div><span class="chip">${esc(o.backup||o.restored||'—')}</span></div>`).join('')||'<div class="empty">No audit entries</div>';$('content').innerHTML=`<div class="grid2"><div class="card"><h2 class="section-title">Configuration backups</h2>${bs}</div><div class="card"><h2 class="section-title">Recent local audit events</h2>${audit}</div></div>`}catch(e){show(String(e),true)}}
@@ -1056,6 +1250,12 @@ function updateDest(id=''){
 function act(type:string,id:string){
     if (type === 'monitor-edit') { editActiveMonitor(id); return; }
     if (type === 'monitor-unlink') { unlinkActiveMonitor(id); return; }
+    if (type === 'profile-add' || type === 'profile-edit') { editMonitorProfile(type === 'profile-edit' ? id : ''); return; }
+    if (type === 'profile-delete') { deleteMonitorProfile(id); return; }
+    if (type === 'real-server-add' || type === 'real-server-edit') { editRealServer(type === 'real-server-edit' ? id : ''); return; }
+    if (type === 'real-server-delete') { deleteRealServer(id); return; }
+    if (type === 'real-server-assign') { assignRealServer(id); return; }
+    if (type === 'profile-assign') { assignMonitorProfile(id); return; }
     if (type === 'monitor-copy') { copyActiveMonitor(id); return; }
  if(type==='invite-add'){inviteEmployee();return}
  if(type==='invite-revoke'){void revokeEmployeeInvite(id);return}
