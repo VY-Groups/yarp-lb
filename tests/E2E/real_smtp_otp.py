@@ -21,7 +21,6 @@ import tempfile
 import time
 from aiosmtpd.controller import Controller
 from aiosmtpd.smtp import AuthResult, LoginPassword
-from playwright.sync_api import sync_playwright, expect
 from real_control_center import Client, check, gateway, openssl_state, port
 
 MAIL_USER="smtp-fixture@example.invalid"
@@ -148,6 +147,10 @@ def browser_enrollment(appdir, dll, root, mailport, originport, mailbox):
 
     Screenshots are of disposable example data only, before entering secrets.
     """
+    # Only the browser acceptance workflow requires Playwright; the audit
+    # collector imports the SMTP fixture without a browser dependency.
+    from playwright.sync_api import sync_playwright, expect
+
     browser_root = root/"browser-first-run"
     openssl_state(browser_root,originport)
     claim = secrets.token_hex(32).upper()
