@@ -239,6 +239,34 @@ test('browser: bootstrap, navigation, onboarding, websites, route edit, users an
     await page.locator('#f-compound').selectOption('off');
     await page.locator('#confirm').click();
     await expect(page.locator('#content')).toContainText('Active');
+    await page.locator('[data-action="profile-add"]').click();
+    await page.locator('#f-id').fill('browser-monitor');
+    await page.locator('#f-compound').selectOption('OR');
+    await page.locator('#f-secondary').fill('/health/alternate');
+    await page.locator('#confirm').click();
+    await expect(page.locator('[data-action="profile-edit"][data-id="browser-monitor"]')).toBeVisible();
+    await page.locator('[data-action="profile-assign"][data-id="esign-browser-private-pool"]').click();
+    await page.locator('#f-profile').selectOption('browser-monitor');
+    await page.locator('#confirm').click();
+    await page.locator('[data-action="monitor-edit"][data-id="esign-browser-private-pool"]').click();
+    await expect(page.locator('#f-compound')).toHaveValue('OR');
+    await expect(page.locator('#f-secondary')).toHaveValue('/health/alternate');
+    await page.locator('#editor button[value="cancel"]').click();
+    await page.locator('[data-action="profile-edit"][data-id="browser-monitor"]').click();
+    await page.locator('#f-secondary').fill('/health/revised');
+    await page.locator('#confirm').click();
+    await page.locator('[data-action="monitor-edit"][data-id="esign-browser-private-pool"]').click();
+    await expect(page.locator('#f-secondary')).toHaveValue('/health/alternate');
+    await page.locator('#f-compound').selectOption('off');
+    await page.locator('#confirm').click();
+    // First prove dismissing the confirmation preserves the template.
+    page.once('dialog', dialog => dialog.dismiss());
+    await page.locator('[data-action="profile-delete"][data-id="browser-monitor"]').click();
+    await expect(page.locator('[data-action="profile-edit"][data-id="browser-monitor"]')).toHaveCount(1);
+    // Playwright otherwise auto-dismisses native confirmation dialogs.
+    page.once('dialog', dialog => dialog.accept());
+    await page.locator('[data-action="profile-delete"][data-id="browser-monitor"]').click();
+    await expect(page.locator('[data-action="profile-edit"][data-id="browser-monitor"]')).toHaveCount(0);
     await openNav('backends');
     await expect(page.locator('#content')).toContainText('A host match separates routes');
     await expect(page.locator('#content')).toContainText('Inspect live health');
