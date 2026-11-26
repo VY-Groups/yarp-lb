@@ -17,3 +17,5 @@ Console.WriteLine("BACKEND MTLS CONFIG CONTRACT TESTS PASSED");
 await ActiveCompoundHealthTests.RunAsync();
 
 MonitorProfileRegistryTests.Run();
+
+RealServerCatalogTests.Run();
