@@ -41,6 +41,9 @@ public static class SharedMonitorContract
                 return "Unsupported shared monitor policy.";
             if (!JsonNode.DeepEquals(active, (target["HealthCheck"] as JsonObject)?["Active"]))
                 return "Linked monitor settings differ from the source. Update all linked groups in one reviewed change.";
+            foreach (var key in new[] { "ADC.Health.CompoundMode", "ADC.Health.SecondaryPath" })
+                if (!JsonNode.DeepEquals((source["Metadata"] as JsonObject)?[key], metadata[key]))
+                    return "Linked compound monitor settings differ from the source.";
             foreach (var key in ThresholdKeys)
             {
                 var value = (source["Metadata"] as JsonObject)?[key];

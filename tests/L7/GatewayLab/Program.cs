@@ -55,7 +55,10 @@ var configPath = Environment.GetEnvironmentVariable("YARP_LAB_CONFIG_FILE")
     ?? Path.Combine(AppContext.BaseDirectory, "lab.json");
 builder.Configuration.AddJsonFile(configPath, optional: false, reloadOnChange: true);
 builder.Services.AddReverseProxy()
-    .LoadFromConfig(builder.Configuration.GetSection("ReverseProxy"));
+    .LoadFromConfig(builder.Configuration.GetSection("ReverseProxy"))
+    .AddConfigFilter<ActiveCompoundConfigFilter>();
+builder.Services.AddSingleton<Yarp.ReverseProxy.Forwarder.IForwarderHttpClientFactory, CompoundForwarderFactory>();
+CompoundProbingRequestFactory.Register(builder.Services);
 builder.Services.AddSingleton<ILoadBalancingPolicy, WeightedRandomPolicy>();
 builder.Services.AddSingleton<ILoadBalancingPolicy, WeightedLeastRequestsPolicy>();
 builder.Services.AddSingleton<ILoadBalancingPolicy, WeightedRoundRobinPolicy>();
@@ -198,6 +201,21 @@ app.MapReverseProxy(proxyPipeline =>
             }
         });
     }
+    proxyPipeline.Use(async (context, next) =>
+    {
+        var feature = context.GetReverseProxyFeature();
+        if (feature.Cluster.Config.Metadata?.ContainsKey(ActiveCompoundSettings.ModeKey) == true)
+        {
+            feature.AvailableDestinations = feature.AvailableDestinations
+                .Where(d => CompoundReadinessEvidence.Eligible(feature.Cluster, d)).ToArray();
+            if (feature.AvailableDestinations.Count == 0)
+            {
+                context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+                return;
+            }
+        }
+        await next();
+    });
     proxyPipeline.UseSessionAffinity();
     proxyPipeline.UseLoadBalancing();
     proxyPipeline.Use(async (context, next) =>

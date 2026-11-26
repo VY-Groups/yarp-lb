@@ -293,8 +293,10 @@ if (OperatingSystem.IsLinux() && !ec2Lab)
 builder.Configuration.AddJsonFile(applicationConfigPath, optional: false, reloadOnChange: true);
 builder.Services.AddReverseProxy()
     .LoadFromConfig(builder.Configuration.GetSection("ReverseProxy"))
-    .ConfigureHttpClient(BackendMutualTls.Configure)
-    .AddConfigFilter<DestinationAdmissionConfigFilter>();
+    .AddConfigFilter<DestinationAdmissionConfigFilter>()
+    .AddConfigFilter<ActiveCompoundConfigFilter>();
+builder.Services.AddSingleton<Yarp.ReverseProxy.Forwarder.IForwarderHttpClientFactory, CompoundForwarderFactory>();
+CompoundProbingRequestFactory.Register(builder.Services);
 builder.Services.AddSingleton<DestinationAdmissionManager>();
 builder.Services.AddHostedService<DestinationAdmissionRegistryReconciler>();
 // Custom policies are registered on every serving YARP instance, never on the UI alone.
@@ -2386,6 +2388,8 @@ IResult? ValidateChangePayload(JsonObject submitted)
     foreach (var (key, clusterNode) in clusters)
     {
         if (!ValidId(key) || clusterNode is not JsonObject c) return Results.BadRequest(new { error = "Invalid cluster ID" });
+        if (!ActiveCompoundSettings.ValidateDraft(c))
+            return Results.BadRequest(new { error = $"Cluster {key}: invalid active compound health configuration" });
         if (!CompoundProbeSettings.TryRead(c, out _))
             return Results.BadRequest(new { error = $"Cluster {key}: invalid compound diagnostic mode or readiness path" });
         // Refuse proxy settings that bypass trust checks or produce unexpected insecure forwarding.
@@ -3564,6 +3568,21 @@ app.MapReverseProxy(proxyPipeline =>
         if (feature.AvailableDestinations.Any(TrafficLifecycle.IsDraining))
             feature.AvailableDestinations = feature.AvailableDestinations
                 .Where(d => !TrafficLifecycle.IsDraining(d)).ToArray();
+        await next();
+    });
+    proxyPipeline.Use(async (context, next) =>
+    {
+        var feature = context.GetReverseProxyFeature();
+        if (feature.Cluster.Config.Metadata?.ContainsKey(ActiveCompoundSettings.ModeKey) == true)
+        {
+            feature.AvailableDestinations = feature.AvailableDestinations
+                .Where(d => CompoundReadinessEvidence.Eligible(feature.Cluster, d)).ToArray();
+            if (feature.AvailableDestinations.Count == 0)
+            {
+                context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+                return;
+            }
+        }
         await next();
     });
     proxyPipeline.UseSessionAffinity();

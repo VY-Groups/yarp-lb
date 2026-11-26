@@ -20,6 +20,14 @@ bool IsLoopback(HttpContext ctx) =>
 
 app.MapGet("/health/ready", () =>
     state.Ready ? (IResult)Results.Ok(new { ready = true, node }) : Results.StatusCode(503));
+app.MapGet("/health/secondary", () =>
+    state.SecondaryReady ? (IResult)Results.Ok(new { ready = true, node }) : Results.StatusCode(503));
+app.MapPost("/lab/secondary/{enabled:bool}", (HttpContext ctx, bool enabled) =>
+{
+    if (!IsLoopback(ctx)) return Results.StatusCode(403);
+    state.SecondaryReady = enabled;
+    return Results.Ok(new { ready = enabled, node });
+});
 app.MapGet("/api/identity", () => Results.Ok(new { node }));
 app.MapGet("/api/latency", async (HttpContext ctx) =>
 {
@@ -81,5 +89,6 @@ app.Run();
 sealed class LabBackendState
 {
     public volatile bool Ready = true;
+    public volatile bool SecondaryReady = true;
     public int InFlight;
 }
