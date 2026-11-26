@@ -6,6 +6,7 @@
   <ItemGroup>
     <PackageReference Include="Yarp.ReverseProxy" Version="2.3.0" />
     <Compile Include="../../ExpiringCookieAffinityPolicy.cs" Link="ExpiringCookieAffinityPolicy.cs" />
+    <Compile Include="../../SecureAffinityDraft.cs" Link="SecureAffinityDraft.cs" />
     <Compile Include="../../SecureAffinityContract.cs" Link="SecureAffinityContract.cs" />
     <Compile Include="../../ServiceGroupCatalog.cs" Link="ServiceGroupCatalog.cs" />
     <Compile Include="../../RealServerCatalog.cs" Link="RealServerCatalog.cs" />

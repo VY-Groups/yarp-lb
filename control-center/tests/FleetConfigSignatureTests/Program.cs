@@ -132,3 +132,5 @@ try
 }
 finally { journalDir.Delete(recursive: true); }
 Console.WriteLine("ALL fleet config signature acceptance tests passed.");
+
+FleetAdcContractTests.Run();

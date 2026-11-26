@@ -45,7 +45,7 @@ public static class MonitorProfileRegistry
             target["Metadata"]![SharedMonitorContract.SourceKey] = "source";
             var test = new JsonObject { ["source"] = source, ["target"] = target };
             if (SharedMonitorContract.Validate(test) is { } error) return error;
-            if (!ActiveCompoundSettings.ValidateDraft(source))
+            if (!CompoundActiveDraft.Validate(source))
                 return "Invalid active compound monitor profile.";
         }
         return null;
