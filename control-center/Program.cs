@@ -291,6 +291,9 @@ if (OperatingSystem.IsLinux() && !ec2Lab)
         throw new InvalidOperationException("Linux runtime config must exist and must not be a symlink");
 }
 builder.Configuration.AddJsonFile(applicationConfigPath, optional: false, reloadOnChange: true);
+builder.Services.AddSingleton<ExpiringAffinityTokens>();
+builder.Services.AddSingleton<Yarp.ReverseProxy.SessionAffinity.ISessionAffinityPolicy>(sp =>
+    new ExpiringCookieAffinityPolicy(sp.GetRequiredService<ExpiringAffinityTokens>(), TimeProvider.System));
 builder.Services.AddReverseProxy()
     .LoadFromConfig(builder.Configuration.GetSection("ReverseProxy"))
     .AddConfigFilter<DestinationAdmissionConfigFilter>()
@@ -2413,7 +2416,7 @@ IResult? ValidateChangePayload(JsonObject submitted)
         if (string.Equals(c["SessionAffinity"]?["Enabled"]?.ToString(), "true", StringComparison.OrdinalIgnoreCase))
         {
             var affinityPolicy = c["SessionAffinity"]?["Policy"]?.ToString() ?? "HashCookie";
-            if (affinityPolicy is not ("HashCookie" or "Cookie" or "ArrCookie" or "CustomHeader"))
+            if (affinityPolicy is not ("HashCookie" or "Cookie" or "ArrCookie" or "CustomHeader" or ExpiringCookieAffinityPolicy.PolicyName))
                 return Results.BadRequest(new { error = "Unsupported session-affinity policy" });
         }
         if (c["HttpRequest"]?["Version"] is JsonNode version && version.ToString() is not ("1.0" or "1.1" or "2" or "3"))
@@ -3609,6 +3612,17 @@ app.MapReverseProxy(proxyPipeline =>
                 context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
                 return;
             }
+        }
+        await next();
+    });
+    proxyPipeline.Use(async (context, next) =>
+    {
+        var affinity = context.GetReverseProxyFeature().Cluster.Config.SessionAffinity;
+        if (affinity?.Enabled == true && affinity.Policy == ExpiringCookieAffinityPolicy.PolicyName &&
+            !context.Request.IsHttps)
+        {
+            context.Response.StatusCode = StatusCodes.Status403Forbidden;
+            return;
         }
         await next();
     });

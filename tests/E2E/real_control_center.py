@@ -632,7 +632,7 @@ def verify_secure_affinity(base, https_base, admin, operator, reviewer, origin_p
     p["clusters"]["affinity-pool"]={"LoadBalancingPolicy":"RoundRobin",
         "Destinations":{"origin":{"Address":f"http://127.0.0.1:{origin_port}/"}},
         "Metadata":{"ADC.Persistence.Profile":"SecureCookie"},
-        "SessionAffinity":{"Enabled":True,"Policy":"Cookie","FailurePolicy":"Return503Error",
+        "SessionAffinity":{"Enabled":True,"Policy":"GatewayCoreExpiringCookie","FailurePolicy":"Return503Error",
             "AffinityKeyName":key,"Cookie":{"Path":"/","HttpOnly":True,
                 "SecurePolicy":"Always","SameSite":"Lax","MaxAge":"00:30:00"}}}
     p["routes"]["affinity-route"]={"ClusterId":"affinity-pool","Match":{"Path":"/affinity-test/{**catch-all}"}}
@@ -645,6 +645,8 @@ def verify_secure_affinity(base, https_base, admin, operator, reviewer, origin_p
             if response.status_code==200: break
             time.sleep(.2)
         check(response.status_code==200,"real HTTPS affinity traffic forwarded")
+        check(client.get(base+"/affinity-test/ready").status_code==403,
+              "expiring affinity refuses plaintext data traffic")
         header=response.headers.get("set-cookie","").lower()
         check(key.lower()+"=" in header and "secure" in header and "httponly" in header
               and "samesite=lax" in header and "max-age=1800" in header and "domain=" not in header,
