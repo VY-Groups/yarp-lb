@@ -22,3 +22,20 @@ Uninstall stops and removes the GatewayCore service only when its image path poi
 ## Acceptance boundary
 
 The `Windows offline lab Setup EXE` GitHub Actions workflow builds and executes the actual Setup EXE on disposable Windows Server 2022 runners. It tests fresh install, a real service-backed upgrade with existing administrator/DPAPI state, configuration backup/migration, a deliberately failed health gate with nonzero Setup exit, failed-candidate cleanup and automatic rollback, IPv6-only loopback upgrade and forced rollback/retry using the saved prior endpoint, with post-Setup candidate and uninstall-registration cleanup, same-version overwrite refusal, dashboard/readiness gating, and uninstall with state retention. These Windows-hosted checks do not establish physical Windows Server, certificate, capacity, production signing, external backup custody, or #36 HA acceptance. Production remains NO-GO until the separate release gates pass.
+
+
+### Verified first-run registration
+On a fresh ordinary lab installation, Setup opens a local six-step wizard. Open
+`C:\ProgramData\GatewayCoreYarp\ControlPlane\first-run-code.txt` as an
+elevated local administrator, or select the protected code option on the Setup
+Finish page. Do not share the code, attach it to support
+tickets or copy it into installer logs. Configure the existing approved
+company sender/SMTP relay, verify a code received in a readable inbox,
+then register and verify the first administrator email and create the
+username/password. The verified sender is stored with encrypted credentials
+and OTP enabled only when registration completes. The installation claim is
+consumed and cannot be reused once an account exists. A lost or expired
+in-memory verification can be restarted using the protected claim. No
+public internet is required if the organization's trusted internal SMTP
+relay is reachable. No password-only setup fallback is offered by the
+ordinary Windows installer. Existing accounts are not re-enrolled on upgrade.

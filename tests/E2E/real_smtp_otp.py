@@ -15,6 +15,7 @@ import os
 import re
 import smtplib
 import ssl
+import secrets
 import subprocess
 import tempfile
 import time
@@ -141,6 +142,97 @@ def plaintext_mail(message):
                 parts.append(raw.decode("utf8","replace"))
     return "\n".join(parts)
 
+def browser_enrollment(appdir, dll, root, mailport, originport, mailbox):
+    """Real shipping page, real protected setup gate and actual SMTP receipts.
+
+    Screenshots are of disposable example data only, before entering secrets.
+    """
+    # Only the browser acceptance workflow requires Playwright; the audit
+    # collector imports the SMTP fixture without a browser dependency.
+    from playwright.sync_api import sync_playwright, expect
+
+    browser_root = root/"browser-first-run"
+    openssl_state(browser_root,originport)
+    claim = secrets.token_hex(32).upper()
+    claim_file = browser_root/"state"/"first-run-code.txt"
+    claim_file.write_text(claim)
+    claim_file.chmod(0o600)
+    output = Path(os.environ["FIRST_RUN_SCREEN_DIR"]).resolve()
+    output.mkdir(parents=True,exist_ok=True)
+    previous = os.environ.get("GATEWAYCORE_REQUIRE_SETUP_OTP")
+    os.environ["GATEWAYCORE_REQUIRE_SETUP_OTP"]="1"
+    try:
+        with gateway(appdir,dll,browser_root,port()) as base, sync_playwright() as pw:
+            browser=pw.chromium.launch()
+            page=browser.new_page(viewport={"width":1280,"height":1000},device_scale_factor=1)
+            errors=[]
+            page.on("pageerror",lambda error: errors.append(str(error)))
+            page.goto(base+"/dashboard",wait_until="domcontentloaded")
+            title=page.locator("#first-run-title")
+            submit=page.locator("#first-run-submit")
+            field=lambda name: page.locator("#first-run-form [name='"+name+"']")
+            expect(page.locator("#first-run-screen")).to_be_visible()
+            expect(page.locator("#auth-screen")).to_be_hidden()
+            expect(title).to_have_text("Authorize this installation")
+            expect(page.locator("#first-run-screen [data-organization-name]")).to_have_text("GatewayCore")
+            expect(page.locator("#first-run-screen [data-organization-name]")).to_be_visible()
+            page.screenshot(path=str(output/"01-authorize.png"),full_page=True)
+            field("setupCode").fill("0"*64)
+            submit.click()
+            expect(page.locator("#first-run-message")).to_contain_text("invalid")
+            field("setupCode").fill(claim)
+            submit.click()
+            expect(title).to_have_text("Connect company email")
+            page.screenshot(path=str(output/"02-company-email.png"),full_page=True)
+            field("from").fill("noreply@example.invalid")
+            field("email").fill("verification@example.invalid")
+            field("host").fill("127.0.0.1")
+            field("port").fill(str(mailport))
+            field("username").fill(MAIL_USER)
+            field("smtpPassword").fill(MAIL_PASSWORD)
+            before=len(mailbox.messages)
+            submit.click()
+            expect(title).to_have_text("Verify sender delivery",timeout=20000)
+            check(len(mailbox.messages)==before+1,"browser sender message received by real relay")
+            page.screenshot(path=str(output/"03-sender-otp.png"),full_page=True)
+            code=re.findall(r"\b[0-9]{6}\b",plaintext_mail(mailbox.messages[-1]))[0]
+            field("code").fill(code)
+            submit.click()
+            expect(title).to_have_text("Register your email")
+            page.screenshot(path=str(output/"04-administrator-email.png"),full_page=True)
+            field("email").fill("browser-admin@example.invalid")
+            submit.click()
+            expect(title).to_have_text("Verify your email",timeout=20000)
+            check(len(mailbox.messages)==before+2,"browser administrator registration message received")
+            page.screenshot(path=str(output/"05-administrator-otp.png"),full_page=True)
+            code=re.findall(r"\b[0-9]{6}\b",plaintext_mail(mailbox.messages[-1]))[0]
+            field("code").fill(code)
+            submit.click()
+            expect(title).to_have_text("Create administrator")
+            page.screenshot(path=str(output/"06-create-password.png"),full_page=True)
+            field("username").fill("browser_first_admin")
+            field("password").fill(ADMIN_PASSWORD)
+            field("confirmPassword").fill("Not-the-same-password!")
+            submit.click()
+            expect(page.locator("#first-run-message")).to_contain_text("Passwords do not match")
+            check(not (browser_root/"state"/"admin-users.json").exists(),"mismatch does not create account")
+            field("confirmPassword").fill(ADMIN_PASSWORD)
+            submit.click()
+            expect(page.locator("#privacy-screen")).to_be_visible(timeout=20000)
+            page.screenshot(path=str(output/"07-privacy.png"),full_page=True)
+            page.locator("#privacy-accept").click()
+            expect(page.locator("#app-shell")).to_be_visible()
+            expect(page.locator("#user-badge")).to_contain_text("browser_first_admin")
+            page.locator('button.nav[data-view="setup"]').click()
+            expect(page.locator("#content")).to_contain_text("Start with a website")
+            page.screenshot(path=str(output/"08-start-here.png"),full_page=True)
+            check(not claim_file.exists(),"browser enrollment consumes local claim")
+            check(not errors,"no browser JavaScript exceptions during first-run enrollment")
+            browser.close()
+    finally:
+        if previous is None: os.environ.pop("GATEWAYCORE_REQUIRE_SETUP_OTP",None)
+        else: os.environ["GATEWAYCORE_REQUIRE_SETUP_OTP"]=previous
+
 def acceptance(root:Path):
     appdir=(Path(__file__).resolve().parents[2]/"control-center").resolve()
     dll=appdir/"bin"/"Release"/"net10.0"/"GatewayCoreYarp.dll"
@@ -215,7 +307,63 @@ def acceptance(root:Path):
                 })
                 check(admin.session()["authenticated"],
                       "correct 6-digit OTP completes real cookie login after wrong-code rejection")
-                return {"smtpStartTls":"pass","smtpAuthentication":"pass",
+                # A second isolated gateway exercises the installed first-run
+                # contract using the same real authenticated STARTTLS relay.
+                enrollment_root = root/"first-run"
+                openssl_state(enrollment_root,originport)
+                claim = secrets.token_hex(32).upper()
+                claim_path = enrollment_root/"state"/"first-run-code.txt"
+                claim_path.write_text(claim)
+                claim_path.chmod(0o600)
+                previous_required = os.environ.get("GATEWAYCORE_REQUIRE_SETUP_OTP")
+                os.environ["GATEWAYCORE_REQUIRE_SETUP_OTP"]="1"
+                try:
+                    with gateway(appdir,dll,enrollment_root,port()) as setup_base:
+                        first = Client(setup_base)
+                        check(first.session()["setupRequired"],"installed enrollment is required")
+                        first.request("POST","/admin/api/bootstrap",{"username":"first_admin","password":ADMIN_PASSWORD,"email":"first@example.invalid"},expect=409)
+                        endpoint="/admin/api/bootstrap/setup"
+                        def post(action,**kwargs):
+                            return first.request("POST",endpoint,{"action":action,"setupCode":claim,**kwargs})
+                        first.request("POST",endpoint,{"action":"unlock","setupCode":"invalid"},expect=403)
+                        check(post("unlock")["authorized"],"local claim authorizes initial setup")
+                        initial_messages=len(mailbox.messages)
+                        sender=post("sender",email="verification@example.invalid",mail={
+                            "enabled":True,"host":"127.0.0.1","port":mailport,"from":"noreply@example.invalid",
+                            "username":MAIL_USER,"password":MAIL_PASSWORD,"startTls":True})
+                        flow=sender["flowId"]
+                        check(len(mailbox.messages)==initial_messages+1,"sender verification delivered over authenticated STARTTLS")
+                        check("sender verification code" in mailbox.messages[-1]["Subject"],"first message verifies sender delivery")
+                        check(not (enrollment_root/"state"/"mail-settings.json").exists(),"unverified sender not persisted")
+                        first.request("POST",endpoint,{"action":"finish","setupCode":claim,"flowId":flow,"username":"first_admin","password":ADMIN_PASSWORD},expect=409)
+                        code=re.findall(r"\b[0-9]{6}\b",plaintext_mail(mailbox.messages[-1]))[0]
+                        first.request("POST",endpoint,{"action":"verify-sender","setupCode":claim,"flowId":flow,"code":"000000" if code!="000000" else "111111"},expect=401)
+                        check(post("verify-sender",flowId=flow,code=code)["verified"],"sender receipt verified")
+                        post("administrator",flowId=flow,email="first@example.invalid")
+                        check(len(mailbox.messages)==initial_messages+2,"separate administrator registration code delivered")
+                        code=re.findall(r"\b[0-9]{6}\b",plaintext_mail(mailbox.messages[-1]))[0]
+                        first.request("POST",endpoint,{"action":"finish","setupCode":claim,"flowId":flow,"username":"first_admin","password":ADMIN_PASSWORD},expect=409)
+                        check(post("verify-admin",flowId=flow,code=code)["verified"],"administrator email verified")
+                        check(not (enrollment_root/"state"/"admin-users.json").exists(),"no user exists before password creation")
+                        check(post("finish",flowId=flow,username="first_admin",password=ADMIN_PASSWORD)["authenticated"],"verified registration created administrator")
+                        check(first.session()["initialized"] and not first.session()["setupRequired"],"initial enrollment completed")
+                        check(not claim_path.exists(),"one-time local claim consumed")
+                        first.request("POST",endpoint,{"action":"unlock","setupCode":claim},expect=409)
+                        saved=first.request("GET","/admin/api/mail")
+                        check(saved["enabled"] and saved["deliveryVerified"],"verified sender and login OTP persisted")
+                        raw=(enrollment_root/"state"/"mail-settings.json").read_text()
+                        check(MAIL_PASSWORD not in raw,"first-run mail credentials encrypted at rest")
+                        first.request("POST","/admin/api/logout",{})
+                        login=first.request("POST","/admin/api/login",{"username":"first_admin","password":ADMIN_PASSWORD,"provider":"local"})
+                        check(login["otpRequired"],"new administrator requires OTP on subsequent login")
+                        code=re.findall(r"\b[0-9]{6}\b",plaintext_mail(mailbox.messages[-1]))[0]
+                        first.request("POST","/admin/api/login/verify",{"challengeId":login["challengeId"],"code":code})
+                        check(first.session()["authenticated"],"first-run administrator completes normal OTP sign-in")
+                finally:
+                    if previous_required is None: os.environ.pop("GATEWAYCORE_REQUIRE_SETUP_OTP",None)
+                    else: os.environ["GATEWAYCORE_REQUIRE_SETUP_OTP"]=previous_required
+                browser_enrollment(appdir,dll,root,mailport,originport,mailbox)
+                return {"firstRunBrowser":"pass","firstRunEnrollment":"pass","smtpStartTls":"pass","smtpAuthentication":"pass",
                         "smtpCertificateValidation":"pass",
                         "smtpDeliveryLocalCI":"pass","otpSignIn":"pass",
                         "externalZohoDelivery":"NOT VERIFIED"}

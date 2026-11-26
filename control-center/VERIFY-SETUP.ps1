@@ -19,6 +19,7 @@ function Expect([string]$Path, [int]$Status) {
 Expect '/gateway/health' 200
 Expect '/dashboard' 200
 Expect '/dashboard/app.js' 200
+Expect '/dashboard/first-run.js' 200
 Expect '/dashboard/style.css' 200
 Expect '/admin/api/session' 200
 Expect '/admin/api/setup/overview' 401

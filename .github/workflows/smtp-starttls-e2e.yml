@@ -26,6 +26,7 @@ jobs:
     timeout-minutes: 20
     env:
       CI: "true"
+      FIRST_RUN_SCREEN_DIR: first-run-screen-evidence
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
@@ -37,6 +38,13 @@ jobs:
       - name: Build shipping Control Center
         run: dotnet build control-center/GatewayCoreYarp.csproj --configuration Release
       - name: Install pinned isolated SMTP test fixture
-        run: python -m pip install aiosmtpd==1.4.6
+        run: python -m pip install aiosmtpd==1.4.6 playwright==1.56.0
+      - name: Install pinned Chromium for first-run browser verification
+        run: python -m playwright install --with-deps chromium
       - name: Exercise real authenticated TLS SMTP and complete OTP login
         run: python tests/E2E/real_smtp_otp.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gatewaycore-first-run-screens
+          path: first-run-screen-evidence/*.png
+          if-no-files-found: error

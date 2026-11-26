@@ -14,6 +14,8 @@ assert "'GatewayCore.ApplicationCategory'" not in ui
 assert 'Set up your GatewayCore gateway' not in ui
 assert '<strong>GatewayCore</strong>' not in html
 assert 'data-organization-name' in html
+first_run=html.split('<section id="first-run-screen"',1)[1].split('</section>',1)[0]
+assert '<strong data-organization-name>GatewayCore</strong>' in first_run, 'first-run uses neutral fallback and shared branding binding'
 privacy=html.split('<section id="privacy-screen"',1)[1].split('</section>',1)[0]
 assert '<strong data-organization-name>GatewayCore</strong>' in privacy
 assert 'ManagementPrivacyPolicy.cs' in installer

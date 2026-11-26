@@ -10,6 +10,23 @@
 </head>
 <body>
 <a class="skip-link" href="#content">Skip to page content</a>
+<section id="first-run-screen" class="first-run-screen" hidden aria-labelledby="first-run-title">
+  <div class="first-run-shell">
+    <div class="first-run-brand"><span class="mark" aria-hidden="true">G</span><div><strong data-organization-name>GatewayCore</strong><small>INITIAL SETUP</small></div></div>
+    <div class="first-run-progress" id="first-run-progress" aria-label="Setup progress"></div>
+    <div class="card first-run-card">
+      <p class="first-run-kicker" id="first-run-step"></p>
+      <h1 id="first-run-title">Set up GatewayCore</h1>
+      <p class="subtle" id="first-run-description"></p>
+      <form id="first-run-form" class="auth-form">
+        <div id="first-run-fields" class="first-run-fields"></div>
+        <p id="first-run-message" role="alert" aria-live="assertive"></p>
+        <div class="first-run-actions"><button class="ghost" type="button" id="first-run-restart" hidden>Start over</button><button class="primary" type="submit" id="first-run-submit">Continue</button></div>
+      </form>
+      <p class="subtle">Local, authorized administrators only. <a class="privacy-link" href="/dashboard/privacy" target="_blank" rel="noopener">Privacy Policy</a></p>
+    </div>
+  </div>
+</section>
 <section id="auth-screen" class="auth-screen" hidden aria-label="GatewayCore administration sign-in">
   <div class="auth-layout">
     <div class="auth-intro">
@@ -143,6 +160,7 @@
     </div>
   </form>
 </dialog>
+<script src="/dashboard/first-run.js" defer></script>
 <script src="/dashboard/app.js" defer></script>
 </body>
 </html>
