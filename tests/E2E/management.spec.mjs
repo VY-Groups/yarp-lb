@@ -259,6 +259,12 @@ test('browser: bootstrap, navigation, onboarding, websites, route edit, users an
     await expect(page.locator('#f-secondary')).toHaveValue('/health/alternate');
     await page.locator('#f-compound').selectOption('off');
     await page.locator('#confirm').click();
+    // First prove dismissing the confirmation preserves the template.
+    page.once('dialog', dialog => dialog.dismiss());
+    await page.locator('[data-action="profile-delete"][data-id="browser-monitor"]').click();
+    await expect(page.locator('[data-action="profile-edit"][data-id="browser-monitor"]')).toHaveCount(1);
+    // Playwright otherwise auto-dismisses native confirmation dialogs.
+    page.once('dialog', dialog => dialog.accept());
     await page.locator('[data-action="profile-delete"][data-id="browser-monitor"]').click();
     await expect(page.locator('[data-action="profile-edit"][data-id="browser-monitor"]')).toHaveCount(0);
     await openNav('backends');
