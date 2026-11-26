@@ -1027,6 +1027,32 @@ def main():
             catalog=admin.request("GET","/admin/api/state")
             check("catalog-template" in catalog["serviceGroups"] and "catalog-origin" in catalog["realServers"]
                   and "catalog-health" in catalog["monitorProfiles"],"approved ADC catalogs survive process restart")
+            # Exercise the actual shipping CLI transport against a real trusted
+            # HTTPS gateway after restart. No fake cookies or TLS bypass.
+            import importlib.util
+            spec = importlib.util.spec_from_file_location("adc_diag", cwd / "tools" / "adc_diag.py")
+            diag = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(diag)
+            diag_base = f"https://127.0.0.1:{https_listen}"
+            trusted = str(root / "secrets" / "tls.crt")
+            client = diag.Client(diag_base, trusted)
+            report = diag.collect(client, "viewer_e2e", "Viewer-secret-long-123!", "local",
+                                  prompt=lambda _: "ACCEPT", notice=lambda _: None)
+            check(report["inventory"]["serviceGroups"] == len(catalog["serviceGroups"]) and
+                  report["inventory"]["clusters"] == len(catalog["clusters"]) and
+                  type(report["localCounters"]["totalRequests"]) is int and
+                  len(client.jar) == 0 and "catalog-origin" not in json.dumps(report),
+                  "operator CLI uses real HTTPS Viewer authorization, privacy, counts and logout")
+            declined = diag.Client(diag_base, trusted)
+            try:
+                diag.collect(declined, "viewer_e2e", "Viewer-secret-long-123!", "local",
+                             prompt=lambda _: "DECLINE", notice=lambda _: None)
+            except diag.DiagnosticError as error:
+                check("declined" in str(error) and len(declined.jar) == 0,
+                      "operator CLI decline blocks diagnostics and discards cookies")
+            else:
+                raise AssertionError("operator CLI accepted declined privacy notice")
+            results["operatorDiagnosticsCli"] = True
         print("E2E_SUCCESS "+json.dumps(results,sort_keys=True),flush=True)
 
 if __name__=="__main__":

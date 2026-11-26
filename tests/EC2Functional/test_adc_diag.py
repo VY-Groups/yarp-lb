@@ -46,7 +46,7 @@ class DiagnosticsTests(unittest.TestCase):
     def test_origin(self):
         self.assertEqual(adc.origin("https://example.test:8443/"), "https://example.test:8443")
         for invalid in ("http://example.test", "https://user@example.test", "https://example.test/a",
-                        "https://example.test/?token=x", "https://example.test/#x", "https://example.test:99999",
+                        "https://example.test/?token=x", "https://example.test/#x", "https://example.test:99999", "https://example.test:0",
                         "https://example.test\n", "https://example.test\\evil"):
             with self.subTest(invalid=invalid), self.assertRaises(adc.DiagnosticError):
                 adc.origin(invalid)

@@ -28,7 +28,7 @@ def origin(value):
         u = urllib.parse.urlsplit(value)
         if (u.scheme != "https" or not u.hostname or u.username is not None
                 or u.password is not None or u.path not in ("", "/")
-                or u.query or u.fragment or not (1 <= (u.port or 443) <= 65535)):
+                or u.query or u.fragment or not (1 <= (443 if u.port is None else u.port) <= 65535)):
             raise ValueError()
         return "https://" + u.netloc
     except ValueError:
