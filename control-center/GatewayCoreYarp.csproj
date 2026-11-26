@@ -36,6 +36,7 @@
   </Target>
   <ItemGroup>
     <Compile Remove="GatewayAgent/**/*.cs;tests/**/*.cs;tools/**/*.cs" />
+    <Compile Include="GatewayAgent/EngineConfigContract.cs" Link="EngineConfigContract.cs" />
     <Compile Include="../engines/GslbHealthContracts/PrivateKeyFileSecurity.cs" Link="PrivateKeyFileSecurity.cs" />
     <Compile Include="../engines/GslbHealthContracts/StrictJsonPropertyNames.cs" Link="StrictJsonPropertyNames.cs" />
     <Compile Include="../src/TrafficPolicies/BoundedTransportFailureHealthPolicy.cs" Link="BoundedTransportFailureHealthPolicy.cs" />
