@@ -13,6 +13,23 @@ using GatewayCore.Gslb.Contracts;
 
 PrivateKeyFileSecurityTests.Run();
 AuthorityFenceTests.Run();
+{
+    var firewall = new DnsSourceFirewall(JsonSerializer.SerializeToElement(new[] { "192.0.2.0/24", "2001:db8::/32" }));
+    if (!firewall.Blocks(IPAddress.Parse("192.0.2.1")) ||
+        !firewall.Blocks(IPAddress.Parse("::ffff:192.0.2.1")) ||
+        !firewall.Blocks(IPAddress.Parse("2001:db8::7")) ||
+        firewall.Blocks(IPAddress.Parse("198.51.100.1")) ||
+        firewall.Blocks(IPAddress.IPv6Loopback))
+        throw new Exception("FAIL: DNS firewall network boundaries");
+    foreach (var invalid in new[] { "null", "{}", "[null]", "[1]", "[\"bad\"]", "[\"::/0\"]", "[\"0.0.0.0/0\"]",
+        "[\"192.0.2.0/24\",\"192.0.2.0/24\"]" })
+    {
+        using var bad = JsonDocument.Parse(invalid);
+        try { _ = new DnsSourceFirewall(bad.RootElement); throw new Exception("FAIL: invalid DNS firewall accepted"); }
+        catch (InvalidDataException) { }
+    }
+    Console.WriteLine("PASS: bounded DNS source firewall IPv4 IPv6 mapped IPv4 and invalid configuration");
+}
 
 // DNS endpoints advertised in A/AAAA and NS/glue responses must be usable
 // unicast addresses; malformed or scoped aliases cannot become zone data.
@@ -1001,6 +1018,7 @@ var chainSites=new[]{
 File.WriteAllText(configuration,JsonSerializer.Serialize(new {
  AllowNonLoopbackListeners=false,AllowDocumentationAddressesForTesting=true,
  ListenHost="127.0.0.1",ListenPort=15353,ProbeIntervalSeconds=1,
+ BlockedResolverCidrs=new[]{"127.0.0.99/32"},
  MetricsListenHost="127.0.0.1",MetricsListenPort=metricsPort,
  GeoIpCountryDatabasePath=countryFixture,GeoIpAsnDatabasePath=asnFixture,
  GeoIpMaxDatabaseAgeDays=0,
@@ -1413,6 +1431,34 @@ try
         return seen.Contains("127.0.0.21") && seen.Contains("127.0.0.22");
     });
     Console.WriteLine("PASS: both IPv4 sites healthy before distribution sampling");
+    // Dedicated source address: permitted resolver already proved above.
+    var blockedIp = IPAddress.Parse("127.0.0.99");
+    using (var blockedUdp = new UdpClient(new IPEndPoint(blockedIp, 0)))
+    {
+        blockedUdp.Connect(IPAddress.Loopback,15353);
+        await blockedUdp.SendAsync(DnsRequest("app.integration.test",1),CancellationToken.None);
+        using var deadline = new CancellationTokenSource(TimeSpan.FromMilliseconds(350));
+        try
+        {
+            _ = await blockedUdp.ReceiveAsync(deadline.Token);
+            throw new Exception("FAIL: blocked DNS UDP peer received a reply");
+        }
+        catch (OperationCanceledException) when (deadline.IsCancellationRequested) { }
+    }
+    using (var blockedTcp = new TcpClient(new IPEndPoint(blockedIp,0)))
+    using (var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(3)))
+    {
+        try
+        {
+            await blockedTcp.ConnectAsync(IPAddress.Loopback,15353,deadline.Token);
+            var received = await blockedTcp.GetStream().ReadAsync(new byte[1],deadline.Token);
+            Must(received==0,"blocked DNS TCP peer closed before session allocation");
+        }
+        catch (IOException ex) when (ex.InnerException is SocketException socket &&
+            socket.SocketErrorCode is SocketError.ConnectionReset or SocketError.ConnectionAborted) { }
+        catch (SocketException ex) when (ex.SocketErrorCode is SocketError.ConnectionReset or SocketError.ConnectionAborted) { }
+    }
+    Console.WriteLine("PASS: real DNS firewall blocks UDP and TCP peers");
     using var metricsClient = new HttpClient { Timeout = TimeSpan.FromSeconds(2) };
     var metricsText = await metricsClient.GetStringAsync($"http://127.0.0.1:{metricsPort}/metrics");
     using (var loadedRevision = System.Text.Json.JsonDocument.Parse(
@@ -1423,6 +1469,9 @@ try
              revision is { Length: 64 } && revision.All(Uri.IsHexDigit),
              "real GSLB process reports loaded configuration revision on loopback only");
     }
+    Must(metricsText.Contains("gatewaycore_gslb_dns_firewall_blocked_total{transport=\"udp\"} 1", StringComparison.Ordinal) &&
+         metricsText.Contains("gatewaycore_gslb_dns_firewall_blocked_total{transport=\"tcp\"} 1", StringComparison.Ordinal) &&
+         !metricsText.Contains("127.0.0.99", StringComparison.Ordinal), "DNS firewall metrics are transport scoped and omit peer addresses");
     Must(metricsText.Contains("# TYPE gatewaycore_gslb_dns_queries_total counter", StringComparison.Ordinal) &&
          metricsText.Contains("gatewaycore_gslb_dns_queries_total{transport=\"udp\"} ", StringComparison.Ordinal) &&
          metricsText.Contains("gatewaycore_gslb_dns_responses_total{transport=\"udp\",rcode=\"NOERROR\"} ", StringComparison.Ordinal) &&

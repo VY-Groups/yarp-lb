@@ -96,6 +96,23 @@ public static class EngineConfigContract
                (allowDocumentationTestRange || !documentationIpv4);
     }
 
+    // Same bounded peer-CIDR grammar as the authoritative DNS listener.
+    private static bool ValidBlockedResolvers(JsonNode? node)
+    {
+        if (node is not JsonArray entries || entries.Count > 128) return false;
+        var networks = new HashSet<IPNetwork>();
+        foreach (var entry in entries)
+        {
+            if (!Str(entry, out var text) || text.Length is < 3 or > 64 ||
+                !text.All(c => char.IsAsciiHexDigit(c) || c is '.' or ':' or '/') ||
+                !IPNetwork.TryParse(text, out var network) || network.PrefixLength == 0 ||
+                network.BaseAddress.IsIPv4MappedToIPv6 ||
+                (network.BaseAddress.AddressFamily == AddressFamily.InterNetworkV6 && network.BaseAddress.ScopeId != 0) ||
+                !networks.Add(network)) return false;
+        }
+        return true;
+    }
+
     public static bool Validate(string engineId, JsonObject config, bool allowPublicBind)
     {
         if (!ValidEngineId(engineId) || config.ToJsonString().Length > 524288) return false;
@@ -118,6 +135,8 @@ public static class EngineConfigContract
                 !Num(config["ProbeIntervalSeconds"],1,60) ||
                 (config.TryGetPropertyValue("MaxUdpQueriesPerSecond", out var aggregate) &&
                  !Num(aggregate,0,0) && !Num(aggregate,20,200000)) ||
+                (config.TryGetPropertyValue("BlockedResolverCidrs", out var blockedResolvers) &&
+                 !ValidBlockedResolvers(blockedResolvers)) ||
                 (config.TryGetPropertyValue("GroupIpv6UdpClientsByPrefix", out var groupIpv6) &&
                  !Bool(groupIpv6)) ||
                 (config["MaxResponsesPerSecondPerClient"] is not null &&

@@ -11,11 +11,13 @@ internal sealed class DnsRuntimeMetrics
 {
     private readonly long[] queries = new long[2];
     private readonly long[] dropped = new long[2];
+    private readonly long[] firewallBlocked = new long[2];
     private readonly long[][] responsesByRcode = [new long[16], new long[16]];
     private readonly long[] reports = new long[3]; // accepted, rejected, storage error
 
     public void QueryReceived(bool tcp) => Interlocked.Increment(ref queries[Transport(tcp)]);
     public void RequestDropped(bool tcp) => Interlocked.Increment(ref dropped[Transport(tcp)]);
+    public void FirewallBlocked(bool tcp) => Interlocked.Increment(ref firewallBlocked[Transport(tcp)]);
 
     public void ResponseSent(bool tcp, ReadOnlySpan<byte> response)
     {
@@ -37,6 +39,8 @@ internal sealed class DnsRuntimeMetrics
             "DNS queries received by transport", "transport", ["udp", "tcp"], queries);
         WriteCounter(output, "gatewaycore_gslb_dns_dropped_total",
             "DNS queries that produced no response", "transport", ["udp", "tcp"], dropped);
+        WriteCounter(output, "gatewaycore_gslb_dns_firewall_blocked_total",
+            "DNS firewall blocked UDP datagrams or TCP connections", "transport", ["udp", "tcp"], firewallBlocked);
         output.AppendLine("# HELP gatewaycore_gslb_dns_responses_total DNS responses sent by transport and response code");
         output.AppendLine("# TYPE gatewaycore_gslb_dns_responses_total counter");
         var codeNames = new[] { "NOERROR", "FORMERR", "SERVFAIL", "NXDOMAIN", "NOTIMP", "REFUSED", "RCODE6", "RCODE7", "RCODE8", "RCODE9", "RCODE10", "RCODE11", "RCODE12", "RCODE13", "RCODE14", "RCODE15" };
