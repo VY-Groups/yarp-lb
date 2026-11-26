@@ -236,19 +236,27 @@ function adcServiceMap() {
 function overview() { let routes = keys(data.routes).slice(0, 5).map(id => `<div class="rowline"><div><b>${esc(id)}</b><div class="subtle mono">${esc(data.routes[id]?.Match?.Path || '—')}</div></div><span class="chip">${esc(data.routes[id]?.ClusterId || '—')}</span></div>`).join('') || '<div class="empty">No routes configured</div>'; let nodes = destinationRows().slice(0, 6).map(d => `<div class="rowline"><div><b>${esc(d.did)}</b><div class="subtle mono">${esc(d.address)}</div></div><span class="chip ${d.enabled ? '' : 'bad'}">${d.enabled ? 'Configured' : 'Disabled'}</span></div>`).join('') || '<div class="empty">No destinations configured</div>'; return summary() + adcServiceMap() + `<div class="grid2"><div class="card"><div class="flex"><h2 class="section-title">Traffic architecture</h2><span class="chip">Design view</span></div><div class="arch"><div class="archnode">Clients / Public & internal ingress</div><div class="arrow">↓</div><div class="archnode">Firewall / upstream HA VIP</div><div class="arrow">↓</div><div class="archnode accent">${esc(topologyModeName(topologyResponse?.plan?.mode || 'standalone'))} (design topology)</div><div class="arrow">↓</div><div class="twonodes"><div class="archnode">Backend node 01</div><div class="archnode">Backend node 02</div></div><div class="arrow">↓</div><div class="archnode">Application-specific data services (optional)</div></div><div class="healthbanner">This gateway is one running instance. The onboarding design is metadata, not proof that a gateway fleet, VIP or backend is healthy.</div></div><div><div class="card"><h2 class="section-title">Route snapshot</h2>${routes}${actionBtn('Manage routes', 'switch', 'routes')}</div><div class="card card-spaced"><h2 class="section-title">Destinations</h2>${nodes}${actionBtn('Manage backends', 'switch', 'backends')}</div></div></div>`; }
 function routes() { const rows = keys(data.routes).map(id => { const r = data.routes[id]; return `<tr><td><b>${esc(id)}</b></td><td class="mono">${esc((r.Match?.Hosts || []).join(', ') || 'Any host')}</td><td class="mono">${esc(r.Match?.Path)}</td><td>${esc(r.ClusterId)}</td><td>${actionBtn('Edit', 'route-edit', id)} ${actionBtn('Advanced', 'route-advanced', id)} ${actionBtn('Delete', 'route-delete', id, 'danger-btn mini')}</td></tr>`; }).join(''); return `<div class="toolbar"><div><h2>Websites &amp; routes</h2><p class="subtle">A route matches the client hostname and path, then forwards to a backend group (cluster). Draft changes need approval.</p></div>${actionBtn('+ Add website / API', 'setup-simple-website', '', 'primary')} ${actionBtn('Advanced: add route', 'route-add', '')}</div><div class="tablewrap"><table><thead><tr><th>Route ID</th><th>Hosts</th><th>Path</th><th>Cluster</th><th>Actions</th></tr></thead><tbody>${rows || '<tr><td colspan="5" class="empty">No routes configured. Use Add website / API to create your first draft.</td></tr>'}</tbody></table></div>`; }
 const monitorSourceKey = 'ADC.HealthMonitorSource';
+const compoundModeKey = 'ADC.Health.CompoundMode';
+const compoundPathKey = 'ADC.Health.SecondaryPath';
+function checkCompoundTarget(group) {
+    if (group.HttpClient?.WebProxy || keys(group.Destinations || {}).some(key => !!group.Destinations[key].Health))
+        throw Error('Compound health does not support web proxies or alternate destination health addresses.');
+}
 function monitorMembers(id) {
     return keys(data.clusters).filter(key => data.clusters[key].Metadata?.[monitorSourceKey] === id);
 }
 function applyMonitorSnapshot(source, target) {
     target.HealthCheck = { ...target.HealthCheck, Active: JSON.parse(JSON.stringify(source.HealthCheck.Active)) };
     const metadata = { ...(target.Metadata || {}) };
-    for (const key of ['RiseFall.Rise', 'RiseFall.Fall', 'ConsecutiveFailuresHealthPolicy.Threshold']) {
+    for (const key of ['RiseFall.Rise', 'RiseFall.Fall', 'ConsecutiveFailuresHealthPolicy.Threshold', compoundModeKey, compoundPathKey]) {
         if (Object.prototype.hasOwnProperty.call(source.Metadata || {}, key))
             metadata[key] = source.Metadata[key];
         else
             delete metadata[key];
     }
     target.Metadata = metadata;
+    if (metadata[compoundModeKey])
+        target.HealthCheck.AvailableDestinationsPolicy = 'HealthyAndUnknown';
 }
 function unlinkActiveMonitor(id) {
     if (currentRole === 'Viewer' || !Object.prototype.hasOwnProperty.call(data.clusters, id))
@@ -271,14 +279,16 @@ function editActiveMonitor(id) {
         const parsed = /^(\d{2}):(\d{2}):(\d{2})$/.exec(String(value || ''));
         return parsed ? String(Number(parsed[1]) * 3600 + Number(parsed[2]) * 60 + Number(parsed[3])) : fallback;
     };
-    modal('HTTP health monitor', 'Choose actual application readiness. This edits the group draft; it does not probe or deploy. Passive checks and other metadata remain unchanged.', [
+    modal('HTTP health monitor', 'Choose actual application readiness. This edits the group draft; it does not probe or deploy. TCP is mandatory in compound mode; AND requires both HTTP checks and OR requires at least one. Passive checks remain unchanged.', [
         { name: 'enabled', label: 'Enable active monitor', value: String(!!old.Enabled), options: ['true', 'false'] },
         { name: 'path', label: 'Readiness path', value: old.Path || '/health/ready' },
         { name: 'interval', label: 'Probe interval (seconds, 1–60)', value: seconds(old.Interval, '15') },
         { name: 'timeout', label: 'Probe timeout (seconds, 1–60)', value: seconds(old.Timeout, '5') },
         { name: 'policy', label: 'Failure / recovery policy', value: old.Policy || 'ConsecutiveFailures', options: ['ConsecutiveFailures', 'RiseFall'] },
         { name: 'fall', label: 'Consecutive failures (1–10)', value: String(old.Policy === 'RiseFall' ? meta['RiseFall.Fall'] || '3' : meta['ConsecutiveFailuresHealthPolicy.Threshold'] || '3') },
-        { name: 'rise', label: 'Consecutive successes for RiseFall (1–10)', value: String(meta['RiseFall.Rise'] || '2') }
+        { name: 'rise', label: 'Consecutive successes for RiseFall (1–10)', value: String(meta['RiseFall.Rise'] || '2') },
+        { name: 'compound', label: 'Active compound mode', value: meta[compoundModeKey] || 'off', options: ['off', 'AND', 'OR'] },
+        { name: 'secondary', label: 'Secondary HTTP readiness path (compound mode)', value: meta[compoundPathKey] || '/health/dependencies', optional: true }
     ], v => {
         const bounded = (raw, max) => /^\d{1,2}$/.test(raw) && Number(raw) >= 1 && Number(raw) <= max;
         if (!bounded(v.interval, 60) || !bounded(v.timeout, 60) || Number(v.timeout) > Number(v.interval) || !bounded(v.rise, 10) || !bounded(v.fall, 10))
@@ -291,9 +301,28 @@ function editActiveMonitor(id) {
             throw Error('PrimaryBackup requires active health checks.');
         if (!['ConsecutiveFailures', 'RiseFall'].includes(v.policy))
             throw Error('Unsupported health policy.');
+        if (!['off', 'AND', 'OR'].includes(v.compound))
+            throw Error('Unsupported compound mode.');
+        if (v.compound !== 'off') {
+            const valid = (path) => path.startsWith('/') && !path.startsWith('//') && path.length <= 300 && !path.includes('\\') && !path.includes('#') && !/[\x00-\x1f\x7f]/.test(path);
+            if (v.enabled !== 'true' || !valid(v.path) || !valid(v.secondary) || v.path === v.secondary)
+                throw Error('Compound monitoring requires active checks and two distinct same-origin readiness paths.');
+            checkCompoundTarget(cluster);
+            for (const member of monitorMembers(id))
+                checkCompoundTarget(data.clusters[member]);
+        }
         const duration = (raw) => '00:' + String(Math.floor(Number(raw) / 60)).padStart(2, '0') + ':' + String(Number(raw) % 60).padStart(2, '0');
         cluster.HealthCheck = { ...cluster.HealthCheck, Active: { ...old, Enabled: v.enabled === 'true', Path: v.path, Interval: duration(v.interval), Timeout: duration(v.timeout), Policy: v.policy } };
         cluster.Metadata = { ...meta, 'RiseFall.Rise': v.rise, 'RiseFall.Fall': v.fall, 'ConsecutiveFailuresHealthPolicy.Threshold': v.fall };
+        if (v.compound === 'off') {
+            delete cluster.Metadata[compoundModeKey];
+            delete cluster.Metadata[compoundPathKey];
+        }
+        else {
+            cluster.Metadata[compoundModeKey] = v.compound;
+            cluster.Metadata[compoundPathKey] = v.secondary;
+            cluster.HealthCheck.AvailableDestinationsPolicy = 'HealthyAndUnknown';
+        }
         for (const member of monitorMembers(id))
             applyMonitorSnapshot(cluster, data.clusters[member]);
         edit();
@@ -316,6 +345,8 @@ function copyActiveMonitor(id) {
             throw Error('Invalid or changed monitor source.');
         if (!['copy', 'linked'].includes(v.mode))
             throw Error('Invalid reuse mode.');
+        if (source.Metadata?.[compoundModeKey])
+            checkCompoundTarget(target);
         applyMonitorSnapshot(source, target);
         if (v.mode === 'linked')
             target.Metadata[monitorSourceKey] = v.source;
