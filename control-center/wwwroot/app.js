@@ -706,8 +706,7 @@ function render() {
         void featureMatrix();
     else if (view === 'tls')
         void certificatePage();
-    else if (view === 'waf' || view === 'gslb')
-    {
+    else if (view === 'waf' || view === 'gslb') {
         $('content').innerHTML = modulePage(view);
         wireSpecialistDraft(view);
     }

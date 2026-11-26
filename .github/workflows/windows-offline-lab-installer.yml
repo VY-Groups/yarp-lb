@@ -7,6 +7,10 @@ on:
       - 'control-center/Program.cs'
       - 'control-center/ManagementPrivacyPolicy.cs'
       - 'control-center/SetupCenter.cs'
+      - 'control-center/SpecialistDrafts.cs'
+      - 'control-center/GatewayAgent/EngineConfigContract.cs'
+      - 'control-center/GatewayCoreYarp.csproj'
+      - 'control-center/CommercialLicenseRuntime.cs'
       - 'control-center/docs/OPERATOR_QUICK_GUIDE.md'
       - '.github/workflows/windows-offline-lab-installer.yml'
   push:
@@ -17,6 +21,10 @@ on:
       - 'control-center/Program.cs'
       - 'control-center/ManagementPrivacyPolicy.cs'
       - 'control-center/SetupCenter.cs'
+      - 'control-center/SpecialistDrafts.cs'
+      - 'control-center/GatewayAgent/EngineConfigContract.cs'
+      - 'control-center/GatewayCoreYarp.csproj'
+      - 'control-center/CommercialLicenseRuntime.cs'
       - 'control-center/docs/OPERATOR_QUICK_GUIDE.md'
       - '.github/workflows/windows-offline-lab-installer.yml'
   workflow_dispatch:
