@@ -75,7 +75,7 @@ def run(args):
                             args.observed_ruleset_sha256, args.receipt, fence=fence)
 
 
-def main(argv=None):
+def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--policy", type=Path, required=True)
     parser.add_argument("--approval", type=Path, action="append", required=True)
@@ -96,7 +96,11 @@ def main(argv=None):
     parser.add_argument("--node-private-key", required=True)
     parser.add_argument("--receipt", type=Path, required=True)
     parser.add_argument("--execute", action="store_true")
-    args = parser.parse_args(argv)
+    return parser.parse_args(argv)
+
+
+def main(argv=None):
+    args = parse_args(argv)
     try:
         result = run(args)
         if result == "preflight-only":

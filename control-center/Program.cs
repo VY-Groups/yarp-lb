@@ -364,6 +364,7 @@ builder.Services.AddRateLimiter(options =>
     options.AddFixedWindowLimiter("mailtest", cfg => { cfg.PermitLimit = 3; cfg.Window = TimeSpan.FromMinutes(5); cfg.QueueLimit = 0; });
     options.AddFixedWindowLimiter("ldaptest", cfg => { cfg.PermitLimit = 4; cfg.Window = TimeSpan.FromMinutes(5); cfg.QueueLimit = 0; });
     options.AddFixedWindowLimiter("acme-revoke", cfg => { cfg.PermitLimit = 2; cfg.Window = TimeSpan.FromMinutes(5); cfg.QueueLimit = 0; });
+    options.AddFixedWindowLimiter("waf-dashboard-deployment", cfg => { cfg.PermitLimit = 2; cfg.Window = TimeSpan.FromMinutes(1); cfg.QueueLimit = 0; });
     options.AddFixedWindowLimiter("tls-stage-import", cfg => { cfg.PermitLimit = 4; cfg.Window = TimeSpan.FromMinutes(1); cfg.QueueLimit = 0; });
     options.AddFixedWindowLimiter("acme-renew-due", cfg => { cfg.PermitLimit = 1; cfg.Window = TimeSpan.FromMinutes(10); cfg.QueueLimit = 0; });
     options.AddFixedWindowLimiter("employee-invite-issue", cfg =>
@@ -3283,6 +3284,41 @@ if (stagedImportEnabled)
     }).RequireAuthorization(p => p.RequireRole("Administrator")).RequireRateLimiting("tls-stage-import");
 }
 app.MapSpecialistDrafts();
+var wafBroker = WafDashboardBroker.FromEnvironment();
+app.MapGet("/admin/api/specialist/waf-deployment", () => Results.Ok(new {
+    configured = wafBroker is not null,
+    scope = "Linux host-approved signed policy; independent quorum commit required"
+})).RequireAuthorization(p => p.RequireRole("Administrator"));
+app.MapPost("/admin/api/specialist/waf-deployment", async (HttpContext ctx, WafDashboardRequest request) =>
+{
+    if (wafBroker is null) return Results.Conflict(new { error = "Host WAF deployment broker not configured." });
+    if (!await AuditActorCurrent(ctx, true)) return Results.StatusCode(403);
+    if (externalAuditIntent is not null || oidcPolicy is not null)
+        return Results.Conflict(new { error = "External-audit/enterprise deployments require the independent operator workflow." });
+    if (request.Operation is not ("preflight" or "execute") || request.Revision is < 1 or > 9007199254740991 ||
+        request.Digest is null || !Regex.IsMatch(request.Digest, "^[A-F0-9]{64}$") ||
+        request.Confirmation != request.Operation.ToUpperInvariant() + " " + request.Digest)
+        return Results.BadRequest(new { error = "Exact signed policy revision, digest and confirmation required." });
+    if (SetupCenter.ReadFreeze(privateDir).Frozen)
+        return Results.Conflict(new { error = "Local routing change freeze is active." });
+    await Audit(Actor(ctx), "WAF_BROKER_REQUESTED", new { request.Operation, request.Revision, request.Digest });
+    if (!await AuditActorCurrent(ctx, true)) return Results.StatusCode(403);
+    try
+    {
+        var outcome = await wafBroker.RequestAsync(request, ctx.RequestAborted);
+        await Audit(Actor(ctx), "WAF_BROKER_OUTCOME", new { request.Revision, request.Digest, outcome });
+        return outcome == "refused-or-failed"
+            ? Results.Conflict(new { error = "Broker refused or failed. Inspect independent operator receipts." })
+            : Results.Ok(new { outcome });
+    }
+    catch (Exception ex)
+    {
+        await Audit(Actor(ctx), "WAF_BROKER_UNCONFIRMED", new { failureType = ex.GetType().Name });
+        return Results.Json(new { error = "Result unconfirmed. Do not retry until independent reconciliation." }, statusCode: 503);
+    }
+}).WithMetadata(new RequestSizeLimitAttribute(2048))
+  .RequireAuthorization(p => p.RequireRole("Administrator"))
+  .RequireRateLimiting("waf-dashboard-deployment");
 app.MapReverseProxy(proxyPipeline =>
 {
 #if GATEWAYCORE_COMMERCIAL
