@@ -634,7 +634,8 @@ app.Use(async (ctx, next) =>
 app.Use(async (ctx, next) =>
 {
     if (ctx.Request.Path.StartsWithSegments("/admin/api") &&
-        !ManagementPrivacyPolicy.Exempt(ctx.Request.Path))
+        !ManagementPrivacyPolicy.Exempt(ctx.Request.Path) &&
+        ctx.GetEndpoint()?.Metadata.GetMetadata<EmployeeInvitationRedemptionEndpoint>() is null)
     {
         if (ctx.User.Identity?.IsAuthenticated != true)
         { ctx.Response.StatusCode = 401; return; }
@@ -998,7 +999,7 @@ app.Use(async (ctx, next) =>
         (ctx.Request.Method is "POST" or "PUT" or "PATCH" or "DELETE") &&
         !ctx.Request.Path.StartsWithSegments("/admin/api/bootstrap") &&
         !ctx.Request.Path.StartsWithSegments("/admin/api/login") &&
-        ctx.Request.Path != "/admin/api/employee-invitation/redeem")
+        ctx.GetEndpoint()?.Metadata.GetMetadata<EmployeeInvitationRedemptionEndpoint>() is null)
     {
         if (ctx.User.Identity?.IsAuthenticated != true) { ctx.Response.StatusCode = 401; return; }
         var token = ctx.User.FindFirst("csrf")?.Value;
@@ -1842,7 +1843,9 @@ app.MapPost("/admin/api/employee-invitation/redeem", async (HttpContext ctx, Emp
             employeeInvitations.Remove(entry.Id);
             return InvalidInvitation();
         }
-        if (input.Action == "verify")
+        // The server's stored capability state, not the submitted action,
+        // determines the transition. Action is only a consistency assertion.
+        if (!entry.Verified)
         {
             // Rotate away from the emailed credential immediately. The short
             // completion capability never appears in a URL or persistent storage.
@@ -1871,7 +1874,8 @@ app.MapPost("/admin/api/employee-invitation/redeem", async (HttpContext ctx, Emp
         return Results.Json(new { error = "Registration could not be completed. Contact your administrator." }, statusCode: 503);
     }
     finally { loginGate.Release(); }
-}).WithMetadata(new Microsoft.AspNetCore.Mvc.RequestSizeLimitAttribute(4096)).RequireRateLimiting("employee-invite-redeem");
+}).WithMetadata(new Microsoft.AspNetCore.Mvc.RequestSizeLimitAttribute(4096),
+    new EmployeeInvitationRedemptionEndpoint()).RequireRateLimiting("employee-invite-redeem").AllowAnonymous();
 #endif
 
 app.MapPost("/admin/api/users/{username}/password", async (HttpContext ctx, string username, PasswordInput input) =>
@@ -3540,6 +3544,7 @@ record MailSettings(bool Enabled = false, string Host = "", int Port = 25, strin
 record MailSettingsInput(bool Enabled, string Host, int Port, string From, string Username, string Password, bool StartTls,
     string AuthMode = "password", string OAuthClientId = "", string OAuthClientSecret = "", string OAuthRefreshToken = "", string OAuthTenant = "");
 record EmployeeInvitationInput(string? Username, string? Email, string? Role);
+sealed class EmployeeInvitationRedemptionEndpoint { }
 record EmployeeInvitationRedeem(string? Action, string? Code, string? Password = null);
 record EmployeeInvitation(string Id, string Username, string Email, string Role, string Issuer, string IssuerStamp,
     string MailFingerprint, byte[] CodeHash, DateTimeOffset ExpiresUtc, bool Verified)
