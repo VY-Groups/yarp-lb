@@ -9,7 +9,7 @@ const getNode = (id)=> { if(!nodes.has(id)) nodes.set(id,{innerHTML:'',textConte
 let records=[];
 const overview = {
  version:'0.1', channel:'development', verifiedForProduction:false, gateway:'LAB-01', mode:'ha-pair', topologyConfirmed:false,
- routeCount:1, clusterCount:1, destinationCount:2, activeHealthClusterCount:0, fleetEntries:0, transport:'http-loopback',
+ activeAdministratorCount:1, routeCount:1, clusterCount:1, destinationCount:2, activeHealthClusterCount:0, fleetEntries:0, transport:'http-loopback',
  freeze:{frozen:true,reason:'Maintenance <script>alert(1)</script>',updatedBy:'admin'},
  stages:[{id:'administrator',title:'Recovery administrator',status:'configured',evidence:'1 admin',action:'users'},
          {id:'audit',title:'Independent immutable audit',status:'not-implemented',evidence:'No WORM destination',action:'backups'}]
@@ -26,6 +26,14 @@ vm.runInContext('currentRole="Administrator";csrf="test-csrf";',ctx);
 await vm.runInContext('setupPage()',ctx);
 const html=getNode('content').innerHTML;
 assert.ok(html.includes('FIRST-RUN BOOTSTRAP'));
+assert.ok(html.includes('journey-checklist'));
+assert.ok(html.includes('1 enabled administrators'));
+assert.ok(html.includes('Manual evidence required'));
+const review=vm.runInContext("currentUser='admin';changeReview({id:'change-test',status:'Pending',requestedBy:'admin',changeReason:'<script>bad</script>',payload:{routes:{r:{ClusterId:'c',Match:{Hosts:['example.invalid'],Path:'/{**catch-all}'}}},clusters:{c:{LoadBalancingPolicy:'RoundRobin',Destinations:{a:{Address:'https://backend.example.invalid/'}}}}}})",ctx);
+assert.ok(review.includes('Proposed websites and routes'));
+assert.ok(review.includes('&lt;script&gt;bad&lt;/script&gt;'));
+assert.ok(!review.includes('data-action="approval-approve"'));
+assert.ok(review.includes('different authorized administrator'));
 assert.ok(html.includes('Version 0.1'));
 assert.ok(html.includes('Routing change freeze is ON'));
 assert.ok(html.includes('&lt;script&gt;alert(1)&lt;/script&gt;'), 'rendered evidence must be escaped');
