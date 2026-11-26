@@ -570,6 +570,8 @@ app.MapPost("/agent/v1/engines/{engineId}/config/activate", async (string engine
         var seqFile=Path.Combine(tx,"sequence.txt");
         if (!File.Exists(prepared) || !File.Exists(originalPath) || !File.Exists(seqFile))
             return Results.NotFound();
+        if (EngineConfigContract.IsRollbackFenced(tx))
+            return Results.Conflict(new {error="Engine transaction fenced by rollback"});
         if (!long.TryParse(await File.ReadAllTextAsync(seqFile),out var sequence) ||
             sequence != FleetSequenceState.Read(Path.Combine(stage,"last-accepted-sequence.txt")))
             return Results.Conflict(new {error="Transaction superseded"});
@@ -610,10 +612,21 @@ app.MapPost("/agent/v1/engines/{engineId}/config/rollback", async (string engine
         var actual=Sha(await File.ReadAllBytesAsync(configPath));
         if (actual != Sha(original) && actual != Sha(proposed))
             return Results.Conflict(new {error="Engine config drift; manual recovery required"});
-        await File.WriteAllBytesAsync(configPath+".next",original);
-        File.Move(configPath+".next",configPath,true);
+        // Persist the fence before restoring bytes. Even rollback of a merely
+        // prepared transaction must prohibit a delayed activation after restart.
+        EngineConfigContract.MarkRollback(tx);
+        if (actual != Sha(original))
+        {
+            var next = configPath+".next";
+            using (var journal = new FileStream(next, FileMode.Create, FileAccess.Write, FileShare.None))
+            {
+                journal.Write(original);
+                journal.Flush(flushToDisk: true);
+            }
+            File.Move(next,configPath,true);
+        }
         app.Logger.LogWarning("Engine {Engine} config rolled back transaction {Tx}; restart NOT performed",SafeLogField(engineId),SafeLogField(input.TransactionId));
-        return Results.Ok(new {engineId,state="rolled-back-file-only",revision=Sha(original),requiresRestart=true});
+        return Results.Ok(new {engineId,state="rolled-back-file-only",revision=Sha(original),requiresRestart=true,rollbackFenced=true});
     }
     finally {revisionLock.Release();}
 });
