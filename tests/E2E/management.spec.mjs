@@ -54,6 +54,15 @@ test('browser: bootstrap, navigation, onboarding, websites, route edit, users an
     await expect(page.locator('[data-action="setup-simple-website"]')).toBeVisible();
     await openNav('guide');
     await expect(page.locator('#content')).toContainText('GatewayCore in five steps');
+    await expect(page.locator('#sop-manual .sop-chapter')).toHaveCount(25);
+    await page.locator('#sop-search').fill('503');
+    await expect(page.locator('#sop-manual .sop-chapter:visible')).not.toHaveCount(25);
+    await expect(page.locator('#sop-manual .sop-chapter:visible').filter({hasText:'Troubleshooting decision tree'})).toBeVisible();
+    await expect(page.locator('#sop-manual .sop-chapter:visible').filter({hasText:'Troubleshooting decision tree'}).locator('details')).toHaveAttribute('open','');
+    await page.locator('#sop-search').fill('no-such-sop-xyz');
+    await expect(page.locator('#sop-count')).toHaveText('0 chapters');
+    await page.locator('#sop-search').clear();
+    await expect(page.locator('#sop-count')).toHaveText('25 chapters');
     await openNav('setup');
   });
 
