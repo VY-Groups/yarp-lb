@@ -1415,6 +1415,14 @@ try
     Console.WriteLine("PASS: both IPv4 sites healthy before distribution sampling");
     using var metricsClient = new HttpClient { Timeout = TimeSpan.FromSeconds(2) };
     var metricsText = await metricsClient.GetStringAsync($"http://127.0.0.1:{metricsPort}/metrics");
+    using (var loadedRevision = System.Text.Json.JsonDocument.Parse(
+        await metricsClient.GetStringAsync($"http://127.0.0.1:{metricsPort}/config-revision")))
+    {
+        var revision = loadedRevision.RootElement.GetProperty("revision").GetString();
+        Must(loadedRevision.RootElement.GetProperty("type").GetString() == "gslb-loaded-config-revision" &&
+             revision is { Length: 64 } && revision.All(Uri.IsHexDigit),
+             "real GSLB process reports loaded configuration revision on loopback only");
+    }
     Must(metricsText.Contains("# TYPE gatewaycore_gslb_dns_queries_total counter", StringComparison.Ordinal) &&
          metricsText.Contains("gatewaycore_gslb_dns_queries_total{transport=\"udp\"} ", StringComparison.Ordinal) &&
          metricsText.Contains("gatewaycore_gslb_dns_responses_total{transport=\"udp\",rcode=\"NOERROR\"} ", StringComparison.Ordinal) &&

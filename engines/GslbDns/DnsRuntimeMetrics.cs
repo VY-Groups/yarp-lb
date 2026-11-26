@@ -140,11 +140,12 @@ internal sealed class DnsMetricsServer : IAsyncDisposable
     private readonly IReadOnlyCollection<AgentReportTarget> reportTargets;
     private readonly AuthorityFenceStore? authorityFence;
     private WebApplication? app;
+    private readonly string? loadedConfigRevision;
 
     public DnsMetricsServer(string listenAddress, int listenPort, DnsRuntimeMetrics metrics,
         IReadOnlyCollection<SiteGroup> groups, AgentHealthReportStore? reportStore,
         IReadOnlyCollection<AgentReportTarget> reportTargets,
-        AuthorityFenceStore? authorityFence = null)
+        AuthorityFenceStore? authorityFence = null, string? loadedConfigRevision = null)
     {
         if (!IPAddress.TryParse(listenAddress, out var address) || !IPAddress.IsLoopback(address) ||
             address.IsIPv4MappedToIPv6 || listenPort is < 1025 or > 65535)
@@ -156,6 +157,7 @@ internal sealed class DnsMetricsServer : IAsyncDisposable
         this.reportStore = reportStore;
         this.reportTargets = reportTargets;
         this.authorityFence = authorityFence;
+        this.loadedConfigRevision = loadedConfigRevision;
     }
 
     public async Task StartAsync(CancellationToken token)
@@ -178,6 +180,13 @@ internal sealed class DnsMetricsServer : IAsyncDisposable
         });
         // The listener itself can only bind to loopback. Operators may use
         // an authenticated tunnel; never publish peer state on the DNS socket.
+        web.MapGet("/config-revision", (HttpContext context) =>
+        {
+            context.Response.Headers.CacheControl = "no-store";
+            return loadedConfigRevision is null ? Results.NotFound() : Results.Ok(new {
+                type = "gslb-loaded-config-revision", revision = loadedConfigRevision
+            });
+        });
         web.MapGet("/authority-fence-status", (HttpContext context) =>
         {
             context.Response.Headers.CacheControl = "no-store";
