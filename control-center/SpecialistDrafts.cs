@@ -246,6 +246,16 @@ public static class SpecialistDrafts
         // authority fencing, DNSSEC and signed activation separately.
         var config = new JsonObject { ["AllowNonLoopbackListeners"] = false, ["ListenHost"] = "127.0.0.1",
             ["ListenPort"] = 15353, ["ProbeIntervalSeconds"] = x.ProbeInterval, ["Zones"] = new JsonArray(zone) };
+        if (!string.IsNullOrWhiteSpace(x.BlockedResolverCidrs))
+        {
+            if (x.BlockedResolverCidrs.Length > 8500)
+                throw new ArgumentException("DNS firewall list is too long.");
+            var blocked = new JsonArray();
+            foreach (var row in Rows(x.BlockedResolverCidrs, 128, 1))
+                blocked.Add(JsonValue.Create(row[0]));
+            config["BlockedResolverCidrs"] = blocked;
+        }
+        // ValidatedGslbCandidate applies the exact signed agent schema.
         return config;
     }
 }
@@ -255,5 +265,5 @@ public sealed record GslbDraftInput(string? Name, string? SoaContact, uint Seria
     string? Policy, int ProbeInterval, int FailureThreshold, int SuccessThreshold, string? Sites, string? NameServers,
     string? DnssecMode = null, string? DnssecKeyPath = null, string? DnssecPrepublishPaths = null,
     string? DnssecAdditionalPaths = null, string? DnssecSalt = null, int? DnssecIterations = null,
-    string? Delegations = null, string? DelegationDs = null);
+    string? Delegations = null, string? DelegationDs = null, string? BlockedResolverCidrs = null);
 public sealed record BackendCertificateCheck(string? Thumbprint);

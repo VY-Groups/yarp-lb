@@ -858,6 +858,22 @@ def acceptance(base:str,https_base:str,origin_port:int):
     admin.request("GET","/admin/api/setup/version")
     initial=admin.request("GET","/admin/api/state")
     check("fixture" in initial["clusters"],"real proxy config inspection")
+    dns_draft = {"name":"firewall.example.test","soaContact":"hostmaster.example.test",
+        "serial":1,"ttl":30,"policy":"Weighted","probeInterval":5,
+        "failureThreshold":2,"successThreshold":2,
+        "sites":"10.0.0.10 | https://dc.example.test/ready | 1 | 0",
+        "nameServers":"ns1.example.test | 10.0.0.53",
+        "blockedResolverCidrs":"192.0.2.0/24\n2001:db8::/32"}
+    viewer.request("POST","/admin/api/specialist/gslb-draft",dns_draft,expect=403)
+    operator.request("POST","/admin/api/specialist/gslb-draft",dns_draft,csrf=False,expect=403)
+    dns_candidate = operator.request("POST","/admin/api/specialist/gslb-draft",dns_draft)
+    check(dns_candidate["status"]=="unsigned-draft-only" and not dns_candidate["deploymentReady"] and
+          json.loads(dns_candidate["json"])["BlockedResolverCidrs"]==["192.0.2.0/24","2001:db8::/32"],
+          "authenticated DNS draft exports validated firewall policy without deployment")
+    operator.request("POST","/admin/api/specialist/gslb-draft",
+        {**dns_draft,"blockedResolverCidrs":"0.0.0.0/0"},expect=400)
+    check(admin.request("GET","/admin/api/state")["revision"]==initial["revision"],
+          "DNS draft generation does not mutate approved proxy state")
     eventually(anonymous,"/fixture/check","e2e-origin:/check")
     check("yarp_control_" in anonymous.request("GET","/gateway/metrics"),"real metrics served")
     admin.request("POST","/admin/api/inventory",{"id":"e2e-node","name":"Temporary origin","type":"Application Server","address":"127.0.0.1","notes":"disposable CI"})

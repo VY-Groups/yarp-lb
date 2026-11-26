@@ -10,4 +10,4 @@ These are documentation ranges; replace them with your approved resolver network
 
 Use the existing signed engine review, rollout and rollback process. Confirm an allowed resolver still receives correct authoritative answers, and an intentionally blocked disposable test resolver receives no response. Monitor gatewaycore_gslb_dns_firewall_blocked_total with transport label only; it counts UDP datagrams or TCP connections and exports no peer addresses. Counters reset on restart. Remove entries via reviewed deployment or restore previous signed configuration. Do not use as a substitute for upstream volumetric DDoS mitigation.
 
-This is source-network admission, not recursive RPZ/content filtering, DNS answer caching, or physical acceptance. No new standalone configuration UI is claimed.
+This is source-network admission, not recursive RPZ/content filtering, DNS answer caching, or physical acceptance. The DNS & GSLB guided initial-draft form also exports this policy, using the same signed staging schema. It never edits a running authority or replaces an existing signed configuration automatically.
