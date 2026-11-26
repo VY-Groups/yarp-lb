@@ -126,16 +126,25 @@ catch (e) {
 } }
 function edit() { dirty = true; render(); }
 async function save() {
-    const reason = prompt('Describe why this change is necessary (minimum 12 characters). A DIFFERENT administrator must approve it.');
-    if (reason === null)
+    if (!dirty || currentRole === 'Viewer')
         return;
+    modal('Submit configuration for approval', 'Your draft contains ' + keys(data.routes).length + ' route(s) and ' + keys(data.clusters).length + ' backend group(s). Nothing goes live until a different authorized administrator approves this exact revision.', [
+        { name: 'reason', label: 'Reason for this change (12–500 characters)', value: '', minLength: 12 }
+    ], v => {
+        const reason = String(v.reason).trim();
+        if (reason.length < 12 || reason.length > 500)
+            throw Error('Enter a change reason of 12–500 characters.');
+        void submitDraft(reason);
+    }, 'Submit request');
+}
+async function submitDraft(reason) {
     try {
         const x = await api('/admin/api/change-requests', 'POST', { reason, payload: { routes: data.routes, clusters: data.clusters, disabled: data.disabled, revision: data.revision } });
         dirty = false;
-        show('Request ' + x.id + ' submitted for independent approval. No live routing changed.');
         await reload();
         view = 'approvals';
         render();
+        show('Request ' + x.id + ' submitted for independent approval. No live routing changed.');
     }
     catch (e) {
         show(String(e), true);
@@ -184,10 +193,26 @@ async function backups() { try {
 catch (e) {
     show(String(e), true);
 } }
+function changeReview(r) {
+    const payload = r.payload || {};
+    const routes = payload.routes || {};
+    const groups = payload.clusters || {};
+    const routeRows = keys(routes).map(id => {
+        const route = routes[id];
+        return `<tr><td>${esc(id)}</td><td>${esc((route.Match?.Hosts || []).join(', ') || 'Any host')}</td><td>${esc(route.Match?.Path || '—')}</td><td>${esc(route.ClusterId || '—')}</td></tr>`;
+    }).join('');
+    const groupRows = keys(groups).map(id => {
+        const group = groups[id];
+        return `<tr><td>${esc(id)}</td><td>${esc(group.LoadBalancingPolicy || 'Default')}</td><td>${keys(group.Destinations || {}).map(d => esc(d + ': ' + group.Destinations[d].Address)).join('<br>') || 'No enabled servers'}</td></tr>`;
+    }).join('');
+    const own = String(r.requestedBy || '').toLowerCase() === currentUser.toLowerCase();
+    const eligible = r.status === 'Pending' && currentRole === 'Administrator' && !own;
+    return `<div class="card"><div class="flex"><h2 class="section-title">Change request details</h2>${actionBtn('Back to approvals', 'switch', 'approvals')}</div><p><b>Status:</b> ${esc(r.status)} · <b>Requested by:</b> ${esc(r.requestedBy)}</p><p><b>Reason:</b> ${esc(r.changeReason)}</p><p class="subtle">Full proposed configuration, not a difference report. Review exact JSON below including advanced policies, disabled servers and revision before making a decision.</p><h3>Proposed websites and routes</h3><div class="tablewrap"><table><thead><tr><th>Route</th><th>Hostnames</th><th>Path</th><th>Backend group</th></tr></thead><tbody>${routeRows || '<tr><td colspan="4">No routes in proposed configuration</td></tr>'}</tbody></table></div><h3>Proposed backend groups</h3><div class="tablewrap"><table><thead><tr><th>Group</th><th>Balancing</th><th>Enabled servers</th></tr></thead><tbody>${groupRows || '<tr><td colspan="3">No backend groups in proposed configuration</td></tr>'}</tbody></table></div><details class="operator-advanced" open><summary>Full exact draft and metadata (required review)</summary><pre class="json-review">${esc(JSON.stringify(r, null, 2))}</pre></details><p>${own && r.status === 'Pending' ? 'Your request is waiting for a different authorized administrator.' : ''}</p>${eligible ? actionBtn('Approve after reviewing', 'approval-approve', r.id, 'primary') + ' ' + actionBtn('Reject', 'approval-reject', r.id, 'danger-btn mini') : ''}</div>`;
+}
 async function approvals() {
     try {
         const items = await api('/admin/api/change-requests');
-        const rows = items.map((x) => `<tr><td class="mono">${esc(x.id)}</td><td>${esc(x.requestedBy)}</td><td>${esc(x.changeReason)}</td><td>${esc(x.routeCount)} / ${esc(x.clusterCount)}</td><td><span class="chip ${x.status === 'Approved' ? 'good' : x.status === 'Rejected' ? 'bad' : ''}">${esc(x.status)}</span></td><td>${esc(x.reviewedBy || '—')}</td><td>${actionBtn('Review full draft', 'approval-review', x.id)} ${x.status === 'Pending' && currentRole === 'Administrator' ? `${actionBtn('Approve', 'approval-approve', x.id)} ${actionBtn('Reject', 'approval-reject', x.id, 'danger-btn mini')}` : ''}</td></tr>`).join('');
+        const rows = items.map((x) => `<tr><td class="mono">${esc(x.id)}</td><td>${esc(x.requestedBy)}</td><td>${esc(x.changeReason)}</td><td>${esc(x.routeCount)} / ${esc(x.clusterCount)}</td><td><span class="chip ${x.status === 'Approved' ? 'good' : x.status === 'Rejected' ? 'bad' : ''}">${esc(x.status)}</span></td><td>${esc(x.reviewedBy || '—')}</td><td>${actionBtn('Review full draft', 'approval-review', x.id)} </td></tr>`).join('');
         $('content').innerHTML = `<div class="toolbar"><div><h2>Two-person configuration approval</h2><p class="subtle">Submitting a change does not update live routing. A different Administrator must approve the exact saved draft; revision conflicts block outdated submissions.</p></div></div><div class="tablewrap"><table><thead><tr><th>Request</th><th>Requester</th><th>Reason</th><th>Routes / Clusters</th><th>Status</th><th>Reviewer</th><th>Actions</th></tr></thead><tbody>${rows || '<tr><td colspan="7" class="empty">No change requests submitted. Create or edit a website, then select Submit for approval.</td></tr>'}</tbody></table></div>`;
     }
     catch (e) {
@@ -965,19 +990,18 @@ function act(type, id) {
     }
     if (type === 'approval-review') {
         api('/admin/api/change-requests/' + encodeURIComponent(id)).then(r => {
-            const summary = JSON.stringify(r, null, 2);
-            const html = `<div class="card"><div class="flex"><h2 class="section-title">Change request details</h2>${actionBtn('Back to approvals', 'switch', 'approvals')}</div><pre class="json-review">${esc(summary)}</pre></div>`;
-            $('content').innerHTML = html;
+            if (view === 'approvals')
+                $('content').innerHTML = changeReview(r);
         }).catch(e => show(String(e), true));
         return;
     }
     if (type === 'approval-approve' || type === 'approval-reject') {
-        const reason = prompt('Enter the independent review note (at least 10 characters):');
-        if (reason === null)
-            return;
-        api('/admin/api/change-requests/' + encodeURIComponent(id) + '/decision', 'POST', {
-            decision: type === 'approval-approve' ? 'approve' : 'reject', reason
-        }).then(async (r) => { show('Request ' + r.status); await approvals(); await reload(); view = 'approvals'; render(); }).catch(e => show(String(e), true));
+        modal(type === 'approval-approve' ? 'Approve configuration' : 'Reject configuration', 'This decision applies to the exact saved request. Approving may change live routing. Verify the configuration and operational change window before continuing.', [{ name: 'reason', label: 'Independent review note (10–500 characters)', value: '', minLength: 10 }], v => {
+            const reason = String(v.reason).trim();
+            if (reason.length < 10 || reason.length > 500)
+                throw Error('Enter a review note of 10–500 characters.');
+            void api('/admin/api/change-requests/' + encodeURIComponent(id) + '/decision', 'POST', { decision: type === 'approval-approve' ? 'approve' : 'reject', reason }).then(async (r) => { await reload(); view = 'approvals'; render(); show('Request ' + r.status); }).catch(e => show(String(e), true));
+        }, type === 'approval-approve' ? 'Approve request' : 'Reject request');
         return;
     }
     if (type === 'route-advanced' || type === 'cluster-advanced' || type === 'dest-advanced') {
