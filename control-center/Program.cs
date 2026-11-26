@@ -398,7 +398,7 @@ builder.Services.AddRateLimiter(options =>
         cfg.AutoReplenishment = true;
     });
 });
-builder.Services.AddHttpClient("probe").ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
+builder.Services.AddHttpClient("probe").ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false, UseCookies = false });
 var sharedPeerLimiter = SharedPeerRateLimiter.FromEnvironment(
     Environment.GetEnvironmentVariable("GATEWAY_PROXY_SHARED_REDIS"),
     Environment.GetEnvironmentVariable("GATEWAY_PROXY_SHARED_HMAC_KEY"),
@@ -2315,7 +2315,7 @@ app.MapGet("/admin/api/audit/delivery", () =>
 }).RequireAuthorization(p => p.RequireRole("Administrator"));
 
 // Explicit, on-demand connectivity probes: these are not YARP's own destination health states.
-app.MapPost("/admin/api/probe", async (IHttpClientFactory factory) =>
+app.MapPost("/admin/api/probe", async (IHttpClientFactory factory, HttpContext ctx) =>
 {
     var results = new List<object>();
     var clusters = ReadProxy()["Clusters"] as JsonObject;
@@ -2326,24 +2326,47 @@ app.MapPost("/admin/api/probe", async (IHttpClientFactory factory) =>
         {
             var addr = dest.Value?["Address"]?.ToString() ?? "";
             var path = c?["HealthCheck"]?["Active"]?["Path"]?.ToString() ?? "/health/ready";
+            ctx.RequestAborted.ThrowIfCancellationRequested();
+            if (c is not null && !CompoundProbeSettings.TryRead(c, out _))
+            {
+                results.Add(new { cluster = cluster.Key, destination = dest.Key, address = addr, status = "invalid-compound-config", httpStatus = (int?)null });
+                continue;
+            }
+            if (c is not null && CompoundProbeSettings.TryRead(c, out var compound) && compound is not null)
+            {
+                if (!Uri.TryCreate(addr, UriKind.Absolute, out var origin) || !CompoundProbeSettings.TryTarget(origin, path, out _))
+                {
+                    results.Add(new { cluster = cluster.Key, destination = dest.Key, address = addr, status = "invalid-compound-config", httpStatus = (int?)null });
+                    continue;
+                }
+                using var diagnosticClient = factory.CreateClient("probe");
+                var result = await CompoundDiagnostics.EvaluateAsync(diagnosticClient, origin, path, compound, ctx.RequestAborted);
+                results.Add(new { cluster = cluster.Key, destination = dest.Key, address = addr,
+                    status = result.Passed ? "reachable" : "unreachable", httpStatus = result.Checks[1].HttpStatus,
+                    compoundMode = compound.Mode, checks = result.Checks });
+                continue;
+            }
             var status = "unreachable"; int? code = null;
             try
             {
                 if (Uri.TryCreate(addr, UriKind.Absolute, out var baseUri) && (baseUri.Scheme == "https" || baseUri.Scheme == "http"))
                 {
                     using var client = factory.CreateClient("probe");
-                    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+                    using var cts = CancellationTokenSource.CreateLinkedTokenSource(ctx.RequestAborted);
+                    cts.CancelAfter(TimeSpan.FromSeconds(3));
                     var target = new Uri(baseUri, path.TrimStart('/'));
                     using var response = await client.GetAsync(target, cts.Token);
                     code = (int)response.StatusCode;
                     status = response.IsSuccessStatusCode ? "reachable" : "http-error";
                 }
             }
+            catch (OperationCanceledException) when (ctx.RequestAborted.IsCancellationRequested) { throw; }
             catch { }
             results.Add(new { cluster = cluster.Key, destination = dest.Key, address = addr, status, httpStatus = code });
         }
     }
-    return Results.Ok(new { checkedAt = DateTimeOffset.UtcNow, type = "On-demand HTTP readiness probe (not YARP health state)", results });
+    ctx.RequestAborted.ThrowIfCancellationRequested();
+    return Results.Ok(new { checkedAt = DateTimeOffset.UtcNow, type = "On-demand HTTP/compound diagnostics (not YARP health state)", results });
 }).RequireAuthorization(p => p.RequireRole("Administrator", "Operator"));
 
 // Whole-proxy changes make route/cluster edits atomic and allow an editable UI without remote command execution.
@@ -2358,9 +2381,13 @@ IResult? ValidateChangePayload(JsonObject submitted)
     var disabled = submitted["disabled"] as JsonObject ?? new JsonObject();
     if (routes is null || clusters is null) return Results.BadRequest(new { error = "Routes and clusters must be objects" });
     if (routes.Count > 100 || clusters.Count > 100) return Results.BadRequest(new { error = "Too many routes/clusters" });
+    if (SharedMonitorContract.Validate(clusters) is { } monitorError)
+        return Results.BadRequest(new { error = monitorError });
     foreach (var (key, clusterNode) in clusters)
     {
         if (!ValidId(key) || clusterNode is not JsonObject c) return Results.BadRequest(new { error = "Invalid cluster ID" });
+        if (!CompoundProbeSettings.TryRead(c, out _))
+            return Results.BadRequest(new { error = $"Cluster {key}: invalid compound diagnostic mode or readiness path" });
         // Refuse proxy settings that bypass trust checks or produce unexpected insecure forwarding.
         if (string.Equals(c["HttpClient"]?["DangerousAcceptAnyServerCertificate"]?.ToString(), "true", StringComparison.OrdinalIgnoreCase))
             return Results.BadRequest(new { error = "Backend TLS certificate validation cannot be disabled" });
