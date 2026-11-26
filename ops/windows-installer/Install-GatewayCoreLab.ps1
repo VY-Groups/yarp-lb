@@ -505,6 +505,8 @@ $sourceConfig = $null
 $serviceCreated = $false
 $serviceChanged = $false
 $migrationStarted = $false
+$setupCodeCreated = $false
+$setupCodePath = Join-Path $stateRoot 'first-run-code.txt'
 $approvedResidualStores = @()
 $residualAuthorization = $null
 $setupStartedAt = Get-Date
@@ -652,7 +654,37 @@ try {
     foreach ($item in @((Get-Item -LiteralPath $stateRoot -Force)) + @(Get-ChildItem -LiteralPath $stateRoot -Force -Recurse)) {
         Set-StateAcl $item.FullName
     }
-    $environment = @("YARP_RUNTIME_CONFIG_PATH=$configPath", 'ASPNETCORE_ENVIRONMENT=Production')
+    # Provision a claim only for an uninitialized installation. Keep it
+    # in private ProgramData, never in installer logs or SCM arguments.
+    $accountFile = Join-Path $stateRoot 'admin-users.json'
+    $initialized = $false
+    if (Test-Path -LiteralPath $accountFile) {
+        $accountDocument = ('{"users":' + [IO.File]::ReadAllText($accountFile) + '}') | ConvertFrom-Json
+        if ($null -eq $accountDocument.users -or $accountDocument.users -isnot [array]) { throw 'Existing administrator state is invalid; use reviewed recovery.' }
+        $initialized = $accountDocument.users.Count -gt 0
+    }
+    if (-not $initialized) {
+        if (-not (Test-Path -LiteralPath $setupCodePath)) {
+            $bytes = New-Object byte[] 32
+            $rng = [Security.Cryptography.RandomNumberGenerator]::Create()
+            try { $rng.GetBytes($bytes) } finally { $rng.Dispose() }
+            $secret = [BitConverter]::ToString($bytes).Replace('-','')
+            $file = [IO.File]::Open($setupCodePath,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+            $setupCodeCreated = $true
+            try {
+                $buffer = [Text.Encoding]::ASCII.GetBytes($secret)
+                $file.Write($buffer,0,$buffer.Length)
+                $file.Flush($true)
+            } finally { $file.Dispose() }
+            Set-StateAcl $setupCodePath
+            $secret = $null
+            [Array]::Clear($bytes,0,$bytes.Length)
+            [Array]::Clear($buffer,0,$buffer.Length)
+        }
+        if ([IO.File]::ReadAllText($setupCodePath).Trim() -cnotmatch '^[A-F0-9]{64}$') { throw 'Existing first-run setup code is invalid; use reviewed local recovery.' }
+        Write-Host 'First-run setup is required. Open the protected first-run-code.txt as a local administrator.'
+    }
+    $environment = @("YARP_RUNTIME_CONFIG_PATH=$configPath", 'ASPNETCORE_ENVIRONMENT=Production', 'GATEWAYCORE_REQUIRE_SETUP_OTP=1')
     if ($approvedResidualStores.Count -gt 0) {
         $environment += "GATEWAYCORE_LAB_RESIDUAL_STORES=$residualAuthorization"
     }
@@ -721,6 +753,7 @@ try {
                 # The old file was never removed or modified; only the new migrated copy is discarded.
                 if (Test-Path -LiteralPath $configPath) { Remove-Item -LiteralPath $configPath -Force }
             }
+            if ($setupCodeCreated -and (Test-Path -LiteralPath $setupCodePath)) { Remove-Item -LiteralPath $setupCodePath -Force }
             Restore-TreeAclManifest $stateRoot $stateAclManifest
             if ($null -ne $previousProductRootSddl) {
                 $rootRestore = [Security.AccessControl.DirectorySecurity]::new()

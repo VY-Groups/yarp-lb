@@ -288,6 +288,19 @@ try {
         Invoke-Setup
         Assert-InstalledPayload
         Assert-InstalledService (Join-Path $target 'app\GatewayCoreYarp.exe')
+        $setupCodePath = Join-Path $stateRoot 'first-run-code.txt'
+        $session = (Invoke-DirectLoopback 'http://127.0.0.1:8080/admin/api/session').Content | ConvertFrom-Json
+        if ($Scenario -in @('Fresh','ResidualLegacy')) {
+            if (-not $session.setupRequired -or $session.initialized -or -not (Test-Path -LiteralPath $setupCodePath)) { throw 'Fresh installer did not require verified setup.' }
+            if ([IO.File]::ReadAllText($setupCodePath) -cnotmatch '^[A-F0-9]{64}$' -or -not (Get-Acl -LiteralPath $setupCodePath).AreAccessRulesProtected) { throw 'Setup claim is not protected.' }
+            $bypass = Invoke-DirectLoopback 'http://127.0.0.1:8080/admin/api/bootstrap' '{"username":"bypass","email":"bypass@example.invalid","password":"Disposable-Bypass-Test-Password"}'
+            if ($bypass.StatusCode -ne 409 -or (Test-Path -LiteralPath $adminFile)) { throw 'Password-only bootstrap bypassed first-run setup.' }
+            $denied = Invoke-DirectLoopback 'http://127.0.0.1:8080/admin/api/bootstrap/setup' '{"action":"unlock","setupCode":"not-the-installation-code"}'
+            if ($denied.StatusCode -ne 403) { throw 'Unclaimed enrollment was not rejected.' }
+            Write-Output 'PASS: installed first-run enrollment gate requires protected setup claim and blocks direct password-only bootstrap.'
+        } else {
+            if ($session.setupRequired -or -not $session.initialized) { throw 'Upgrade reset existing account enrollment.' }
+        }
         $serviceEnvironment = @((Get-ItemProperty -LiteralPath $svcKey).Environment)
         $isolations = @($serviceEnvironment | Where-Object { $_ -like 'GATEWAYCORE_LAB_RESIDUAL_STORES=*' })
         if ($Scenario -ne 'ResidualLegacy' -and $isolations.Count -ne 0) { throw 'Clean install or upgrade received a spurious legacy authorization.' }
