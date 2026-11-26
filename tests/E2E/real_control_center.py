@@ -616,6 +616,61 @@ def verify_max_connections_per_server(base:str,admin:Client,reviewer:Client):
         time.sleep(.1)
     check(constrained==1,"MaxConnectionsPerServer=1 limits actual concurrent upstream connections to one")
 
+def verify_secure_affinity(base, https_base, admin, operator, reviewer, origin_port):
+    """Actual TLS proxy response and tampered-cookie failure-policy checks."""
+    import httpx
+    def submit(p,expected=200):
+        pending=operator.request("POST","/admin/api/change-requests",
+            {"reason":"Disposable secure affinity acceptance","payload":p})
+        reviewer.request("POST",f"/admin/api/change-requests/{pending['id']}/decision",
+            {"decision":"approve","reason":"Independent secure affinity fixture review"},expect=expected)
+    def snapshot():
+        state=admin.request("GET","/admin/api/state")
+        return {key:state[key] for key in ("routes","clusters","disabled","revision")}
+    p=snapshot()
+    key="__Host-GatewayCore-affinity-pool"
+    p["clusters"]["affinity-pool"]={"LoadBalancingPolicy":"RoundRobin",
+        "Destinations":{"origin":{"Address":f"http://127.0.0.1:{origin_port}/"}},
+        "Metadata":{"ADC.Persistence.Profile":"SecureCookie"},
+        "SessionAffinity":{"Enabled":True,"Policy":"Cookie","FailurePolicy":"Return503Error",
+            "AffinityKeyName":key,"Cookie":{"Path":"/","HttpOnly":True,
+                "SecurePolicy":"Always","SameSite":"Lax","MaxAge":"00:30:00"}}}
+    p["routes"]["affinity-route"]={"ClusterId":"affinity-pool","Match":{"Path":"/affinity-test/{**catch-all}"}}
+    submit(p)
+    # Disposable self-signed loopback certificate only.
+    with httpx.Client(verify=False,timeout=8.0,trust_env=False) as client:
+        url=https_base+"/affinity-test/ready"
+        for attempt in range(100):
+            response=client.get(url)
+            if response.status_code==200: break
+            time.sleep(.2)
+        check(response.status_code==200,"real HTTPS affinity traffic forwarded")
+        header=response.headers.get("set-cookie","").lower()
+        check(key.lower()+"=" in header and "secure" in header and "httponly" in header
+              and "samesite=lax" in header and "max-age=1800" in header and "domain=" not in header,
+              "real encrypted affinity cookie security attributes")
+        check(client.get(url).status_code==200,"valid affinity cookie accepted")
+        client.cookies.clear()
+        check(client.get(url,headers={"Cookie":key+"=tampered"}).status_code==503,
+              "invalid affinity returns 503 under fail-closed policy")
+        p=snapshot()
+        p["clusters"]["affinity-pool"]["SessionAffinity"]["FailurePolicy"]="Redistribute"
+        submit(p)
+        for attempt in range(100):
+            response=client.get(url,headers={"Cookie":key+"=tampered"})
+            if response.status_code==200: break
+            time.sleep(.2)
+        check(response.status_code==200,"redistribution policy accepts traffic with invalid affinity")
+        p=snapshot()
+        p["clusters"]["affinity-pool"]["SessionAffinity"]["Cookie"]["SecurePolicy"]="None"
+        submit(p,expected=400)
+        check(admin.request("GET","/admin/api/state")["clusters"]["affinity-pool"]["SessionAffinity"]["Cookie"]["SecurePolicy"]=="Always",
+              "insecure reviewed affinity draft rejected")
+        p=snapshot()
+        p["routes"].pop("affinity-route")
+        p["clusters"].pop("affinity-pool")
+        submit(p)
+
 def verify_reusable_adc_catalogs(base, admin, operator, reviewer, origin_port):
     """Validate actual approved catalog storage, references and materialized traffic."""
     def payload():
@@ -896,6 +951,7 @@ def acceptance(base:str,https_base:str,origin_port:int):
         "authorized restore rolls routing config back")
     verify_compound_probe_endpoint(base,admin,operator,reviewer,viewer,origin_port)
     verify_reusable_adc_catalogs(base,admin,operator,reviewer,origin_port)
+    verify_secure_affinity(base,https_base,admin,operator,reviewer,origin_port)
     check(admin.request("GET","/admin/api/mail")["enabled"] is False,"SMTP starts disabled")
     admin.request("POST","/admin/api/mail/test",{},expect=409)
     admin.request("POST","/admin/api/mail",{"enabled":True,"host":"smtp.invalid","port":587,

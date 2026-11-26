@@ -21,3 +21,5 @@ MonitorProfileRegistryTests.Run();
 RealServerCatalogTests.Run();
 
 ServiceGroupCatalogTests.Run();
+
+SecureAffinityContractTests.Run();

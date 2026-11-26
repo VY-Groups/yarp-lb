@@ -458,7 +458,40 @@ function serviceGroupPanel() {
     }).join('');
     return `<div class="card"><div class="toolbar"><div><h2>Reusable service group templates</h2><p class="subtle">Combine real servers, weights, roles and a monitor. Create an independent backend group from a template.</p></div>${currentRole === 'Viewer' ? '' : actionBtn('+ Create service group template', 'service-group-add', '')}</div><div class="tablewrap"><table><thead><tr><th>Template</th><th>Policy</th><th>Monitor</th><th>Members</th><th>Actions</th></tr></thead><tbody>${rows || '<tr><td colspan="5">No reusable service groups</td></tr>'}</tbody></table></div></div>`;
 }
-function clusters(){const rows=keys(data.clusters).map(id=>{const c=data.clusters[id];const active=!!c.HealthCheck?.Active?.Enabled,passive=!!c.HealthCheck?.Passive?.Enabled;const health=active&&passive?'<span class="chip good">Active + passive</span>':active?'<span class="chip good">Active</span>':passive?'<span class="chip warn">Passive only</span>':'<span class="chip">Disabled</span>';return `<tr><td><b>${esc(id)}</b></td><td>${esc(c.LoadBalancingPolicy||'Default')}</td><td>${keys(c.Destinations||{}).length}</td><td>${health}${c.Metadata?.[monitorSourceKey]?`<div class="subtle">Linked to ${esc(c.Metadata[monitorSourceKey])}</div>`:""}</td><td>${actionBtn('Edit','cluster-edit',id)} ${currentRole==='Viewer'?'':actionBtn('Health monitor','monitor-edit',id)+' '+actionBtn('Reuse monitor','monitor-copy',id)+' '+actionBtn('Assign profile','profile-assign',id)+(c.Metadata?.[monitorSourceKey]?' '+actionBtn('Unlink monitor','monitor-unlink',id):'')} ${actionBtn('Advanced','cluster-advanced',id)} ${actionBtn('Delete','cluster-delete',id,'danger-btn mini')}</td></tr>`}).join('');return `<div class="toolbar"><div><h2>Backend groups (clusters)</h2><p class="subtle">A group contains the servers for one application and defines traffic distribution. Use the policy guide below.</p></div>${actionBtn('+ Add cluster','cluster-add','')}</div><div class="tablewrap"><table><thead><tr><th>Cluster</th><th>Policy</th><th>Active backends</th><th>Health checks</th><th>Actions</th></tr></thead><tbody>${rows||'<tr><td colspan="5" class="empty">No clusters configured</td></tr>'}</tbody></table></div>${policyReference()}${monitorRegistryPanel()}${serviceGroupPanel()}`}
+function editSecurePersistence(id: string) {
+    if (currentRole === 'Viewer' || !Object.prototype.hasOwnProperty.call(data.clusters, id))
+        return;
+    const cluster = data.clusters[id];
+    const affinity = cluster.SessionAffinity || {};
+    const enabled = cluster.Metadata?.['ADC.Persistence.Profile'] === 'SecureCookie';
+    const parseMinutes = (value: string) => {
+        const m = /^(?:(\d+)\.)?(\d{2}):(\d{2}):00$/.exec(value);
+        return m ? String(Number(m[1] || 0) * 1440 + Number(m[2]) * 60 + Number(m[3])) : '30';
+    };
+    modal('HTTPS session persistence', 'Native encrypted affinity cookie. Requires HTTPS; not authentication. Expiry is browser-side. Select explicit failover behavior. This replaces the existing affinity configuration when applied.', [
+        { name: 'mode', label: 'Persistence mode', value: enabled ? 'SecureCookie' : 'off', options: ['off', 'SecureCookie'] },
+        { name: 'failure', label: 'When selected destination is unavailable', value: affinity.FailurePolicy === 'Return503Error' ? 'Return503Error' : 'Redistribute', options: ['Redistribute', 'Return503Error'] },
+        { name: 'minutes', label: 'Browser cookie lifetime (1–1440 minutes)', value: parseMinutes(String(affinity.Cookie?.MaxAge || '00:30:00')) },
+        { name: 'sameSite', label: 'SameSite policy', value: affinity.Cookie?.SameSite === 'Strict' ? 'Strict' : 'Lax', options: ['Lax', 'Strict'] }
+    ], v => {
+        if (!['off', 'SecureCookie'].includes(v.mode) || !['Redistribute', 'Return503Error'].includes(v.failure) || !['Lax', 'Strict'].includes(v.sameSite) || !/^\d{1,4}$/.test(v.minutes) || Number(v.minutes) < 1 || Number(v.minutes) > 1440)
+            throw Error('Invalid persistence policy or cookie lifetime.');
+        const metadata = { ...(cluster.Metadata || {}) };
+        if (v.mode === 'off') {
+            delete metadata['ADC.Persistence.Profile'];
+            cluster.SessionAffinity = { Enabled: false };
+        }
+        else {
+            const total = Number(v.minutes);
+            const age = (total === 1440 ? '1.' : '') + String(Math.floor(total % 1440 / 60)).padStart(2, '0') + ':' + String(total % 60).padStart(2, '0') + ':00';
+            metadata['ADC.Persistence.Profile'] = 'SecureCookie';
+            cluster.SessionAffinity = { Enabled: true, Policy: 'Cookie', FailurePolicy: v.failure, AffinityKeyName: '__Host-GatewayCore-' + id, Cookie: { Path: '/', HttpOnly: true, SecurePolicy: 'Always', SameSite: v.sameSite, MaxAge: age } };
+        }
+        cluster.Metadata = metadata;
+        edit();
+    });
+}
+function clusters(){const rows=keys(data.clusters).map(id=>{const c=data.clusters[id];const active=!!c.HealthCheck?.Active?.Enabled,passive=!!c.HealthCheck?.Passive?.Enabled;const health=active&&passive?'<span class="chip good">Active + passive</span>':active?'<span class="chip good">Active</span>':passive?'<span class="chip warn">Passive only</span>':'<span class="chip">Disabled</span>';return `<tr><td><b>${esc(id)}</b></td><td>${esc(c.LoadBalancingPolicy||'Default')}</td><td>${keys(c.Destinations||{}).length}</td><td>${health}${c.Metadata?.[monitorSourceKey]?`<div class="subtle">Linked to ${esc(c.Metadata[monitorSourceKey])}</div>`:""}</td><td>${actionBtn('Edit','cluster-edit',id)} ${currentRole==='Viewer'?'':actionBtn('Health monitor','monitor-edit',id)+' '+actionBtn('Reuse monitor','monitor-copy',id)+' '+actionBtn('Assign profile','profile-assign',id)+' '+actionBtn('Persistence','persistence-edit',id)+(c.Metadata?.[monitorSourceKey]?' '+actionBtn('Unlink monitor','monitor-unlink',id):'')} ${actionBtn('Advanced','cluster-advanced',id)} ${actionBtn('Delete','cluster-delete',id,'danger-btn mini')}</td></tr>`}).join('');return `<div class="toolbar"><div><h2>Backend groups (clusters)</h2><p class="subtle">A group contains the servers for one application and defines traffic distribution. Use the policy guide below.</p></div>${actionBtn('+ Add cluster','cluster-add','')}</div><div class="tablewrap"><table><thead><tr><th>Cluster</th><th>Policy</th><th>Active backends</th><th>Health checks</th><th>Actions</th></tr></thead><tbody>${rows||'<tr><td colspan="5" class="empty">No clusters configured</td></tr>'}</tbody></table></div>${policyReference()}${monitorRegistryPanel()}${serviceGroupPanel()}`}
 function validCatalogOrigin(value: string) {
     try {
         const uri = new URL(value);
@@ -1369,6 +1402,7 @@ function act(type:string,id:string){
     if (type === 'service-group-members') { editServiceGroupMember(id); return; }
     if (type === 'service-group-delete') { deleteServiceGroup(id); return; }
     if (type === 'service-group-deploy') { deployServiceGroup(id); return; }
+    if (type === 'persistence-edit') { editSecurePersistence(id); return; }
     if (type === 'profile-assign') { assignMonitorProfile(id); return; }
     if (type === 'monitor-copy') { copyActiveMonitor(id); return; }
  if(type==='invite-add'){inviteEmployee();return}

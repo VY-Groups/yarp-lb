@@ -5,6 +5,7 @@
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="Yarp.ReverseProxy" Version="2.3.0" />
+    <Compile Include="../../SecureAffinityContract.cs" Link="SecureAffinityContract.cs" />
     <Compile Include="../../ServiceGroupCatalog.cs" Link="ServiceGroupCatalog.cs" />
     <Compile Include="../../RealServerCatalog.cs" Link="RealServerCatalog.cs" />
     <Compile Include="../../MonitorProfileRegistry.cs" Link="MonitorProfileRegistry.cs" />

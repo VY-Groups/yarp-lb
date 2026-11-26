@@ -294,7 +294,8 @@ builder.Configuration.AddJsonFile(applicationConfigPath, optional: false, reload
 builder.Services.AddReverseProxy()
     .LoadFromConfig(builder.Configuration.GetSection("ReverseProxy"))
     .AddConfigFilter<DestinationAdmissionConfigFilter>()
-    .AddConfigFilter<ActiveCompoundConfigFilter>();
+    .AddConfigFilter<ActiveCompoundConfigFilter>()
+    .AddConfigFilter<SecureAffinityContract>();
 builder.Services.AddSingleton<Yarp.ReverseProxy.Forwarder.IForwarderHttpClientFactory, CompoundForwarderFactory>();
 CompoundProbingRequestFactory.Register(builder.Services);
 builder.Services.AddSingleton<DestinationAdmissionManager>();
@@ -2392,6 +2393,8 @@ IResult? ValidateChangePayload(JsonObject submitted)
         return Results.BadRequest(new { error = profileError });
     if (ServiceGroupCatalog.Validate(submitted, ReadProxy()) is { } serviceGroupError)
         return Results.BadRequest(new { error = serviceGroupError });
+    if (SecureAffinityContract.Validate(clusters) is { } affinityError)
+        return Results.BadRequest(new { error = affinityError });
     if (SharedMonitorContract.Validate(clusters) is { } monitorError)
         return Results.BadRequest(new { error = monitorError });
     foreach (var (key, clusterNode) in clusters)
