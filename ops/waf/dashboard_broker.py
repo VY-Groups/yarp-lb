@@ -17,6 +17,11 @@ MAX_REQUEST = 1024
 def dispatch(raw, approved, peer_uid, allowed_uid):
     if peer_uid != allowed_uid:
         return "refused-or-failed"
+    return dispatch_approved(raw, approved)
+
+
+def dispatch_approved(raw, approved):
+    # Only called after the transport authenticates its peer.
     try:
         request = signed._json(raw)
         if (type(request) is not dict or set(request) != {"operation", "revision", "digest"} or

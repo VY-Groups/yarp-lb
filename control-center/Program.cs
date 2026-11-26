@@ -3285,9 +3285,44 @@ if (stagedImportEnabled)
 }
 app.MapSpecialistDrafts();
 var wafBroker = WafDashboardBroker.FromEnvironment();
+var dnsBroker = WafDashboardBroker.FromEnvironment("YARP_GSLB_DASHBOARD");
+app.MapGet("/admin/api/specialist/gslb-deployment", () => Results.Ok(new {
+    configured = dnsBroker is not null,
+    scope = "Independently staged signed DNS plan; separate authority commit required"
+})).RequireAuthorization(p => p.RequireRole("Administrator"));
+app.MapPost("/admin/api/specialist/gslb-deployment", async (HttpContext ctx, WafDashboardRequest request) =>
+{
+    if (dnsBroker is null) return Results.Conflict(new { error = "Host DNS deployment broker not configured." });
+    if (!await AuditActorCurrent(ctx, true)) return Results.StatusCode(403);
+    if (externalAuditIntent is not null || oidcPolicy is not null)
+        return Results.Conflict(new { error = "Enterprise deployments require the independent operator workflow." });
+    if (request.Operation is not ("preflight" or "execute") || request.Revision is < 1 or > 9007199254740991 ||
+        request.Digest is null || !Regex.IsMatch(request.Digest, "^[A-F0-9]{64}$") ||
+        request.Confirmation != request.Operation.ToUpperInvariant() + " " + request.Digest)
+        return Results.BadRequest(new { error = "Exact signed DNS plan sequence, digest and confirmation required." });
+    if (SetupCenter.ReadFreeze(privateDir).Frozen)
+        return Results.Conflict(new { error = "Local routing change freeze is active." });
+    await Audit(Actor(ctx), "DNS_BROKER_REQUESTED", new { request.Operation, request.Revision, request.Digest });
+    if (!await AuditActorCurrent(ctx, true)) return Results.StatusCode(403);
+    try
+    {
+        var outcome = await dnsBroker.RequestAsync(request, ctx.RequestAborted);
+        await Audit(Actor(ctx), "DNS_BROKER_OUTCOME", new { request.Revision, request.Digest, outcome });
+        return outcome == "refused-or-failed"
+            ? Results.Conflict(new { error = "Broker refused or failed. Reconcile independent DNS journal." })
+            : Results.Ok(new { outcome });
+    }
+    catch (Exception ex)
+    {
+        await Audit(Actor(ctx), "DNS_BROKER_UNCONFIRMED", new { failureType = ex.GetType().Name });
+        return Results.Json(new { error = "Result unconfirmed. Do not retry until independent reconciliation." }, statusCode: 503);
+    }
+}).WithMetadata(new RequestSizeLimitAttribute(2048))
+  .RequireAuthorization(p => p.RequireRole("Administrator"))
+  .RequireRateLimiting("waf-dashboard-deployment");
 app.MapGet("/admin/api/specialist/waf-deployment", () => Results.Ok(new {
     configured = wafBroker is not null,
-    scope = "Linux host-approved signed policy; independent quorum commit required"
+    scope = "Host-approved signed policy via local or mutually authenticated operator broker; independent quorum commit required"
 })).RequireAuthorization(p => p.RequireRole("Administrator"));
 app.MapPost("/admin/api/specialist/waf-deployment", async (HttpContext ctx, WafDashboardRequest request) =>
 {

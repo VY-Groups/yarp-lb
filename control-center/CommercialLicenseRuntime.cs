@@ -220,6 +220,7 @@ internal sealed class CommercialLicenseRuntime : BackgroundService
             if (path == "/admin/api/specialist/waf-draft") return Allows("waf");
             if (path == "/admin/api/specialist/waf-deployment") return Allows("waf") && Allows("fleet") && Allows("ha");
             if (path == "/admin/api/specialist/gslb-draft") return Allows("gslb");
+            if (path == "/admin/api/specialist/gslb-deployment") return Allows("gslb") && Allows("fleet") && Allows("ha");
             if (path.StartsWithSegments("/admin/api/audit")) return Allows("audit");
             if (path.StartsWithSegments("/admin/api/directory")) return Allows("enterprise-sso");
             if (path.StartsWithSegments("/admin/api/metrics") ||

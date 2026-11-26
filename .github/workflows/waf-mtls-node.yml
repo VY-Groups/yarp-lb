@@ -8,6 +8,9 @@ on:
       - "ops/waf/two_node_transaction.py"
       - "ops/waf/waf_fleet_rollout.py"
       - "ops/waf/dashboard_broker.py"
+      - "ops/waf/specialist_tls_broker.py"
+      - "ops/waf/test_specialist_tls_broker.py"
+      - "ops/acceptance/gslb_signed_rollout.py"
       - "ops/waf/test_dashboard_broker.py"
       - "ops/waf/verify_signed_policy.py"
       - "ops/waf/test_verify_signed_policy.py"
@@ -22,6 +25,9 @@ on:
       - "ops/waf/two_node_transaction.py"
       - "ops/waf/waf_fleet_rollout.py"
       - "ops/waf/dashboard_broker.py"
+      - "ops/waf/specialist_tls_broker.py"
+      - "ops/waf/test_specialist_tls_broker.py"
+      - "ops/acceptance/gslb_signed_rollout.py"
       - "ops/waf/test_dashboard_broker.py"
       - "ops/waf/verify_signed_policy.py"
       - "ops/waf/test_verify_signed_policy.py"
@@ -47,3 +53,4 @@ jobs:
           python3 -m unittest discover -s ops/waf -p test_verify_signed_policy.py -v
           python3 -m unittest discover -s ops/waf -p test_waf_fleet_rollout.py -v
           python3 -m unittest discover -s ops/waf -p test_dashboard_broker.py -v
+          python3 -m unittest discover -s ops/waf -p test_specialist_tls_broker.py -v
