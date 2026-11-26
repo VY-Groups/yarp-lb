@@ -174,6 +174,8 @@ def browser_enrollment(appdir, dll, root, mailport, originport, mailbox):
             expect(page.locator("#first-run-screen")).to_be_visible()
             expect(page.locator("#auth-screen")).to_be_hidden()
             expect(title).to_have_text("Authorize this installation")
+            expect(page.locator("#first-run-screen [data-organization-name]")).to_have_text("GatewayCore")
+            expect(page.locator("#first-run-screen [data-organization-name]")).to_be_visible()
             page.screenshot(path=str(output/"01-authorize.png"),full_page=True)
             field("setupCode").fill("0"*64)
             submit.click()
