@@ -216,6 +216,11 @@ test('browser: bootstrap, navigation, onboarding, websites, route edit, users an
     await page.locator('[data-action="monitor-edit"][data-id="esign-browser-public-pool"]').click();
     await page.locator('#f-interval').fill('8');
     await page.locator('#f-timeout').fill('3');
+    await page.locator('#f-compound').selectOption('AND');
+    await page.locator('#f-secondary').fill('//invalid.example/');
+    await page.locator('#confirm').click();
+    await expect(page.locator('#modal')).toBeVisible();
+    await page.locator('#f-secondary').fill('/health/dependencies');
     await page.locator('#confirm').click();
     await expect(page.locator('#modal')).toBeHidden();
     await page.locator('[data-action="monitor-edit"][data-id="esign-browser-private-pool"]').click();
@@ -225,7 +230,14 @@ test('browser: bootstrap, navigation, onboarding, websites, route edit, users an
     await page.locator('[data-action="monitor-edit"][data-id="esign-browser-private-pool"]').click();
     await expect(page.locator('#f-interval')).toHaveValue('8');
     await expect(page.locator('#f-timeout')).toHaveValue('3');
-    await page.locator('#editor button[value="cancel"]').click();
+    await expect(page.locator('#f-compound')).toHaveValue('AND');
+    await expect(page.locator('#f-secondary')).toHaveValue('/health/dependencies');
+    await page.locator('#f-compound').selectOption('off');
+    await page.locator('#confirm').click();
+    await page.locator('[data-action="monitor-edit"][data-id="esign-browser-public-pool"]').click();
+    await expect(page.locator('#f-compound')).toHaveValue('AND');
+    await page.locator('#f-compound').selectOption('off');
+    await page.locator('#confirm').click();
     await expect(page.locator('#content')).toContainText('Active');
     await openNav('backends');
     await expect(page.locator('#content')).toContainText('A host match separates routes');

@@ -6,7 +6,7 @@ acceptance or changes the physical acceptance requirements.
 
 ## Configure a service group
 
-Use Advanced cluster JSON in the Control Center. Preserve existing destinations,
+Use **Backend groups → Health monitor** in the Control Center. Choose off, AND or OR under Active compound mode; enter the distinct secondary readiness path. The guided editor selects HealthyAndUnknown for compound mode, rejects incompatible backends, and propagates compound settings across linked groups in the draft. Unlink a group to edit its monitor independently. Advanced cluster JSON is also available. Preserve existing destinations,
 load-balancing policy, passive checks and unrelated metadata. Add the following
 properties to the appropriate existing objects:
 
@@ -39,8 +39,7 @@ Preserve the existing backend TLS verification and client certificate settings.
 The current feature uses no additional requests on ordinary customer traffic.
 
 Submit the entire draft with a justification. A different administrator reviews
-and approves it. For a shared monitor, update matching metadata for every linked
-group; the dedicated compound editor is not part of this PR.
+and approves it. For a shared monitor, the guided source editor updates matching metadata for every linked group in the draft. Advanced JSON edits require matching metadata for all linked groups.
 
 ## Verify
 
