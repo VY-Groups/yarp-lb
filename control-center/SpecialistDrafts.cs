@@ -56,7 +56,7 @@ public static class SpecialistDrafts
           .RequireAuthorization(p => p.RequireRole("Administrator", "Operator"));
         app.MapPost("/admin/api/specialist/gslb-draft", (GslbDraftInput input) =>
         {
-            try { return Candidate(Gslb(input), "gslb-zone-unsigned.json"); }
+            try { return ValidatedGslbCandidate(input); }
             catch (ArgumentException ex) { return Bad(ex); }
         }).WithMetadata(new RequestSizeLimitAttribute(65536))
           .RequireAuthorization(p => p.RequireRole("Administrator", "Operator"));
@@ -194,7 +194,16 @@ public static class SpecialistDrafts
         }
         if (cuts.Count > 0) zone["Delegations"] = new JsonArray(cuts.Values.Select(v => (JsonNode?)v).ToArray());
     }
-    internal static JsonObject Gslb(GslbDraftInput x)
+    // Untrusted fields may reject draft construction, but cannot choose
+    // whether a constructed draft is checked by the signed-agent schema.
+    private static IResult ValidatedGslbCandidate(GslbDraftInput input)
+    {
+        var config = BuildGslbDraft(input);
+        if (!EngineConfigContract.Validate("gslb", config, allowPublicBind: false))
+            throw new ArgumentException("The existing signed agent staging schema rejected the candidate; check addresses and values.");
+        return Candidate(config, "gslb-zone-unsigned.json");
+    }
+    internal static JsonObject BuildGslbDraft(GslbDraftInput x)
     {
         // Initial loopback configuration; key paths are references only.
         // This process never reads or provisions DNS signing keys.
@@ -232,8 +241,6 @@ public static class SpecialistDrafts
         // authority fencing, DNSSEC and signed activation separately.
         var config = new JsonObject { ["AllowNonLoopbackListeners"] = false, ["ListenHost"] = "127.0.0.1",
             ["ListenPort"] = 15353, ["ProbeIntervalSeconds"] = x.ProbeInterval, ["Zones"] = new JsonArray(zone) };
-        if (!EngineConfigContract.Validate("gslb", config, allowPublicBind: false))
-            throw new ArgumentException("The existing signed agent staging schema rejected the candidate; check addresses and values.");
         return config;
     }
 }
