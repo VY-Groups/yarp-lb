@@ -586,6 +586,22 @@ public sealed class AcmeRenewalBackgroundService(AcmeRenewalSettings settings,
     IAcmeDns01Publisher? dns01Publisher = null) : BackgroundService
 {
     private readonly TimeProvider clock = timeProvider ?? TimeProvider.System;
+    private readonly SemaphoreSlim scheduledOrManual = new(1, 1);
+
+    // A manual request uses the exact same configured issuer, challenge and
+    // due-date policy as the scheduler. It cannot force an early CA order.
+    public async Task<AcmeRenewalResult?> CheckDueAsync(CancellationToken token)
+    {
+        if (!await scheduledOrManual.WaitAsync(0, token)) return null;
+        try
+        {
+            return await coordinator.RenewIfDueAsync(settings.DirectoryUrl, settings.DnsName,
+                settings.ContactEmail, publicHttp01Enabled: !settings.EnableDns01Renewal,
+                settings.PfxPath, settings.PfxPasswordFile, TimeSpan.FromDays(settings.RenewalWindowDays),
+                token, dns01Publisher);
+        }
+        finally { scheduledOrManual.Release(); }
+    }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -597,12 +613,9 @@ public sealed class AcmeRenewalBackgroundService(AcmeRenewalSettings settings,
             TimeSpan nextDelay;
             try
             {
-                await coordinator.RenewIfDueAsync(settings.DirectoryUrl, settings.DnsName, settings.ContactEmail,
-                    publicHttp01Enabled: !settings.EnableDns01Renewal, settings.PfxPath,
-                    settings.PfxPasswordFile, TimeSpan.FromDays(settings.RenewalWindowDays),
-                    stoppingToken, dns01Publisher);
+                var outcome = await CheckDueAsync(stoppingToken);
                 backoff = TimeSpan.FromMinutes(1);
-                nextDelay = TimeSpan.FromHours(6);
+                nextDelay = outcome is null ? TimeSpan.FromMinutes(1) : TimeSpan.FromHours(6);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { break; }
             catch (Exception ex)

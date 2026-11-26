@@ -361,12 +361,45 @@ async function certificatePage() {
         const rows = certs.map(c => `<tr><td><b>${esc(c.subject)}</b><div class="subtle">${esc(c.issuer)}</div></td><td class="mono">${esc(c.thumbprint)}</td><td>${esc(c.notAfterUtc)}</td><td><span class="chip ${c.expiryState === 'valid-date-only' ? '' : 'warn'}">${esc(c.expiryState)}</span></td><td>${c.privateKeyAvailable ? 'Reported present' : 'Not reported'} · ${c.serverAuthenticationEku ? 'Server EKU allowed' : 'Server EKU not allowed'}</td></tr>`).join('');
         const listeners = endpoints.map(e => `<tr><td>${esc(e.name)}</td><td>${esc(e.scheme)}</td><td>${e.certificateReferenceConfigured ? 'Reference configured' : 'No reference reported'}</td></tr>`).join('');
         $('content').innerHTML = `<div class="card"><h2>Certificates &amp; TLS</h2><p>Inventory for ${esc(x.gateway)} · ${esc(x.timestampUtc)} · store ${esc(x.storeState)}</p>${actionBtn('Refresh inventory', 'switch', 'tls', 'ghost')}<div class="healthbanner">Read-only local store and configured endpoint metadata. Valid dates and a reported private key do not establish certificate trust, SAN match, active selection or accessibility to the service.</div></div><div class="card card-spaced"><h3>Configured endpoints</h3><div class="tablewrap"><table><thead><tr><th>Listener</th><th>Scheme</th><th>Certificate reference</th></tr></thead><tbody>${listeners || '<tr><td colspan="3">No endpoint metadata reported.</td></tr>'}</tbody></table></div></div><div class="card card-spaced"><h3>Local certificate inventory</h3><div class="tablewrap"><table><thead><tr><th>Subject / issuer</th><th>Thumbprint</th><th>Not after (UTC)</th><th>Date status</th><th>Key / purpose</th></tr></thead><tbody>${rows || '<tr><td colspan="5">No certificates reported; verify the configured file/store separately.</td></tr>'}</tbody></table></div></div><div class="card card-spaced"><h3>ACME lifecycle availability</h3><p>Automatic renewal service: ${x.acmeRenewalConfigured === true ? 'Configured' : 'Not configured'}. Historical certificate revocation service: ${x.acmeRevocationConfigured === true ? 'Configured' : 'Not configured'}.</p><p class="subtle">${esc(x.acmeScope || 'Service capability is not reported; do not infer readiness.')}</p><h3>Certificate change workflow</h3><ol class="specialist-steps"><li>Identify traffic, management or backend client certificate usage and approved CA.</li><li>Provision the trusted chain and protected key via the documented host configuration. Never upload keys to the dashboard.</li><li>Review SAN, expiry, EKU, listener isolation, file/store ACL and renewal or rollback procedure.</li><li>Apply the approved change and test actual TLS and mTLS, then verify live selection and monitor expiration.</li></ol><p class="subtle">Traffic certificate import, ACME configuration and trust-store changes use the approved host runbook. Backend client identity can be added to a reviewed configuration draft below.</p>${actionBtn('Configure backend mTLS', 'backend-cert', '', 'primary')}</div>` + (x.acmeRevocationConfigured === true && currentRole === 'Administrator' ? '<div class="card card-spaced"><h3>Revoke historical ACME certificate</h3><p>Irreversible CA operation. Use only the public DER certificate (base64 without PEM headers), not a PFX or key. The server rejects the currently served certificate.</p><form id="acme-revoke-form" class="auth-form"><label>Public DER base64<textarea name="certificateDerBase64" rows="4" maxlength="30000" required autocomplete="off" spellcheck="false"></textarea></label><label>SHA-1 certificate thumbprint (40 uppercase hex)<input name="thumbprint" required maxlength="40" pattern="[A-F0-9]{40}" autocomplete="off"></label><label>Reason<select name="reason"><option value="Unspecified">Unspecified</option><option value="KeyCompromise">Key compromise</option><option value="Superseded">Superseded</option><option value="CessationOfOperation">Cessation of operation</option></select></label><label>Type REVOKE followed by a space and the exact thumbprint<input name="confirmation" required maxlength="47" autocomplete="off"></label><button type="submit" class="danger-btn">Request revocation</button></form><p id="acme-revoke-status" role="status"></p></div>' : '');
+        if (x.acmeRenewalConfigured === true && currentRole === 'Administrator') {
+            $('content').insertAdjacentHTML('beforeend', '<div class="card card-spaced"><h3>Check and renew configured ACME certificate</h3><p>Uses the preconfigured CA, DNS name and protected traffic certificate. Renews only when due; never forces early issuance. A check can take several minutes.</p><button id="acme-renew-due" type="button" class="primary">Check renewal now</button><p id="acme-renew-status" role="status"></p></div>');
+            wireAcmeRenewal();
+        }
         wireAcmeRevocation();
     }
     catch (e) {
         if (view === 'tls')
             $('content').innerHTML = `<div class="card"><h2>Certificate inventory unavailable</h2><p>${esc(String(e))}</p><p>No certificate readiness is claimed.</p></div>`;
     }
+}
+function wireAcmeRenewal() {
+    const button = $('acme-renew-due') as HTMLButtonElement;
+    const status = $('acme-renew-status');
+    const generation = authGeneration;
+    button.onclick = async () => {
+        if (button.disabled || !confirm('Check the configured traffic certificate and renew it only if due?'))
+            return;
+        button.disabled = true;
+        status.textContent = 'Checking configured certificate renewal…';
+        try {
+            const outcome = await api('/admin/api/tls/acme/renew-due', 'POST', {});
+            if (generation !== authGeneration || view !== 'tls' || !button.isConnected)
+                return;
+            if (outcome.renewed === true && outcome.reason === 'renewed-and-atomically-installed')
+                status.textContent = 'Renewal and listener activation reported; expiry: ' + String(outcome.notAfter || 'unknown') + '. Verify independent TLS handshake.';
+            else if (outcome.renewed === false && outcome.reason === 'certificate-is-outside-renewal-window')
+                status.textContent = 'Not due. Current certificate expiry: ' + String(outcome.notAfter || 'unknown');
+            else
+                throw Error('Unexpected renewal outcome; verify live certificate before retrying.');
+        }
+        catch (e) {
+            if (generation === authGeneration && view === 'tls' && button.isConnected)
+                status.textContent = String(e);
+        }
+        finally {
+            button.disabled = false;
+        }
+    };
 }
 function wireAcmeRevocation() {
     const form = document.getElementById('acme-revoke-form') as HTMLFormElement | null;

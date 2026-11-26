@@ -240,10 +240,12 @@ if (acmeRenewalSettings is { } renewalSettings)
         services.GetRequiredService<IAcmeCertificateIssuer>(), renewalSettings.DirectoryUrl,
         renewalSettings.DnsName, renewalSettings.ContactEmail, activeListeners.IsTrafficCertificateActive,
         services.GetRequiredService<AcmeCertificateLifecycleGate>()));
-    builder.Services.AddHostedService(services => new AcmeRenewalBackgroundService(renewalSettings,
+    builder.Services.AddSingleton<AcmeRenewalBackgroundService>(services => new AcmeRenewalBackgroundService(renewalSettings,
         services.GetRequiredService<AcmeRenewalCoordinator>(), null,
         services.GetRequiredService<ILogger<AcmeRenewalBackgroundService>>(),
         dns01Publisher));
+    builder.Services.AddHostedService<AcmeRenewalBackgroundService>(services =>
+        services.GetRequiredService<AcmeRenewalBackgroundService>());
 }
 // Keep executable/static assets read-only under /opt on hardened Linux.
 // Management may atomically update ONLY a private state-directory config.
@@ -352,6 +354,7 @@ builder.Services.AddRateLimiter(options =>
     options.AddFixedWindowLimiter("mailtest", cfg => { cfg.PermitLimit = 3; cfg.Window = TimeSpan.FromMinutes(5); cfg.QueueLimit = 0; });
     options.AddFixedWindowLimiter("ldaptest", cfg => { cfg.PermitLimit = 4; cfg.Window = TimeSpan.FromMinutes(5); cfg.QueueLimit = 0; });
     options.AddFixedWindowLimiter("acme-revoke", cfg => { cfg.PermitLimit = 2; cfg.Window = TimeSpan.FromMinutes(5); cfg.QueueLimit = 0; });
+    options.AddFixedWindowLimiter("acme-renew-due", cfg => { cfg.PermitLimit = 1; cfg.Window = TimeSpan.FromMinutes(10); cfg.QueueLimit = 0; });
     options.AddFixedWindowLimiter("employee-invite-issue", cfg =>
     { cfg.PermitLimit = 8; cfg.Window = TimeSpan.FromMinutes(5); cfg.QueueLimit = 0; });
     options.AddFixedWindowLimiter("employee-invite-redeem", cfg =>
@@ -2146,6 +2149,31 @@ app.MapHttp01Challenge(acmeHttp01PublicEntrypointEnabled,
     ctx => isolatedListeners?.OnTrafficHttp(ctx) == true);
 if (acmeRenewalSettings is { } revokeSettings)
 {
+    app.MapPost("/admin/api/tls/acme/renew-due", async (HttpContext ctx, AcmeRenewalBackgroundService worker) =>
+    {
+        if (!await AuditActorCurrent(ctx, administratorOnly: true))
+            return Results.StatusCode(403);
+        await Audit(Actor(ctx), "ACME_RENEWAL_CHECK_REQUESTED", new { dnsName = revokeSettings.DnsName });
+        if (!await AuditActorCurrent(ctx, administratorOnly: true))
+            return Results.StatusCode(403);
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(ctx.RequestAborted,
+            app.Lifetime.ApplicationStopping);
+        linked.CancelAfter(TimeSpan.FromMinutes(11));
+        try
+        {
+            var outcome = await worker.CheckDueAsync(linked.Token);
+            if (outcome is null) return Results.Conflict(new { error = "A scheduled or manual certificate check is already in progress." });
+            await Audit(Actor(ctx), "ACME_RENEWAL_CHECK_COMPLETED", new { outcome.Renewed, outcome.NotAfter, outcome.Reason });
+            return Results.Ok(outcome);
+        }
+        catch (Exception ex)
+        {
+            await Audit(Actor(ctx), "ACME_RENEWAL_CHECK_FAILED", new { failureType = ex.GetType().Name });
+            return Results.Json(new { error = "Renewal was not confirmed. Inspect certificate status and audit before retrying." }, statusCode: 503);
+        }
+    }).RequireAuthorization(policy => policy.RequireRole("Administrator"))
+      .RequireRateLimiting("acme-renew-due");
+
     app.MapPost("/admin/api/tls/acme/revoke", async (HttpContext ctx,
         AcmeRevocationCoordinator coordinator) =>
     {

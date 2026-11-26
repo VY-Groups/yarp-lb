@@ -265,6 +265,7 @@ test('browser: bootstrap, navigation, onboarding, websites, route edit, users an
     expect(inventory.body.acmeRenewalConfigured).toBe(false);
     expect(inventory.body.acmeRevocationConfigured).toBe(false);
     await expect(page.locator('#acme-revoke-form')).toHaveCount(0);
+    await expect(page.locator('#acme-renew-due')).toHaveCount(0);
     await expect(page.locator('#content')).toContainText('Automatic renewal service: Not configured');
     await expect(page.locator('#context-help-text')).toContainText('certificate');
     await openNav('waf');
