@@ -1824,7 +1824,7 @@ function act(type, id) {
     if (type === 'ha-policy-export') {
         const value = (field) => $(field).value;
         const proposal = { version: 1, scope: value('ha-scope'), preferredPin: value('ha-preferred').trim().toUpperCase(), otherPin: value('ha-other').trim().toUpperCase(), failbackEnabled: $('ha-failback').checked, rearmEnabled: $('ha-rearm').checked, pollSeconds: Number(value('ha-poll')), failureSamples: Number(value('ha-samples')), failureSeconds: Number(value('ha-failure')), failbackEligibleSeconds: Number(value('ha-eligible')), minimumOwnerSeconds: Number(value('ha-owner')) };
-        void api('/admin/api/network/virtual-services/ha-policy', 'POST', proposal).then(async reply => {
+        void api('/admin/api/network/virtual-services/ha-policy', 'POST', proposal).then(async (reply) => {
             const policy = await verifiedHaPolicyExport(reply, proposal);
             const url = URL.createObjectURL(new Blob([policy], { type: 'application/json' }));
             const link = document.createElement('a');

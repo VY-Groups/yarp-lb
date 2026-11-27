@@ -133,13 +133,16 @@ def accept_live_policy(executable,scope,fleet,vip,reader,policy,expected_owner):
     openssl("req","-new","-x509","-nodes","-newkey","rsa:3072","-sha256","-days","3",
         "-subj","/CN=Disposable VIP policy CA","-addext","basicConstraints=critical,CA:TRUE",
         "-addext","keyUsage=keyCertSign,cRLSign","-keyout",ca_key,"-out",ca_crt)
+    # Hosted role inspection deliberately requires owner-private mode even
+    # for referenced CA files. Never weaken the production ACL contract.
+    ca_key.chmod(0o600);ca_crt.chmod(0o600)
     def leaf(label,san,usage):
         k=certdir/(label+".key");csr=certdir/(label+".csr");crt=certdir/(label+".crt")
         openssl("req","-new","-nodes","-newkey","rsa:2048","-subj","/CN="+label,"-keyout",k,"-out",csr)
         ext=put(certdir,label+".ext","subjectAltName="+san+"\nextendedKeyUsage="+usage+"\n")
         openssl("x509","-req","-in",csr,"-CA",ca_crt,"-CAkey",ca_key,"-CAcreateserial",
                 "-days","2","-sha256","-extfile",ext,"-out",crt)
-        k.chmod(0o600);return k,crt
+        k.chmod(0o600);crt.chmod(0o600);return k,crt
     sk,sc=leaf("management","IP:127.0.0.1","serverAuth")
     tk,tc=leaf("traffic","IP:"+vip,"serverAuth")
     ck,cc=leaf("operator","DNS:vip-ci-operator","clientAuth")
@@ -203,7 +206,15 @@ def accept_live_policy(executable,scope,fleet,vip,reader,policy,expected_owner):
             "readerConfig":str(reader),"supervisorConfig":str(supervisor),"server":{"listenIp":"127.0.0.1",
             "port":free_port(),"pfx":server_pfx,"passwordFile":server_pass,"clientCaFile":str(ca_crt),"clientPin":pin(cc)}})
         inspected=subprocess.run([str(executable),"--vip-node-agent",str(agent),"inspect"],
-            env=env,capture_output=True,text=True,timeout=60,check=True)
+            env=env,capture_output=True,text=True,timeout=60)
+        if inspected.returncode:
+            # Only shipping fixed-stage/type diagnostics; never print config,
+            # exception messages, certificate data or arbitrary child output.
+            import re
+            for line in inspected.stderr.splitlines():
+                if re.fullmatch(r"VIP node agent refused at [a-z ]+: [A-Za-z0-9_]+",line):
+                    print(line,flush=True)
+            raise AssertionError("Node offline preflight exit "+str(inspected.returncode))
         preflight=json.loads(inspected.stdout)
         if (not preflight["validated"] or preflight["mutated"] or preflight["networkVerified"] or
             preflight["serviceVerified"] or list(journal_dir.iterdir()) or Path(str(supervisor)+".lock").exists()):

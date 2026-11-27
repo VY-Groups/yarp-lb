@@ -26,17 +26,22 @@ try{
   $created.Add($plan.Name)
   # Fail only the first verification read after actual SCM creation.
   # Rollback still uses the real SCM record and actual Delete method.
-  $script:injectVipRegistrationFailure=$true
-  function Get-CimInstance {
+  # A mutable captured object is shared across the caller and child
+  # script scopes; $script: variables resolve to different script scopes.
+  $injection=@{Name=$plan.Name;Reads=0;Triggered=$false}
+  $hook={
    param([Parameter(Position=0)][string]$ClassName,[string]$Filter)
    $record=CimCmdlets\Get-CimInstance -ClassName $ClassName -Filter $Filter
-   if($script:injectVipRegistrationFailure -and $null -ne $record -and
-      $record.Name -eq $plan.Name){
-    $script:injectVipRegistrationFailure=$false
-    throw 'Injected post-create verification read failure'
+   if($null -ne $record -and $record.Name -eq $injection.Name){
+    $injection.Reads++
+    if(-not $injection.Triggered){
+     $injection.Triggered=$true
+     throw 'Injected post-create verification read failure'
+    }
    }
    return $record
-  }
+  }.GetNewClosure()
+  Set-Item -Path Function:\Get-CimInstance -Value $hook
   $rolledBack=$false
   try{
    try{& "$PSScriptRoot/Install-VipService.ps1" @params -Apply | Out-Null}
@@ -44,11 +49,11 @@ try{
     if($_.Exception.Message -notmatch 'newly created service rolled back'){throw}
     $rolledBack=$true
    }
-   if($script:injectVipRegistrationFailure -or -not $rolledBack){throw 'Failure injection did not exercise rollback'}
+   if(-not $injection.Triggered -or $injection.Reads -lt 2 -or -not $rolledBack){throw 'Failure injection did not exercise real verification and rollback reads'}
   }
   finally{
    Remove-Item Function:\Get-CimInstance
-   Remove-Variable injectVipRegistrationFailure -Scope Script
+   Remove-Variable injection,hook
   }
   if(Get-Service -Name $plan.Name -ErrorAction SilentlyContinue){throw 'Failed registration left an SCM service'}
   $gateway=Get-Service -Name GatewayCoreYarp
