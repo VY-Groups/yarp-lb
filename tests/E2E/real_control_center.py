@@ -616,6 +616,90 @@ def verify_max_connections_per_server(base:str,admin:Client,reviewer:Client):
         time.sleep(.1)
     check(constrained==1,"MaxConnectionsPerServer=1 limits actual concurrent upstream connections to one")
 
+def verify_real_server_catalog(base, admin, operator, reviewer, viewer, origin_port):
+    """Exercise the shipping catalog API, approval, real traffic and rollback."""
+    def snapshot():
+        state=admin.request("GET","/admin/api/state")
+        return {key:state[key] for key in ("routes","clusters","disabled","revision")}
+    def approve(p,expected=200):
+        item=operator.request("POST","/admin/api/change-requests",
+            {"reason":"Disposable real-server catalog acceptance","payload":p})
+        reviewer.request("POST",f"/admin/api/change-requests/{item['id']}/decision",
+            {"decision":"approve","reason":"Independent catalog fixture review"},expect=expected)
+        return item
+    state=admin.request("GET","/admin/api/state")
+    initial=json.loads(json.dumps(state["realServers"]))
+    address=f"http://127.0.0.1:{origin_port}/"
+    template={"Address":address,"Description":"Disposable real origin"}
+    p=snapshot()
+    p["realServers"]={**initial,"real-server-e2e":template}
+    p["clusters"]["real-server-e2e-pool"]={"LoadBalancingPolicy":"RoundRobin",
+        "Destinations":{"real-server-e2e":{"Address":address,
+            "Metadata":{"Weight":"7","TrafficRole":"primary"}}}}
+    p["routes"]["real-server-e2e-route"]={"ClusterId":"real-server-e2e-pool",
+        "Match":{"Path":"/real-server-e2e/{**catch-all}"}}
+    plan={"schemaVersion":1,"payload":p}
+    viewer.request("POST","/admin/api/gitops/plan",plan,expect=403)
+    operator.request("POST","/admin/api/gitops/plan",plan,csrf=False,expect=403)
+    diff=operator.request("POST","/admin/api/gitops/plan",plan)
+    check(diff["realServers"]["added"]==["real-server-e2e"],"GitOps reports real-server addition")
+    check(admin.request("GET","/admin/api/state")["realServers"]==initial,"catalog plan is read-only")
+    item=operator.request("POST","/admin/api/change-requests",
+        {"reason":"Create reusable real-server and assigned snapshot","payload":p})
+    check(admin.request("GET","/admin/api/state")["realServers"]==initial,
+          "unapproved real-server draft does not persist")
+    operator.request("POST",f"/admin/api/change-requests/{item['id']}/decision",
+        {"decision":"approve","reason":"Unauthorized own approval attempt"},expect=403)
+    reviewer.request("POST",f"/admin/api/change-requests/{item['id']}/decision",
+        {"decision":"approve","reason":"Independent real-server creation review"})
+    saved=admin.request("GET","/admin/api/state")
+    check(saved["realServers"]["real-server-e2e"]==template and saved["revision"]!=p["revision"],
+          "approved real-server catalog persists and advances revision")
+    eventually(Client(base),"/real-server-e2e/ready","e2e-origin:/real-server-e2e/ready",seconds=20)
+    operator.request("POST","/admin/api/gitops/plan",plan,expect=409)
+
+    p=snapshot()
+    p["realServers"]={**saved["realServers"],"real-server-e2e":{
+        "Address":address+"template-only/","Description":"Changed independent template"}}
+    before_update=set(admin.request("GET","/admin/api/backups"))
+    approve(p)
+    after_update=admin.request("GET","/admin/api/state")
+    check(after_update["realServers"]["real-server-e2e"]["Address"]==address+"template-only/"
+          and after_update["clusters"]["real-server-e2e-pool"]["Destinations"]["real-server-e2e"]["Address"]==address,
+          "template edit persists without rewriting materialized destination")
+    eventually(Client(base),"/real-server-e2e/ready","e2e-origin:/real-server-e2e/ready",seconds=20)
+    created=[name for name in admin.request("GET","/admin/api/backups") if name not in before_update]
+    check(len(created)==1,"catalog update produced one rollback backup")
+    admin.request("POST","/admin/api/restore/"+created[0],{})
+    check(admin.request("GET","/admin/api/state")["realServers"]["real-server-e2e"]==template,
+          "authorized rollback restores catalog contents")
+
+    p=snapshot()
+    p["realServers"]={**initial,"real-server-e2e":{"Address":"https://user:secret@invalid.example/",
+        "Description":"invalid fixture"}}
+    operator.request("POST","/admin/api/gitops/plan",{"schemaVersion":1,"payload":p},expect=400)
+    approve(p,expected=400)
+    check(admin.request("GET","/admin/api/state")["realServers"]["real-server-e2e"]==template,
+          "invalid catalog approval does not change storage")
+
+    p=snapshot()
+    p["realServers"]=initial
+    approve(p)
+    state=admin.request("GET","/admin/api/state")
+    check(state["realServers"]==initial and "real-server-e2e" in state["clusters"]["real-server-e2e-pool"]["Destinations"],
+          "approved catalog removal preserves assigned destination snapshot")
+    eventually(Client(base),"/real-server-e2e/ready","e2e-origin:/real-server-e2e/ready",seconds=20)
+
+    p=snapshot()
+    p["realServers"]={**initial,"real-server-e2e":template}
+    approve(p)
+    legacy=snapshot()
+    legacy["routes"].pop("real-server-e2e-route")
+    legacy["clusters"].pop("real-server-e2e-pool")
+    approve(legacy)
+    check(admin.request("GET","/admin/api/state")["realServers"]["real-server-e2e"]==template,
+          "legacy draft omitting catalog preserves persisted template")
+
 def verify_secure_affinity(base, https_base, admin, operator, reviewer, origin_port):
     """Actual TLS proxy response and tampered-cookie failure-policy checks."""
     import httpx
@@ -688,7 +772,7 @@ def verify_reusable_adc_catalogs(base, admin, operator, reviewer, origin_port):
     active={"Enabled":True,"Path":"/compound-ok","Interval":"00:00:05","Timeout":"00:00:02","Policy":"RiseFall"}
     metadata={"RiseFall.Rise":"2","RiseFall.Fall":"3","ConsecutiveFailuresHealthPolicy.Threshold":"3"}
     p["monitorProfiles"]={"catalog-health":{"Active":active,"Metadata":metadata}}
-    p["realServers"]={"catalog-origin":{"Address":addr,"Description":"Disposable origin"}}
+    p["realServers"]={**admin.request("GET","/admin/api/state")["realServers"],"catalog-origin":{"Address":addr,"Description":"Disposable origin"}}
     p["serviceGroups"]={"catalog-template":{"Policy":"RoundRobin","MonitorProfile":"catalog-health",
         "Members":{"catalog-origin":{"Weight":"7","TrafficRole":"primary"}}}}
     p["clusters"]["catalog-pool"]={"LoadBalancingPolicy":"RoundRobin",
@@ -701,7 +785,7 @@ def verify_reusable_adc_catalogs(base, admin, operator, reviewer, origin_port):
           and state["serviceGroups"]==p["serviceGroups"],"approved ADC catalog state round trip")
     eventually(Client(base),"/catalog-test/ready","e2e-origin:/catalog-test/ready",seconds=20)
     invalid=payload()
-    invalid["realServers"]={}
+    invalid["realServers"]={key:value for key,value in state["realServers"].items() if key!="catalog-origin"}
     approve(invalid,expected=400)
     check("catalog-origin" in admin.request("GET","/admin/api/state")["realServers"],
           "referenced server deletion rejected without changing storage")
@@ -952,6 +1036,7 @@ def acceptance(base:str,https_base:str,origin_port:int):
     check("e2e" not in admin.request("GET","/admin/api/state")["routes"],
         "authorized restore rolls routing config back")
     verify_compound_probe_endpoint(base,admin,operator,reviewer,viewer,origin_port)
+    verify_real_server_catalog(base,admin,operator,reviewer,viewer,origin_port)
     verify_reusable_adc_catalogs(base,admin,operator,reviewer,origin_port)
     verify_secure_affinity(base,https_base,admin,operator,reviewer,origin_port)
     check(admin.request("GET","/admin/api/mail")["enabled"] is False,"SMTP starts disabled")
@@ -1027,6 +1112,8 @@ def main():
             catalog=admin.request("GET","/admin/api/state")
             check("catalog-template" in catalog["serviceGroups"] and "catalog-origin" in catalog["realServers"]
                   and "catalog-health" in catalog["monitorProfiles"],"approved ADC catalogs survive process restart")
+            check(catalog["realServers"]["real-server-e2e"]=={"Address":f"http://127.0.0.1:{origin}/",
+                "Description":"Disposable real origin"},"approved real-server catalog survives real process restart")
             # Exercise the actual shipping CLI transport against a real trusted
             # HTTPS gateway after restart. No fake cookies or TLS bypass.
             import importlib.util
