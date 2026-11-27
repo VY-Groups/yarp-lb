@@ -221,13 +221,21 @@ try:
     if not WIN: print(run("systemctl","show",CONTROLLER+".service","-p","ExecStart","-p","User").stdout,flush=True)
     start(CONTROLLER);wait(controller_ready,"Installed writer did not open durable journal")
     if WIN:
-        result=run("pwsh","-NoProfile","-File",HERE/"Test-VipRoleIsolation.ps1","-ProviderDirectory",pdir,"-ControllerDirectory",cdir,"-ProviderKey",secret,"-ControllerKey",ckey,check=False)
+        probe_dir=bindir/"role-probe"
+        build=run("dotnet","build",HERE/"VipRoleProbe"/"VipRoleProbe.csproj","-c","Release","-o",probe_dir,check=False)
+        if build.returncode:
+            print(build.stdout[-6000:],build.stderr[-6000:],flush=True)
+            raise AssertionError("CI role probe compilation failed")
+        for identity in (pa,wa): run("icacls",probe_dir,"/grant:r",identity+":(OI)(CI)RX","/T")
+        result=run("pwsh","-NoProfile","-File",HERE/"Test-VipRoleIsolation.ps1","-ProviderDirectory",pdir,"-ControllerDirectory",cdir,"-ProviderKey",secret,"-ControllerKey",ckey,"-ProbeExe",probe_dir/"VipRoleProbe.exe",check=False)
         print(result.stdout,flush=True)
         if result.returncode!=0:
             # Disposable synthetic fixture only; print the precise bounded
             # PowerShell failure rather than masking it in CalledProcessError.
             print(result.stderr[-6000:],flush=True)
             raise AssertionError("Windows role isolation probe failed")
+        wait(provider_ready,"Restored shipping provider not ready")
+        wait(controller_ready,"Restored shipping controller not ready")
     time.sleep(6)
     if not active(CONTROLLER): raise AssertionError("Controller did not survive unavailable quorum")
     stop(CONTROLLER)
