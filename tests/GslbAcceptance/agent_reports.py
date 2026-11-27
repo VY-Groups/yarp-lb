@@ -37,7 +37,7 @@ class FenceProxy:
         self.active = set()
         self.listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.listener.bind(("127.0.0.1", 0))
+        self.listener.bind(("127.0.0.1", port()))
         self.listener.listen(32)
         self.listener.settimeout(.2)
         self.port = self.listener.getsockname()[1]
@@ -113,7 +113,7 @@ class FenceProxy:
 
 
 def serve(stack):
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Ready)
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", port()), Ready)
     server.verdict = 200
     stack.callback(server.server_close)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -122,10 +122,27 @@ def serve(stack):
     return server
 
 
+# Keep every fixture allocation unique for the lifetime of the process,
+# including previously assigned ports that have not been bound by a child yet.
+# Probe both TCP and UDP because the authoritative DNS port uses both.
+_allocated_ports = set()
+
+
 def port():
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
+    for _ in range(256):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as tcp, \
+                socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp:
+            tcp.bind(("127.0.0.1", 0))
+            candidate = tcp.getsockname()[1]
+            if candidate in _allocated_ports:
+                continue
+            try:
+                udp.bind(("127.0.0.1", candidate))
+            except OSError:
+                continue
+            _allocated_ports.add(candidate)
+            return candidate
+    raise RuntimeError("Could not allocate distinct fixture TCP/UDP port")
 
 
 def secure_windows_test_directory(path: Path) -> None:
