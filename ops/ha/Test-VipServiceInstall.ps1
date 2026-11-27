@@ -24,6 +24,36 @@ try{
   # Record the exact absent service before invoking the installer so cleanup
   # also handles a successful creation followed by a failed assertion.
   $created.Add($plan.Name)
+  # Fail only the first verification read after actual SCM creation.
+  # Rollback still uses the real SCM record and actual Delete method.
+  $script:injectVipRegistrationFailure=$true
+  function Get-CimInstance {
+   param([Parameter(Position=0)][string]$ClassName,[string]$Filter)
+   $record=CimCmdlets\Get-CimInstance -ClassName $ClassName -Filter $Filter
+   if($script:injectVipRegistrationFailure -and $null -ne $record -and
+      $record.Name -eq $plan.Name){
+    $script:injectVipRegistrationFailure=$false
+    throw 'Injected post-create verification read failure'
+   }
+   return $record
+  }
+  $rolledBack=$false
+  try{
+   try{& "$PSScriptRoot/Install-VipService.ps1" @params -Apply | Out-Null}
+   catch{
+    if($_.Exception.Message -notmatch 'newly created service rolled back'){throw}
+    $rolledBack=$true
+   }
+   if($script:injectVipRegistrationFailure -or -not $rolledBack){throw 'Failure injection did not exercise rollback'}
+  }
+  finally{
+   Remove-Item Function:\Get-CimInstance
+   Remove-Variable injectVipRegistrationFailure -Scope Script
+  }
+  if(Get-Service -Name $plan.Name -ErrorAction SilentlyContinue){throw 'Failed registration left an SCM service'}
+  $gateway=Get-Service -Name GatewayCoreYarp
+  if($gateway.Status -ne 'Stopped' -or $gateway.StartType -ne 'Manual'){throw 'Rollback changed dedicated gateway'}
+  Write-Output "PASS: SCM $role post-create verification failure rolled back without changing gateway"
   $installed=& "$PSScriptRoot/Install-VipService.ps1" @params -Apply
   if(-not $installed.Applied){throw 'Installer did not report completion'}
   $svc=Get-CimInstance Win32_Service -Filter ("Name='"+$plan.Name+"'")

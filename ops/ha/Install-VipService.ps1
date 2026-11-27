@@ -50,5 +50,43 @@ $created=Invoke-CimMethod -ClassName Win32_Service -MethodName Create -Arguments
  StartMode=$startup;DesktopInteract=$false;StartName=$identity
 }
 if($created.ReturnValue -ne 0){throw "SCM service creation failed: $($created.ReturnValue)"}
+# Only a successful Create grants permission to undo this registration.
+# Verify the actual SCM record, not just the provider return code.
+$filter="Name='"+$name+"'"
+$expectedStart=if($Role -eq 'agent'){'Auto'}else{'Manual'}
+function ReadRegistration {
+ Get-CimInstance -ClassName Win32_Service -Filter $filter
+}
+function MatchesRegistration($Service){
+ return ($null -ne $Service -and $Service.Name -eq $name -and
+  $Service.PathName -ceq $command -and $Service.StartName -eq $identity)
+}
+try{
+ $registered=ReadRegistration
+ if(-not (MatchesRegistration $registered) -or $registered.State -ne 'Stopped' -or
+    $registered.StartMode -ne $expectedStart){throw 'Installed SCM state not confirmed'}
+}
+catch{
+ # Do not delete an unexpected or active service, even during rollback.
+ try{
+  $registered=ReadRegistration
+  if($null -ne $registered){
+   if(-not (MatchesRegistration $registered) -or $registered.State -ne 'Stopped'){
+    throw 'Unexpected service identity, command or runtime state'
+   }
+   $removed=Invoke-CimMethod -InputObject $registered -MethodName Delete
+   if($removed.ReturnValue -ne 0){throw 'SCM rollback deletion failed'}
+   $deadline=[DateTime]::UtcNow.AddSeconds(10)
+   do{
+    $remaining=ReadRegistration
+    if($null -eq $remaining){break}
+    Start-Sleep -Milliseconds 200
+   }while([DateTime]::UtcNow -lt $deadline)
+   if($null -ne $remaining){throw 'SCM rollback removal not confirmed'}
+  }
+ }
+ catch{throw 'SCM registration rollback unconfirmed; inspect the exact service before retrying'}
+ throw 'SCM registration verification failed; newly created service rolled back'
+}
 Write-Verbose 'Installed; not started. Provision service-identity ACLs and validate topology before starting.'
 [pscustomobject]@{Name=$name;Identity=$identity;Startup=$startup;Command=$command;Applied=$true}
