@@ -103,6 +103,8 @@ internal static class VipAutomaticController
         Func<string,string,string,long,string,CancellationToken,Task<VipFenceProvider.NodeEvidence>> nodeAction,
         CancellationToken token)
     {
+        if(journal.Pending!=intent||scope!=intent.Scope)
+            throw new InvalidDataException("Transition must match the durable pending intent.");
         var state=await observe(token)??throw new InvalidDataException("Owner record missing.");
         var original=new FleetQuorum.Fence("vip_"+intent.OldPin,intent.OldEpoch);
         if(state==original)

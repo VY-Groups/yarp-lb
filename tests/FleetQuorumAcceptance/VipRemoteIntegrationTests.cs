@@ -97,6 +97,39 @@ internal static class VipRemoteIntegrationTests
                 ClientCertificateValidation=(leaf,_,_)=>VipMachineTransport.Pinned(leaf,ca,Pin(client),"1.3.6.1.5.5.7.3.2")
             })));
             await using var app=builder.Build();
+            VipMachineTransport? remoteClient=null;
+            async Task<IResult> Agent(HttpContext ctx,bool activate)
+            {
+                var r=await ctx.Request.ReadFromJsonAsync<VipRemoteNode.Request>(json,ctx.RequestAborted);
+                if(r is null||r.Scope!=scope||state!=new FleetQuorum.Fence("vip_"+r.OwnerPin,r.Epoch)||
+                    !VipFenceProvider.Pin(r.Nonce)||!powered.ContainsKey(r.OwnerPin)||!powered.ContainsKey(r.OtherPin)||
+                    r.OwnerPin==r.OtherPin)return Results.StatusCode(503);
+                // The fixture uses a node identity header ONLY inside this
+                // disposable test listener; the product pins two fixed origins.
+                string pin=ctx.Request.Path=="/v1/vip-node/activate"?r.OwnerPin:
+                    r.Nonce.StartsWith("0",StringComparison.Ordinal)?r.OwnerPin:r.OtherPin;
+                if(activate)
+                {
+                    if(loseActivation||powered[r.OtherPin]||!powered[pin])return Results.StatusCode(503);
+                    activations++;drained[pin]=false;serving[pin]=true;
+                }
+                return Results.Json(new VipRemoteNode.Evidence(scope,r.OwnerPin,r.Epoch,r.OtherPin,r.Nonce,pin,
+                    pin==r.OwnerPin&&powered[pin]&&serving[pin],pin==r.OtherPin&&powered[pin]&&!serving[pin]),json);
+            }
+            async Task<IResult> DrainEndpoint(HttpContext ctx)
+            {
+                var r=await ctx.Request.ReadFromJsonAsync<VipRemoteNode.DrainRequest>(json,ctx.RequestAborted);
+                if(r is null||r.Scope!=scope||state.Epoch!=r.Epoch||!state.Transaction.StartsWith("vip_",StringComparison.Ordinal)||
+                    !VipFenceProvider.Pin(r.Nonce))return Results.StatusCode(503);
+                string owner=state.Transaction[4..];
+                if(!powered.ContainsKey(owner)||!powered[owner])return Results.StatusCode(503);
+                if(r.Drain){drained[owner]=true;serving[owner]=false;drainSamples++;}
+                else if(drained[owner]&&inflight>0){inflight--;drainSamples++;}
+                return Results.Json(new VipRemoteNode.DrainEvidence(scope,r.Epoch,r.Nonce,drained[owner],manual[owner],inflight),json);
+            }
+            app.MapPost("/v1/vip-node/status",(Delegate)(Func<HttpContext,Task<IResult>>)(ctx=>Agent(ctx,false)));
+            app.MapPost("/v1/vip-node/activate",(Delegate)(Func<HttpContext,Task<IResult>>)(ctx=>Agent(ctx,true)));
+            app.MapPost("/admin/vip-machine/drain",(Delegate)(Func<HttpContext,Task<IResult>>)DrainEndpoint);
             async Task<IResult> Node(HttpContext ctx,string action)
             {
                 try
@@ -108,22 +141,17 @@ internal static class VipRemoteIntegrationTests
                         if(state!=new FleetQuorum.Fence("vip_"+r.OwnerPin,r.Epoch))throw new InvalidDataException("Wrong owner");
                         return Task.CompletedTask;
                     }
-                    Task<VipRemoteNode.Evidence> NodeStatus(string pin,bool activate,CancellationToken t)
+                    async Task<VipRemoteNode.Evidence> NodeStatus(string pin,bool activate,CancellationToken t)
                     {
-                        if(activate)
-                        {
-                            if(loseActivation)throw new InvalidOperationException("injected activation failure");
-                            if(pin!=r.OwnerPin||powered[r.OtherPin]||!powered[pin])throw new InvalidDataException("Unsafe activation");
-                            activations++;drained[pin]=false;serving[pin]=true;
-                        }
-                        return Task.FromResult(new VipRemoteNode.Evidence(scope,r.OwnerPin,r.Epoch,r.OtherPin,r.Nonce,pin,
-                            pin==r.OwnerPin&&powered[pin]&&serving[pin],pin==r.OtherPin&&powered[pin]&&!serving[pin]));
+                        var request=new VipRemoteNode.Request(scope,r.OwnerPin,r.Epoch,r.OtherPin,
+                            (pin==r.OwnerPin?"0":"1")+Convert.ToHexString(RandomNumberGenerator.GetBytes(32))[1..]);
+                        return VipRemoteNode.Match(request,pin,await remoteClient!.Post<VipRemoteNode.Evidence>(
+                            activate?"/v1/vip-node/activate":"/v1/vip-node/status",request,t));
                     }
-                    Task<VipRemoteNode.DrainEvidence> Drain(bool mutate,CancellationToken t)
+                    async Task<VipRemoteNode.DrainEvidence> Drain(bool mutate,CancellationToken t)
                     {
-                        if(mutate){drained[r.OwnerPin]=true;serving[r.OwnerPin]=false;drainSamples++;}
-                        else if(drained[r.OwnerPin]&&inflight>0){inflight--;drainSamples++;}
-                        return Task.FromResult(new VipRemoteNode.DrainEvidence(scope,r.Epoch,r.Nonce,drained[r.OwnerPin],manual[r.OwnerPin],inflight));
+                        var request=new VipRemoteNode.DrainRequest(scope,r.Epoch,Convert.ToHexString(RandomNumberGenerator.GetBytes(32)),mutate);
+                        return VipRemoteNode.Match(request,await remoteClient!.Post<VipRemoteNode.DrainEvidence>("/admin/vip-machine/drain",request,t));
                     }
                     var evidence=await VipProviderActions.Run(action,r,Assert,
                         _=>Task.FromResult(!powered[r.OwnerPin]),_=>Task.FromResult(!powered[r.OtherPin]),NodeStatus,Drain,ctx.RequestAborted);
@@ -136,7 +164,7 @@ internal static class VipRemoteIntegrationTests
                 var selected=action;
                 app.MapPost("/v1/vip/"+selected,(Delegate)(Func<HttpContext,Task<IResult>>)(ctx=>Node(ctx,selected)));
             }
-            app.MapPost("/v1/vip/hard-fence",async (HttpContext ctx)=>
+            async Task<IResult> HardFence(HttpContext ctx)
             {
                 var r=await ctx.Request.ReadFromJsonAsync<VipFenceProvider.Request>(json,ctx.RequestAborted);
                 if(r is null||r.Scope!=scope||state!=new FleetQuorum.Fence("vip_revoked_"+r.OldPin,r.RevokedEpoch)||loseFence)
@@ -145,11 +173,14 @@ internal static class VipRemoteIntegrationTests
                 long expiry=DateTimeOffset.UtcNow.ToUnixTimeSeconds()+60;
                 var sig=signer.SignData(Message(r.OldPin,r.RevokedEpoch,r.NewPin,expiry),HashAlgorithmName.SHA256,DSASignatureFormat.Rfc3279DerSequence);
                 return Results.Json(new VipFenceProvider.Permit(scope,r.OldPin,r.RevokedEpoch,r.NewPin,expiry,Convert.ToBase64String(sig)),json);
-            });
+            }
+            app.MapPost("/v1/vip/hard-fence",(Delegate)(Func<HttpContext,Task<IResult>>)HardFence);
             await app.StartAsync();
             string origin=app.Services.GetRequiredService<IServer>().Features.Get<IServerAddressesFeature>()!.Addresses.Single();
             string Config(string cert,string key,string pin,string name)=>Write(name,JsonSerializer.Serialize(
                 new VipFenceProvider.Settings(origin,pin,caPath,cert,key,scope,[a,b]),json));
+            using var agentTransport=VipMachineTransport.Open(new(origin,Pin(server),caPath,certPath,keyPath));
+            remoteClient=agentTransport;
             using var provider=VipFenceProvider.Open(Config(certPath,keyPath,Pin(server),"writer.json"),scope,a,b);
             using var wrongClient=VipFenceProvider.Open(Config(wrongPath,wrongKey,Pin(server),"wrong.json"),scope,a,b);
             await Refused(()=>wrongClient.NodeAction("node-status",scope,a,10,b,default));
@@ -176,17 +207,17 @@ internal static class VipRemoteIntegrationTests
                 await VipAutomaticController.ExecuteTransition(scope,intent,journal,Observe,Revoke,provider.Fence,Activate,provider.NodeAction,default);
                 Must(state.Epoch==12&&serving[b]&&!powered[a]&&journal.Pending is null&&revokes==1,"exact recovery activates successor without another ownership transfer");
                 powered[a]=true; // fixture simulates independently approved standby rearm, not production power-on
-                manual[b]=true;inflight=2;
+                manual[b]=true;inflight=5;
                 var back=new VipAutomaticJournal.Transition(scope,b,12,a,"failback");journal.Begin(back);
                 await Refused(()=>VipAutomaticController.ExecuteTransition(scope,back,journal,Observe,Revoke,provider.Fence,Activate,provider.NodeAction,default));
-                Must(state.Epoch==12&&inflight==2,"manual maintenance prevents automatic failback");
+                Must(state.Epoch==12&&inflight==5,"manual maintenance prevents automatic failback");
                 manual[b]=false;drained[b]=true;serving[b]=false;
                 await VipAutomaticController.ExecuteTransition(scope,back,journal,Observe,Revoke,provider.Fence,Activate,provider.NodeAction,default);
                 Must(state.Transaction=="vip_"+a&&state.Epoch==14&&serving[a]&&!powered[b]&&inflight==0&&drainSamples>=2&&journal.Pending is null,
                     "recovered failback waits for zero active requests, fences predecessor and activates preferred owner");
             }
             await app.StopAsync();
-            Console.WriteLine("PASS: actual loopback mTLS transport and production transition/provider decision code; fixture Raft and BMC state only, not physical acceptance.");
+            Console.WriteLine("PASS: actual controller-to-provider and provider-to-node loopback mTLS transport and production transition/provider decision code; fixture Raft and BMC state only, not physical acceptance.");
         }
         finally{dir.Delete(true);}
     }

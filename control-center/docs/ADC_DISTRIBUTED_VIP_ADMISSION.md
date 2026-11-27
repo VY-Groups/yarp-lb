@@ -90,3 +90,5 @@ Recovery safety: failback always rechecks the authenticated drain endpoint until
 ### Combined lifecycle integration fixture
 
 The Windows/Linux fencing contract CI includes a disposable loopback HTTPS server with generated CA and separate client identities. It runs the same provider action decision and automatic transition code used by the product; checks valid mTLS, wrong client/server pin, stale epoch, interrupted hard fencing, successor startup failure, journal restart recovery, manual maintenance denial and completion of a recovered failback only after zero active requests. Raft and BMC state in this fixture are simulated; it does not replace the existing real Raft tests or actual OS/BMC two-host acceptance. No production credentials or BMCs are contacted.
+
+The combined fixture also exercises the actual pinned VipMachineTransport on provider-to-node and provider-to-drain loopback requests. Node identities, BMC and Raft are fixture state; production uses separately pinned management origins. A manual resume is not offered for an automatic-only drain; the inventory shows that an independently authorized ownership transition is required.
