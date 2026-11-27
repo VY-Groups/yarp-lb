@@ -221,8 +221,13 @@ try:
     if not WIN: print(run("systemctl","show",CONTROLLER+".service","-p","ExecStart","-p","User").stdout,flush=True)
     start(CONTROLLER);wait(controller_ready,"Installed writer did not open durable journal")
     if WIN:
-        result=run("pwsh","-NoProfile","-File",HERE/"Test-VipRoleIsolation.ps1","-ProviderDirectory",pdir,"-ControllerDirectory",cdir,"-ProviderKey",secret,"-ControllerKey",ckey)
+        result=run("pwsh","-NoProfile","-File",HERE/"Test-VipRoleIsolation.ps1","-ProviderDirectory",pdir,"-ControllerDirectory",cdir,"-ProviderKey",secret,"-ControllerKey",ckey,check=False)
         print(result.stdout,flush=True)
+        if result.returncode!=0:
+            # Disposable synthetic fixture only; print the precise bounded
+            # PowerShell failure rather than masking it in CalledProcessError.
+            print(result.stderr[-6000:],flush=True)
+            raise AssertionError("Windows role isolation probe failed")
     time.sleep(6)
     if not active(CONTROLLER): raise AssertionError("Controller did not survive unavailable quorum")
     stop(CONTROLLER)

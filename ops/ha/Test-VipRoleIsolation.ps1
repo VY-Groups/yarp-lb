@@ -15,15 +15,48 @@ public static class VipRoleReadProbe {
  [DllImport("kernel32.dll",SetLastError=true)] static extern bool CloseHandle(IntPtr handle);
  [DllImport("advapi32.dll",SetLastError=true)] static extern bool OpenProcessToken(IntPtr process,uint access,out SafeAccessTokenHandle token);
  [DllImport("advapi32.dll",SetLastError=true)] static extern bool DuplicateTokenEx(SafeAccessTokenHandle existing,uint access,IntPtr attributes,int level,int type,out SafeAccessTokenHandle token);
+ [DllImport("kernel32.dll")] static extern IntPtr GetCurrentProcess();
+ [StructLayout(LayoutKind.Sequential)] struct Luid { public uint Low; public int High; }
+ [StructLayout(LayoutKind.Sequential)] struct Privileges { public uint Count; public Luid Luid; public uint Attributes; }
+ [DllImport("advapi32.dll",SetLastError=true,CharSet=CharSet.Unicode)] static extern bool LookupPrivilegeValue(string system,string name,out Luid luid);
+ [DllImport("advapi32.dll",SetLastError=true)] static extern bool AdjustTokenPrivileges(SafeAccessTokenHandle token,bool disable,ref Privileges value,int length,out Privileges previous,out int returned);
+ static Win32Exception Error(string stage) {
+  int code=Marshal.GetLastWin32Error();
+  return new Win32Exception(code,stage+" failed with Windows error "+code);
+ }
+ // Enable only the existing admin debug privilege to obtain a token from
+ // the two exact disposable SCM processes, then restore before impersonating.
+ static SafeAccessTokenHandle GetServiceToken(int pid) {
+  SafeAccessTokenHandle current;
+  if(!OpenProcessToken(GetCurrentProcess(),0x0028,out current)) throw Error("Open fixture administrator token");
+  using(current) {
+   Luid luid;
+   if(!LookupPrivilegeValue(null,"SeDebugPrivilege",out luid)) throw Error("Lookup fixture debug privilege");
+   var enable=new Privileges {Count=1,Luid=luid,Attributes=2};
+   Privileges previous; int returned;
+   if(!AdjustTokenPrivileges(current,false,ref enable,Marshal.SizeOf<Privileges>(),out previous,out returned) || Marshal.GetLastWin32Error()!=0)
+    throw Error("Enable fixture debug privilege");
+   SafeAccessTokenHandle result=null;
+   try {
+    IntPtr process=OpenProcess(0x1000,false,pid);
+    if(process==IntPtr.Zero) throw Error("Open exact SCM process");
+    try {
+     if(!OpenProcessToken(process,0x000A,out result)) throw Error("Open exact SCM token");
+    } finally {CloseHandle(process);}
+   } finally {
+    Privileges ignored; int unused;
+    if(!AdjustTokenPrivileges(current,false,ref previous,Marshal.SizeOf<Privileges>(),out ignored,out unused) || Marshal.GetLastWin32Error()!=0) {
+     if(result!=null)result.Dispose();
+     throw Error("Restore fixture debug privilege");
+    }
+   }
+   return result;
+  }
+ }
  public static void Check(int pid,string expectedSid,string own,string other) {
-  IntPtr process=OpenProcess(0x1000,false,pid);
-  if(process==IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error());
-  try {
-   SafeAccessTokenHandle original;
-   if(!OpenProcessToken(process,0x000A,out original)) throw new Win32Exception(Marshal.GetLastWin32Error());
-   using(original) {
+  using(var original=GetServiceToken(pid)) {
     SafeAccessTokenHandle impersonation;
-    if(!DuplicateTokenEx(original,0x000C,IntPtr.Zero,2,2,out impersonation)) throw new Win32Exception(Marshal.GetLastWin32Error());
+    if(!DuplicateTokenEx(original,0x000C,IntPtr.Zero,2,2,out impersonation)) throw Error("Duplicate exact SCM token");
     using(impersonation) WindowsIdentity.RunImpersonated(impersonation,()=>{
      using(var identity=WindowsIdentity.GetCurrent()) {
       if(identity.User==null || identity.User.Value!=expectedSid) throw new InvalidOperationException("Unexpected SCM service token");
@@ -33,8 +66,7 @@ public static class VipRoleReadProbe {
      catch(UnauthorizedAccessException) { return; }
      throw new InvalidOperationException("Cross-role credential unexpectedly accessible");
     });
-   }
-  } finally { CloseHandle(process); }
+  }
  }
 }
 '@
@@ -53,7 +85,9 @@ function Check-Role($Name,$Directory,$Own,$Other){
   if($rules | Where-Object {$_.AccessControlType -eq 'Allow' -and $_.IdentityReference.Value -notin $allowed}){throw 'Unexpected cross-role allow ACE'}
   if(-not($rules | Where-Object {$_.AccessControlType -eq 'Allow' -and $_.IdentityReference.Value -eq $sid})){throw 'Own service ACE missing'}
  }
+ Write-Output "PASS: $Name exact protected ACL allowlist"
  [VipRoleReadProbe]::Check([int]$service.ProcessId,$sid,$Own,$Other)
+ Write-Output "PASS: $Name exact service token own/peer file access"
 }
 Check-Role 'GatewayCoreVipFenceProvider' $ProviderDirectory $ProviderKey $ControllerKey
 Check-Role 'GatewayCoreVipController' $ControllerDirectory $ControllerKey $ProviderKey
