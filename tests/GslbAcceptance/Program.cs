@@ -14,6 +14,18 @@ using GatewayCore.Gslb.Contracts;
 PrivateKeyFileSecurityTests.Run();
 AuthorityFenceTests.Run();
 {
+    var peerGate = new DnsTcpPeerAdmission(1);
+    using var firstPeer = peerGate.Acquire(IPAddress.Parse("192.0.2.1")) ?? throw new Exception("first peer refused");
+    if (peerGate.Acquire(IPAddress.Parse("::ffff:192.0.2.1")) is not null) throw new Exception("mapped alias bypassed peer gate");
+    using var otherPeer = peerGate.Acquire(IPAddress.Parse("192.0.2.2")) ?? throw new Exception("other peer refused");
+    using var v6Peer = peerGate.Acquire(IPAddress.Parse("2001:db8::1")) ?? throw new Exception("IPv6 peer refused");
+    if (peerGate.Acquire(IPAddress.Parse("2001:db8::2")) is not null) throw new Exception("IPv6 prefix bypassed peer gate");
+    firstPeer.Dispose(); firstPeer.Dispose();
+    using var recoveredPeer = peerGate.Acquire(IPAddress.Parse("192.0.2.1")) ?? throw new Exception("peer lease not released");
+    if (peerGate.Acquire(IPAddress.Parse("192.0.2.1")) is not null) throw new Exception("double dispose released a new lease");
+    Console.WriteLine("PASS: bounded TCP peer leases, mapped IPv4, IPv6 /64 and idempotent release");
+}
+{
     var firewall = new DnsSourceFirewall(JsonSerializer.SerializeToElement(new[] { "192.0.2.0/24", "2001:db8::/32" }));
     if (!firewall.Blocks(IPAddress.Parse("192.0.2.1")) ||
         !firewall.Blocks(IPAddress.Parse("::ffff:192.0.2.1")) ||
@@ -1018,7 +1030,7 @@ var chainSites=new[]{
 File.WriteAllText(configuration,JsonSerializer.Serialize(new {
  AllowNonLoopbackListeners=false,AllowDocumentationAddressesForTesting=true,
  ListenHost="127.0.0.1",ListenPort=15353,ProbeIntervalSeconds=1,
- BlockedResolverCidrs=new[]{"127.0.0.99/32"},
+ BlockedResolverCidrs=new[]{"127.0.0.99/32"},MaxTcpSessionsPerClient=4,
  MetricsListenHost="127.0.0.1",MetricsListenPort=metricsPort,
  GeoIpCountryDatabasePath=countryFixture,GeoIpAsnDatabasePath=asnFixture,
  GeoIpMaxDatabaseAgeDays=0,
@@ -1459,6 +1471,31 @@ try
         catch (SocketException ex) when (ex.SocketErrorCode is SocketError.ConnectionReset or SocketError.ConnectionAborted) { }
     }
     Console.WriteLine("PASS: real DNS firewall blocks UDP and TCP peers");
+    // Four incomplete DNS frames consume this peer's allowance only.
+    var idlePeers = new List<TcpClient>();
+    try
+    {
+        using var peerDeadline = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+        for (int i=0; i<4; i++)
+        {
+            var idle = new TcpClient(new IPEndPoint(IPAddress.Parse("127.0.0.98"),0));
+            idlePeers.Add(idle);
+            await idle.ConnectAsync(IPAddress.Loopback,15353,peerDeadline.Token);
+        }
+        using var overflow = new TcpClient(new IPEndPoint(IPAddress.Parse("127.0.0.98"),0));
+        try
+        {
+            await overflow.ConnectAsync(IPAddress.Loopback,15353,peerDeadline.Token);
+            Must(await overflow.GetStream().ReadAsync(new byte[1],peerDeadline.Token)==0,
+                "TCP peer session cap closes overflow before reading a frame");
+        }
+        catch (IOException ex) when (ex.InnerException is SocketException socket &&
+            socket.SocketErrorCode is SocketError.ConnectionReset or SocketError.ConnectionAborted) { }
+        catch (SocketException ex) when (ex.SocketErrorCode is SocketError.ConnectionReset or SocketError.ConnectionAborted) { }
+        // Check a separate resolver still receives a UDP authoritative reply.
+        Must((await Query("app.integration.test")).Address is not null,"unrelated resolver remains served during TCP peer saturation");
+    }
+    finally { foreach (var idle in idlePeers) idle.Dispose(); }
     using var metricsClient = new HttpClient { Timeout = TimeSpan.FromSeconds(2) };
     var metricsText = await metricsClient.GetStringAsync($"http://127.0.0.1:{metricsPort}/metrics");
     using (var loadedRevision = System.Text.Json.JsonDocument.Parse(
@@ -1472,6 +1509,8 @@ try
     Must(metricsText.Contains("gatewaycore_gslb_dns_firewall_blocked_total{transport=\"udp\"} 1", StringComparison.Ordinal) &&
          metricsText.Contains("gatewaycore_gslb_dns_firewall_blocked_total{transport=\"tcp\"} 1", StringComparison.Ordinal) &&
          !metricsText.Contains("127.0.0.99", StringComparison.Ordinal), "DNS firewall metrics are transport scoped and omit peer addresses");
+    Must(metricsText.Contains("gatewaycore_gslb_dns_tcp_peer_limit_rejected_total 1", StringComparison.Ordinal) &&
+        !metricsText.Contains("127.0.0.98", StringComparison.Ordinal),"TCP peer saturation evidence omits source identity");
     Must(metricsText.Contains("# TYPE gatewaycore_gslb_dns_queries_total counter", StringComparison.Ordinal) &&
          metricsText.Contains("gatewaycore_gslb_dns_queries_total{transport=\"udp\"} ", StringComparison.Ordinal) &&
          metricsText.Contains("gatewaycore_gslb_dns_responses_total{transport=\"udp\",rcode=\"NOERROR\"} ", StringComparison.Ordinal) &&

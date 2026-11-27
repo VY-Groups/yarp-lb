@@ -367,6 +367,17 @@ dnsBudget["GroupIpv6UdpClientsByPrefix"] = "true";
 Must(!EngineConfigContract.Validate("gslb",dnsBudget,false), "signed IPv6 grouping rejects string");
 dnsBudget["GroupIpv6UdpClientsByPrefix"] = null;
 Must(!EngineConfigContract.Validate("gslb",dnsBudget,false), "signed IPv6 grouping rejects null");
+var dnsTcpLimit = dns.DeepClone().AsObject();
+foreach (var validTcpLimit in new[] {0,1,4,32})
+{
+    dnsTcpLimit["MaxTcpSessionsPerClient"] = validTcpLimit;
+    Must(EngineConfigContract.Validate("gslb",dnsTcpLimit,false), "signed TCP peer limit accepts "+validTcpLimit);
+}
+foreach (var invalidTcpLimit in new[] {"-1","33","null","\"4\"","1.5"})
+{
+    dnsTcpLimit["MaxTcpSessionsPerClient"] = JsonNode.Parse(invalidTcpLimit);
+    Must(!EngineConfigContract.Validate("gslb",dnsTcpLimit,false), "signed TCP peer limit rejects "+invalidTcpLimit);
+}
 var dnsFirewall = dns.DeepClone().AsObject();
 foreach (var valid in new[] { "[]", "[\"192.0.2.0/24\",\"2001:db8::/32\"]" })
 {

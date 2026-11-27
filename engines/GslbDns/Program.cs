@@ -42,6 +42,7 @@ if (!IPAddress.TryParse(config.ListenHost, out var listen) ||
     config.ProbeIntervalSeconds is < 1 or > 60 ||
     config.MaxResponsesPerSecondPerClient is < 20 or > 20000 ||
     (config.MaxUdpQueriesPerSecond != 0 && config.MaxUdpQueriesPerSecond is < 20 or > 200000) ||
+    config.MaxTcpSessionsPerClient is < 0 or > 32 ||
     config.MaxConcurrentHealthProbes is < 1 or > 128 ||
     config.MetricsListenPort is < 0 or > 65535 ||
     config.Zones is not { Length: >= 1 and <= 64 })
@@ -475,6 +476,7 @@ using var tcpListener = new TcpListener(listen, config.ListenPort);
 if (ipv6) tcpListener.Server.DualMode = false;
 tcpListener.Start(32);
 using var tcpSlots = new SemaphoreSlim(32);
+var tcpPeerAdmission = config.MaxTcpSessionsPerClient == 0 ? null : new DnsTcpPeerAdmission(config.MaxTcpSessionsPerClient);
 var tcpSessions = new List<Task>();
 var tcpAccept = Task.Run(async () =>
 {
@@ -485,7 +487,8 @@ var tcpAccept = Task.Run(async () =>
         catch (OperationCanceledException) when (stop.IsCancellationRequested) { break; }
         catch (SocketException) when (stop.IsCancellationRequested) { break; }
         // Reject the actual TCP socket peer before it can acquire a session slot.
-        if (sourceFirewall.Blocks((session.Client.RemoteEndPoint as IPEndPoint)?.Address))
+        var tcpPeer = (session.Client.RemoteEndPoint as IPEndPoint)?.Address;
+        if (tcpPeer is null || sourceFirewall.Blocks(tcpPeer))
         {
             runtimeMetrics.FirewallBlocked(tcp: true);
             session.Dispose();
@@ -496,8 +499,17 @@ var tcpAccept = Task.Run(async () =>
             session.Dispose(); // bounded concurrency, no unbounded pending requests
             continue;
         }
+        var peerLease = tcpPeerAdmission?.Acquire(tcpPeer);
+        if (tcpPeerAdmission is not null && peerLease is null)
+        {
+            runtimeMetrics.TcpPeerLimitRejected();
+            tcpSlots.Release();
+            session.Dispose();
+            continue;
+        }
         var task = Task.Run(async () =>
         {
+            using (peerLease)
             using (session)
             using (var deadline = CancellationTokenSource.CreateLinkedTokenSource(stop.Token))
             {
@@ -535,7 +547,7 @@ var tcpAccept = Task.Run(async () =>
                 }
                 catch (Exception ex) when (ex is IOException or SocketException or
                     OperationCanceledException or ObjectDisposedException) { }
-                finally { tcpSlots.Release(); }
+                finally { peerLease?.Dispose(); tcpSlots.Release(); }
             }
         });
         lock (tcpSessions)
@@ -614,6 +626,7 @@ sealed record DnsConfig(bool AllowNonLoopbackListeners,string ListenHost,int Lis
     public int MaxUdpQueriesPerSecond {get;init;} = 0;
     public bool GroupIpv6UdpClientsByPrefix {get;init;} = false;
     public JsonElement BlockedResolverCidrs { get; init; }
+    public int MaxTcpSessionsPerClient { get; init; }
     public int MaxConcurrentHealthProbes {get;init;} = 32;
     public string MetricsListenHost { get; init; } = "127.0.0.1";
     public int MetricsListenPort { get; init; }
