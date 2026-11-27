@@ -90,6 +90,13 @@ internal static class FleetRecoveryProcessAcceptance
             Console.WriteLine("PASS: "+message);
         }
         const string tx = "rollout_AAAAAAAAAAAAAAAAAAAAAAAA";
+        string NodeDirectory(string id)=>Path.Combine(root,id=="one"?"recovery-node-0":"recovery-node-1");
+        JsonObject ReadProxy(string file)=>JsonNode.Parse(File.ReadAllBytes(file))!["ReverseProxy"]!.AsObject();
+        static void CheckCatalog(JsonObject actual,JsonObject expected,string label)
+        {
+            foreach(var key in new[]{"Routes","Clusters","AdminDisabledDestinations","AdminMonitorProfiles","AdminRealServers","AdminServiceGroups"})
+                Must(actual.ContainsKey(key)&&JsonNode.DeepEquals(actual[key],expected[key]),label+": "+key);
+        }
         var inventory = Path.Combine(root,"fleet-controller","state","fleet-gateways.json");
         var digest = File.Exists(inventory) ? Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(inventory))) : new string('D',64);
         if(mode=="reject-unfenced")
@@ -148,17 +155,44 @@ internal static class FleetRecoveryProcessAcceptance
                 ["status"]="preparing",["sequence"]=sequence,["details"]=new JsonArray(),["targets"]=rows};
             if(quorum is not null)journal["quorumScope"]=quorum.Scope;
             FleetRolloutJournal.Write(path,journal);
-            var proxy=JsonNode.Parse("""{"Routes":{},"Clusters":{},"fixture":"candidate"}""")!.AsObject();
+            // Use the complete signed ADC snapshot, not a synthetic empty proxy.
+            var proxy=JsonNode.Parse("""
+            {"Routes":{"web":{"ClusterId":"pool"}},
+             "Clusters":{"pool":{"Destinations":{"app":{"Address":"https://app.invalid/"}}}},
+             "AdminDisabledDestinations":{"pool::standby":{"Address":"https://standby.invalid/"}},
+             "AdminMonitorProfiles":{"health":{"Active":{"Enabled":true,"Path":"/ready","Interval":"00:00:15","Timeout":"00:00:05","Policy":"RiseFall"},"Metadata":{}}},
+             "AdminRealServers":{"app":{"Address":"https://app.invalid/","Description":"Backend"}},
+             "AdminServiceGroups":{"web":{"Policy":"RoundRobin","MonitorProfile":"health","Members":{"app":{"Weight":"3","TrafficRole":"primary"}}}}}
+            """)!.AsObject();
             var signingKey=File.ReadAllText(Path.Combine(root,"fleet-private.pem"));
             foreach(var target in FleetRolloutJournal.Targets(journal))
             {
                 var id=target["id"]!.GetValue<string>();var revision=target["originalRevision"]!.GetValue<string>();
+                var originalPath=Path.Combine(NodeDirectory(id),"gateway.json");
+                var originalBytes=File.ReadAllBytes(originalPath);
+                var before=await Call(id,"agent/v1/status");
+                // Even a correctly signed invalid object set must not consume a
+                // sequence or stage files. Exercise the real agent over mTLS.
+                var invalid=proxy.DeepClone().AsObject();
+                invalid["AdminRealServers"]=new JsonObject();
+                var bad=FleetConfigSignature.SignV2(signingKey,tx,revision,invalid,DateTimeOffset.UtcNow.AddMinutes(2).ToUnixTimeSeconds(),sequence);
+                var (origin,client)=Connect(id);
+                using(client)
+                using(var rejected=await client.PostAsJsonAsync(new Uri(origin,"agent/v1/config/prepare"),
+                    new {TransactionId=tx,ExpectedRevision=revision,ReverseProxy=invalid,bad.ExpiresUnixSeconds,bad.Sequence,bad.KeyId,bad.Signature}))
+                    Must(rejected.StatusCode==HttpStatusCode.BadRequest,"real agent rejects signed dangling ADC catalog: "+id);
+                var after=await Call(id,"agent/v1/status");
+                Must(after["highestAcceptedSequence"]!.GetValue<long>()==before["highestAcceptedSequence"]!.GetValue<long>()&&
+                    originalBytes.SequenceEqual(File.ReadAllBytes(originalPath))&&!Directory.Exists(Path.Combine(NodeDirectory(id),"stage",tx)),
+                    "invalid catalog leaves live config, sequence and staging unchanged: "+id);
                 var signed=FleetConfigSignature.SignV2(signingKey,tx,revision,proxy,DateTimeOffset.UtcNow.AddMinutes(2).ToUnixTimeSeconds(),sequence);
                 target["prepareSent"]=true;
                 FleetRolloutJournal.Log(path,journal,id,"prepare","dispatching");
                 var result=await Call(id,"agent/v1/config/prepare",new {TransactionId=tx,ExpectedRevision=revision,ReverseProxy=proxy,
                     signed.ExpiresUnixSeconds,signed.Sequence,signed.KeyId,signed.Signature});
                 target["preparedRevision"]=result["preparedRevision"]!.GetValue<string>();
+                CheckCatalog(ReadProxy(Path.Combine(NodeDirectory(id),"stage",tx,"prepared.json")),proxy,"real staged ADC snapshot "+id);
+                Must(originalBytes.SequenceEqual(File.ReadAllBytes(originalPath)),"prepare does not change live configuration: "+id);
                 FleetRolloutJournal.Log(path,journal,id,"prepare","ok");
             }
             var first=FleetRolloutJournal.Targets(journal)[0];
@@ -167,6 +201,10 @@ internal static class FleetRecoveryProcessAcceptance
             var activated=await Call("one","agent/v1/config/activate",new {TransactionId=tx,PreparedRevision=first["preparedRevision"]!.GetValue<string>()});
             Must(activated["revision"]!.GetValue<string>()==first["preparedRevision"]!.GetValue<string>(),
                 "first agent really activated; second remains prepared");
+            CheckCatalog(ReadProxy(Path.Combine(NodeDirectory("one"),"gateway.json")),proxy,"real activated ADC snapshot");
+            var second=FleetRolloutJournal.Targets(journal)[1];
+            Must(Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(Path.Combine(NodeDirectory("two"),"gateway.json"))))==
+                second["originalRevision"]!.GetValue<string>(),"second real agent retains original while first activates");
             // Exit without recording activation ACK or starting compensation:
             // reproduces lost response/process interruption at durable boundary.
             return;
@@ -194,6 +232,9 @@ internal static class FleetRecoveryProcessAcceptance
             var status=await Call(id,"agent/v1/status");
             Must(status["revision"]!.GetValue<string>()==target["originalRevision"]!.GetValue<string>() &&
                  status["highestAcceptedSequence"]!.GetValue<long>()==(recovered["sequence"]?.GetValue<long>()??1),"original revision and sequence high-water retained");
+            var local=NodeDirectory(id);
+            Must(File.ReadAllBytes(Path.Combine(local,"gateway.json")).SequenceEqual(File.ReadAllBytes(Path.Combine(local,"stage",tx,"original.json"))),
+                "byte-exact original ADC configuration restored on real agent "+id);
             var (origin,client)=Connect(id);
             using(client)
             using(var late=await client.PostAsJsonAsync(new Uri(origin,"agent/v1/config/activate"),

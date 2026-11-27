@@ -561,6 +561,15 @@ authorityKeyIdentifier = keyid,issuer
                                     state=admin.request("GET","/admin/api/state")
                                     payload={name:state[name] for name in ("routes","clusters","disabled","revision")}
                                     payload["routes"]["commercial-rollout"]={"ClusterId":"fixture","Match":{"Path":"/commercial-rollout/{**catch-all}"}}
+                                    # The actual reviewed commercial controller must sign and
+                                    # deploy every ADC catalog, not just a route-only snapshot.
+                                    addr=f"http://127.0.0.1:{upstream}/"
+                                    payload["disabled"]["fixture::fleet-standby"]={"Address":addr}
+                                    active_probe={"Enabled":True,"Path":"/ready","Interval":"00:00:15","Timeout":"00:00:05","Policy":"RiseFall"}
+                                    payload["monitorProfiles"]={**state.get("monitorProfiles",{}),"fleet-health":{"Active":active_probe,"Metadata":{"RiseFall.Rise":"2","RiseFall.Fall":"3"}}}
+                                    payload["realServers"]={**state.get("realServers",{}),"fleet-origin":{"Address":addr,"Description":"Disposable fleet origin"}}
+                                    payload["serviceGroups"]={**state.get("serviceGroups",{}),"fleet-template":{"Policy":"RoundRobin","MonitorProfile":"fleet-health",
+                                        "Members":{"fleet-origin":{"Weight":"3","TrafficRole":"primary"}}}}
                                     change=admin.request("POST","/admin/api/change-requests",{"reason":"Disposable commercial licensed fleet rollout","payload":payload})
                                     reviewer.request("POST","/admin/api/change-requests/"+change["id"]+"/decision",
                                         {"decision":"approve","reason":"Independently approved commercial acceptance"})
@@ -581,9 +590,16 @@ authorityKeyIdentifier = keyid,issuer
                                             command(qfixture,"release",qconfig,competitor,competing_epoch)
                                     rollout=admin.request("POST","/admin/api/fleet/rollout/"+change["id"],{})
                                     check(rollout["status"]=="activated-pending-health-validation","actual commercial controller rollout validates all licensed sites and activates")
+                                    live=[]
                                     for i in range(2):
                                         config=json.loads((temp/f"recovery-node-{i}"/"gateway.json").read_bytes())
-                                        check("commercial-rollout" in config["ReverseProxy"]["Routes"],"actual licensed agent config activated")
+                                        proxy=config["ReverseProxy"]
+                                        check("commercial-rollout" in proxy["Routes"],"actual licensed agent config activated")
+                                        for key,stored in (("disabled","AdminDisabledDestinations"),("monitorProfiles","AdminMonitorProfiles"),
+                                                           ("realServers","AdminRealServers"),("serviceGroups","AdminServiceGroups")):
+                                            check(proxy.get(stored)==payload[key],f"actual signed controller rollout preserves {stored} on node {i+1}")
+                                        live.append(proxy)
+                                    check(live[0]==live[1],"both real licensed agents activated identical complete signed ADC configuration")
                                 invoke("prepare")
                                 if commercial and os.environ.get("GC_FLEET_QUORUM_MEMBER_CONTAINERS"):
                                     members=json.loads(os.environ["GC_FLEET_QUORUM_MEMBER_CONTAINERS"])
