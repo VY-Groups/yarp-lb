@@ -273,6 +273,14 @@ def accept_live_policy(executable,scope,fleet,vip,reader,policy,expected_owner):
             print("PASS: live journal-bound VIP forwards actual YARP traffic to actively healthy origin",flush=True)
             context=ssl.create_default_context(cafile=str(ca_crt));context.load_cert_chain(str(cc),str(ck))
             opener=build_opener(ProxyHandler({}),HTTPSHandler(context=context),HTTPCookieProcessor(CookieJar()))
+            # Check the physical HTTP assets with independent CA-validated
+            # mTLS before starting the real Chromium flow.
+            for route,name in (("/dashboard","index.html"),("/dashboard/app.js","app.js"),
+                ("/dashboard/first-run.js","first-run.js"),("/dashboard/style.css","style.css")):
+                with opener.open("https://127.0.0.1:"+str(ports[2])+route,timeout=8) as response:
+                    if response.status!=200 or response.read()!=(executable.parent/"wwwroot"/name).read_bytes():
+                        raise AssertionError("Shipping UI asset response mismatch "+name)
+            print("PASS: actual mTLS dashboard HTML and scripts match exact staged shipping assets",flush=True)
             csrf=None
             def api(method,path,payload=None,expected=200,with_csrf=True):
                 headers={"Accept":"application/json"}
@@ -341,6 +349,19 @@ try:
     pdir=private_dir("provider"); cdir=private_dir("controller")
     fixture=private_dir("hardware-fixture"); bindir=root/"bin"
     shutil.copytree(product.parent,bindir)
+    # dotnet build does not guarantee physical wwwroot files beside the
+    # apphost. The shipping dashboard serves those files from content root.
+    # Stage the exact checked-out assets into this disposable runtime.
+    webroot=bindir/"wwwroot";webroot.mkdir(exist_ok=True)
+    for name in ("index.html","app.js","first-run.js","style.css","license.html","license.js"):
+        source=HERE/"control-center"/"wwwroot"/name
+        target=webroot/name
+        if not source.is_file() or source.is_symlink() or target.is_symlink():
+            raise AssertionError("Missing or linked shipping UI asset "+name)
+        if target.exists():
+            if target.read_bytes()!=source.read_bytes():
+                raise AssertionError("Built UI asset differs from exact source "+name)
+        else:shutil.copyfile(source,target)
     executable=bindir/"GatewayCoreYarp"
     for p in bindir.rglob("*"):
         p.chmod(0o755 if p.is_dir() or p==executable else 0o644)

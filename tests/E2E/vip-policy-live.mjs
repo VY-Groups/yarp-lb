@@ -23,7 +23,12 @@ try {
         page.on('pageerror',()=>errors.push('browser execution error'));
         let downloads=0;
         page.on('download',()=>downloads++);
-        await page.goto(fixture.origin+'/dashboard',{waitUntil:'domcontentloaded'});
+        const document=await page.goto(fixture.origin+'/dashboard',{waitUntil:'domcontentloaded'});
+        assert.equal(document?.status(),200,'real browser dashboard document status');
+        assert.equal(new URL(page.url()).pathname,'/dashboard','unexpected dashboard redirect');
+        assert.equal(await page.evaluate(()=>isSecureContext && !!globalThis.crypto?.subtle),true,
+            'browser management context must support SHA-256');
+        await page.locator('#auth-username').waitFor({state:'visible'});
         await page.locator('#auth-username').fill('vip-policy-admin');
         await page.locator('#auth-password').fill(fixture.password);
         await page.locator('#auth-submit').click();
