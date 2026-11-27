@@ -2,11 +2,12 @@
 internal sealed class VipAuthorityReaders : IDisposable
 {
     private readonly Dictionary<(string Path,string Scope),FleetQuorum> clients = new();
-    internal Func<CancellationToken,Task<bool>> For(string path,string scope,long epoch)
+    internal Func<CancellationToken,Task<bool>> For(string path,string scope,long epoch,Func<bool>? localBinding=null)
     {
         if(!clients.TryGetValue((path,scope),out var client))
             clients.Add((path,scope),client=FleetQuorum.OpenVip(path,scope));
-        return token=>client.IsVipOwner(epoch,token);
+        return async token=>(localBinding is null||localBinding()) &&
+            await client.IsVipOwner(epoch,token) && (localBinding is null||localBinding());
     }
     public void Dispose()
     {

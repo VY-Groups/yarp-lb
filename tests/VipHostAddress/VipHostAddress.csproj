@@ -2,6 +2,7 @@
   <PropertyGroup><TargetFramework>net10.0</TargetFramework><OutputType>Exe</OutputType><Nullable>enable</Nullable><ImplicitUsings>enable</ImplicitUsings></PropertyGroup>
   <ItemGroup>
     <Compile Include="../../control-center/VipIpv6Readiness.cs" Link="VipIpv6Readiness.cs" />
+    <Compile Include="../../control-center/VipLocalReconcile.cs" Link="VipLocalReconcile.cs" />
     <Compile Include="../../control-center/VipAddressJournal.cs" Link="VipAddressJournal.cs" />
     <Compile Include="../../control-center/VipHostAddressPlatform.cs" Link="VipHostAddressPlatform.cs" />
     <Compile Include="../../engines/GslbHealthContracts/PrivateKeyFileSecurity.cs" Link="PrivateKeyFileSecurity.cs" />

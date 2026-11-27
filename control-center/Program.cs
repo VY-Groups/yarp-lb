@@ -207,8 +207,12 @@ using var vipAuthorityReaders = new VipAuthorityReaders();
 var vipAuthorityChecks = new Dictionary<string,Func<CancellationToken,Task<bool>>>(StringComparer.Ordinal);
 if(guardedVirtualServices is not null)
     foreach(var service in guardedVirtualServices.Where(s=>s.VipQuorumConfigPath is not null))
+    {
+        var binding=service.VipJournalDirectory is null?null:new VipJournalBinding(service,IPAddress.Parse(isolatedListeners!.Config.ManagementIp));
+        Func<bool>? localCheck=binding is null?null:binding.Current;
         vipAuthorityChecks.Add(service.Id,vipAuthorityReaders.For(service.VipQuorumConfigPath!,
-            FleetQuorum.VipScope(service.VipFleetId!,service.Ip),service.VipOwnershipEpoch!.Value));
+            FleetQuorum.VipScope(service.VipFleetId!,service.Ip),binding?.Epoch??service.VipOwnershipEpoch!.Value,localCheck));
+    }
 LocalVipAdmission? localVipAdmission = guardedVirtualServices is { Length: > 0 }
     ? new LocalVipAdmission(guardedVirtualServices.Select(s => (s.Id, s.Ip)), TimeProvider.System,vipAuthorityChecks) : null;
 // Planned drain is address-wide and excludes any shared primary/unguarded socket.
@@ -2201,6 +2205,7 @@ app.MapGet("/admin/api/network/interfaces", (HttpContext ctx) =>
                 var observed = NetworkObservation.ObserveVirtualAddress(service.Id, service.Ip, service.Port, service.Protocol, snapshot);
                 return new { observed.Id, observed.Ip, observed.Port, observed.Protocol, observed.Status,
                     observed.Interfaces, service.RequireLocalAddressPresence, distributedOwnershipRequired = service.VipQuorumConfigPath is not null, admission = localVipAdmission?.Status(service.Id) ?? "disabled", activeGuardedRequests = localVipAdmission?.Active(service.Id) ?? 0,
+                    ownershipMode=service.VipJournalDirectory is not null?"journal-bound":service.VipOwnershipEpoch is not null?"fixed-epoch":"local-only",
                     plannedDrain=localVipAdmission?.IsDraining(service.Id)??false,
                     drainEligible=vipDrainGroups.ContainsKey(IPAddress.Parse(service.Ip).ToString()) };
             })

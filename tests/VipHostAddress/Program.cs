@@ -19,6 +19,32 @@ try
         j.Append(2,"assign-intent");j.Append(2,"assigned");
     }
     Refused(()=>{using var j=new VipAddressJournal(path,"scope","other","192.0.2.10");});
+    using(var reader=new VipAddressJournal(path,"scope","nic","192.0.2.10",readOnly:true))
+        Must(reader.Last?.Epoch==2&&reader.Last.Phase=="assigned","read-only runtime journal binding");
+    var recoveryPath=Path.Combine(dir.FullName,"recovery");
+    using(var j=new VipAddressJournal(recoveryPath,"scope","nic","192.0.2.10"))
+    {
+        bool present=false,owner=true;long observedEpoch=10;
+        VipHostAddressPlatform.Observation Inspect()=>new("nic","eth0",2,present,present);
+        Task Change(VipHostAddressPlatform.Observation before,bool add,CancellationToken t)
+        {if(before.Present==add)throw new Exception("unexpected mutation");present=add;return Task.CompletedTask;}
+        Task<bool> Owner(long e,CancellationToken t)=>Task.FromResult(owner&&e==observedEpoch);
+        await VipLocalReconcile.Run(j,10,true,Inspect,Change,Owner,default);
+        Must(present&&j.Last?.Epoch==10&&j.Last.Phase=="assigned","new owner reconciles address");
+        await VipLocalReconcile.Run(j,10,true,Inspect,Change,Owner,default);
+        present=false;
+        await VipLocalReconcile.Run(j,10,true,Inspect,Change,Owner,default);
+        Must(present&&j.Last?.Phase=="assigned","same owner recovers absent address after restart");
+        owner=false;observedEpoch=11;
+        await VipLocalReconcile.Run(j,11,false,Inspect,Change,Owner,default);
+        Must(!present&&j.Last?.Phase=="withdrawn","revoked owner withdraws");
+        owner=true;observedEpoch=12;
+        await VipLocalReconcile.Run(j,12,true,Inspect,Change,Owner,default);
+        Must(present&&j.Last?.Epoch==12,"newer failback epoch reconciles");
+        try{await VipLocalReconcile.Run(j,10,true,Inspect,Change,Owner,default);throw new Exception("stale revision accepted");}
+        catch(InvalidDataException){}
+        Must(present&&j.Last?.Epoch==12,"stale revision leaves current address intact");
+    }
     File.AppendAllText(path,"partial");
     Refused(()=>{using var j=new VipAddressJournal(path,"scope","nic","192.0.2.10");});
     Refused(()=>VipHostAddressPlatform.Parse("127.0.0.1"));
