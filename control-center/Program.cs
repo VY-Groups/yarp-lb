@@ -2992,7 +2992,8 @@ app.MapPost("/admin/api/fleet/rollout/{changeId}", async (HttpContext ctx, strin
             return Results.Json(new { error = "Licensed managed-gateway count exceeded or HA/fleet feature unavailable.", code = "license_node_limit" }, statusCode: 402);
 #endif
         var fleetDigest = FleetDigest();
-        var proxy = new JsonObject { ["Routes"] = routes.DeepClone(), ["Clusters"] = clusters.DeepClone() };
+        if (!FleetAdcContract.TryBuildApproved(payload, ReadProxy(), out var proxy, out var adcError))
+            return Results.Conflict(new { error = adcError });
         var signingKeyPath = Path.Combine(privateDir, "fleet-signing-private.pem");
         if (!File.Exists(signingKeyPath))
             return Results.Conflict(new { error = "Fleet signing key not provisioned" });

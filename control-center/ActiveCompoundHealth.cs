@@ -27,25 +27,7 @@ public sealed record ActiveCompoundSettings(string Mode, string SecondaryPath)
         return true;
     }
 
-    public static bool ValidateDraft(JsonObject cluster)
-    {
-        if (cluster["Metadata"] is not JsonObject metadata) return true;
-        if (!metadata.ContainsKey(ModeKey)) return !metadata.ContainsKey(PathKey);
-        if (metadata[ModeKey] is not JsonValue mode || !mode.TryGetValue<string>(out var modeText) ||
-            metadata[PathKey] is not JsonValue path || !path.TryGetValue<string>(out var pathText) ||
-            modeText is null || pathText is null ||
-            !TryRead(new Dictionary<string,string> { [ModeKey] = modeText, [PathKey] = pathText }, out var settings) ||
-            settings is null) return false;
-        var active = (cluster["HealthCheck"] as JsonObject)?["Active"] as JsonObject;
-        if (active?["Enabled"] is not JsonValue enabled || !enabled.TryGetValue<bool>(out var on) || !on ||
-            active["Path"] is not JsonValue primary || !primary.TryGetValue<string>(out var primaryPath) ||
-            !CompoundProbeSettings.ValidPath(primaryPath) || primaryPath == settings.SecondaryPath ||
-            cluster["HttpClient"]?["WebProxy"] is not null ||
-            cluster["HealthCheck"]?["AvailableDestinationsPolicy"]?.ToString() != "HealthyAndUnknown")
-            return false;
-        return cluster["Destinations"] is JsonObject destinations &&
-            destinations.All(x => x.Value is JsonObject d && d["Health"] is null);
-    }
+    public static bool ValidateDraft(JsonObject cluster) => CompoundActiveDraft.Validate(cluster);
 }
 
 public sealed class ActiveCompoundConfigFilter : IProxyConfigFilter

@@ -401,6 +401,9 @@ app.MapPost("/agent/v1/config/prepare", async (ConfigPrepare input) =>
         var hash = Sha(current);
         if (!hash.Equals(input.ExpectedRevision, StringComparison.OrdinalIgnoreCase))
             return Results.Conflict(new { error = "Gateway config drift detected", currentRevision = hash });
+        var doc = JsonNode.Parse(current)!.AsObject();
+        if (FleetAdcContract.Validate(candidate, doc["ReverseProxy"] as JsonObject ?? new JsonObject()) is { } adcError)
+            return Results.BadRequest(new { error = adcError });
         var txDir = Path.Combine(stageRoot, input.TransactionId);
         if (Directory.Exists(txDir)) return Results.Conflict(new { error = "Transaction already exists" });
         if (input.Sequence <= FleetSequenceState.Read(sequencePath))
@@ -415,7 +418,6 @@ app.MapPost("/agent/v1/config/prepare", async (ConfigPrepare input) =>
         await File.WriteAllTextAsync(Path.Combine(txDir, "sequence.txt"),
             input.Sequence.ToString(System.Globalization.CultureInfo.InvariantCulture));
         await File.WriteAllBytesAsync(Path.Combine(txDir, "original.json"), current);
-        var doc = JsonNode.Parse(current)!.AsObject();
         doc["ReverseProxy"] = candidate.DeepClone();
         var proposed = Encoding.UTF8.GetBytes(doc.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
         await File.WriteAllBytesAsync(Path.Combine(txDir, "prepared.json"), proposed);
