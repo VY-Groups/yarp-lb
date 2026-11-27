@@ -6,7 +6,7 @@ using GatewayCore.Gslb.Contracts;
 
 internal static class VipHostAddressCommand
 {
-    internal static async Task<int> Run(string[] args)
+    internal static async Task<int> Run(string[] args,long? exactEpoch=null,CancellationToken externalToken=default)
     {
         try
         {
@@ -36,7 +36,11 @@ internal static class VipHostAddressCommand
             using var log=new VipAddressJournal(file,scope,args[3],ip.ToString());
             var observed=VipHostAddressPlatform.Inspect(args[3],ip,management);
             long epoch=service.VipOwnershipEpoch??log.Last?.Epoch??0;
-            using var deadline=new CancellationTokenSource(TimeSpan.FromSeconds(30));
+            using var deadline=CancellationTokenSource.CreateLinkedTokenSource(externalToken);
+            deadline.CancelAfter(TimeSpan.FromSeconds(30));
+            if(exactEpoch is <1)throw new InvalidDataException("Positive exact epoch required.");
+            if(exactEpoch is long expected && args[4]=="withdraw" && log.Last?.Epoch!=expected)
+                throw new InvalidDataException("Delayed withdrawal does not match the journal owner epoch.");
             async Task Withdraw()
             {
                 // Compensation has an independent deadline even if the quorum check timed out.
@@ -53,6 +57,8 @@ internal static class VipHostAddressCommand
                 using var authority=FleetQuorum.OpenVip(service.VipQuorumConfigPath,scope);
                 var current=await authority.ObserveVipReader(deadline.Token);
                 epoch=current.Epoch;
+                if(exactEpoch is long required && (!current.Own||current.Epoch!=required))
+                    throw new InvalidDataException("Delayed reconciliation does not match exact current ownership.");
                 await VipLocalReconcile.Run(log,current.Epoch,current.Own,
                     ()=>VipHostAddressPlatform.Inspect(args[3],ip,management),
                     (observation,add,token)=>VipHostAddressPlatform.Change(observation,ip,add,token),

@@ -202,9 +202,9 @@ internal static class VipRedfishProvider
                 {return Results.StatusCode(503);}
                 finally{gate.Release();}
             }
-            app.MapPost("/v1/vip/node-status",(HttpContext ctx)=>NodeAction(ctx,"node-status"));
-            app.MapPost("/v1/vip/drain-node",(HttpContext ctx)=>NodeAction(ctx,"drain-node"));
-            app.MapPost("/v1/vip/activate-node",(HttpContext ctx)=>NodeAction(ctx,"activate-node"));
+            app.MapPost("/v1/vip/node-status",(Delegate)(Func<HttpContext,Task<IResult>>)(ctx=>NodeAction(ctx,"node-status")));
+            app.MapPost("/v1/vip/drain-node",(Delegate)(Func<HttpContext,Task<IResult>>)(ctx=>NodeAction(ctx,"drain-node")));
+            app.MapPost("/v1/vip/activate-node",(Delegate)(Func<HttpContext,Task<IResult>>)(ctx=>NodeAction(ctx,"activate-node")));
             await app.RunAsync();
             return 0;
         }

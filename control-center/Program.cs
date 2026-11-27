@@ -266,12 +266,19 @@ if((vipMachinePin is not null||vipMachineScope is not null)&&
 var vipMachineEpoch=vipMachineService is null?0:vipEpochs[vipMachineService.Id];
 var vipMachineAddress=vipMachineService is null?null:IPAddress.Parse(vipMachineService.Ip).ToString();
 var vipMachinePath=vipMachineService is null?null:Path.Combine(privateDir,"vip-auto-drain-"+vipMachineScope+".json");
-var vipMachineDrained=vipMachinePath is not null && VipMachineDrainState.Read(vipMachinePath,vipMachineScope!,vipMachineEpoch);
+var activeAutomaticDrains=new HashSet<string>(StringComparer.Ordinal);
+foreach(var service in (guardedVirtualServices??[]).Where(s=>s.VipJournalDirectory is not null))
+{
+    var scope=FleetQuorum.VipScope(service.VipFleetId!,service.Ip);
+    var path=Path.Combine(privateDir,"vip-auto-drain-"+scope+".json");
+    if(VipMachineDrainState.Read(path,scope,vipEpochs[service.Id]))activeAutomaticDrains.Add(service.Id);
+}
+var vipMachineDrained=vipMachineService is not null&&activeAutomaticDrains.Contains(vipMachineService.Id);
 var vipMachineAuthKey=new object();
 if (localVipAdmission is not null)
 {
     localVipAdmission.SetPlannedDrains(persistedVipDrains.SelectMany(ip=>vipDrainGroups[ip]));
-    if(vipMachineDrained)localVipAdmission.SetAutomaticDrains(vipDrainGroups[vipMachineAddress!]);
+    localVipAdmission.SetAutomaticDrains(activeAutomaticDrains);
     builder.Services.AddHostedService<LocalVipAdmission>(_ => localVipAdmission);
 }
 var acmeChallengeSetting = Environment.GetEnvironmentVariable("YARP_ACME_HTTP01_PUBLIC_ENTRYPOINT");
@@ -2314,7 +2321,8 @@ app.MapPost("/admin/vip-machine/drain",async (HttpContext ctx,VipMachineDrainInp
             var denied=await ConfirmAndWriteResourceMutation(ctx,vipMachinePath,before,proposed,"VIP_AUTOMATIC_DRAIN_INTENT",true);
             if(denied is not null)return denied;
             vipMachineDrained=true;
-            localVipAdmission.SetAutomaticDrains(group);
+            activeAutomaticDrains.UnionWith(group);
+            localVipAdmission.SetAutomaticDrains(activeAutomaticDrains);
             await Audit(Actor(ctx),"VIP_AUTOMATIC_DRAIN_COMMITTED",new{scope=input.Scope,epoch=input.Epoch});
         }
         return Results.Ok(new{scope=input.Scope,epoch=input.Epoch,nonce=input.Nonce,

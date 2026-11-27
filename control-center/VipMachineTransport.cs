@@ -49,7 +49,7 @@ internal sealed class VipMachineTransport:IDisposable
         }
         catch{handler?.Dispose();cert?.Dispose();ca.Dispose();throw;}
     }
-    internal async Task<T> Post<T>(string path,object request,CancellationToken token)
+    internal async Task<T> Post<T>(string path,object request,CancellationToken token) where T:class
     {
         if(path is not ("/v1/vip-node/status" or "/v1/vip-node/activate" or "/admin/vip-machine/drain"))
             throw new InvalidDataException("Unknown machine operation.");

@@ -112,7 +112,9 @@ internal static class VipAutomaticController
                 if(!sample.Quiescent||!sample.OtherEligible||
                     (intent.Kind=="failover"&&(sample.OwnerServing||sample.OwnerDrained)))
                     throw new InvalidDataException("Transition conditions no longer hold; independent recovery required.");
-                if(intent.Kind=="failback"&&!sample.OwnerDrained)
+                // A prior drain flag does not prove that all in-flight requests
+                // completed, nor that this is not a human maintenance drain.
+                if(intent.Kind=="failback")
                 {
                     sample=await provider.NodeAction("drain-node",scope,intent.OldPin,intent.OldEpoch,intent.NewPin,token);
                     if(!sample.Quiescent||!sample.OwnerDrained||!sample.OtherEligible)

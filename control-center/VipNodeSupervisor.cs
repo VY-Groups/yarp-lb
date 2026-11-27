@@ -87,13 +87,25 @@ internal static class VipNodeSupervisor
             async Task Reconcile(CancellationToken token)
             {
                 token.ThrowIfCancellationRequested();
-                if(await VipHostAddressCommand.Run(AddressArgs("reconcile"))!=0||!bindingReady())
+                if(await VipHostAddressCommand.Run(AddressArgs("reconcile"),epoch,token)!=0||!bindingReady())
                     throw new InvalidOperationException("Local journal reconciliation not confirmed.");
+            }
+            async Task StopExact(CancellationToken token)
+            {
+                // Never compensate against a newer local journal, even if a
+                // stale activation has timed out while another owner recovered.
+                var journalFile=Path.Combine(service.VipJournalDirectory,Convert.ToHexString(SHA256.HashData(Encoding.ASCII.GetBytes(address.ToString())))+".journal");
+                if(File.Exists(journalFile))
+                {
+                    using var journal=new VipAddressJournal(journalFile,s.Scope,service.VipInterfaceId,address.ToString(),readOnly:true);
+                    if(journal.Last?.Epoch>epoch)throw new InvalidDataException("Newer local owner must not be stopped.");
+                }
+                await Service(s.ServiceName,false,token);
             }
             async Task Withdraw(CancellationToken token)
             {
                 token.ThrowIfCancellationRequested();
-                if(await VipHostAddressCommand.Run(AddressArgs("withdraw"))!=0||
+                if(await VipHostAddressCommand.Run(AddressArgs("withdraw"),epoch,token)!=0||
                     VipHostAddressPlatform.Inspect(service.VipInterfaceId,address,management).Present)
                     throw new InvalidOperationException("Local withdrawal not confirmed.");
             }
@@ -144,7 +156,7 @@ internal static class VipNodeSupervisor
             {
                 await VipNodeLifecycle.Activate(epoch,authority.IsVipOwner,Reconcile,
                     token=>Service(s.ServiceName,true,token),Serving,
-                    token=>Service(s.ServiceName,false,token),Withdraw,deadline.Token);
+                    StopExact,Withdraw,deadline.Token);
             }
             else
             {
@@ -153,7 +165,7 @@ internal static class VipNodeSupervisor
                 var state=await authority.ObserveVipReader(deadline.Token);
                 if(state.Epoch<epoch||state.Own&&state.Epoch!=epoch||!bindingReady())
                     throw new InvalidDataException("Local service epoch is not the requested stop epoch.");
-                await VipNodeLifecycle.StopAndWithdraw(token=>Service(s.ServiceName,false,token),Withdraw,deadline.Token);
+                await VipNodeLifecycle.StopAndWithdraw(StopExact,Withdraw,deadline.Token);
             }
             Console.WriteLine(JsonSerializer.Serialize(new {scope=s.Scope,epoch,action=args[2],confirmed=true}));
             return 0;

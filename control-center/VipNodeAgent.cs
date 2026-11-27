@@ -72,8 +72,8 @@ internal static class VipNodeAgent
                 {return Results.StatusCode(503);}
                 finally{gate.Release();}
             }
-            app.MapPost("/v1/vip-node/status",(HttpContext ctx)=>Handle(ctx,false));
-            app.MapPost("/v1/vip-node/activate",(HttpContext ctx)=>Handle(ctx,true));
+            app.MapPost("/v1/vip-node/status",(Delegate)(Func<HttpContext,Task<IResult>>)(ctx=>Handle(ctx,false)));
+            app.MapPost("/v1/vip-node/activate",(Delegate)(Func<HttpContext,Task<IResult>>)(ctx=>Handle(ctx,true)));
             await app.RunAsync();return 0;
         }
         catch(Exception e) when(e is IOException or InvalidDataException or InvalidOperationException or
