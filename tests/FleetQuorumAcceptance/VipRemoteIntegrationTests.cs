@@ -46,7 +46,10 @@ internal static class VipRemoteIntegrationTests
                 r.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension(usages,true));
                 if(server){var san=new SubjectAlternativeNameBuilder();san.AddIpAddress(IPAddress.Loopback);r.CertificateExtensions.Add(san.Build());}
                 using var leaf=r.Create(ca,DateTimeOffset.UtcNow.AddMinutes(-2),DateTimeOffset.UtcNow.AddHours(2),RandomNumberGenerator.GetBytes(16));
-                return leaf.CopyWithPrivateKey(key);
+                using var withKey=leaf.CopyWithPrivateKey(key);
+                // Schannel requires a Windows key-container-backed TLS private key.
+                return X509CertificateLoader.LoadPkcs12(withKey.Export(X509ContentType.Pkcs12),null,
+                    OperatingSystem.IsWindows()?X509KeyStorageFlags.UserKeySet:X509KeyStorageFlags.EphemeralKeySet);
             }
             using var server=Issue(serverKey,"127.0.0.1","1.3.6.1.5.5.7.3.1",true);
             using var client=Issue(clientKey,"disposable writer","1.3.6.1.5.5.7.3.2",false);

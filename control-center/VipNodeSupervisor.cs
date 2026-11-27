@@ -155,7 +155,7 @@ internal static class VipNodeSupervisor
             if(args[2]=="activate")
             {
                 await VipNodeLifecycle.Activate(epoch,authority.IsVipOwner,Reconcile,
-                    token=>Service(s.ServiceName,true,token),Serving,
+                    token=>Service(s.ServiceName,true,token),token=>Serving(token),
                     StopExact,Withdraw,deadline.Token);
             }
             else

@@ -39,7 +39,8 @@ internal sealed class VipMachineTransport:IDisposable
         try
         {
             using var pem=X509Certificate2.CreateFromPemFile(FleetQuorum.FilePath(s.CertFile,65536),FleetQuorum.FilePath(s.KeyFile,65536,true));
-            cert=X509CertificateLoader.LoadPkcs12(pem.Export(X509ContentType.Pkcs12),null,X509KeyStorageFlags.EphemeralKeySet);
+            cert=X509CertificateLoader.LoadPkcs12(pem.Export(X509ContentType.Pkcs12),null,
+                OperatingSystem.IsWindows()?X509KeyStorageFlags.UserKeySet:X509KeyStorageFlags.EphemeralKeySet);
             handler=new HttpClientHandler{UseProxy=false,AllowAutoRedirect=false,UseCookies=false};
             handler.ClientCertificates.Add(cert);
             handler.ServerCertificateCustomValidationCallback=(_,leaf,_,errors)=>

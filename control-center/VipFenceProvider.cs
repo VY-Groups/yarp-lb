@@ -43,7 +43,8 @@ internal sealed class VipFenceProvider : IDisposable
         try
         {
             using var pem=X509Certificate2.CreateFromPemFile(FleetQuorum.FilePath(s.CertFile,65536),FleetQuorum.FilePath(s.KeyFile,65536,true));
-            credential=X509CertificateLoader.LoadPkcs12(pem.Export(X509ContentType.Pkcs12),null,X509KeyStorageFlags.EphemeralKeySet);
+            credential=X509CertificateLoader.LoadPkcs12(pem.Export(X509ContentType.Pkcs12),null,
+                OperatingSystem.IsWindows()?X509KeyStorageFlags.UserKeySet:X509KeyStorageFlags.EphemeralKeySet);
             if(s.OwnerPins.Contains(Convert.ToHexString(SHA256.HashData(credential.RawData)),StringComparer.Ordinal))
                 throw new InvalidDataException("Provider client credential must be independent from gateway identities.");
             handler=new HttpClientHandler{UseProxy=false,AllowAutoRedirect=false,UseCookies=false};
