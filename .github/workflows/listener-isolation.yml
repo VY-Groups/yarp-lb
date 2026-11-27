@@ -25,7 +25,7 @@ jobs:
           set -euo pipefail
           python3 tests/CI/listeners/test_isolation.py \
             --dll control-center/bin/Release/net10.0/GatewayCoreYarp.dll \
-            --out artifacts/listeners
+            --out artifacts/listeners --exercise-vip-address-transition
       - name: Diff real exported metric families against contract and alert/dashboard expressions
         shell: bash
         run: |

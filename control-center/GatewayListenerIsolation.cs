@@ -33,7 +33,7 @@ public sealed class GatewayListenerIsolation : IDisposable
         string[]? TrafficCertificateDnsNames = null,
         VirtualSocket[]? VirtualServices = null);
 
-    public sealed record VirtualSocket(string Id, string Ip, int Port, string Protocol);
+    public sealed record VirtualSocket(string Id, string Ip, int Port, string Protocol, bool RequireLocalAddressPresence = false);
     private readonly (VirtualSocket Config, IPAddress Address)[] _virtualServices;
 
     public readonly Settings Config;
