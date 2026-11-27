@@ -57,6 +57,13 @@ internal static class FleetAdcContractTests
         Check(!ApplicationAccessPolicy.TryParse(rules,out _),"unbounded CIDR rejected");
         rules[ApplicationAccessPolicy.NetworksKey]="192.0.2.0/24,";
         Check(!ApplicationAccessPolicy.TryParse(rules,out _),"empty allowlist member rejected");
+        bad = snapshot.DeepClone().AsObject();
+        bad["Routes"]!["web"]!["Metadata"] = new JsonObject { [ApplicationAccessPolicy.CompressionKey]="true" };
+        Check(FleetAdcContract.Validate(bad,snapshot) is null,"signed public HTTP compression accepted");
+        bad["Routes"]!["web"]!["Metadata"]![ApplicationAccessPolicy.HttpsKey] = "true";
+        Check(FleetAdcContract.Validate(bad,snapshot) is not null,"HTTP compression and mandatory HTTPS conflict rejected");
+        bad["Routes"]!["web"]!["Metadata"] = new JsonObject { [ApplicationAccessPolicy.CompressionKey]=true };
+        Check(FleetAdcContract.Validate(bad,snapshot) is not null,"malformed signed compression policy rejected");
         using var key=ECDsa.Create(ECCurve.NamedCurves.nistP256);
         var pub=key.ExportSubjectPublicKeyInfoPem();
         var trusted=new Dictionary<string,string> { [FleetConfigSignature.KeyIdFromPublicKey(pub)] = pub };

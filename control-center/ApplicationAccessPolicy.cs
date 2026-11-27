@@ -2,16 +2,24 @@ using System.Net;
 using System.Text.Json.Nodes;
 
 /// <summary>Opt-in route TLS and actual peer-network access, not user authentication.</summary>
-public sealed record ApplicationAccessPolicy(bool RequireHttps, IPNetwork[] AllowedNetworks)
+public sealed record ApplicationAccessPolicy(bool RequireHttps, IPNetwork[] AllowedNetworks, bool PublicHttpCompression = false)
 {
     public const string HttpsKey = "ADC.Access.RequireHttps";
     public const string NetworksKey = "ADC.Access.AllowedNetworks";
+    public const string CompressionKey = "ADC.Acceleration.PublicHttpCompression";
     public static bool TryParse(IReadOnlyDictionary<string,string>? metadata, out ApplicationAccessPolicy policy)
     {
         policy = new(false, []);
         if (metadata is null) return true;
         if (metadata.Keys.Any(key => key.StartsWith("ADC.Access.", StringComparison.OrdinalIgnoreCase) &&
             key is not (HttpsKey or NetworksKey))) return false;
+        if (metadata.Keys.Any(key => key.StartsWith("ADC.Acceleration.", StringComparison.OrdinalIgnoreCase) && key != CompressionKey)) return false;
+        bool compress = false;
+        if (metadata.TryGetValue(CompressionKey, out var compression))
+        {
+            if (compression is not ("true" or "false")) return false;
+            compress = compression == "true";
+        }
         bool tls = false;
         if (metadata.TryGetValue(HttpsKey, out var https))
         {
@@ -33,7 +41,8 @@ public sealed record ApplicationAccessPolicy(bool RequireHttps, IPNetwork[] Allo
                 networks.Add(network);
             }
         }
-        policy = new(tls, networks.ToArray());
+        if (tls && compress) return false; // this initial compression profile is HTTP only
+        policy = new(tls, networks.ToArray(), compress);
         return true;
     }
 
@@ -52,8 +61,9 @@ public sealed record ApplicationAccessPolicy(bool RequireHttps, IPNetwork[] Allo
         var relevant = new Dictionary<string,string>(StringComparer.Ordinal);
         foreach (var (key,node) in meta)
         {
-            if (!key.StartsWith("ADC.Access.", StringComparison.OrdinalIgnoreCase)) continue;
-            if (key is not (HttpsKey or NetworksKey) || node is not JsonValue value ||
+            if (!key.StartsWith("ADC.Access.", StringComparison.OrdinalIgnoreCase) &&
+                !key.StartsWith("ADC.Acceleration.", StringComparison.OrdinalIgnoreCase)) continue;
+            if (key is not (HttpsKey or NetworksKey or CompressionKey) || node is not JsonValue value ||
                 !value.TryGetValue<string>(out var text) || text is null) return false;
             relevant.Add(key,text);
         }

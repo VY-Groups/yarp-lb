@@ -158,6 +158,13 @@ if (auditOutboxPath is not null && externalAuditIntent is null)
 using var auditOutbox = auditOutboxPath is null ? null : new DurableAuditOutbox(auditOutboxPath, externalAuditIntent!);
 var localAudit = new LocalAdminAudit(Path.Combine(privateDir, "admin-audit.jsonl"), auditOutbox);
 var builder = WebApplication.CreateBuilder(args);
+builder.Services.AddResponseCompression(options =>
+{
+    options.EnableForHttps = false;
+    options.Providers.Add<Microsoft.AspNetCore.ResponseCompression.BrotliCompressionProvider>();
+    options.Providers.Add<Microsoft.AspNetCore.ResponseCompression.GzipCompressionProvider>();
+    options.MimeTypes = new[] { "text/css", "text/javascript", "application/javascript", "image/svg+xml" };
+});
 #if GATEWAYCORE_COMMERCIAL
 builder.Services.AddHostedService<CommercialLicenseRuntime>(_ => commercialLicense);
 #endif
@@ -3840,6 +3847,29 @@ app.MapReverseProxy(proxyPipeline =>
             return;
         }
         await next();
+    });
+    proxyPipeline.Use(next =>
+    {
+        var provider = new PublicAssetCompression(app.Services.GetRequiredService<Microsoft.AspNetCore.ResponseCompression.IResponseCompressionProvider>());
+        var middleware = new Microsoft.AspNetCore.ResponseCompression.ResponseCompressionMiddleware(next, provider);
+        return async context =>
+        {
+            if (!PublicAssetCompression.RequestEligible(context))
+            {
+                await next(context);
+                return;
+            }
+            // Identity representations must also vary on the encoding request.
+            context.Response.OnStarting(() =>
+            {
+                if (PublicAssetCompression.ResponseEligible(context) &&
+                    !context.Response.Headers.Vary.ToString().Split(',', StringSplitOptions.TrimEntries)
+                        .Any(value => value.Equals("Accept-Encoding", StringComparison.OrdinalIgnoreCase)))
+                    context.Response.Headers.Append("Vary", "Accept-Encoding");
+                return Task.CompletedTask;
+            });
+            await middleware.Invoke(context);
+        };
     });
     proxyPipeline.UsePassiveHealthChecks();
 }).RequireRateLimiting("proxy-concurrency");

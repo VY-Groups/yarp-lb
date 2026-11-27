@@ -65,6 +65,17 @@ class Origin(BaseHTTPRequestHandler):
             cls.connection_max_active = 0
 
     def do_GET(self):
+        if self.path.startswith("/adc-compression/"):
+            body = b"body { color: black; }\n" * 512
+            self.send_response(200)
+            self.send_header("Content-Type", "text/css")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "private, max-age=60" if self.path.endswith("/private") else "public, max-age=60")
+            if self.path.endswith("/cookie"):
+                self.send_header("Set-Cookie", "fixture=only; HttpOnly")
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if self.path == "/compound-fail":
             self.send_error(503)
             return
@@ -1078,6 +1089,45 @@ def acceptance(base:str,https_base:str,origin_port:int):
     verify_real_server_catalog(base,admin,operator,reviewer,viewer,origin_port)
     verify_reusable_adc_catalogs(base,admin,operator,reviewer,origin_port)
     verify_secure_affinity(base,https_base,admin,operator,reviewer,origin_port)
+    # Actual gateway compression negotiation after independent configuration approval.
+    import httpx
+    snapshot = admin.request("GET","/admin/api/state")
+    payload = {key:snapshot[key] for key in ("routes","clusters","disabled","revision")}
+    payload["routes"]["compression-fixture"] = {
+        "ClusterId":"fixture","Match":{"Path":"/adc-compression/{**catch-all}"},
+        "Metadata":{"ADC.Acceleration.PublicHttpCompression":"true"}}
+    pending = operator.request("POST","/admin/api/change-requests",
+        {"reason":"Public HTTP compression fixture","payload":payload})
+    reviewer.request("POST",f"/admin/api/change-requests/{pending['id']}/decision",
+        {"decision":"approve","reason":"Independent compression fixture review"})
+    with httpx.Client(verify=False,timeout=8,trust_env=False) as compression_client:
+        url = base + "/adc-compression/public"
+        expected = b"body { color: black; }\n" * 512
+        for attempt in range(100):
+            response = compression_client.get(url,headers={"Accept-Encoding":"gzip"})
+            if response.status_code == 200: break
+            time.sleep(.2)
+        check(response.status_code==200 and response.headers.get("content-encoding")=="gzip" and
+              response.content==expected and "accept-encoding" in response.headers.get("vary","").lower(),
+              "real gateway gzip public asset and decoded body")
+        for target, headers in (
+            (url, {"Accept-Encoding":"identity"}),
+            (url, {"Accept-Encoding":"gzip","Authorization":"Bearer fixture"}),
+            (url, {"Accept-Encoding":"gzip","Cookie":"fixture=1"}),
+            (url, {"Accept-Encoding":"gzip","Range":"bytes=0-20"}),
+            (base+"/adc-compression/private", {"Accept-Encoding":"gzip"}),
+            (base+"/adc-compression/cookie", {"Accept-Encoding":"gzip"}),
+            (https_base+"/adc-compression/public", {"Accept-Encoding":"gzip"})):
+            response = compression_client.get(target,headers=headers)
+            check(response.status_code==200 and response.headers.get("content-encoding") is None and
+                  response.content==expected, "compression bypass preserves exact upstream body")
+    snapshot = admin.request("GET","/admin/api/state")
+    payload = {key:snapshot[key] for key in ("routes","clusters","disabled","revision")}
+    del payload["routes"]["compression-fixture"]
+    pending = operator.request("POST","/admin/api/change-requests",
+        {"reason":"Remove compression fixture","payload":payload})
+    reviewer.request("POST",f"/admin/api/change-requests/{pending['id']}/decision",
+        {"decision":"approve","reason":"Independent compression fixture cleanup"})
     check(admin.request("GET","/admin/api/mail")["enabled"] is False,"SMTP starts disabled")
     admin.request("POST","/admin/api/mail/test",{},expect=409)
     admin.request("POST","/admin/api/mail",{"enabled":True,"host":"smtp.invalid","port":587,
