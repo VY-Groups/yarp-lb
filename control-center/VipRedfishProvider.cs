@@ -8,7 +8,7 @@ using System.Text.Json.Serialization;
 using Microsoft.AspNetCore.Server.Kestrel.Https;
 
 // Run on an independently administered, private fencing host. It cannot
-// mutate Raft ownership, cannot power a node on, and never accepts target URLs
+// mutate Raft ownership; optional rearm requires local approval. Never accepts target URLs
 // or credentials from the network. BMC access is limited to configured nodes.
 internal static class VipRedfishProvider
 {
@@ -16,7 +16,7 @@ internal static class VipRedfishProvider
         VipMachineTransport.ClientSettings? Agent=null,VipMachineTransport.ClientSettings? Drain=null);
     private sealed record Settings(string ListenIp,int Port,string Scope,string ReaderConfig,
         string ServerPfx,string ServerPasswordFile,string WriterCaFile,string WriterPin,
-        string SigningKeyFile,Node[] Nodes,bool StandbyBootIsolationApproved=false);
+        string SigningKeyFile,Node[] Nodes,bool StandbyBootIsolationApproved=false,string? RearmJournalFile=null);
     private static readonly JsonSerializerOptions Json=new(JsonSerializerDefaults.Web)
         {UnmappedMemberHandling=JsonUnmappedMemberHandling.Disallow};
     internal static async Task<int> Run(string[] args)
@@ -49,6 +49,17 @@ internal static class VipRedfishProvider
             using var agent1=remote?VipMachineTransport.Open(s.Nodes[1].Agent!):null;
             using var drain0=remote?VipMachineTransport.Open(s.Nodes[0].Drain!):null;
             using var drain1=remote?VipMachineTransport.Open(s.Nodes[1].Drain!):null;
+            if(s.StandbyBootIsolationApproved&&(!remote||string.IsNullOrWhiteSpace(s.RearmJournalFile)||
+                !Path.IsPathFullyQualified(s.RearmJournalFile)))
+                throw new InvalidDataException("Approved standby boot requires a protected provider rearm journal.");
+            if(s.StandbyBootIsolationApproved)
+            {
+                string dir=Path.GetDirectoryName(s.RearmJournalFile!)!;
+                if(OperatingSystem.IsWindows())WindowsStateProtection.ValidateOfflineKeyRingDirectory(dir);
+                else if(OperatingSystem.IsLinux())GatewayCore.Gslb.Contracts.PrivateKeyFileSecurity.ValidateLinuxPrivateStateDirectory(dir,"VIP provider rearm");
+                else throw new InvalidOperationException("Unsupported provider platform.");
+            }
+            using var rearmJournal=s.StandbyBootIsolationApproved?new VipProviderRearmJournal(s.RearmJournalFile!,s.Scope,s.Nodes[0].Pin,s.Nodes[1].Pin):null;
             using var signer=ECDsa.Create();
             signer.ImportFromPem(File.ReadAllText(FleetQuorum.FilePath(s.SigningKeyFile,8192,true)));
             if(signer.KeySize!=256||signer.ExportParameters(true).D is not {Length:32})
@@ -160,38 +171,11 @@ internal static class VipRedfishProvider
                     }
                     if(action=="rearm-node")
                     {
-                        // Site approval is explicit and local to the independent
-                        // provider. The gateway/UI cannot authorize power-on.
-                        if(!s.StandbyBootIsolationApproved)return Results.StatusCode(403);
-                        async Task AssertSafePeer(CancellationToken _)
-                        {
-                            await AssertOwner();
-                            if(await ownerBmc.IsOff(token)||!(await Status(ownerAgent,r.OwnerPin)).Serving)
-                                throw new InvalidDataException("Current owner not serving; rearm refused.");
-                            var d=await Drain(false);
-                            if(d.ManualDrain||d.Draining)throw new InvalidDataException("Owner maintenance drain; rearm refused.");
-                            await AssertOwner();
-                        }
-                        await AssertSafePeer(token);
-                        await peerBmc.ConfirmOn(AssertSafePeer,token);
-                        // A powered-on peer is not eligible until its pinned
-                        // agent confirms no VIP, a safe journal and stopped/manual service.
-                        while(true)
-                        {
-                            await AssertSafePeer(token);
-                            try
-                            {
-                                if((await Status(peerAgent,r.OtherPin)).Eligible)
-                                {
-                                    await AssertSafePeer(token);
-                                    return Results.Json(new VipFenceProvider.NodeEvidence(r.Scope,r.OwnerPin,r.Epoch,r.OtherPin,r.Nonce,
-                                        true,true,false,true),Json);
-                                }
-                            }
-                            catch(Exception e) when(e is HttpRequestException or InvalidDataException or OperationCanceledException)
-                            {token.ThrowIfCancellationRequested();}
-                            await Task.Delay(TimeSpan.FromSeconds(3),token);
-                        }
+                        if(rearmJournal is null)return Results.StatusCode(403);
+                        var rearmed=await VipStandbyRearm.Run(r,rearmJournal,AssertOwner,ownerBmc.IsOff,
+                            (pin,_,_)=>Status(pin==r.OwnerPin?ownerAgent:peerAgent,pin),
+                            (mutate,_)=>Drain(mutate),peerBmc.ConfirmOn,token);
+                        return Results.Json(rearmed,Json);
                     }
                     var evidence=await VipProviderActions.Run(action,r,AssertOwner,ownerBmc.IsOff,peerBmc.IsOff,
                         (pin,activate,_)=>Status(pin==r.OwnerPin?ownerAgent:peerAgent,pin,

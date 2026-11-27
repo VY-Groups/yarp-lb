@@ -101,6 +101,8 @@ internal static class VipRemoteIntegrationTests
             })));
             await using var app=builder.Build();
             VipMachineTransport? remoteClient=null;
+            int rearms=0;
+            using var providerRearmJournal=new VipProviderRearmJournal(Path.Combine(dir.FullName,"provider-rearms"),scope,a,b);
             async Task<IResult> Agent(HttpContext ctx,bool activate)
             {
                 var r=await ctx.Request.ReadFromJsonAsync<VipRemoteNode.Request>(json,ctx.RequestAborted);
@@ -156,13 +158,24 @@ internal static class VipRemoteIntegrationTests
                         var request=new VipRemoteNode.DrainRequest(scope,r.Epoch,Convert.ToHexString(RandomNumberGenerator.GetBytes(32)),mutate);
                         return VipRemoteNode.Match(request,await remoteClient!.Post<VipRemoteNode.DrainEvidence>("/admin/vip-machine/drain",request,t));
                     }
+                    if(action=="rearm-node")
+                    {
+                        var rearmed=await VipStandbyRearm.Run(r,providerRearmJournal,Assert,
+                            _=>Task.FromResult(!powered[r.OwnerPin]),NodeStatus,Drain,
+                            async (assert,t)=>
+                            {
+                                await assert(t);
+                                if(!powered[r.OtherPin]){powered[r.OtherPin]=true;rearms++;}
+                            },ctx.RequestAborted);
+                        return Results.Json(rearmed,json);
+                    }
                     var evidence=await VipProviderActions.Run(action,r,Assert,
                         _=>Task.FromResult(!powered[r.OwnerPin]),_=>Task.FromResult(!powered[r.OtherPin]),NodeStatus,Drain,ctx.RequestAborted);
                     return Results.Json(evidence,json);
                 }
                 catch(Exception e) when(e is InvalidDataException or InvalidOperationException){return Results.StatusCode(503);}
             }
-            foreach(var action in new[]{"node-status","drain-node","activate-node"})
+            foreach(var action in new[]{"node-status","drain-node","activate-node","rearm-node"})
             {
                 var selected=action;
                 app.MapPost("/v1/vip/"+selected,(Delegate)(Func<HttpContext,Task<IResult>>)(ctx=>Node(ctx,selected)));
@@ -209,7 +222,15 @@ internal static class VipRemoteIntegrationTests
                 loseActivation=false;
                 await VipAutomaticController.ExecuteTransition(scope,intent,journal,Observe,Revoke,provider.Fence,Activate,provider.NodeAction,default);
                 Must(state.Epoch==12&&serving[b]&&!powered[a]&&journal.Pending is null&&revokes==1,"exact recovery activates successor without another ownership transfer");
-                powered[a]=true; // fixture simulates independently approved standby rearm, not production power-on
+                manual[b]=true;
+                await Refused(()=>provider.NodeAction("rearm-node",scope,b,12,a,default));
+                Must(rearms==0&&!powered[a],"maintenance denies standby power-on");
+                manual[b]=false;
+                journal.RecordRearm(b,12,a);
+                var rearmed=await provider.NodeAction("rearm-node",scope,b,12,a,default);
+                Must(rearmed.OwnerServing&&rearmed.OtherEligible&&rearms==1&&powered[a]&&!serving[a],"rearm independently confirms non-serving standby over mTLS");
+                await Refused(()=>provider.NodeAction("rearm-node",scope,b,12,a,default));
+                Must(rearms==1,"duplicate authenticated rearm cannot power on again");
                 manual[b]=true;inflight=5;
                 var back=new VipAutomaticJournal.Transition(scope,b,12,a,"failback");journal.Begin(back);
                 await Refused(()=>VipAutomaticController.ExecuteTransition(scope,back,journal,Observe,Revoke,provider.Fence,Activate,provider.NodeAction,default));
