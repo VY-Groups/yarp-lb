@@ -1,0 +1,5 @@
+# Local network inventory
+
+Open Infrastructure inventory as Administrator or Operator to inspect interfaces on the control-center host. The authenticated API reads OS interface names, types, operational status, IP prefixes and reported default gateways through .NET NetworkInformation on Windows and Linux. It does not execute privileged shell commands, expose MAC addresses, mutate configuration or discover remote nodes. Snapshots are bounded and explicitly mark truncation. Viewer access is intentionally refused. Reload the page for a fresh snapshot; network state can change between observations.
+
+Use this as preflight evidence before independently approved changes to VIPs, interface addressing, VLANs, routes or NAT. Do not infer VLAN tags, route metrics, live forwarding, VIP ownership, or tenant isolation from interface names or default gateways. Those require separate implementation and acceptance. If inventory is unavailable, inspect the host using approved OS administration procedures; no changes are attempted.

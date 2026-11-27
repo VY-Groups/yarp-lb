@@ -2399,11 +2399,29 @@ $('auth-form').onsubmit = async (e) => {
         $('auth-form').removeAttribute('aria-busy');
     }
 };
+async function networkInventoryPanel() {
+    if (currentRole === 'Viewer')
+        return '';
+    try {
+        const snapshot = await api('/admin/api/network/interfaces');
+        if (!Array.isArray(snapshot.interfaces))
+            throw Error('Invalid network inventory response.');
+        const rows = snapshot.interfaces.map((item) => `<tr><td>${esc(item.name)}</td><td>${esc(item.type)}</td><td>${esc(item.status)}</td><td class="mono">${item.addresses.map((address) => esc(address.address + '/' + address.prefixLength)).join(', ') || '—'}</td><td class="mono">${item.defaultGateways.map((gateway) => esc(gateway)).join(', ') || '—'}</td></tr>`).join('');
+        return `<section class="card card-spaced"><h2>Local network interfaces</h2><p class="subtle">${esc(snapshot.platform)} · ${esc(snapshot.observedUtc)} · ${esc(snapshot.scope)}. ${snapshot.truncated ? 'Snapshot truncated; inspect the host before making decisions.' : 'Read-only observation.'}</p><div class="tablewrap"><table><thead><tr><th>Interface</th><th>Type</th><th>Status</th><th>IP / prefix</th><th>Default gateways</th></tr></thead><tbody>${rows || '<tr><td colspan="5">No interfaces reported</td></tr>'}</tbody></table></div></section>`;
+    }
+    catch {
+        return '<section class="card card-spaced"><h2>Local network interfaces</h2><p>Host network inventory unavailable. No network changes made.</p></section>';
+    }
+}
 async function inventory() {
     try {
+        const generation = authGeneration;
         const items = await api('/admin/api/inventory');
+        const network = await networkInventoryPanel();
+        if (generation !== authGeneration || view !== 'inventory')
+            return;
         const rows = items.map((x) => `<tr><td><b>${esc(x.name)}</b><div class="subtle mono">${esc(x.id)}</div></td><td>${esc(x.type)}</td><td class="mono">${esc(x.address)}</td><td>${esc(x.notes)}</td><td>${currentRole === 'Viewer' ? '—' : actionBtn('Remove', 'inventory-delete', x.id, 'danger-btn mini')}</td></tr>`).join('');
-        $('content').innerHTML = `<div class="toolbar"><div><h2>Infrastructure inventory</h2><p class="subtle">Register machines and services for documentation. Registration does not install software or configure firewalls.</p></div>${currentRole === 'Viewer' ? '' : actionBtn('+ Register asset', 'inventory-add', '')}</div><div class="tablewrap"><table><thead><tr><th>Name / ID</th><th>Type</th><th>Address</th><th>Notes</th><th>Actions</th></tr></thead><tbody>${rows || '<tr><td colspan="5" class="empty">No assets registered</td></tr>'}</tbody></table></div>`;
+        $('content').innerHTML = `<div class="toolbar"><div><h2>Infrastructure inventory</h2><p class="subtle">Register machines and services for documentation. Registration does not install software or configure firewalls.</p></div>${currentRole === 'Viewer' ? '' : actionBtn('+ Register asset', 'inventory-add', '')}</div><div class="tablewrap"><table><thead><tr><th>Name / ID</th><th>Type</th><th>Address</th><th>Notes</th><th>Actions</th></tr></thead><tbody>${rows || '<tr><td colspan="5" class="empty">No assets registered</td></tr>'}</tbody></table></div>` + network;
     }
     catch (e) {
         show(String(e), true);

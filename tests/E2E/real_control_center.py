@@ -931,6 +931,14 @@ def acceptance(base:str,https_base:str,origin_port:int):
     viewer.login("viewer_e2e","Viewer-secret-long-123!")
     reviewer.login("reviewer_e2e","Reviewer-secret-long!")
     viewer.request("GET","/admin/api/users",expect=403)
+    anonymous.request("GET","/admin/api/network/interfaces",expect=401)
+    viewer.request("GET","/admin/api/network/interfaces",expect=403)
+    for net_client in (admin,operator):
+        net_snapshot=net_client.request("GET","/admin/api/network/interfaces")
+        check(net_snapshot["platform"]=="Linux" and isinstance(net_snapshot["interfaces"],list) and
+              any(i["type"]=="Loopback" and any(a["address"]=="127.0.0.1" and a["prefixLength"]==8 for a in i["addresses"]) for i in net_snapshot["interfaces"]),
+              "authorized live OS network snapshot includes loopback prefix")
+    operator.request("POST","/admin/api/network/interfaces",{},expect=405)
     viewer.request("POST","/admin/api/inventory",{"id":"bad"},expect=403)
     operator.request("POST","/admin/api/users",{"username":"bad"},expect=403)
     for client in (admin,operator,viewer):

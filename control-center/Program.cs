@@ -2142,6 +2142,14 @@ app.MapPost("/admin/api/directory/test-user", async (HttpContext ctx, DirectoryL
 }).RequireRateLimiting("ldaptest").RequireAuthorization(p => p.RequireRole("Administrator"));
 
 app.MapGet("/admin/api/inventory", () => Results.Ok(ReadInventory())).RequireAuthorization();
+app.MapGet("/admin/api/network/interfaces", (HttpContext ctx) =>
+{
+    ctx.Response.Headers.CacheControl = "no-store";
+    try { return Results.Ok(LocalNetworkInventory.Read()); }
+    catch (Exception error) when (error is System.Net.NetworkInformation.NetworkInformationException or
+        InvalidOperationException or PlatformNotSupportedException or System.Net.Sockets.SocketException)
+    { return Results.Json(new { error = "Local network inventory unavailable." }, statusCode: 503); }
+}).RequireAuthorization(policy => policy.RequireRole("Administrator", "Operator"));
 app.MapPost("/admin/api/inventory", async (HttpContext ctx, InventoryInput input) =>
 {
     if (!ValidId(input.Id) || input.Name.Length is < 1 or > 100 ||
