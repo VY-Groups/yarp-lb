@@ -81,7 +81,9 @@ def rpc(path,body):
         if r.status!=200:raise RuntimeError("Disposable quorum request denied")
         return json.loads(data)
     finally:conn.close()
-scope=hashlib.sha256(("live-vip-"+uuid.uuid4().hex).encode()).hexdigest().upper()
+fleet="live-vip-"+uuid.uuid4().hex
+vip="192.0.2.137"
+scope=hashlib.sha256(("gatewaycore-adc-vip-v1\n"+fleet+"\n"+vip).encode()).hexdigest().upper()
 key=b64("/gatewaycore/adc-vip/v1/"+scope)
 def owner_state():
     rows=rpc("/v3/kv/range",{"key":key,"serializable":False}).get("kvs",[])
@@ -118,6 +120,144 @@ class JsonHandler(http.server.BaseHTTPRequestHandler):
     def body(self):
         self.connection.settimeout(5)
         return read_json_body(self.headers,self.rfile)
+def accept_live_policy(executable,scope,fleet,vip,reader,policy,expected_owner):
+    # Real shipping gateway on an ephemeral dedicated kernel interface.
+    # This fixture is intentionally separate from simulated BMC/node endpoints.
+    from http.cookiejar import CookieJar
+    from urllib.request import build_opener,ProxyHandler,HTTPSHandler,HTTPCookieProcessor,Request
+    from urllib.error import HTTPError,URLError
+    d=private_dir("live-policy");state=d/"state";state.mkdir(mode=0o700)
+    journal_dir=d/"vip-journal";journal_dir.mkdir(mode=0o700)
+    certdir=d/"certs";certdir.mkdir(mode=0o700)
+    ca_key=certdir/"ca.key";ca_crt=certdir/"ca.crt"
+    openssl("req","-new","-x509","-nodes","-newkey","rsa:3072","-sha256","-days","3",
+        "-subj","/CN=Disposable VIP policy CA","-addext","basicConstraints=critical,CA:TRUE",
+        "-addext","keyUsage=keyCertSign,cRLSign","-keyout",ca_key,"-out",ca_crt)
+    def leaf(label,san,usage):
+        k=certdir/(label+".key");csr=certdir/(label+".csr");crt=certdir/(label+".crt")
+        openssl("req","-new","-nodes","-newkey","rsa:2048","-subj","/CN="+label,"-keyout",k,"-out",csr)
+        ext=put(certdir,label+".ext","subjectAltName="+san+"\nextendedKeyUsage="+usage+"\n")
+        openssl("x509","-req","-in",csr,"-CA",ca_crt,"-CAkey",ca_key,"-CAcreateserial",
+                "-days","2","-sha256","-extfile",ext,"-out",crt)
+        k.chmod(0o600);return k,crt
+    sk,sc=leaf("management","IP:127.0.0.1","serverAuth")
+    ck,cc=leaf("operator","DNS:vip-ci-operator","clientAuth")
+    dpkey=certdir/"dp.key";dpcrt=certdir/"dp.crt"
+    openssl("req","-new","-x509","-nodes","-newkey","rsa:3072","-sha256","-days","7",
+            "-subj","/CN=Disposable VIP DP","-addext","basicConstraints=critical,CA:FALSE",
+            "-addext","keyUsage=critical,keyEncipherment","-keyout",dpkey,"-out",dpcrt)
+    def make_pfx(name,key,crt):
+        password=put(certdir,name+".password",uuid.uuid4().hex)
+        output=certdir/(name+".pfx")
+        openssl("pkcs12","-export","-in",crt,"-inkey",key,"-out",output,"-passout","file:"+str(password))
+        output.chmod(0o600);return str(output),str(password)
+    server_pfx,server_pass=make_pfx("server",sk,sc)
+    dp_pfx,dp_pass=make_pfx("dp",dpkey,dpcrt)
+    thumb=hashlib.sha1(ssl.PEM_cert_to_DER_cert(cc.read_text())).hexdigest().upper()
+    # Hold every port reservation concurrently until the configuration is built.
+    reservations=[]
+    try:
+        for ip in ("127.0.0.2","127.0.0.2","127.0.0.1","127.0.0.1","127.0.0.1"):
+            sock=socket.socket();reservations.append(sock);sock.bind((ip,0))
+        ports=[sock.getsockname()[1] for sock in reservations]
+        if len(set(ports))!=len(ports):raise AssertionError("Disposable port collision")
+    finally:
+        for sock in reservations:sock.close()
+    suffix=uuid.uuid4().hex[:8];nic="gcv"+suffix;peer="gcp"+suffix
+    if any(run("ip","link","show","dev",n,check=False).returncode==0 for n in (nic,peer)):
+        raise AssertionError("Existing interface; refuse mutation")
+    current=json.loads(run("ip","-j","address","show").stdout)
+    if any(x.get("local")==vip for item in current for x in item.get("addr_info",[])):
+        raise AssertionError("Existing VIP; refuse mutation")
+    config=put(d,"listeners.json",{"trafficIp":"127.0.0.2","trafficHttpPort":ports[0],
+        "trafficHttpsPort":ports[1],"managementIp":"127.0.0.1","adminPort":ports[2],
+        "metricsPort":ports[3],"trafficPfxPath":server_pfx,"trafficPfxPasswordFile":server_pass,
+        "managementPfxPath":server_pfx,"managementPfxPasswordFile":server_pass,
+        "clientCaPemPath":str(ca_crt),"clientThumbprints":[thumb],
+        "allowedAdminCidrs":["127.0.0.1/32"],"maxConcurrentConnections":32,"httpVersion":"1.1",
+        "virtualServices":[{"id":"policy-vip","ip":vip,"port":ports[4],"protocol":"HTTP",
+            "requireLocalAddressPresence":True,"vipFleetId":fleet,"vipQuorumConfigPath":str(reader),
+            "vipJournalDirectory":str(journal_dir),"vipInterfaceId":nic}]})
+    cfg=state/"config";cfg.mkdir(mode=0o700)
+    runtime=put(cfg,"appsettings.json",{"Logging":{"LogLevel":{"Default":"Warning"}},
+        "ReverseProxy":{"Routes":{},"Clusters":{}}})
+    env={k:v for k,v in os.environ.items() if not k.startswith(("YARP_","GATEWAY_","ASPNETCORE_","GATEWAYCORE_"))}
+    env.update(ASPNETCORE_ENVIRONMENT="Production",YARP_CONTROL_PLANE_DIR=str(state),
+        YARP_RUNTIME_CONFIG_PATH=str(runtime),YARP_LISTENERS_CONFIG_FILE=str(config),
+        YARP_LINUX_DP_CERT_PFX_PATH=dp_pfx,YARP_LINUX_DP_CERT_PASSWORD_FILE=dp_pass)
+    proc=None;created=False;assigned=False
+    def address(action):
+        result=subprocess.run([str(executable),"--vip-address",str(journal_dir),"policy-vip",nic,action],
+            env=env,capture_output=True,text=True,timeout=60,check=True)
+        return json.loads(result.stdout.strip().splitlines()[-1])
+    try:
+        run("ip","link","add",nic,"type","veth","peer","name",peer);created=True
+        run("ip","link","set",nic,"up");run("ip","link","set",peer,"up")
+        result=address("reconcile");assigned=True
+        if not result.get("eligibleToStart") or result.get("epoch")!=expected_owner[1]:
+            raise AssertionError("Real journal-bound address not ready at signed epoch")
+        journal_files=list(journal_dir.glob("*.journal"))
+        if len(journal_files)!=1:raise AssertionError("Exact address journal missing")
+        original_journal=journal_files[0].read_bytes()
+        with (d/"gateway.log").open("w") as log:
+            proc=subprocess.Popen([str(executable)],env=env,cwd=executable.parent,stdout=log,stderr=log)
+            def ready():
+                if proc.poll() is not None:raise AssertionError("Real policy gateway exited")
+                conn=http.client.HTTPConnection("127.0.0.2",ports[0],timeout=2)
+                try:
+                    conn.request("GET","/gateway/health/ready")
+                    res=conn.getresponse();res.read();return res.status==200
+                finally:conn.close()
+            wait(ready,"Real journal-bound gateway readiness",40)
+            context=ssl.create_default_context(cafile=str(ca_crt));context.load_cert_chain(str(cc),str(ck))
+            opener=build_opener(ProxyHandler({}),HTTPSHandler(context=context),HTTPCookieProcessor(CookieJar()))
+            csrf=None
+            def api(method,path,payload=None,expected=200,with_csrf=True):
+                headers={"Accept":"application/json"}
+                if payload is not None:headers["Content-Type"]="application/json"
+                if csrf and with_csrf:headers["X-CSRF-Token"]=csrf
+                data=None if payload is None else json.dumps(payload).encode()
+                try:
+                    with opener.open(Request("https://127.0.0.1:"+str(ports[2])+path,data=data,method=method,headers=headers),timeout=8) as reply:
+                        status,raw,cache=reply.status,reply.read(65536),reply.headers.get("Cache-Control")
+                except HTTPError as err:status,raw,cache=err.code,err.read(65536),err.headers.get("Cache-Control")
+                if status!=expected:raise AssertionError("Real policy API "+method+" "+path+" status "+str(status))
+                return (json.loads(raw),cache) if status==200 else (None,cache)
+            api("POST","/admin/api/bootstrap",{"username":"vip-policy-admin",
+                "password":uuid.uuid4().hex,"email":"vip-policy@example.invalid"})
+            session,_=api("GET","/admin/api/session");csrf=session["csrf"]
+            if not session["privacyAccepted"]:
+                api("POST","/admin/api/privacy/accept",{"version":session["privacyVersion"]})
+            if session["role"]!="Administrator" or not csrf:raise AssertionError("Missing authenticated administrator")
+            inventory,_=api("GET","/admin/api/network/interfaces")
+            rows=[r for r in inventory["virtualAddresses"] if r["id"]=="policy-vip"]
+            if len(rows)!=1 or rows[0]["haPolicyScope"]!=scope or rows[0]["ownershipEpoch"]!=expected_owner[1]:
+                raise AssertionError("Inventory did not expose actual journal-bound scope and epoch")
+            path="/admin/api/network/virtual-services/ha-policy"
+            api("POST",path,policy,expected=403,with_csrf=False)
+            api("POST",path,dict(policy,scope="0"*64),expected=400)
+            api("POST",path,dict(policy,pollSeconds=1),expected=400)
+            reply,cache=api("POST",path,policy)
+            if (reply["applied"] is not False or json.loads(reply["json"])!=policy or
+                reply["sha256"]!=hashlib.sha256(reply["json"].encode("utf-8")).hexdigest().upper() or
+                cache!="no-store"):
+                raise AssertionError("Real exported policy bytes, digest or cache contract mismatch")
+            if owner_state()!=expected_owner or journal_files[0].read_bytes()!=original_journal:
+                raise AssertionError("Policy export changed live ownership or address journal")
+            print("PASS: real journal-bound gateway + actual Raft + kernel VIP + mTLS administrator: positive audited policy export, digest and negative scope/CSRF/timing checks",flush=True)
+    finally:
+        if proc is not None:
+            proc.terminate()
+            try:proc.wait(timeout=15)
+            except subprocess.TimeoutExpired:proc.kill();proc.wait(timeout=5)
+        try:
+            if assigned:
+                result=address("withdraw")
+                if result.get("present") or result.get("phase")!="withdrawn":
+                    raise AssertionError("Disposable address withdrawal unconfirmed")
+        finally:
+            if created:run("ip","link","delete",nic)
+
 try:
     if installed(provider) or installed(controller):raise AssertionError("Existing service; refuse mutation")
     if not all(c.startswith("waf-etcd-") for c in manifest["containers"]) or len(manifest["containers"])!=3:
@@ -250,6 +390,12 @@ try:
     initial=owner_state()
     if initial[0]!="vip_"+first:raise AssertionError("Initial signed owner missing")
     sig.unlink()
+    stage="real-journal-bound-policy-export"
+    policy_dir=private_dir("policy-reader")
+    node_cert=copy(policy_dir,"node.pem",manifest["nodeA"][0]);node_key=copy(policy_dir,"node.key",manifest["nodeA"][1])
+    node_ca=copy(policy_dir,"ca.pem",ca)
+    node_reader=put(policy_dir,"reader.json",quorum(node_ca,node_cert,node_key))
+    accept_live_policy(executable,scope,fleet,vip,node_reader,json.loads(policy.read_text()),initial)
     stage="install-roles"
     services.append(provider)
     run("bash",HERE/"ops/ha/install-vip-service.sh","provider",executable,provider_cfg,pa,"--apply")

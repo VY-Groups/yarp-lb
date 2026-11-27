@@ -141,3 +141,7 @@ The Windows offline service installer verifies the actual SCM service name, comm
 ### HA policy export integrity
 
 The browser downloads a policy only after verifying the returned document exactly matches the reviewed form, the server explicitly reported applied=false, and the SHA-256 of the actual UTF-8 bytes matches the audited digest. Use the isolated HTTPS management interface (or a secure local lab browser context); a missing browser cryptographic API or any mismatch refuses download. The export is not deployment. The real isolated management fixture rejects missing CSRF and attempts to export a distributed policy for an unconfigured/local-only VIP. Browser-model regression covers the valid digest and altered response cases; this does not establish physical acceptance or a successful live journal-bound UI export.
+
+### Positive journal-bound policy acceptance
+
+The disposable real-Raft workflow now also starts the shipping gateway with a separate kernel veth interface and an address reconciled against the signed initial owner, then authenticates an administrator through pinned management mTLS. It verifies the actual inventory scope and epoch, positive policy export bytes and digest, no-store response, negative CSRF/scope/timing cases, and unchanged ownership and journal. The fixture withdraws its address and removes only its newly created interface. This is live software/API acceptance, not a real browser run or a physical two-host failover claim; the independently reviewed BMC and multi-host commissioning gates remain under #36.
