@@ -24,7 +24,7 @@ internal static class VipRedfishProvider
         try
         {
             if(args.Length!=2)throw new InvalidDataException("Usage: --vip-redfish-provider <private-config>");
-            var s=JsonSerializer.Deserialize<Settings>(File.ReadAllBytes(FleetQuorum.FilePath(args[1],32768,true)),Json)
+            var s=JsonSerializer.Deserialize<Settings>(File.ReadAllBytes(VipServiceSecurity.RequireFile(args[1],32768)),Json)
                 ??throw new InvalidDataException("Missing provider configuration.");
             if(!IPAddress.TryParse(s.ListenIp,out var ip)||ip.Equals(IPAddress.Any)||ip.Equals(IPAddress.IPv6Any)||
                 ip.IsIPv4MappedToIPv6||ip.IsIPv6Multicast||s.Port is <1024 or >65535||s.Nodes is not {Length:2}||
@@ -34,6 +34,14 @@ internal static class VipRedfishProvider
             if(s.Nodes.Any(n=>n.Pin==s.WriterPin)||s.Nodes[0].Bmc.Origin==s.Nodes[1].Bmc.Origin||
                 string.Equals(s.Nodes[0].Bmc.SystemUuid,s.Nodes[1].Bmc.SystemUuid,StringComparison.OrdinalIgnoreCase))
                 throw new InvalidDataException("Independent writer and distinct BMC identities required.");
+            VipServiceSecurity.Quorum(s.ReaderConfig);
+            foreach(var node in s.Nodes)
+            {
+                VipServiceSecurity.RequireFile(node.Bmc.CaFile);
+                VipServiceSecurity.RequireFile(node.Bmc.CredentialFile,8192);
+                if(node.Agent is not null)VipServiceSecurity.Client(node.Agent);
+                if(node.Drain is not null)VipServiceSecurity.Client(node.Drain);
+            }
             using var reader=FleetQuorum.OpenVip(s.ReaderConfig,s.Scope);
             if(reader.VipReaderPin==s.WriterPin||s.Nodes.Any(n=>n.Pin==reader.VipReaderPin))
                 throw new InvalidDataException("Provider requires an independent read-only Raft identity.");
@@ -59,14 +67,16 @@ internal static class VipRedfishProvider
                 else if(OperatingSystem.IsLinux())GatewayCore.Gslb.Contracts.PrivateKeyFileSecurity.ValidateLinuxPrivateStateDirectory(dir,"VIP provider rearm");
                 else throw new InvalidOperationException("Unsupported provider platform.");
             }
+            if(s.StandbyBootIsolationApproved&&File.Exists(s.RearmJournalFile!))
+                VipServiceSecurity.RequireFile(s.RearmJournalFile!,1024*1024);
             using var rearmJournal=s.StandbyBootIsolationApproved?new VipProviderRearmJournal(s.RearmJournalFile!,s.Scope,s.Nodes[0].Pin,s.Nodes[1].Pin):null;
             using var signer=ECDsa.Create();
-            signer.ImportFromPem(File.ReadAllText(FleetQuorum.FilePath(s.SigningKeyFile,8192,true)));
+            signer.ImportFromPem(File.ReadAllText(VipServiceSecurity.RequireFile(s.SigningKeyFile,8192)));
             if(signer.KeySize!=256||signer.ExportParameters(true).D is not {Length:32})
                 throw new InvalidDataException("Independent P-256 signing key required.");
-            using var writerCa=X509CertificateLoader.LoadCertificateFromFile(FleetQuorum.FilePath(s.WriterCaFile,65536));
-            var password=File.ReadAllText(FleetQuorum.FilePath(s.ServerPasswordFile,4096,true)).TrimEnd('\r','\n');
-            using var server=X509CertificateLoader.LoadPkcs12FromFile(FleetQuorum.FilePath(s.ServerPfx,65536,true),password,
+            using var writerCa=X509CertificateLoader.LoadCertificateFromFile(VipServiceSecurity.RequireFile(s.WriterCaFile));
+            var password=File.ReadAllText(VipServiceSecurity.RequireFile(s.ServerPasswordFile,4096)).TrimEnd('\r','\n');
+            using var server=X509CertificateLoader.LoadPkcs12FromFile(VipServiceSecurity.RequireFile(s.ServerPfx),password,
                 OperatingSystem.IsWindows()?X509KeyStorageFlags.UserKeySet:X509KeyStorageFlags.EphemeralKeySet);
             if(!server.HasPrivateKey||server.NotAfter.ToUniversalTime()<=DateTime.UtcNow||
                 server.NotBefore.ToUniversalTime()>DateTime.UtcNow)

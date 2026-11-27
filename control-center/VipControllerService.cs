@@ -20,7 +20,14 @@ internal static class VipControllerService
     {
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
         {
-            try{completed(await VipOwnershipCommand.Run(args,stoppingToken));}
+            try
+            {
+                // The hosted controller accepts only its installed bounded policy mode.
+                VipServiceSecurity.Controller(args);
+                completed(await VipOwnershipCommand.Run(args,stoppingToken));
+            }
+            catch(Exception e) when(e is IOException or InvalidOperationException or UnauthorizedAccessException or ArgumentException or System.Text.Json.JsonException)
+            {Console.Error.WriteLine("VIP controller startup refused: "+e.GetType().Name);completed(78);}
             finally{lifetime.StopApplication();}
         }
     }

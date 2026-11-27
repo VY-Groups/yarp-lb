@@ -15,7 +15,7 @@ internal static class VipNodeAgent
         try
         {
             if(args.Length!=2)throw new InvalidDataException("Usage: --vip-node-agent <private-config>");
-            var s=JsonSerializer.Deserialize<Settings>(File.ReadAllBytes(FleetQuorum.FilePath(args[1],16384,true)),VipMachineTransport.Json)
+            var s=JsonSerializer.Deserialize<Settings>(File.ReadAllBytes(VipServiceSecurity.RequireFile(args[1],16384)),VipMachineTransport.Json)
                 ??throw new InvalidDataException("Missing node agent settings.");
             VipFenceProvider.ValidatePair(s.Scope,s.NodePin,s.OtherPin);
             var t=s.Server;
@@ -23,12 +23,13 @@ internal static class VipNodeAgent
                 ip.IsIPv4MappedToIPv6||ip.IsIPv6Multicast||t.Port is <1024 or >65535||
                 !VipFenceProvider.Pin(t.ClientPin)||t.ClientPin==s.NodePin||t.ClientPin==s.OtherPin)
                 throw new InvalidDataException("Require isolated node agent and independent provider certificate.");
+            VipServiceSecurity.Quorum(s.ReaderConfig);
             using var authority=FleetQuorum.OpenVip(s.ReaderConfig,s.Scope);
             if(authority.VipReaderPin!=s.NodePin)throw new InvalidDataException("Node identity mismatch.");
-            _=FleetQuorum.FilePath(s.SupervisorConfig,16384,true);
-            using var ca=X509CertificateLoader.LoadCertificateFromFile(FleetQuorum.FilePath(t.ClientCaFile,65536));
-            using var cert=X509CertificateLoader.LoadPkcs12FromFile(FleetQuorum.FilePath(t.Pfx,65536,true),
-                File.ReadAllText(FleetQuorum.FilePath(t.PasswordFile,4096,true)).TrimEnd('\r','\n'),
+            _=VipServiceSecurity.RequireFile(s.SupervisorConfig,16384);
+            using var ca=X509CertificateLoader.LoadCertificateFromFile(VipServiceSecurity.RequireFile(t.ClientCaFile));
+            using var cert=X509CertificateLoader.LoadPkcs12FromFile(VipServiceSecurity.RequireFile(t.Pfx),
+                File.ReadAllText(VipServiceSecurity.RequireFile(t.PasswordFile,4096)).TrimEnd('\r','\n'),
                 OperatingSystem.IsWindows()?X509KeyStorageFlags.UserKeySet:X509KeyStorageFlags.EphemeralKeySet);
             bool Allowed(X509Certificate2? leaf)=>VipMachineTransport.Pinned(leaf,ca,t.ClientPin,"1.3.6.1.5.5.7.3.2");
             var builder=WebApplication.CreateSlimBuilder(Array.Empty<string>());
