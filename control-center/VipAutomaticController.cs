@@ -95,6 +95,51 @@ internal sealed class VipAutomaticPolicy
 
 internal static class VipAutomaticController
 {
+    internal static async Task ExecuteTransition(string scope,VipAutomaticJournal.Transition intent,VipAutomaticJournal journal,
+        Func<CancellationToken,Task<FleetQuorum.Fence?>> observe,
+        Func<string,long,CancellationToken,Task<FleetQuorum.Fence>> revoke,
+        Func<VipFenceProvider.Request,CancellationToken,Task<(long Expires,byte[] Signature)>> fence,
+        Func<string,long,string,long,byte[],CancellationToken,Task<FleetQuorum.Fence>> activate,
+        Func<string,string,string,long,string,CancellationToken,Task<VipFenceProvider.NodeEvidence>> nodeAction,
+        CancellationToken token)
+    {
+        var state=await observe(token)??throw new InvalidDataException("Owner record missing.");
+        var original=new FleetQuorum.Fence("vip_"+intent.OldPin,intent.OldEpoch);
+        if(state==original)
+        {
+            var sample=await nodeAction("node-status",scope,intent.OldPin,intent.OldEpoch,intent.NewPin,token);
+            if(!sample.Quiescent||!sample.OtherEligible||
+                (intent.Kind=="failover"&&(sample.OwnerServing||sample.OwnerDrained)))
+                throw new InvalidDataException("Transition conditions no longer hold; independent recovery required.");
+            // A prior drain flag does not prove that all in-flight requests
+            // completed, nor that this is not a human maintenance drain.
+            if(intent.Kind=="failback")
+            {
+                sample=await nodeAction("drain-node",scope,intent.OldPin,intent.OldEpoch,intent.NewPin,token);
+                if(!sample.Quiescent||!sample.OwnerDrained||!sample.OtherEligible)
+                    throw new InvalidDataException("Planned failback drain not confirmed.");
+            }
+            if(await observe(token)!=original)throw new FleetQuorumContentionException();
+            state=await VipFencedTransfer.Run(scope,intent.OldPin,intent.OldEpoch,intent.NewPin,false,
+                observe,revoke,fence,activate,token);
+        }
+        else if(state.Transaction=="vip_revoked_"+intent.OldPin&&state.Epoch>intent.OldEpoch)
+        {
+            state=await VipFencedTransfer.Run(scope,intent.OldPin,state.Epoch,intent.NewPin,true,
+                observe,revoke,fence,activate,token);
+        }
+        else if(state.Transaction!="vip_"+intent.NewPin||state.Epoch<=intent.OldEpoch)
+            throw new InvalidDataException("Unexpected owner revision; preserve transition journal.");
+        if(state.Transaction!="vip_"+intent.NewPin||state.Epoch<=intent.OldEpoch||
+            await observe(token)!=state)
+            throw new InvalidDataException("Successor ownership not confirmed.");
+        var activation=await nodeAction("activate-node",scope,intent.NewPin,state.Epoch,intent.OldPin,token);
+        if(!activation.Quiescent||!activation.OwnerServing||activation.OwnerDrained||
+            await observe(token)!=state)
+            throw new InvalidDataException("Successor service or ownership unconfirmed; preserve transition.");
+        journal.Complete(state.Epoch);
+        Console.WriteLine(JsonSerializer.Serialize(new{decision=intent.Kind,owner=intent.NewPin,epoch=state.Epoch}));
+    }
     internal static async Task Run(string scope,string preferred,string other,string providerConfig,string journalPath,
         bool failback,bool recover,FleetQuorum authority,CancellationToken stop)
     {
@@ -102,45 +147,9 @@ internal static class VipAutomaticController
         using var journal=new VipAutomaticJournal(journalPath,scope,preferred,other);
         var policy=new VipAutomaticPolicy(TimeProvider.System);
         string Other(string pin)=>pin==preferred?other:pin==other?preferred:throw new InvalidDataException("Unknown VIP owner identity.");
-        async Task Execute(VipAutomaticJournal.Transition intent,CancellationToken token)
-        {
-            var state=await authority.ObserveVip(token)??throw new InvalidDataException("Owner record missing.");
-            var original=new FleetQuorum.Fence("vip_"+intent.OldPin,intent.OldEpoch);
-            if(state==original)
-            {
-                var sample=await provider.NodeAction("node-status",scope,intent.OldPin,intent.OldEpoch,intent.NewPin,token);
-                if(!sample.Quiescent||!sample.OtherEligible||
-                    (intent.Kind=="failover"&&(sample.OwnerServing||sample.OwnerDrained)))
-                    throw new InvalidDataException("Transition conditions no longer hold; independent recovery required.");
-                // A prior drain flag does not prove that all in-flight requests
-                // completed, nor that this is not a human maintenance drain.
-                if(intent.Kind=="failback")
-                {
-                    sample=await provider.NodeAction("drain-node",scope,intent.OldPin,intent.OldEpoch,intent.NewPin,token);
-                    if(!sample.Quiescent||!sample.OwnerDrained||!sample.OtherEligible)
-                        throw new InvalidDataException("Planned failback drain not confirmed.");
-                }
-                if(await authority.ObserveVip(token)!=original)throw new FleetQuorumContentionException();
-                state=await VipFencedTransfer.Run(scope,intent.OldPin,intent.OldEpoch,intent.NewPin,false,
-                    authority.ObserveVip,authority.RevokeVip,provider.Fence,authority.ActivateVip,token);
-            }
-            else if(state.Transaction=="vip_revoked_"+intent.OldPin&&state.Epoch>intent.OldEpoch)
-            {
-                state=await VipFencedTransfer.Run(scope,intent.OldPin,state.Epoch,intent.NewPin,true,
-                    authority.ObserveVip,authority.RevokeVip,provider.Fence,authority.ActivateVip,token);
-            }
-            else if(state.Transaction!="vip_"+intent.NewPin||state.Epoch<=intent.OldEpoch)
-                throw new InvalidDataException("Unexpected owner revision; preserve transition journal.");
-            if(state.Transaction!="vip_"+intent.NewPin||state.Epoch<=intent.OldEpoch||
-                await authority.ObserveVip(token)!=state)
-                throw new InvalidDataException("Successor ownership not confirmed.");
-            var activation=await provider.NodeAction("activate-node",scope,intent.NewPin,state.Epoch,intent.OldPin,token);
-            if(!activation.Quiescent||!activation.OwnerServing||activation.OwnerDrained||
-                await authority.ObserveVip(token)!=state)
-                throw new InvalidDataException("Successor service or ownership unconfirmed; preserve transition.");
-            journal.Complete(state.Epoch);
-            Console.WriteLine(JsonSerializer.Serialize(new{decision=intent.Kind,owner=intent.NewPin,epoch=state.Epoch}));
-        }
+        Task Execute(VipAutomaticJournal.Transition intent,CancellationToken token)=>
+            ExecuteTransition(scope,intent,journal,authority.ObserveVip,authority.RevokeVip,
+                provider.Fence,authority.ActivateVip,provider.NodeAction,token);
         if(recover)
         {
             using var deadline=CancellationTokenSource.CreateLinkedTokenSource(stop);

@@ -156,46 +156,11 @@ internal static class VipRedfishProvider
                         var req=new VipRemoteNode.DrainRequest(r.Scope,r.Epoch,Convert.ToHexString(RandomNumberGenerator.GetBytes(32)),mutate);
                         return VipRemoteNode.Match(req,await ownerDrain.Post<VipRemoteNode.DrainEvidence>("/admin/vip-machine/drain",req,token));
                     }
-                    await AssertOwner();
-                    bool serving=false,eligible=false,drained=false;
-                    if(action=="activate-node")
-                    {
-                        // Before starting the successor, independently re-observe
-                        // physical isolation of the predecessor.
-                        if(!await peerBmc.IsOff(token))return Results.Conflict();
-                        await AssertOwner();
-                        serving=(await Status(ownerAgent,r.OwnerPin,"/v1/vip-node/activate")).Serving;
-                        if(!serving||!await peerBmc.IsOff(token))return Results.StatusCode(503);
-                    }
-                    else
-                    {
-                        if(!await peerBmc.IsOff(token))
-                            eligible=(await Status(peerAgent,r.OtherPin)).Eligible;
-                        if(!await ownerBmc.IsOff(token))
-                        {
-                            var health=await Status(ownerAgent,r.OwnerPin);
-                            serving=health.Serving;
-                            var before=await Drain(false);
-                            drained=before.ManualDrain||before.Draining;
-                            if(action=="drain-node")
-                            {
-                                if(!eligible||before.ManualDrain)return Results.Conflict();
-                                await AssertOwner();
-                                var observed=await Drain(true);
-                                while(observed.Active!=0)
-                                {
-                                    await Task.Delay(250,token);await AssertOwner();
-                                    observed=await Drain(false);
-                                }
-                                if(!observed.Draining||observed.ManualDrain)return Results.Conflict();
-                                drained=true;serving=false;
-                            }
-                        }
-                        else if(action=="drain-node")return Results.Conflict();
-                    }
-                    await AssertOwner();
-                    return Results.Json(new VipFenceProvider.NodeEvidence(r.Scope,r.OwnerPin,r.Epoch,r.OtherPin,r.Nonce,
-                        serving,eligible,drained,true),Json);
+                    var evidence=await VipProviderActions.Run(action,r,AssertOwner,ownerBmc.IsOff,peerBmc.IsOff,
+                        (pin,activate,_)=>Status(pin==r.OwnerPin?ownerAgent:peerAgent,pin,
+                            activate?"/v1/vip-node/activate":"/v1/vip-node/status"),
+                        (mutate,_)=>Drain(mutate),token);
+                    return Results.Json(evidence,Json);
                 }
                 catch(Exception e) when(e is IOException or InvalidDataException or InvalidOperationException or
                     HttpRequestException or OperationCanceledException or JsonException or CryptographicException or UnauthorizedAccessException or ArgumentException)

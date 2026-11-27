@@ -36,6 +36,7 @@ internal static class VipFenceContractTests
             catch(InvalidDataException){}
         }
         await VipRedfishFenceTests.Run();
+        await VipRemoteIntegrationTests.Run();
         var clock=new TestClock();
         var policy=new VipAutomaticPolicy(clock);
         var nodeRequest=new VipFenceProvider.NodeRequest(scope,oldPin,10,newPin,"nonce");

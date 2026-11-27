@@ -1,7 +1,7 @@
 name: ADC external VIP fencing provider contracts
 on:
   pull_request:
-    paths: ["control-center/FleetQuorum.cs", "control-center/VipOwnershipCommand.cs", "control-center/VipFenceProvider.cs", "tests/FleetQuorumAcceptance/**", ".github/workflows/adc-vip-fence-provider.yml"]
+    paths: ["control-center/**", "tests/FleetQuorumAcceptance/**", ".github/workflows/adc-vip-fence-provider.yml"]
   workflow_dispatch:
 permissions:
   contents: read
