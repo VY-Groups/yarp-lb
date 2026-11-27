@@ -55,6 +55,13 @@ if(args.Length>0 && args[0]=="--vip-owner")
     return;
 }
 
+// Independent hardware fencing authority, not the gateway management plane.
+if(args.Length>0 && args[0]=="--vip-redfish-provider")
+{
+    Environment.ExitCode=await VipRedfishProvider.Run(args);
+    return;
+}
+
 // Privileged local host administration, never an HTTP management endpoint.
 if(args.Length>0 && args[0]=="--vip-address")
 {

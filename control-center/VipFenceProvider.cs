@@ -90,7 +90,8 @@ internal sealed class VipFenceProvider : IDisposable
     }
     internal sealed record NodeRequest(string Scope,string OwnerPin,long Epoch,string OtherPin,string Nonce);
     internal sealed record NodeEvidence(string Scope,string OwnerPin,long Epoch,string OtherPin,string Nonce,
-        bool OwnerServing,bool OtherEligible,bool OwnerDrained,bool Quiescent);
+        [property:JsonRequired] bool OwnerServing,[property:JsonRequired] bool OtherEligible,
+        [property:JsonRequired] bool OwnerDrained,[property:JsonRequired] bool Quiescent);
     internal async Task<NodeEvidence> NodeAction(string action,string scope,string owner,long epoch,string other,CancellationToken token)
     {
         ValidatePair(scope,owner,other);

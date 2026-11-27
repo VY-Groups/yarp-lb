@@ -46,7 +46,7 @@ internal sealed class VipAutomaticJournal : IDisposable
         if(value.FinalEpoch==0)
         {if(Pending is not null)throw new InvalidDataException("Unresolved VIP transition.");}
         else if(Pending is null||value.FinalEpoch<=value.OldEpoch||
-            value with{FinalEpoch=0}!=Pending)
+            (value with{FinalEpoch=0})!=Pending)
             throw new InvalidDataException("Unrelated controller completion.");
         if(persist)
         {
@@ -76,7 +76,7 @@ internal sealed class VipAutomaticPolicy
     {
         long now=clock.GetTimestamp();
         if(last!=state){Reset();last=state;observedAt=now;}
-        if(!sample.Quiescent||!sample.OtherEligible){failures=eligible=0;return null;}
+        if(!sample.Quiescent||!sample.OtherEligible||sample.OwnerDrained){failures=eligible=0;return null;}
         if(!sample.OwnerServing)
         {
             eligible=0;
@@ -110,7 +110,7 @@ internal static class VipAutomaticController
             {
                 var sample=await provider.NodeAction("node-status",scope,intent.OldPin,intent.OldEpoch,intent.NewPin,token);
                 if(!sample.Quiescent||!sample.OtherEligible||
-                    (intent.Kind=="failover"&&sample.OwnerServing))
+                    (intent.Kind=="failover"&&(sample.OwnerServing||sample.OwnerDrained)))
                     throw new InvalidDataException("Transition conditions no longer hold; independent recovery required.");
                 if(intent.Kind=="failback"&&!sample.OwnerDrained)
                 {

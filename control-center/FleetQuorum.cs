@@ -233,6 +233,13 @@ internal sealed class FleetQuorum : IDisposable
             throw new InvalidOperationException("VIP transition not confirmed; inspect persistent state before any recovery.");
         return state!;
     }
+    internal string VipReaderPin=>Convert.ToHexString(SHA256.HashData(credential.RawData));
+    internal async Task<Fence> ReadVipState(CancellationToken token)
+    {
+        if(writable||!namespaceKey.StartsWith("/gatewaycore/adc-vip/v1/",StringComparison.Ordinal))
+            throw new InvalidOperationException("Read-only VIP identity required.");
+        return (await Read(token)).State??throw new InvalidDataException("VIP owner record missing.");
+    }
     internal async Task<(long Epoch,bool Own)> ObserveVipReader(CancellationToken token)
     {
         if(writable||!namespaceKey.StartsWith("/gatewaycore/adc-vip/v1/",StringComparison.Ordinal))

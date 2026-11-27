@@ -35,6 +35,7 @@ internal static class VipFenceContractTests
             try{_=VipFenceProvider.Validate(request,invalid,1000);throw new Exception("Expected permit rejection");}
             catch(InvalidDataException){}
         }
+        await VipRedfishFenceTests.Run();
         var clock=new TestClock();
         var policy=new VipAutomaticPolicy(clock);
         var nodeRequest=new VipFenceProvider.NodeRequest(scope,oldPin,10,newPin,"nonce");
