@@ -35,6 +35,26 @@ printf '{}\n' > "$d/policy.json"
 printf '{}\n' > "$d/provider.json"
 printf '[Unit]\nDescription=Disposable stopped gateway fixture\n[Service]\nExecStart=/usr/bin/true\n[Install]\nWantedBy=multi-user.target\n' > /etc/systemd/system/gatewaycore-vip-ci-gateway.service
 systemctl daemon-reload
+# Inject a failure AFTER real systemd enablement. The shipping installer must
+# return failure, remove only its newly registered unit and undo enablement.
+systemctl(){
+  if [[ "${1:-}" == enable && "${2:-}" == gatewaycore-vip-node-agent.service ]]; then
+    command systemctl "$@" || return
+    return 97
+  fi
+  command systemctl "$@"
+}
+export -f systemctl
+if output=$(bash "$here/install-vip-service.sh" agent /usr/bin/true "$d/config.json" root --apply 2>&1); then
+  echo 'Failed enablement reported success' >&2; exit 1
+fi
+unset -f systemctl
+grep -q 'Registration failed; newly created unit rolled back' <<<"$output"
+[[ ! -e /etc/systemd/system/gatewaycore-vip-node-agent.service ]]
+[[ ! -L /etc/systemd/system/multi-user.target.wants/gatewaycore-vip-node-agent.service ]]
+! systemctl cat gatewaycore-vip-node-agent.service >/dev/null 2>&1
+[[ $(systemctl show -p LoadState --value gatewaycore-vip-ci-gateway.service) == loaded ]]
+echo 'PASS: failed real systemd enablement rolled back without modifying the gateway fixture'
 for role in agent provider controller; do
   case "$role" in
     agent) name=gatewaycore-vip-node-agent; account=root; enabled=enabled; args=();;

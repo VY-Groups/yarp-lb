@@ -50,6 +50,37 @@ if [[ "$role" == agent ]]; then
   [[ $(systemctl show -p LoadState --value "$gateway") == loaded && $(systemctl show -p ActiveState --value "$gateway") == inactive && $(systemctl is-enabled "$gateway" 2>/dev/null || true) == disabled ]] || { echo 'Dedicated gateway must be installed, stopped and disabled' >&2; exit 1; }
 fi
 (umask 022; set -o noclobber; printf '%s\n' "$unit" > "$target")
+# Own only the newly created unit. An unsuccessful reload/enable must not
+# leave a privileged agent silently registered for the next boot.
+rollback_registration(){
+  local rc=$?
+  trap - EXIT
+  if ((rc == 0)); then return; fi
+  set +e
+  local cleanup_failed=0
+  if systemctl is-active --quiet "$name.service"; then
+    echo 'Unexpected active unit; independent reconciliation required' >&2
+    exit "$rc"
+  fi
+  if "$boot"; then systemctl disable "$name.service" >/dev/null 2>&1 || cleanup_failed=1; fi
+  rm -f -- "$target" || cleanup_failed=1
+  systemctl daemon-reload || cleanup_failed=1
+  if ((cleanup_failed)); then
+    echo 'Registration rollback unconfirmed; inspect the exact unit and enablement before retrying' >&2
+  else
+    echo 'Registration failed; newly created unit rolled back' >&2
+  fi
+  exit "$rc"
+}
+trap rollback_registration EXIT
 systemctl daemon-reload
 if "$boot"; then systemctl enable "$name.service"; fi
+expected_state=disabled
+if "$boot"; then expected_state=enabled; fi
+[[ $(systemctl show -p LoadState --value "$name.service") == loaded &&
+   $(systemctl show -p ActiveState --value "$name.service") == inactive &&
+   $(systemctl show -p User --value "$name.service") == "$account" &&
+   $(systemctl is-enabled "$name.service" 2>/dev/null || true) == "$expected_state" ]] ||
+  { echo 'Installed service state not confirmed' >&2; exit 1; }
+trap - EXIT
 echo 'Installed; not started. Verify protected credentials and approved topology before starting.'

@@ -129,3 +129,7 @@ Only an authorized site operator may perform these actions on an isolated two-ho
 | Release acceptance | Capture throughput, p99, zero transport/HTTP errors, no duplicate non-idempotent requests, alerts and audit with the unchanged #36 thresholds. Preserve evidence without credentials; independent reviewer signs the result. |
 
 Abort on uncertain owner, mismatched epoch, unknown BMC state, conflicting service configuration, unexpected traffic or failed audit. Do not force-unlock, reset journals, power a fenced predecessor on manually or bypass certificate checks to obtain a green result.
+
+### Linux service registration failure recovery
+
+The Linux offline installer now verifies the exact registered identity, loaded/stopped state and expected boot policy before reporting success. If reload, enablement or verification fails after creating the unit, it removes only that newly created registration and undoes its enablement; it does not overwrite pre-existing services. If an unexpected running unit or incomplete rollback is observed, stop the commissioning procedure and independently inspect the exact unit and its boot policy before retrying. The hosted regression injects failure after actual systemd enablement and verifies the new agent unit and boot link are removed while the existing gateway fixture remains intact. This is software acceptance, not physical commissioning.
