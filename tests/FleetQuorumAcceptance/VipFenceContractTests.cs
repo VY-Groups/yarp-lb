@@ -57,6 +57,14 @@ internal static class VipFenceContractTests
         clock.Now=310000;
         if(policy.Observe(active,healthy,newPin,true)!="failback")throw new Exception("stable failback missing");
         if(policy.Observe(active,healthy with{OtherEligible=false},newPin,true)!=null)throw new Exception("ineligible peer admitted");
+        policy.Reset();
+        var plannedDrain=node with{OwnerDrained=true};
+        for(int i=0;i<4;i++)
+        {
+            clock.Now+=5000;
+            if(policy.Observe(active,plannedDrain,newPin,true)!=null)
+                throw new Exception("planned maintenance triggered unsolicited failover");
+        }
         var dir=Directory.CreateTempSubdirectory("vip-auto-test-");
         try
         {

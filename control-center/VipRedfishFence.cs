@@ -95,7 +95,7 @@ internal sealed class VipRedfishFence : IDisposable
         {
             if(!first.CanOff)throw new InvalidDataException("Exact Redfish ForceOff action not advertised.");
             await assertRevoked(token);
-            using var response=await client.PostAsJsonAsync(new Uri(system,action),new{ResetType="ForceOff"},token);
+            using var response=await client.PostAsJsonAsync(new Uri(system,action),new Dictionary<string,string>{{"ResetType","ForceOff"}},token);
             if(response.StatusCode is not (HttpStatusCode.OK or HttpStatusCode.Accepted or HttpStatusCode.NoContent))
                 throw new InvalidDataException("BMC power-off not accepted.");
         }

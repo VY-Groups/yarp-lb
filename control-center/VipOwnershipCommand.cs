@@ -11,7 +11,8 @@ internal static class VipOwnershipCommand
         {
             if(args.Length<4)throw new ArgumentException("Usage: --vip-owner <writer-config> <scope> status|revoke|activate ...");
             using var authority=FleetQuorum.OpenVipWriter(args[1],args[2]);
-            using var timeout=new CancellationTokenSource(TimeSpan.FromSeconds(25));
+            using var timeout=new CancellationTokenSource(TimeSpan.FromSeconds(
+                args[3] is "transfer" or "resume-transfer"?90:25));
             long Number(string s)=>long.Parse(s,NumberStyles.None,CultureInfo.InvariantCulture);
             FleetQuorum.Fence? state;
             if((args[3] is "automatic" or "recover-automatic")&&args.Length==9&&args[8] is "failback-on" or "failback-off")

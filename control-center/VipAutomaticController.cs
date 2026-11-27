@@ -157,7 +157,8 @@ internal static class VipAutomaticController
             {
                 state=await authority.ObserveVip(deadline.Token);
                 if(state is null||!state.Transaction.StartsWith("vip_",StringComparison.Ordinal)||
-                    !VipFenceProvider.Pin(state.Transaction[4..])||state.Epoch<journal.LastCompletedEpoch)
+                    !VipFenceProvider.Pin(state.Transaction[4..])||
+                    (journal.LastCompletedEpoch>0&&state.Epoch!=journal.LastCompletedEpoch))
                     throw new InvalidDataException("No active reviewed owner; independent recovery required.");
                 string owner=state.Transaction[4..];
                 evidence=await provider.NodeAction("node-status",scope,owner,state.Epoch,Other(owner),deadline.Token);

@@ -61,7 +61,7 @@ internal sealed class VipFenceProvider : IDisposable
                 chain.ChainPolicy.ApplicationPolicy.Add(new Oid("1.3.6.1.5.5.7.3.1"));
                 return chain.Build(leaf);
             };
-            return new(new HttpClient(handler){Timeout=TimeSpan.FromSeconds(12),MaxResponseContentBufferSize=4096},
+            return new(new HttpClient(handler){Timeout=TimeSpan.FromSeconds(45),MaxResponseContentBufferSize=4096},
                 ca,credential,new Uri(origin,"/v1/vip/hard-fence"));
         }
         catch{handler?.Dispose();credential?.Dispose();ca.Dispose();throw;}
