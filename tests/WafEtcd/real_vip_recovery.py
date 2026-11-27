@@ -184,8 +184,25 @@ def accept_live_policy(executable,scope,fleet,vip,reader,policy,expected_owner):
             "requireLocalAddressPresence":True,"vipFleetId":fleet,"vipQuorumConfigPath":str(reader),
             "vipJournalDirectory":str(journal_dir),"vipInterfaceId":nic}]})
     cfg=state/"config";cfg.mkdir(mode=0o700)
+    # Readiness intentionally requires an actively healthy real destination.
+    # Exercise the shipping YARP route instead of bypassing that contract.
+    class PolicyBackend(http.server.BaseHTTPRequestHandler):
+        def log_message(self,*args):pass
+        def do_GET(self):
+            body=b"fixture" if self.path=="/api/identity" else b"ready"
+            status=200 if self.path in ("/api/identity","/health/ready") else 404
+            self.send_response(status);self.send_header("Content-Length",str(len(body)))
+            self.end_headers();self.wfile.write(body)
+    backend=http.server.ThreadingHTTPServer(("127.0.0.1",0),PolicyBackend)
+    backend_port=backend.server_port
     runtime=put(cfg,"appsettings.json",{"Logging":{"LogLevel":{"Default":"Warning"}},
-        "ReverseProxy":{"Routes":{},"Clusters":{}}})
+        "ReverseProxy":{"Routes":{
+            "policy-vip":{"ClusterId":"policy-backend","Match":{"Path":"/api/identity"},
+                "Metadata":{"ADC.VirtualServer.Id":"policy-vip"}}},
+            "Clusters":{"policy-backend":{"HealthCheck":{"AvailableDestinationsPolicy":"HealthyAndUnknown",
+                "Active":{"Enabled":True,"Interval":"00:00:01","Timeout":"00:00:01",
+                    "Policy":"ConsecutiveFailures","Path":"/health/ready"}},
+                "Destinations":{"fixture":{"Address":"http://127.0.0.1:"+str(backend_port)+"/"}}}}}})
     env={k:v for k,v in os.environ.items() if not k.startswith(("YARP_","GATEWAY_","ASPNETCORE_","GATEWAYCORE_"))}
     env.update(ASPNETCORE_ENVIRONMENT="Production",YARP_CONTROL_PLANE_DIR=str(state),
         YARP_RUNTIME_CONFIG_PATH=str(runtime),YARP_LISTENERS_CONFIG_FILE=str(config),
@@ -195,6 +212,8 @@ def accept_live_policy(executable,scope,fleet,vip,reader,policy,expected_owner):
         result=subprocess.run([str(executable),"--vip-address",str(journal_dir),"policy-vip",nic,action],
             env=env,capture_output=True,text=True,timeout=60,check=True)
         return json.loads(result.stdout.strip().splitlines()[-1])
+    backend_thread=threading.Thread(target=backend.serve_forever,daemon=True)
+    backend_thread.start()
     try:
         run("ip","link","add",nic,"type","veth","peer","name",peer);created=True
         run("ip","link","set",nic,"up");run("ip","link","set",peer,"up")
@@ -242,6 +261,16 @@ def accept_live_policy(executable,scope,fleet,vip,reader,policy,expected_owner):
                     res=conn.getresponse();res.read();return res.status==200
                 finally:conn.close()
             wait(ready,"Real journal-bound gateway readiness",40)
+            def vip_serving():
+                conn=http.client.HTTPSConnection(vip,ports[4],timeout=4,
+                    context=ssl.create_default_context(cafile=str(ca_crt)))
+                try:
+                    conn.request("GET","/api/identity")
+                    res=conn.getresponse();body=res.read()
+                    return res.status==200 and body==b"fixture"
+                finally:conn.close()
+            wait(vip_serving,"Real journal-bound TLS VIP forwards healthy backend traffic",30)
+            print("PASS: live journal-bound VIP forwards actual YARP traffic to actively healthy origin",flush=True)
             context=ssl.create_default_context(cafile=str(ca_crt));context.load_cert_chain(str(cc),str(ck))
             opener=build_opener(ProxyHandler({}),HTTPSHandler(context=context),HTTPCookieProcessor(CookieJar()))
             csrf=None
@@ -300,7 +329,10 @@ def accept_live_policy(executable,scope,fleet,vip,reader,policy,expected_owner):
                 if result.get("present") or result.get("phase")!="withdrawn":
                     raise AssertionError("Disposable address withdrawal unconfirmed")
         finally:
-            if created:run("ip","link","delete",nic)
+            try:
+                if created:run("ip","link","delete",nic)
+            finally:
+                backend.shutdown();backend.server_close();backend_thread.join(timeout=5)
 
 try:
     if installed(provider) or installed(controller):raise AssertionError("Existing service; refuse mutation")
