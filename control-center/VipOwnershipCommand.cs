@@ -14,6 +14,17 @@ internal static class VipOwnershipCommand
             using var timeout=new CancellationTokenSource(TimeSpan.FromSeconds(25));
             long Number(string s)=>long.Parse(s,NumberStyles.None,CultureInfo.InvariantCulture);
             FleetQuorum.Fence? state;
+            if((args[3] is "automatic" or "recover-automatic")&&args.Length==9&&args[8] is "failback-on" or "failback-off")
+            {
+                using var stop=new CancellationTokenSource();
+                ConsoleCancelEventHandler cancel=(_,eventArgs)=>{eventArgs.Cancel=true;stop.Cancel();};
+                Console.CancelKeyPress+=cancel;
+                try{await VipAutomaticController.Run(args[2],args[4],args[5],args[6],args[7],
+                    args[8]=="failback-on",args[3]=="recover-automatic",authority,stop.Token);}
+                catch(OperationCanceledException) when(stop.IsCancellationRequested){}
+                finally{Console.CancelKeyPress-=cancel;}
+                return 0;
+            }
             if(args[3]=="status" && args.Length==4)state=await authority.ObserveVip(timeout.Token);
             else if(args[3]=="revoke" && args.Length==6)
                 state=await authority.RevokeVip(args[4],Number(args[5]),timeout.Token);

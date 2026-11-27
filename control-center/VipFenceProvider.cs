@@ -88,6 +88,30 @@ internal sealed class VipFenceProvider : IDisposable
         var permit=JsonSerializer.Deserialize<Permit>(body,Json)??throw new InvalidDataException("Missing fence permit.");
         return Validate(request,permit,DateTimeOffset.UtcNow.ToUnixTimeSeconds());
     }
+    internal sealed record NodeRequest(string Scope,string OwnerPin,long Epoch,string OtherPin,string Nonce);
+    internal sealed record NodeEvidence(string Scope,string OwnerPin,long Epoch,string OtherPin,string Nonce,
+        bool OwnerServing,bool OtherEligible,bool OwnerDrained,bool Quiescent);
+    internal async Task<NodeEvidence> NodeAction(string action,string scope,string owner,long epoch,string other,CancellationToken token)
+    {
+        ValidatePair(scope,owner,other);
+        if(epoch<1||action is not ("node-status" or "drain-node" or "activate-node"))
+            throw new InvalidDataException("Invalid bounded provider action.");
+        var request=new NodeRequest(scope,owner,epoch,other,Convert.ToHexString(RandomNumberGenerator.GetBytes(32)));
+        using var response=await client.PostAsJsonAsync(new Uri(endpoint,"/v1/vip/"+action),request,Json,token);
+        if(response.StatusCode!=System.Net.HttpStatusCode.OK)
+            throw new InvalidDataException("Independent node action unconfirmed.");
+        var body=await response.Content.ReadAsByteArrayAsync(token);
+        if(body.Length>4096)throw new InvalidDataException("Oversized node evidence.");
+        var evidence=JsonSerializer.Deserialize<NodeEvidence>(body,Json)??throw new InvalidDataException("Missing node evidence.");
+        return ValidateNode(request,evidence);
+    }
+    internal static NodeEvidence ValidateNode(NodeRequest request,NodeEvidence evidence)
+    {
+        if(evidence.Scope!=request.Scope||evidence.OwnerPin!=request.OwnerPin||evidence.Epoch!=request.Epoch||
+            evidence.OtherPin!=request.OtherPin||evidence.Nonce!=request.Nonce)
+            throw new InvalidDataException("Stale or unrelated independent node evidence.");
+        return evidence;
+    }
     public void Dispose(){client.Dispose();credential.Dispose();ca.Dispose();}
 }
 

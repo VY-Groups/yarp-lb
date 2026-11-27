@@ -1,5 +1,11 @@
 internal static class VipFenceContractTests
 {
+    private sealed class TestClock:TimeProvider
+    {
+        internal long Now;
+        public override long TimestampFrequency=>1000;
+        public override long GetTimestamp()=>Now;
+    }
     internal static async Task Run()
     {
         string scope=new('A',64),oldPin=new('B',64),newPin=new('C',64);
@@ -29,6 +35,43 @@ internal static class VipFenceContractTests
             try{_=VipFenceProvider.Validate(request,invalid,1000);throw new Exception("Expected permit rejection");}
             catch(InvalidDataException){}
         }
-        Console.WriteLine("PASS: fence provider exact response, failure remains revoked, exact resume");
+        var clock=new TestClock();
+        var policy=new VipAutomaticPolicy(clock);
+        var nodeRequest=new VipFenceProvider.NodeRequest(scope,oldPin,10,newPin,"nonce");
+        var node=new VipFenceProvider.NodeEvidence(scope,oldPin,10,newPin,"nonce",false,true,false,true);
+        _=VipFenceProvider.ValidateNode(nodeRequest,node);
+        try{_=VipFenceProvider.ValidateNode(nodeRequest,node with{Nonce="old"});throw new Exception("replayed node response accepted");}
+        catch(InvalidDataException){}
+        var active=new FleetQuorum.Fence("vip_"+oldPin,10);
+        if(policy.Observe(active,node,newPin,true)!=null)throw new Exception("premature failover");
+        clock.Now=5000;
+        if(policy.Observe(active,node,newPin,true)!=null)throw new Exception("premature failover");
+        clock.Now=10000;
+        if(policy.Observe(active,node,newPin,true)!="failover")throw new Exception("qualified failover missing");
+        policy.Reset();
+        var healthy=node with{OwnerServing=true};
+        if(policy.Observe(active,healthy,newPin,true)!=null)throw new Exception("premature failback");
+        clock.Now=130000;
+        if(policy.Observe(active,healthy,newPin,true)!=null)throw new Exception("premature failback");
+        clock.Now=310000;
+        if(policy.Observe(active,healthy,newPin,true)!="failback")throw new Exception("stable failback missing");
+        if(policy.Observe(active,healthy with{OtherEligible=false},newPin,true)!=null)throw new Exception("ineligible peer admitted");
+        var dir=Directory.CreateTempSubdirectory("vip-auto-test-");
+        try
+        {
+            if(OperatingSystem.IsLinux())File.SetUnixFileMode(dir.FullName,UnixFileMode.UserRead|UnixFileMode.UserWrite|UnixFileMode.UserExecute);
+            var path=Path.Combine(dir.FullName,"journal");
+            var intent=new VipAutomaticJournal.Transition(scope,oldPin,10,newPin,"failover");
+            using(var journal=new VipAutomaticJournal(path,scope,oldPin,newPin))journal.Begin(intent);
+            using(var journal=new VipAutomaticJournal(path,scope,oldPin,newPin))
+            {
+                if(journal.Pending!=intent)throw new Exception("pending transfer lost after restart");
+                journal.Complete(12);
+            }
+            using(var journal=new VipAutomaticJournal(path,scope,oldPin,newPin))
+                if(journal.Pending!=null||journal.LastCompletedEpoch!=12)throw new Exception("completion lost");
+        }
+        finally{dir.Delete(true);}
+        Console.WriteLine("PASS: fence provider exact response, failure remains revoked, exact resume, failover/failback policy and durable transition journal");
     }
 }
