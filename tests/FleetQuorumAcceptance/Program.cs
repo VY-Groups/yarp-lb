@@ -1,4 +1,6 @@
 // Actual separate processes against disposable real three-member Raft.
+if(Environment.GetEnvironmentVariable("GITHUB_ACTIONS")=="true" && args.Length>0 && args[0]=="--vip-owner")
+    return await VipOwnershipCommand.Run(args);
 if(Environment.GetEnvironmentVariable("GITHUB_ACTIONS")!="true" || args.Length!=4 ||
    !long.TryParse(args[3],out var epoch))return 2;
 try

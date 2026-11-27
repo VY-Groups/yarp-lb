@@ -18,7 +18,7 @@ internal sealed class FleetQuorumContentionException : InvalidOperationException
 internal sealed class FleetQuorum : IDisposable
 {
     internal sealed record Endpoint(string Url,string LeafSha256,string MemberId);
-    internal sealed record Settings(string Scope,string ClusterId,string CaFile,string CertFile,string KeyFile,Endpoint[] Endpoints);
+    internal sealed record Settings(string Scope,string ClusterId,string CaFile,string CertFile,string KeyFile,Endpoint[] Endpoints,string? VipFencePublicKeyFile=null,string? VipFencePublicKeySha256=null);
     internal sealed record Fence(string Transaction,long Epoch);
     private sealed record Peer(Uri Origin,ulong Id,HttpClient Client);
     private readonly Peer[] peers;
@@ -26,6 +26,7 @@ internal sealed class FleetQuorum : IDisposable
     private readonly X509Certificate2 ca,credential;
     private readonly string key,namespaceKey;
     private readonly bool writable;
+    private ECDsa? vipFenceVerifier;
     internal string Scope { get; }
     internal static string DeploymentScope(string license,string customer,string deployment)=>
         Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(license+"\n"+customer+"\n"+deployment)));
@@ -57,6 +58,8 @@ internal sealed class FleetQuorum : IDisposable
         var opts=new JsonSerializerOptions(JsonSerializerDefaults.Web){UnmappedMemberHandling=JsonUnmappedMemberHandling.Disallow};
         var settings=JsonSerializer.Deserialize<Settings>(File.ReadAllBytes(FilePath(path,16384,true)),opts)
             ??throw new InvalidDataException("Missing quorum settings.");
+        if(settings.VipFencePublicKeyFile is not null || settings.VipFencePublicKeySha256 is not null)
+            throw new InvalidDataException("VIP writer trust is not a commercial fleet setting.");
         return new FleetQuorum(settings,writable,"/gatewaycore/commercial-fleet/v1/");
     }
     private FleetQuorum(Settings settings,bool writable,string keyPrefix)
@@ -127,7 +130,91 @@ internal sealed class FleetQuorum : IDisposable
         var settings=JsonSerializer.Deserialize<Settings>(File.ReadAllBytes(FilePath(path,16384,true)),opts)
             ??throw new InvalidDataException("Missing VIP quorum settings.");
         if(settings.Scope!=scope)throw new InvalidDataException("VIP quorum scope must match fleet and canonical address.");
+        if(settings.VipFencePublicKeyFile is not null || settings.VipFencePublicKeySha256 is not null)
+            throw new InvalidDataException("VIP gateway reader cannot load writer trust.");
         return new FleetQuorum(settings,false,"/gatewaycore/adc-vip/v1/");
+    }
+    internal static FleetQuorum OpenVipWriter(string path,string scope)
+    {
+        var opts=new JsonSerializerOptions(JsonSerializerDefaults.Web){UnmappedMemberHandling=JsonUnmappedMemberHandling.Disallow};
+        var settings=JsonSerializer.Deserialize<Settings>(File.ReadAllBytes(FilePath(path,16384,true)),opts)
+            ??throw new InvalidDataException("Missing VIP writer settings.");
+        if(settings.Scope!=scope || !Hex(settings.VipFencePublicKeySha256) ||
+            string.IsNullOrWhiteSpace(settings.VipFencePublicKeyFile))
+            throw new InvalidDataException("Require exact VIP scope and pinned independent fencing public key.");
+        var verifier=ECDsa.Create();
+        FleetQuorum? quorum=null;
+        try
+        {
+            verifier.ImportFromPem(File.ReadAllText(FilePath(settings.VipFencePublicKeyFile,16384)));
+            var publicKey=verifier.ExportSubjectPublicKeyInfo();
+            if(verifier.KeySize!=256 || !CryptographicOperations.FixedTimeEquals(
+                SHA256.HashData(publicKey),Convert.FromHexString(settings.VipFencePublicKeySha256!)))
+                throw new InvalidDataException("Independent fencing trust mismatch.");
+            // Reject private key material in the public trust file.
+            try { _=verifier.ExportParameters(true); throw new InvalidDataException("Public key only required."); }
+            catch(CryptographicException) { }
+            quorum=new FleetQuorum(settings,true,"/gatewaycore/adc-vip/v1/");
+            quorum.vipFenceVerifier=verifier;
+            return quorum;
+        }
+        catch { quorum?.Dispose();verifier.Dispose();throw; }
+    }
+    private void RequireVipWriter()
+    {
+        if(!writable || vipFenceVerifier is null || !namespaceKey.StartsWith("/gatewaycore/adc-vip/v1/",StringComparison.Ordinal))
+            throw new InvalidOperationException("Independent VIP writer credentials required.");
+    }
+    internal async Task<Fence?> ObserveVip(CancellationToken token)
+    {
+        RequireVipWriter();
+        return (await Read(token)).State;
+    }
+    internal async Task<Fence> RevokeVip(string ownerPin,long epoch,CancellationToken token)
+    {
+        RequireVipWriter();
+        if(!Hex(ownerPin)||epoch<1)throw new InvalidDataException("Exact prior owner and epoch required.");
+        return await ChangeVip(new Fence("vip_"+ownerPin,epoch),"vip_revoked_"+ownerPin,null,token);
+    }
+    internal async Task<Fence> ActivateVip(string oldPin,long revokedEpoch,string newPin,long expires,byte[] signature,CancellationToken token)
+    {
+        RequireVipWriter();
+        if(!Hex(newPin) || (oldPin=="-" ? revokedEpoch!=0 : !Hex(oldPin)||revokedEpoch<1) ||
+            newPin==Convert.ToHexString(SHA256.HashData(credential.RawData)))
+            throw new InvalidDataException("Invalid successor, predecessor or epoch; writer cannot be the owner.");
+        var previous=oldPin=="-" ? null : new Fence("vip_revoked_"+oldPin,revokedEpoch);
+        void Verify()
+        {
+            long now=DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+            if(expires<=now || expires>now+300 || signature.Length is <64 or >80)
+                throw new InvalidDataException("Expired or unbounded external fencing permit.");
+            var message=Encoding.UTF8.GetBytes(string.Join("\n","GatewayCore.VIP.HardFence.v1",Scope,oldPin,
+                revokedEpoch.ToString(CultureInfo.InvariantCulture),newPin,expires.ToString(CultureInfo.InvariantCulture)));
+            if(!vipFenceVerifier!.VerifyData(message,signature,HashAlgorithmName.SHA256,DSASignatureFormat.Rfc3279DerSequence))
+                throw new InvalidDataException("Independent fencing permit signature rejected.");
+        }
+        Verify();
+        return await ChangeVip(previous,"vip_"+newPin,Verify,token);
+    }
+    private async Task<Fence> ChangeVip(Fence? expected,string next,Action? verify,CancellationToken token)
+    {
+        var before=await Read(token);
+        if(before.State!=expected)throw new FleetQuorumContentionException();
+        object[] compare=expected is null
+            ? [new {key,result="EQUAL",target="CREATE",createRevision="0"}]
+            : [new {key,result="EQUAL",target="MOD",modRevision=expected.Epoch.ToString(CultureInfo.InvariantCulture)},
+               new {key,result="EQUAL",target="VALUE",value=Base64(expected.Transaction)}];
+        verify?.Invoke();
+        token.ThrowIfCancellationRequested();
+        var result=await Post(before.Peer,"/v3/kv/txn",new {
+            compare,success=new[]{new {requestPut=new {key,value=Base64(next)}}},failure=Array.Empty<object>()},token);
+        if(!result.TryGetProperty("succeeded",out var success)||success.ValueKind!=JsonValueKind.True)
+            throw new FleetQuorumContentionException();
+        var revision=checked((long)Number(result.GetProperty("header").GetProperty("revision")));
+        var state=(await Read(token)).State;
+        if(revision<=(expected?.Epoch??0)||state!=new Fence(next,revision))
+            throw new InvalidOperationException("VIP transition not confirmed; inspect persistent state before any recovery.");
+        return state!;
     }
     internal async Task<bool> IsVipOwner(long expectedEpoch,CancellationToken token)
     {
@@ -153,8 +240,15 @@ internal sealed class FleetQuorum : IDisposable
             var epoch=checked((long)Number(row.GetProperty("mod_revision")));
             if(tx.Length is <1 or >120 || tx.Any(c=>c is < (char)33 or > (char)126) ||
                 Number(root.GetProperty("header").GetProperty("revision"))<(ulong)epoch ||
-                Number(row.GetProperty("version"))!=1)
+                (!namespaceKey.StartsWith("/gatewaycore/adc-vip/v1/",StringComparison.Ordinal) && Number(row.GetProperty("version"))!=1))
                 throw new InvalidDataException("Invalid or overwritten transaction fence.");
+            if(namespaceKey.StartsWith("/gatewaycore/adc-vip/v1/",StringComparison.Ordinal))
+            {
+                _=Number(row.GetProperty("version"));
+                if(!(tx.StartsWith("vip_",StringComparison.Ordinal) && Hex(tx[4..])) &&
+                   !(tx.StartsWith("vip_revoked_",StringComparison.Ordinal) && Hex(tx[12..])))
+                    throw new InvalidDataException("Invalid VIP ownership record.");
+            }
             return (peer,new Fence(tx,epoch));
         }
         catch(HttpRequestException){return null;}
@@ -233,5 +327,5 @@ internal sealed class FleetQuorum : IDisposable
         if(!await Completed())throw new InvalidOperationException("Quorum completion not confirmed; preserve journal.");
     }
     public void Dispose()
-    {foreach(var peer in peers)peer.Client.Dispose();credential.Dispose();ca.Dispose();}
+    {foreach(var peer in peers)peer.Client.Dispose();credential.Dispose();ca.Dispose();vipFenceVerifier?.Dispose();}
 }
