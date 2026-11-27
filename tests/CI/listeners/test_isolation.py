@@ -61,6 +61,8 @@ class Backend(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == '/health/ready': status,body=200,b'ok'
         elif self.path == '/api/identity': status,body=200,b'{"node":"CI"}'
+        elif self.path == '/api/virtual-http': status,body=200,b'virtual-http'
+        elif self.path == '/api/virtual-https': status,body=200,b'virtual-https'
         else: status,body=404,b'not found'
         self.send_response(status);self.send_header('Content-Length',str(len(body)))
         self.end_headers();self.wfile.write(body)
@@ -75,7 +77,15 @@ with tempfile.TemporaryDirectory(prefix='gateway-sockets-') as td:
         threading.Thread(target=backend.serve_forever,daemon=True).start()
         backend_port=backend.server_address[1]
         appconfig.write_text(json.dumps({'Logging':{'LogLevel':{'Default':'Warning'}},
-          'ReverseProxy':{'Routes':{'api':{'ClusterId':'api','Match':{'Path':'/api/{**catch-all}'}}},
+          'ReverseProxy':{'Routes':{
+              'api':{'ClusterId':'api','Match':{'Path':'/api/{**catch-all}'}},
+              'virtual-http':{'ClusterId':'api','Match':{'Path':'/api/{**catch-all}'},
+                  'Metadata':{'ADC.VirtualServer.Id':'vip-http'},'Transforms':[{'PathSet':'/api/virtual-http'}]},
+              'virtual-https':{'ClusterId':'api','Match':{'Path':'/api/{**catch-all}'},
+                  'Metadata':{'ADC.VirtualServer.Id':'vip-https'},'Transforms':[{'PathSet':'/api/virtual-https'}]},
+              'legacy-only':{'ClusterId':'api','Match':{'Path':'/legacy-only'},'Transforms':[{'PathSet':'/api/identity'}]},
+              'virtual-only':{'ClusterId':'api','Match':{'Path':'/virtual-only'},
+                  'Metadata':{'ADC.VirtualServer.Id':'vip-http'},'Transforms':[{'PathSet':'/api/virtual-http'}]}},
           'Clusters':{'api':{'HealthCheck':{'AvailableDestinationsPolicy':'HealthyAndUnknown',
           'Active':{'Enabled':True,'Interval':'00:00:01','Timeout':'00:00:01',
           'Policy':'ConsecutiveFailures','Path':'/health/ready'}},
@@ -110,6 +120,11 @@ with tempfile.TemporaryDirectory(prefix='gateway-sockets-') as td:
                   'managementPfxPath':str(mgmt_pfx),'managementPfxPasswordFile':str(mgmt_password),
                   'clientCaPemPath':str(ca_crt),'clientThumbprints':[thumb],
                   'allowedAdminCidrs':['127.0.0.1/32'],'maxConcurrentConnections':1500,'httpVersion':'1.1'}
+        vip_http=available('127.0.0.3')
+        vip_https=available('127.0.0.2')
+        while vip_https in ports or vip_https==vip_http: vip_https=available('127.0.0.2')
+        settings['virtualServices']=[{'id':'vip-http','ip':'127.0.0.3','port':vip_http,'protocol':'HTTP'},
+            {'id':'vip-https','ip':'127.0.0.2','port':vip_https,'protocol':'HTTPS'}]
         config=root/'listeners.json'
         def write_config(payload):
             config.write_text(json.dumps(payload));chmod(config)
@@ -140,6 +155,20 @@ with tempfile.TemporaryDirectory(prefix='gateway-sockets-') as td:
             check(status==200,'YARP forwards over dedicated traffic HTTP listener',status)
             status,_=req(f'https://127.0.0.2:{ports[1]}/api/identity',ca_context)
             check(status==200,'P-256 HTTPS data listener validates server chain and SAN',status)
+            status,body=req(f'http://127.0.0.3:{vip_http}/api/identity')
+            check(status==200 and body==b'virtual-http','overlapping route selected by real HTTP virtual socket')
+            status,body=req(f'https://127.0.0.2:{vip_https}/api/identity',ca_context)
+            check(status==200 and body==b'virtual-https','overlapping route selected by real TLS virtual socket')
+            status,body=req(f'http://127.0.0.2:{ports[0]}/api/identity')
+            check(status==200 and body==b'{"node":"CI"}','legacy listener still selects unbound route')
+            status,_=req(f'http://127.0.0.3:{vip_http}/legacy-only')
+            check(status==404,'unbound route cannot leak onto virtual socket',status)
+            status,_=req(f'http://127.0.0.2:{ports[0]}/virtual-only')
+            check(status==404,'bound route cannot leak onto default socket',status)
+            status,_=req(f'https://127.0.0.2:{vip_https}/virtual-only',ca_context)
+            check(status==404,'bound route cannot leak onto another virtual socket',status)
+            status,_=req(f'http://127.0.0.3:{vip_http}/dashboard')
+            check(status==403,'virtual service cannot expose management dashboard',status)
             check(denied('127.0.0.2',ports[2]),'admin socket unreachable on data-plane IP')
             check(denied('127.0.0.2',ports[3]),'metrics socket unreachable on data-plane IP')
             check(denied('127.0.0.1',ports[0]),'traffic socket unreachable on management IP')

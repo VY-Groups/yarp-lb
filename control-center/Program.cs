@@ -294,6 +294,8 @@ builder.Configuration.AddJsonFile(applicationConfigPath, optional: false, reload
 builder.Services.AddSingleton<ExpiringAffinityTokens>();
 builder.Services.AddSingleton<Yarp.ReverseProxy.SessionAffinity.ISessionAffinityPolicy>(sp =>
     new ExpiringCookieAffinityPolicy(sp.GetRequiredService<ExpiringAffinityTokens>(), TimeProvider.System));
+builder.Services.AddSingleton<Microsoft.AspNetCore.Routing.MatcherPolicy>(new VirtualServiceMatcherPolicy(isolatedListeners));
+builder.Services.AddSingleton<Yarp.ReverseProxy.Configuration.IProxyConfigFilter>(new VirtualServiceRouteFilter(isolatedListeners));
 builder.Services.AddReverseProxy()
     .LoadFromConfig(builder.Configuration.GetSection("ReverseProxy"))
     .AddConfigFilter<DestinationAdmissionConfigFilter>()
@@ -2312,6 +2314,12 @@ app.MapGet("/admin/api/state", () =>
         mode = "Authenticated local management", telemetry = "Local HTTP counters only; no backend or fleet metrics", revision = Convert.ToHexString(SHA256.HashData(snapshot)) });
 }).RequireAuthorization();
 
+app.MapGet("/admin/api/virtual-servers", () => Results.Ok(new {
+    isolated = isolatedListeners is not null,
+    services = isolatedListeners?.VirtualServices ?? Array.Empty<GatewayListenerIsolation.VirtualSocket>(),
+    scope = "Locally provisioned data-plane sockets; operating-system VIP ownership is external"
+})).RequireAuthorization();
+
 app.MapGet("/admin/api/audit", async () =>
     Results.Ok(await localAudit.ReadRecentAsync())).RequireAuthorization();
 
@@ -2466,6 +2474,10 @@ IResult? ValidateChangePayload(JsonObject submitted)
     foreach (var (id, routeNode) in routes)
     {
         if (!ValidId(id) || routeNode is not JsonObject r) return Results.BadRequest(new { error = "Invalid route ID" });
+        if (r["Metadata"] is JsonObject routeMetadata && routeMetadata.ContainsKey(VirtualServiceBinding.Key) &&
+            (routeMetadata[VirtualServiceBinding.Key] is not JsonValue binding || !binding.TryGetValue<string>(out var socketId) ||
+             !VirtualServiceBinding.ValidId(socketId) || isolatedListeners?.HasVirtualService(socketId!) != true))
+            return Results.BadRequest(new { error = $"Route {id} references a virtual service not provisioned on this gateway" });
         if (r["Transforms"] is JsonArray transformList && transformList.Count > 20)
             return Results.BadRequest(new { error = "Too many route transforms" });
         if (r["Match"]?["Methods"] is JsonArray methods && methods.Count > 12)
