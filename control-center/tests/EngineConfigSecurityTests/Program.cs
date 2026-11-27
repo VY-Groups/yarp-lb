@@ -367,6 +367,20 @@ dnsBudget["GroupIpv6UdpClientsByPrefix"] = "true";
 Must(!EngineConfigContract.Validate("gslb",dnsBudget,false), "signed IPv6 grouping rejects string");
 dnsBudget["GroupIpv6UdpClientsByPrefix"] = null;
 Must(!EngineConfigContract.Validate("gslb",dnsBudget,false), "signed IPv6 grouping rejects null");
+var dnsFirewall = dns.DeepClone().AsObject();
+foreach (var valid in new[] { "[]", "[\"192.0.2.0/24\",\"2001:db8::/32\"]" })
+{
+    dnsFirewall["BlockedResolverCidrs"] = JsonNode.Parse(valid);
+    Must(EngineConfigContract.Validate("gslb",dnsFirewall,false), "signed DNS firewall accepts "+valid);
+}
+foreach (var invalidFirewallJson in new[] { "null", "{}", "[null]", "[1]", "[\"invalid\"]", "[\"0.0.0.0/0\"]",
+    "[\"::/0\"]", "[\"::ffff:192.0.2.0/120\"]", "[\"192.0.2.0/24\",\"192.0.2.0/24\"]" })
+{
+    dnsFirewall["BlockedResolverCidrs"] = JsonNode.Parse(invalidFirewallJson);
+    Must(!EngineConfigContract.Validate("gslb",dnsFirewall,false), "signed DNS firewall rejects "+invalidFirewallJson);
+}
+dnsFirewall["BlockedResolverCidrs"] = new JsonArray(Enumerable.Range(0,129).Select(i => (JsonNode?)JsonValue.Create($"192.0.2.{i}/32")).ToArray());
+Must(!EngineConfigContract.Validate("gslb",dnsFirewall,false), "signed DNS firewall enforces bound");
 var badDns=dns.DeepClone().AsObject();
 badDns["Zones"]![0]!["Sites"]![0]!["HealthUrl"]="file:///etc/passwd";
 Must(!EngineConfigContract.Validate("gslb",badDns,false),

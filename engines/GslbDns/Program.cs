@@ -26,6 +26,7 @@ var loadedConfigRevision = Convert.ToHexString(System.Security.Cryptography.SHA2
 using var configReader = new StreamReader(new MemoryStream(configBytes), detectEncodingFromByteOrderMarks: true);
 var config = JsonSerializer.Deserialize<DnsConfig>(configReader.ReadToEnd(), options)
     ?? throw new InvalidDataException("Missing DNS config");
+var sourceFirewall = new DnsSourceFirewall(config.BlockedResolverCidrs);
 using var geoIpDatabase = new GeoIpEcsDatabase(config.GeoIpCountryDatabasePath,
     config.GeoIpAsnDatabasePath, config.GeoIpMaxDatabaseAgeDays,
     bindAuthorityIdentity: config.AuthorityFence is not null &&
@@ -483,6 +484,13 @@ var tcpAccept = Task.Run(async () =>
         try { session = await tcpListener.AcceptTcpClientAsync(stop.Token); }
         catch (OperationCanceledException) when (stop.IsCancellationRequested) { break; }
         catch (SocketException) when (stop.IsCancellationRequested) { break; }
+        // Reject the actual TCP socket peer before it can acquire a session slot.
+        if (sourceFirewall.Blocks((session.Client.RemoteEndPoint as IPEndPoint)?.Address))
+        {
+            runtimeMetrics.FirewallBlocked(tcp: true);
+            session.Dispose();
+            continue;
+        }
         if (!await tcpSlots.WaitAsync(0, stop.Token))
         {
             session.Dispose(); // bounded concurrency, no unbounded pending requests
@@ -554,6 +562,13 @@ try
         // IP-keyed response budget. Do not echo arbitrary UDP traffic without limits.
         // Loopback is still the required default deployment boundary.
         var source=((IPEndPoint)received.RemoteEndPoint).Address;
+        // ECS is routing metadata, never an authority for peer admission.
+        if (sourceFirewall.Blocks(source))
+        {
+            runtimeMetrics.FirewallBlocked(tcp: false);
+            runtimeMetrics.RequestDropped(tcp: false);
+            continue;
+        }
         if(!responseLimiter.Allow(source,Environment.TickCount64))
         {
             runtimeMetrics.RequestDropped(tcp: false);
@@ -598,6 +613,7 @@ sealed record DnsConfig(bool AllowNonLoopbackListeners,string ListenHost,int Lis
     public int MaxResponsesPerSecondPerClient {get;init;} = 500;
     public int MaxUdpQueriesPerSecond {get;init;} = 0;
     public bool GroupIpv6UdpClientsByPrefix {get;init;} = false;
+    public JsonElement BlockedResolverCidrs { get; init; }
     public int MaxConcurrentHealthProbes {get;init;} = 32;
     public string MetricsListenHost { get; init; } = "127.0.0.1";
     public int MetricsListenPort { get; init; }

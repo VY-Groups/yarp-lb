@@ -475,7 +475,12 @@ test('browser: bootstrap, navigation, onboarding, websites, route edit, users an
     expect(config.Zones[0].FailClosedWhenAllSitesDown).toBe(true);
     expect(config.Zones[0].Sites.length).toBe(2);
     expect(config.Zones[0].RoutingPolicy).toBe('Failover');
-    await form.locator('details summary').click();
+    await form.locator('summary').filter({hasText:'DNS source firewall'}).click();
+    await form.locator('[name="blockedResolverCidrs"]').fill('192.0.2.0/24\n2001:db8::/32');
+    await form.locator('button[type="submit"]').click();
+    await expect(page.locator('#specialist-json')).toBeVisible();
+    expect(JSON.parse(await page.locator('#specialist-json').inputValue()).BlockedResolverCidrs).toEqual(['192.0.2.0/24','2001:db8::/32']);
+    await form.locator('summary').filter({hasText:'DNSSEC and delegated authority'}).click();
     await form.locator('[name="dnssecMode"]').selectOption('Nsec3');
     await form.locator('[name="dnssecKeyPath"]').fill('/etc/gatewaycore/dns/active.pem');
     await form.locator('[name="dnssecSalt"]').fill('1234567890ABCDEF');
