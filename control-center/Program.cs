@@ -213,12 +213,18 @@ var guardedVirtualServices = isolatedListeners?.VirtualServices.Where(s => s.Req
 using var vipAuthorityReaders = new VipAuthorityReaders();
 var vipAuthorityChecks = new Dictionary<string,Func<CancellationToken,Task<bool>>>(StringComparer.Ordinal);
 if(guardedVirtualServices is not null)
-    foreach(var service in guardedVirtualServices.Where(s=>s.VipQuorumConfigPath is not null))
+    foreach(var group in guardedVirtualServices.Where(s=>s.VipQuorumConfigPath is not null)
+        .GroupBy(s=>s.Ip,StringComparer.Ordinal))
     {
+        // GatewayListenerIsolation validates that every socket on the same IP
+        // uses identical authority, epoch and journal binding. Share only that
+        // exact probe, and only inside the current bounded observation cycle.
+        var service=group.First();
         var binding=service.VipJournalDirectory is null?null:new VipJournalBinding(service,IPAddress.Parse(isolatedListeners!.Config.ManagementIp));
         Func<bool>? localCheck=binding is null?null:binding.Current;
-        vipAuthorityChecks.Add(service.Id,vipAuthorityReaders.For(service.VipQuorumConfigPath!,
-            FleetQuorum.VipScope(service.VipFleetId!,service.Ip),binding?.Epoch??service.VipOwnershipEpoch!.Value,localCheck));
+        var probe=vipAuthorityReaders.For(service.VipQuorumConfigPath!,
+            FleetQuorum.VipScope(service.VipFleetId!,service.Ip),binding?.Epoch??service.VipOwnershipEpoch!.Value,localCheck);
+        foreach(var socket in group)vipAuthorityChecks.Add(socket.Id,probe);
     }
 LocalVipAdmission? localVipAdmission = guardedVirtualServices is { Length: > 0 }
     ? new LocalVipAdmission(guardedVirtualServices.Select(s => (s.Id, s.Ip)), TimeProvider.System,vipAuthorityChecks) : null;

@@ -8,6 +8,8 @@ internal sealed class LocalVipAdmission : BackgroundService
     private readonly Dictionary<string,string> required;
     private readonly TimeProvider clock;
     private readonly Dictionary<string, Func<CancellationToken,Task<bool>>> authorities;
+    private readonly (Func<CancellationToken,Task<bool>> Probe,string[] Ids)[] authorityGroups;
+    private readonly (string Ip,string[] Ids)[] addressGroups;
     private sealed record Sample(long Started, Dictionary<string,string> Status);
     private Sample? current;
     private readonly object lifecycle=new();
@@ -63,8 +65,16 @@ internal sealed class LocalVipAdmission : BackgroundService
         }
     }
 
-    private RequestLease[] CollectInvalid()=>inFlight.Where(x=>!Allows(x.Key))
-        .SelectMany(x=>x.Value).ToArray();
+    private RequestLease[] CollectInvalid()
+    {
+        List<RequestLease>? invalid=null;
+        foreach(var (id,entries) in inFlight)
+        {
+            if(entries.Count==0||Allows(id))continue;
+            (invalid??=new()).AddRange(entries);
+        }
+        return invalid is null?Array.Empty<RequestLease>():invalid.ToArray();
+    }
     internal void Sweep()
     {
         RequestLease[] invalid;
@@ -85,6 +95,13 @@ internal sealed class LocalVipAdmission : BackgroundService
         foreach(var id in required.Keys)inFlight.Add(id,new());
         this.authorities = authorities is null ? new(StringComparer.Ordinal) : new(authorities,StringComparer.Ordinal);
         if(this.authorities.Keys.Any(id=>!required.ContainsKey(id)))throw new InvalidOperationException("Unknown VIP authority target.");
+        // Group only identical delegate instances for the same configured IP.
+        // Never share a positive observation across distinct authority scopes.
+        authorityGroups=this.authorities.GroupBy(x=>required[x.Key],StringComparer.Ordinal)
+            .SelectMany(ip=>ip.GroupBy(x=>x.Value,ReferenceEqualityComparer.Instance))
+            .Select(g=>(g.First().Value,g.Select(x=>x.Key).ToArray())).ToArray();
+        addressGroups=required.GroupBy(x=>x.Value,StringComparer.Ordinal)
+            .Select(g=>(g.Key,g.Select(x=>x.Key).ToArray())).ToArray();
     }
     internal string Status(string? id)
     {
@@ -99,24 +116,35 @@ internal sealed class LocalVipAdmission : BackgroundService
     internal void Refresh(long started, LocalNetworkInventory.Snapshot snapshot, IReadOnlyDictionary<string,bool>? confirmed = null)
     {
         var statuses = new Dictionary<string,string>(StringComparer.Ordinal);
-        foreach (var (id, ip) in required)
-            statuses.Add(id, snapshot.Truncated ? "incomplete-observation" :
-                NetworkObservation.ObserveVirtualAddress(id, ip, 0, "", snapshot).Status);
-        foreach(var id in authorities.Keys)
+        foreach(var (ip,ids) in addressGroups)
         {
-            if(statuses[id]!="present-interface-up")continue;
-            var address=System.Net.IPAddress.Parse(required[id]);
-            int prefix=address.AddressFamily==AddressFamily.InterNetworkV6?128:32;
-            var entries=snapshot.Interfaces.SelectMany(n=>n.Addresses.Select(a=>(Nic:n,Address:a)))
-                .Where(x=>System.Net.IPAddress.TryParse(x.Address.Address,out var observed)&&address.Equals(observed)).ToArray();
-            // Quorum is necessary but cannot legitimize an ambiguous, non-ready,
-            // or non-host-prefix assignment on a distributed VIP.
-            if(entries.Length!=1||entries[0].Address.PrefixLength!=prefix||!entries[0].Address.Ready||
-                entries[0].Nic.Truncated||entries[0].Nic.DefaultGateways.Length!=0||
-                entries[0].Nic.Type is "Loopback" or "Tunnel")
-                statuses[id]="distributed-address-invalid";
-            else if(confirmed is null||!confirmed.TryGetValue(id,out var allowed)||!allowed)
-                statuses[id]="quorum-ownership-unconfirmed";
+            string local=snapshot.Truncated?"incomplete-observation":
+                NetworkObservation.ObserveVirtualAddress(ids[0],ip,0,"",snapshot).Status;
+            bool validDistributed=false;
+            if(local=="present-interface-up"&&ids.Any(authorities.ContainsKey))
+            {
+                var address=System.Net.IPAddress.Parse(ip);
+                int prefix=address.AddressFamily==AddressFamily.InterNetworkV6?128:32;
+                int matches=0;
+                foreach(var nic in snapshot.Interfaces)
+                    foreach(var entry in nic.Addresses)
+                        if(System.Net.IPAddress.TryParse(entry.Address,out var observed)&&address.Equals(observed))
+                        {
+                            matches++;
+                            validDistributed=entry.PrefixLength==prefix&&entry.Ready&&!nic.Truncated&&
+                                nic.DefaultGateways.Length==0&&nic.Type is not ("Loopback" or "Tunnel");
+                        }
+                validDistributed&=matches==1;
+            }
+            foreach(var id in ids)
+            {
+                string status=local;
+                if(local=="present-interface-up"&&authorities.ContainsKey(id))
+                    status=!validDistributed?"distributed-address-invalid":
+                        confirmed is not null&&confirmed.TryGetValue(id,out var allowed)&&allowed
+                            ?"present-interface-up":"quorum-ownership-unconfirmed";
+                statuses.Add(id,status);
+            }
         }
         RequestLease[] invalid;
         lock(lifecycle)
@@ -125,7 +153,9 @@ internal sealed class LocalVipAdmission : BackgroundService
             // even if the independent watchdog has not yet swept that gap.
             var expired=CollectInvalid();
             Volatile.Write(ref current,new Sample(started,statuses));
-            invalid=expired.Concat(CollectInvalid()).Distinct().ToArray();
+            var denied=CollectInvalid();
+            invalid=expired.Length==0?denied:denied.Length==0?expired:
+                expired.Concat(denied).Distinct().ToArray();
         }
         foreach(var lease in invalid)lease.Abort();
     }
@@ -134,6 +164,23 @@ internal sealed class LocalVipAdmission : BackgroundService
         RequestLease[] invalid;
         lock(lifecycle){Volatile.Write(ref current,null);invalid=CollectInvalid();}
         foreach(var lease in invalid)lease.Abort();
+    }
+    internal async Task<Dictionary<string,bool>> PollAuthorities(CancellationToken token)
+    {
+        if(authorityGroups.Length==0)return new(StringComparer.Ordinal);
+        var results=await Task.WhenAll(authorityGroups.Select(async group=>
+        {
+            bool allowed=false;
+            try{allowed=await group.Probe(token);}
+            catch(Exception error) when(error is HttpRequestException or InvalidDataException or InvalidOperationException or
+                System.Text.Json.JsonException or KeyNotFoundException or FormatException or OverflowException or OperationCanceledException)
+            {}
+            return (group.Ids,Allowed:allowed&&!token.IsCancellationRequested);
+        }));
+        var confirmed=new Dictionary<string,bool>(authorities.Count,StringComparer.Ordinal);
+        foreach(var result in results)
+            foreach(var id in result.Ids)confirmed.Add(id,result.Allowed);
+        return confirmed;
     }
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -150,15 +197,9 @@ internal sealed class LocalVipAdmission : BackgroundService
                     var snapshot = LocalNetworkInventory.Read();
                     using var deadline = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
                     deadline.CancelAfter(TimeSpan.FromSeconds(2));
-                    var results=await Task.WhenAll(authorities.Select(async item=>
-                    {
-                        try { return (item.Key, Allowed:await item.Value(deadline.Token)); }
-                        catch(Exception error) when(error is HttpRequestException or InvalidDataException or InvalidOperationException or
-                            System.Text.Json.JsonException or KeyNotFoundException or FormatException or OverflowException or OperationCanceledException)
-                        { return (item.Key,Allowed:false); }
-                    }));
-                    if (stoppingToken.IsCancellationRequested) break;
-                    Refresh(started, snapshot, results.ToDictionary(x=>x.Key,x=>x.Allowed,StringComparer.Ordinal));
+                    var results=await PollAuthorities(deadline.Token);
+                    if(stoppingToken.IsCancellationRequested)break;
+                    Refresh(started,snapshot,results);
                 }
                 catch (Exception error) when (error is NetworkInformationException or SocketException or
                     InvalidOperationException or PlatformNotSupportedException)

@@ -115,6 +115,20 @@ internal static class LocalVipAdmissionTests
             try{_=VipDrainState.Parse(System.Text.Encoding.UTF8.GetBytes(bad),["192.0.2.10"]);throw new Exception("invalid drain state accepted");}
             catch(InvalidDataException){}
         }
+        int sharedCalls=0,separateCalls=0;
+        Func<CancellationToken,Task<bool>> shared=_=>{sharedCalls++;return Task.FromResult(true);};
+        Func<CancellationToken,Task<bool>> separate=_=>{separateCalls++;return Task.FromResult(false);};
+        using var grouped=new LocalVipAdmission([("a","192.0.2.10"),("b","192.0.2.10"),("c","192.0.2.11"),("d","192.0.2.10")],clock,
+            new(){{"a",shared},{"b",shared},{"c",shared},{"d",separate}});
+        var results=grouped.PollAuthorities(default).GetAwaiter().GetResult();
+        Must(sharedCalls==2&&separateCalls==1&&results["a"]&&results["b"]&&results["c"]&&!results["d"],
+            "one authority poll per exact address and probe, no cross-address or cross-probe reuse");
+        using(var canceled=new CancellationTokenSource())
+        {
+            canceled.Cancel();
+            results=grouped.PollAuthorities(canceled.Token).GetAwaiter().GetResult();
+            Must(results.Values.All(x=>!x),"canceled sample never authorizes traffic");
+        }
         static void MustQuiet(bool ok){if(!ok)throw new Exception("VIP request tracking refused early");}
     }
 }
