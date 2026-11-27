@@ -9,8 +9,14 @@ if (!OperatingSystem.IsWindows() ||
 ServiceBase.Run(new RoleProbe(args));
 return 0;
 
-sealed class RoleProbe(string[] options) : ServiceBase
+sealed class RoleProbe : ServiceBase
 {
+    private readonly string[] options;
+    internal RoleProbe(string[] options)
+    {
+        this.options = options;
+        ServiceName = options[0];
+    }
     protected override void OnStart(string[] args)
     {
         var name = options[0];
