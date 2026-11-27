@@ -23,3 +23,5 @@ RealServerCatalogTests.Run();
 ServiceGroupCatalogTests.Run();
 
 SecureAffinityContractTests.Run();
+
+ExpiringAffinityTests.Run();

@@ -20,10 +20,11 @@ public sealed class SecureAffinityContract : IProxyConfigFilter
             var enabled = affinity?["Enabled"]?.ToString()?.Equals("true", StringComparison.OrdinalIgnoreCase) == true;
             // Enforce the reserved namespace, even if a hand-edited draft omits the marker.
             var marked = cluster["Metadata"]?[Marker]?.ToString() == SecureCookie;
-            if (!marked && !(key?.StartsWith("__Host-GatewayCore-", StringComparison.Ordinal) ?? false)) continue;
+            if (!marked && affinity?["Policy"]?.ToString() != ExpiringCookieAffinityPolicy.PolicyName &&
+                !(key?.StartsWith("__Host-GatewayCore-", StringComparison.Ordinal) ?? false)) continue;
             var cookie = affinity?["Cookie"] as JsonObject;
             if (!marked || !enabled || key != KeyName(id) || !names.Add(key) ||
-                affinity?["Policy"]?.ToString() != "Cookie" ||
+                affinity?["Policy"]?.ToString() is not ("Cookie" or ExpiringCookieAffinityPolicy.PolicyName) ||
                 affinity?["FailurePolicy"]?.ToString() is not ("Redistribute" or "Return503Error") ||
                 cookie is null || cookie.ContainsKey("Domain") ||
                 cookie["Path"]?.ToString() != "/" ||
@@ -46,11 +47,12 @@ public sealed class SecureAffinityContract : IProxyConfigFilter
         var affinity = cluster.SessionAffinity;
         var key = affinity?.AffinityKeyName;
         var marked = cluster.Metadata?.TryGetValue(Marker, out var mode) == true && mode == SecureCookie;
-        if (marked || (key?.StartsWith("__Host-GatewayCore-", StringComparison.Ordinal) ?? false))
+        if (marked || affinity?.Policy == ExpiringCookieAffinityPolicy.PolicyName ||
+            (key?.StartsWith("__Host-GatewayCore-", StringComparison.Ordinal) ?? false))
         {
             var cookie = affinity?.Cookie;
             if (!marked || affinity?.Enabled != true || key != KeyName(cluster.ClusterId) ||
-                affinity.Policy != "Cookie" || affinity.FailurePolicy is not ("Redistribute" or "Return503Error") ||
+                affinity.Policy is not ("Cookie" or ExpiringCookieAffinityPolicy.PolicyName) || affinity.FailurePolicy is not ("Redistribute" or "Return503Error") ||
                 cookie?.Domain is not null || cookie?.Path != "/" || cookie.HttpOnly != true ||
                 cookie.SecurePolicy != CookieSecurePolicy.Always ||
                 cookie.SameSite is not (SameSiteMode.Lax or SameSiteMode.Strict) ||

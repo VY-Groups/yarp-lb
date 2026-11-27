@@ -468,10 +468,10 @@ function editSecurePersistence(id: string) {
         const m = /^(?:(\d+)\.)?(\d{2}):(\d{2}):00$/.exec(value);
         return m ? String(Number(m[1] || 0) * 1440 + Number(m[2]) * 60 + Number(m[3])) : '30';
     };
-    modal('HTTPS session persistence', 'Native encrypted affinity cookie. Requires HTTPS; not authentication. Expiry is browser-side. Select explicit failover behavior. This replaces the existing affinity configuration when applied.', [
+    modal('HTTPS session persistence', 'Native encrypted affinity cookie. Requires HTTPS; not authentication. Expiry is enforced by the gateway and browser. Select explicit failover behavior. This replaces the existing affinity configuration when applied.', [
         { name: 'mode', label: 'Persistence mode', value: enabled ? 'SecureCookie' : 'off', options: ['off', 'SecureCookie'] },
         { name: 'failure', label: 'When selected destination is unavailable', value: affinity.FailurePolicy === 'Return503Error' ? 'Return503Error' : 'Redistribute', options: ['Redistribute', 'Return503Error'] },
-        { name: 'minutes', label: 'Browser cookie lifetime (1–1440 minutes)', value: parseMinutes(String(affinity.Cookie?.MaxAge || '00:30:00')) },
+        { name: 'minutes', label: 'Cookie lifetime (1–1440 minutes)', value: parseMinutes(String(affinity.Cookie?.MaxAge || '00:30:00')) },
         { name: 'sameSite', label: 'SameSite policy', value: affinity.Cookie?.SameSite === 'Strict' ? 'Strict' : 'Lax', options: ['Lax', 'Strict'] }
     ], v => {
         if (!['off', 'SecureCookie'].includes(v.mode) || !['Redistribute', 'Return503Error'].includes(v.failure) || !['Lax', 'Strict'].includes(v.sameSite) || !/^\d{1,4}$/.test(v.minutes) || Number(v.minutes) < 1 || Number(v.minutes) > 1440)
@@ -485,7 +485,7 @@ function editSecurePersistence(id: string) {
             const total = Number(v.minutes);
             const age = (total === 1440 ? '1.' : '') + String(Math.floor(total % 1440 / 60)).padStart(2, '0') + ':' + String(total % 60).padStart(2, '0') + ':00';
             metadata['ADC.Persistence.Profile'] = 'SecureCookie';
-            cluster.SessionAffinity = { Enabled: true, Policy: 'Cookie', FailurePolicy: v.failure, AffinityKeyName: '__Host-GatewayCore-' + id, Cookie: { Path: '/', HttpOnly: true, SecurePolicy: 'Always', SameSite: v.sameSite, MaxAge: age } };
+            cluster.SessionAffinity = { Enabled: true, Policy: 'GatewayCoreExpiringCookie', FailurePolicy: v.failure, AffinityKeyName: '__Host-GatewayCore-' + id, Cookie: { Path: '/', HttpOnly: true, SecurePolicy: 'Always', SameSite: v.sameSite, MaxAge: age } };
         }
         cluster.Metadata = metadata;
         edit();
