@@ -5,6 +5,7 @@
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="Yarp.ReverseProxy" Version="2.3.0" />
+    <Compile Include="../../VipDrainState.cs" Link="VipDrainState.cs" />
     <Compile Include="../../LocalVipAdmission.cs" Link="LocalVipAdmission.cs" />
     <Compile Include="../../LocalNetworkInventory.cs" Link="LocalNetworkInventory.cs" />
     <Compile Include="../../NetworkObservation.cs" Link="NetworkObservation.cs" />

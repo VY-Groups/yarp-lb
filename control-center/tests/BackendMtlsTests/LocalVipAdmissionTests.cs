@@ -83,6 +83,27 @@ internal static class LocalVipAdmissionTests
         }
         finally {foreach(var item in leases)item.Dispose();}
         Must(quorumGate.Active("guarded")==0,"all tracked slots released");
+        Must(quorumGate.TryEnter("guarded",()=>aborted++,out var draining),"healthy in-flight request before planned drain");
+        quorumGate.SetPlannedDrains(["guarded"]);
+        quorumGate.Sweep();
+        Must(aborted==3&&quorumGate.IsDraining("guarded")&&!quorumGate.TryEnter("guarded",()=>{},out _),
+            "planned drain refuses new requests without aborting existing healthy traffic");
+        draining!.Dispose();
+        Must(quorumGate.Active("guarded")==0,"planned drain reaches zero active requests");
+        quorumGate.SetPlannedDrains([]);
+        Must(quorumGate.TryEnter("guarded",()=>aborted++,out draining),"explicit resume admits fresh traffic");
+        draining!.Dispose();
+        quorumGate.SetPlannedDrains(["guarded"]);
+        var persisted=VipDrainState.Parse(VipDrainState.Encode(["192.0.2.10"]),["192.0.2.10"]);
+        using var restarted=new LocalVipAdmission([("guarded","192.0.2.10")],clock);
+        restarted.SetPlannedDrains(persisted.Select(_=>"guarded"));
+        restarted.Refresh(clock.Now,snapshot);
+        Must(!restarted.TryEnter("guarded",()=>{},out _),"durable drain survives guard reconstruction");
+        foreach(var bad in new[]{"null","[\"192.0.2.11\"]","[\"192.0.2.10\",\"192.0.2.10\"]"})
+        {
+            try{_=VipDrainState.Parse(System.Text.Encoding.UTF8.GetBytes(bad),["192.0.2.10"]);throw new Exception("invalid drain state accepted");}
+            catch(InvalidDataException){}
+        }
         static void MustQuiet(bool ok){if(!ok)throw new Exception("VIP request tracking refused early");}
     }
 }

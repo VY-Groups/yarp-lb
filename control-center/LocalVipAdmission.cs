@@ -13,6 +13,14 @@ internal sealed class LocalVipAdmission : BackgroundService
     private readonly object lifecycle=new();
     private readonly Dictionary<string,HashSet<RequestLease>> inFlight=new(StringComparer.Ordinal);
     private const int MaximumRequestsPerSocket=4096;
+    private HashSet<string> plannedDrains=new(StringComparer.Ordinal);
+    internal bool IsDraining(string id){lock(lifecycle)return plannedDrains.Contains(id);}
+    internal void SetPlannedDrains(IEnumerable<string> ids)
+    {
+        var next=new HashSet<string>(ids,StringComparer.Ordinal);
+        if(next.Any(id=>!required.ContainsKey(id)))throw new InvalidDataException("Unknown drained VIP socket.");
+        lock(lifecycle)plannedDrains=next;
+    }
 
     private sealed class RequestLease(LocalVipAdmission owner,string id,Action abort):IDisposable
     {
@@ -48,7 +56,7 @@ internal sealed class LocalVipAdmission : BackgroundService
         if(id is null||!required.ContainsKey(id))return true;
         lock(lifecycle)
         {
-            if(!Allows(id)||inFlight[id].Count>=MaximumRequestsPerSocket)return false;
+            if(plannedDrains.Contains(id)||!Allows(id)||inFlight[id].Count>=MaximumRequestsPerSocket)return false;
             var active=new RequestLease(this,id,abort);
             inFlight[id].Add(active);lease=active;
             return true;
