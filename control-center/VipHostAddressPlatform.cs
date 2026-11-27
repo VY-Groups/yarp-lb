@@ -51,7 +51,9 @@ internal static class VipHostAddressPlatform
             if(entries.Count>128)throw new InvalidDataException("Incomplete address inventory.");
             foreach(var entry in entries)
                 if(entry.Address.Equals(address))
-                    matches.Add((n.Id,entry.PrefixLength,!v6||VipIpv6Readiness.IsReady(entry,index,n.Name,VipIpv6Readiness.ReadLinux())));
+                    matches.Add((n.Id,entry.PrefixLength,OperatingSystem.IsWindows()
+                        ? entry.DuplicateAddressDetectionState==DuplicateAddressDetectionState.Preferred
+                        : !v6||VipIpv6Readiness.IsReady(entry,index,n.Name,VipIpv6Readiness.ReadLinux())));
         }
         if(matches.Count>1 || (matches.Count==1&&(matches[0].Id!=target.Id||matches[0].Prefix!=prefix)))
             throw new InvalidDataException("VIP is already assigned elsewhere or with a different prefix.");
