@@ -4,6 +4,7 @@
     <ImplicitUsings>enable</ImplicitUsings><OutputType>Exe</OutputType>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="../../VipMachineDrainState.cs" Link="VipMachineDrainState.cs" />
     <Compile Include="../../VipIpv6Readiness.cs" Link="VipIpv6Readiness.cs" />
     <PackageReference Include="Yarp.ReverseProxy" Version="2.3.0" />
     <Compile Include="../../VipDrainState.cs" Link="VipDrainState.cs" />

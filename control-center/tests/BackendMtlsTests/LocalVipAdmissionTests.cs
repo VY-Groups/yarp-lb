@@ -129,6 +129,16 @@ internal static class LocalVipAdmissionTests
             results=grouped.PollAuthorities(canceled.Token).GetAwaiter().GetResult();
             Must(results.Values.All(x=>!x),"canceled sample never authorizes traffic");
         }
+        grouped.SetPlannedDrains(["a"]);
+        grouped.SetAutomaticDrains(["a","b"]);
+        Must(grouped.IsManualDrain("a")&&grouped.IsAutomaticDrain("a")&&grouped.IsDraining("b"),"manual and automatic drains independent");
+        grouped.SetPlannedDrains([]);
+        Must(grouped.IsDraining("a"),"manual resume cannot remove automatic drain");
+        grouped.SetAutomaticDrains([]);
+        Must(!grouped.IsDraining("a"),"new epoch can clear automatic drain without touching manual state");
+        Must(VipMachineDrainState.Parse(new("scope",5),"scope",5),"same epoch drain persists");
+        Must(!VipMachineDrainState.Parse(new("scope",5),"scope",6),"new epoch does not inherit automatic drain");
+        try{VipMachineDrainState.Parse(new("scope",6),"scope",5);throw new Exception("future drain accepted");}catch(InvalidDataException){}
         static void MustQuiet(bool ok){if(!ok)throw new Exception("VIP request tracking refused early");}
     }
 }

@@ -16,7 +16,16 @@ internal sealed class LocalVipAdmission : BackgroundService
     private readonly Dictionary<string,HashSet<RequestLease>> inFlight=new(StringComparer.Ordinal);
     private const int MaximumRequestsPerSocket=4096;
     private HashSet<string> plannedDrains=new(StringComparer.Ordinal);
-    internal bool IsDraining(string id){lock(lifecycle)return plannedDrains.Contains(id);}
+    private HashSet<string> automaticDrains=new(StringComparer.Ordinal);
+    internal bool IsDraining(string id){lock(lifecycle)return plannedDrains.Contains(id)||automaticDrains.Contains(id);}
+    internal bool IsManualDrain(string id){lock(lifecycle)return plannedDrains.Contains(id);}
+    internal bool IsAutomaticDrain(string id){lock(lifecycle)return automaticDrains.Contains(id);}
+    internal void SetAutomaticDrains(IEnumerable<string> ids)
+    {
+        var next=new HashSet<string>(ids,StringComparer.Ordinal);
+        if(next.Any(id=>!required.ContainsKey(id)))throw new InvalidDataException("Unknown automatic VIP drain socket.");
+        lock(lifecycle)automaticDrains=next;
+    }
     internal void SetPlannedDrains(IEnumerable<string> ids)
     {
         var next=new HashSet<string>(ids,StringComparer.Ordinal);
@@ -58,7 +67,7 @@ internal sealed class LocalVipAdmission : BackgroundService
         if(id is null||!required.ContainsKey(id))return true;
         lock(lifecycle)
         {
-            if(plannedDrains.Contains(id)||!Allows(id)||inFlight[id].Count>=MaximumRequestsPerSocket)return false;
+            if(plannedDrains.Contains(id)||automaticDrains.Contains(id)||!Allows(id)||inFlight[id].Count>=MaximumRequestsPerSocket)return false;
             var active=new RequestLease(this,id,abort);
             inFlight[id].Add(active);lease=active;
             return true;
