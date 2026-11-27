@@ -43,6 +43,7 @@ jobs:
         shell: pwsh
         run: ./ops/ha/Test-VipServiceInstall.ps1
       - name: Build shipping node-agent executable
+        id: shipping-build
         run: dotnet build control-center/GatewayCoreYarp.csproj -c Release
       - name: Installed Linux agent runtime and protected credential acceptance
         if: runner.os == 'Linux'
@@ -52,3 +53,11 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: python ops/ha/test-vip-agent-runtime.py "$PWD/control-center/bin/Release/net10.0/GatewayCoreYarp.exe"
+      - name: Installed Linux provider and controller runtime
+        if: ${{ !cancelled() && steps.shipping-build.outcome == 'success' && runner.os == 'Linux' }}
+        shell: bash
+        run: sudo -n env GITHUB_ACTIONS=true RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" DOTNET_ROOT="$DOTNET_ROOT" "$(command -v python3)" ops/ha/test-vip-independent-runtime.py "$PWD/control-center/bin/Release/net10.0/GatewayCoreYarp"
+      - name: Installed Windows provider and controller runtime
+        if: ${{ !cancelled() && steps.shipping-build.outcome == 'success' && runner.os == 'Windows' }}
+        shell: pwsh
+        run: python ops/ha/test-vip-independent-runtime.py "$PWD/control-center/bin/Release/net10.0/GatewayCoreYarp.exe"
