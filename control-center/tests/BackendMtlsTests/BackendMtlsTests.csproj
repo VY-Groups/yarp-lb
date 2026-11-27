@@ -4,6 +4,9 @@
     <ImplicitUsings>enable</ImplicitUsings><OutputType>Exe</OutputType>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="../../TrafficLifecycle.cs" Link="TrafficLifecycle.cs" />
+    <Compile Include="../../LoadBalancingCore.cs" Link="LoadBalancingCore.cs" />
+    <Compile Include="../../RecoveryTransition.cs" Link="RecoveryTransition.cs" />
     <PackageReference Include="Yarp.ReverseProxy" Version="2.3.0" />
     <Compile Include="../../ExpiringCookieAffinityPolicy.cs" Link="ExpiringCookieAffinityPolicy.cs" />
     <Compile Include="../../SecureAffinityDraft.cs" Link="SecureAffinityDraft.cs" />
