@@ -33,7 +33,7 @@ public sealed class GatewayListenerIsolation : IDisposable
         string[]? TrafficCertificateDnsNames = null,
         VirtualSocket[]? VirtualServices = null);
 
-    public sealed record VirtualSocket(string Id, string Ip, int Port, string Protocol, bool RequireLocalAddressPresence = false);
+    public sealed record VirtualSocket(string Id, string Ip, int Port, string Protocol, bool RequireLocalAddressPresence = false, string? VipFleetId = null, string? VipQuorumConfigPath = null, long? VipOwnershipEpoch = null);
     private readonly (VirtualSocket Config, IPAddress Address)[] _virtualServices;
 
     public readonly Settings Config;
@@ -74,7 +74,21 @@ public sealed class GatewayListenerIsolation : IDisposable
                 (address.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork &&
                     address.GetAddressBytes()[0] >= 224) || !bindings.Add((address, service.Port)))
                 throw new InvalidOperationException("Virtual service socket overlaps another binding or management IP.");
+            var distributed = service.VipFleetId is not null || service.VipQuorumConfigPath is not null || service.VipOwnershipEpoch is not null;
+            if (distributed && (!service.RequireLocalAddressPresence || string.IsNullOrWhiteSpace(service.VipQuorumConfigPath) ||
+                !Path.IsPathFullyQualified(service.VipQuorumConfigPath) || service.VipOwnershipEpoch is not > 0 ||
+                address.Equals(_traffic) || address.Equals(_management)))
+                throw new InvalidOperationException("Distributed VIP admission requires local guard, isolated address, private quorum config and exact ownership epoch.");
+            if (distributed) _ = FleetQuorum.VipScope(service.VipFleetId!, address.ToString());
             validated.Add((service, address));
+        }
+        foreach (var group in validated.GroupBy(x=>x.Item2))
+        {
+            var first=group.First().Item1;
+            if(group.Any(x=>x.Item1.VipFleetId!=first.VipFleetId ||
+                x.Item1.VipQuorumConfigPath!=first.VipQuorumConfigPath ||
+                x.Item1.VipOwnershipEpoch!=first.VipOwnershipEpoch))
+                throw new InvalidOperationException("All sockets on a distributed VIP must share the exact same authority and epoch.");
         }
         _virtualServices = validated.ToArray();
         if (config.MaxConcurrentConnections <= 0)

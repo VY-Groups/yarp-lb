@@ -73,6 +73,26 @@ with tempfile.TemporaryDirectory(prefix="gc-fleet-raft-") as tmp:
             p.write_text(json.dumps(doc));p.chmod(0o600)
             return p
         writer=config("writer");reader=config("reader")
+        # Separate VIP owner namespace, exact canonical address and independent client cert.
+        vip_scope=hashlib.sha256(b"gatewaycore-adc-vip-v1\nci\n192.0.2.10").hexdigest().upper()
+        vip_key=base64.b64encode(("/gatewaycore/adc-vip/v1/"+vip_scope).encode()).decode()
+        vip_reader=root/"vip-reader.json";vip_writer=root/"vip-writer.json"
+        for path,role in [(vip_reader,"reader"),(vip_writer,"writer")]:
+            cert,key,_=ids[role]
+            path.write_text(json.dumps({"scope":vip_scope,"clusterId":cluster,"caFile":ca,"certFile":cert,
+                                        "keyFile":key,"endpoints":endpoints}));path.chmod(0o600)
+        run("vip-check",vip_reader,vip_scope,1,ok=False)
+        owner="vip_"+ids["reader"][2]
+        value=base64.b64encode(owner.encode()).decode()
+        res=post(("127.0.0.1",ports[0]),("/v3/kv/txn",{"compare":[{"key":vip_key,"target":"CREATE","result":"EQUAL","createRevision":"0"}],
+            "success":[{"requestPut":{"key":vip_key,"value":value}}],"failure":[]}),ca,writer_cert,writer_key)
+        assert res["succeeded"]
+        vip_epoch=int(res["header"]["revision"])
+        run("vip-check",vip_reader,vip_scope,vip_epoch)
+        run("vip-check",vip_writer,vip_scope,vip_epoch,ok=False)
+        run("vip-check",vip_reader,vip_scope,vip_epoch+1,ok=False)
+        run("vip-check",vip_reader,scope,vip_epoch,ok=False)
+        print("PASS: independent real Raft VIP owner certificate and exact epoch",flush=True)
         # The real interrupted-transaction fixture reserves A*24. Never reuse a completed ID.
         one="rollout_"+"6"*24;two="rollout_"+"7"*24
         def contender(tx):
@@ -106,9 +126,11 @@ with tempfile.TemporaryDirectory(prefix="gc-fleet-raft-") as tmp:
         one="rollout_"+"C"*24;two="rollout_"+"D"*24
         epoch=int(run("acquire",writer,one,0))
         docker("stop","--time","1",containers[-1])
+        run("vip-check",vip_reader,vip_scope,vip_epoch)
         run("assert",reader,one,epoch)
         run("acquire",writer,two,epoch,ok=False)
         docker("stop","--time","1",containers[-2])
+        run("vip-check",vip_reader,vip_scope,vip_epoch,ok=False)
         run("assert",reader,one,epoch,ok=False)
         run("release",writer,one,epoch,ok=False)
         print("COMMERCIAL_FLEET_RAFT_FENCE_ACCEPTANCE_PASS",flush=True)
