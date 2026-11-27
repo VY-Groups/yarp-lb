@@ -8,6 +8,7 @@ internal sealed class VipAutomaticJournal : IDisposable
     private readonly string scope,preferred,other;
     internal Transition? Pending {get;private set;}
     internal long LastCompletedEpoch {get;private set;}
+    internal long LastRearmAttemptEpoch {get;private set;}
     internal VipAutomaticJournal(string path,string scope,string preferred,string other)
     {
         VipFenceProvider.ValidatePair(scope,preferred,other);
@@ -38,6 +39,16 @@ internal sealed class VipAutomaticJournal : IDisposable
     }
     private void Apply(Transition value,bool persist)
     {
+        if(value.Kind=="rearm")
+        {
+            if(value.Scope!=scope||Pending is not null||LastCompletedEpoch<1||
+                value.OldEpoch!=LastCompletedEpoch||value.FinalEpoch!=value.OldEpoch||
+                value.OldEpoch<=LastRearmAttemptEpoch||
+                !((value.OldPin==preferred&&value.NewPin==other)||(value.OldPin==other&&value.NewPin==preferred)))
+                throw new InvalidDataException("Invalid or repeated standby rearm intent.");
+            if(persist)Append(value);
+            LastRearmAttemptEpoch=value.OldEpoch;return;
+        }
         if(value.Scope!=scope||value.OldEpoch<1||value.OldEpoch<LastCompletedEpoch||
             !((value.OldPin==preferred&&value.NewPin==other)||(value.OldPin==other&&value.NewPin==preferred))||
             value.Kind is not ("failover" or "failback")||
@@ -48,15 +59,17 @@ internal sealed class VipAutomaticJournal : IDisposable
         else if(Pending is null||value.FinalEpoch<=value.OldEpoch||
             (value with{FinalEpoch=0})!=Pending)
             throw new InvalidDataException("Unrelated controller completion.");
-        if(persist)
-        {
-            var bytes=Encoding.UTF8.GetBytes(JsonSerializer.Serialize(value)+"\n");
-            if(file.Length+bytes.Length>1024*1024)throw new InvalidDataException("Controller journal full.");
-            file.Write(bytes);file.Flush(true);
-        }
+        if(persist)Append(value);
         if(value.FinalEpoch==0)Pending=value;
         else{Pending=null;LastCompletedEpoch=value.FinalEpoch;}
     }
+    private void Append(Transition value)
+    {
+        var bytes=Encoding.UTF8.GetBytes(JsonSerializer.Serialize(value)+"\n");
+        if(file.Length+bytes.Length>1024*1024)throw new InvalidDataException("Controller journal full.");
+        file.Write(bytes);file.Flush(true);
+    }
+    internal void RecordRearm(string owner,long epoch,string peer)=>Apply(new(scope,owner,epoch,peer,"rearm",epoch),true);
     internal void Begin(Transition value)=>Apply(value,true);
     internal void Complete(long epoch)=>Apply((Pending??throw new InvalidOperationException("No pending VIP transition.")) with{FinalEpoch=epoch},true);
     public void Dispose()=>file.Dispose();
@@ -185,6 +198,29 @@ internal static class VipAutomaticController
             catch(Exception e) when(!stop.IsCancellationRequested&&(e is HttpRequestException or OperationCanceledException or
                 FleetQuorumContentionException or InvalidOperationException or InvalidDataException or JsonException))
             {policy.Reset();Console.Error.WriteLine("VIP automatic observation unavailable; no mutation.");continue;}
+            // Rearm is a distinct, one-shot action after a fully completed transfer.
+            // No rearm on the first unmanaged epoch or while recovery is pending.
+            if(settings.RearmEnabled&&state!.Epoch==journal.LastCompletedEpoch&&
+                state.Epoch>journal.LastRearmAttemptEpoch&&evidence!.OwnerServing&&
+                !evidence.OwnerDrained&&!evidence.OtherEligible&&evidence.Quiescent)
+            {
+                journal.RecordRearm(evidence.OwnerPin,state.Epoch,evidence.OtherPin);
+                using var rearmDeadline=CancellationTokenSource.CreateLinkedTokenSource(stop);
+                rearmDeadline.CancelAfter(TimeSpan.FromSeconds(150));
+                try
+                {
+                    if(await authority.ObserveVip(rearmDeadline.Token)!=state)throw new FleetQuorumContentionException();
+                    var result=await provider.NodeAction("rearm-node",scope,evidence.OwnerPin,state.Epoch,evidence.OtherPin,rearmDeadline.Token);
+                    if(!result.Quiescent||!result.OwnerServing||!result.OtherEligible||result.OwnerDrained||
+                        await authority.ObserveVip(rearmDeadline.Token)!=state)
+                        throw new InvalidDataException("Standby rearm not independently confirmed.");
+                    Console.WriteLine(JsonSerializer.Serialize(new{decision="rearm",epoch=state.Epoch,standby=evidence.OtherPin}));
+                }
+                catch(Exception e) when(!stop.IsCancellationRequested&&(e is HttpRequestException or OperationCanceledException or
+                    FleetQuorumContentionException or InvalidOperationException or InvalidDataException or JsonException))
+                {Console.Error.WriteLine("Standby rearm unconfirmed; no automatic retry. Inspect the peer and provider.");}
+                policy.Reset();continue;
+            }
             string? decision=policy.Observe(state!,evidence!,preferred,failback);
             if(decision is not null)
             {

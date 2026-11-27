@@ -16,7 +16,7 @@ internal static class VipRedfishProvider
         VipMachineTransport.ClientSettings? Agent=null,VipMachineTransport.ClientSettings? Drain=null);
     private sealed record Settings(string ListenIp,int Port,string Scope,string ReaderConfig,
         string ServerPfx,string ServerPasswordFile,string WriterCaFile,string WriterPin,
-        string SigningKeyFile,Node[] Nodes);
+        string SigningKeyFile,Node[] Nodes,bool StandbyBootIsolationApproved=false);
     private static readonly JsonSerializerOptions Json=new(JsonSerializerDefaults.Web)
         {UnmappedMemberHandling=JsonUnmappedMemberHandling.Disallow};
     internal static async Task<int> Run(string[] args)
@@ -156,6 +156,41 @@ internal static class VipRedfishProvider
                         var req=new VipRemoteNode.DrainRequest(r.Scope,r.Epoch,Convert.ToHexString(RandomNumberGenerator.GetBytes(32)),mutate);
                         return VipRemoteNode.Match(req,await ownerDrain.Post<VipRemoteNode.DrainEvidence>("/admin/vip-machine/drain",req,token));
                     }
+                    if(action=="rearm-node")
+                    {
+                        // Site approval is explicit and local to the independent
+                        // provider. The gateway/UI cannot authorize power-on.
+                        if(!s.StandbyBootIsolationApproved)return Results.StatusCode(403);
+                        async Task AssertSafePeer(CancellationToken _)
+                        {
+                            await AssertOwner();
+                            if(await ownerBmc.IsOff(token)||!(await Status(ownerAgent,r.OwnerPin)).Serving)
+                                throw new InvalidDataException("Current owner not serving; rearm refused.");
+                            var d=await Drain(false);
+                            if(d.ManualDrain||d.Draining)throw new InvalidDataException("Owner maintenance drain; rearm refused.");
+                            await AssertOwner();
+                        }
+                        await AssertSafePeer(token);
+                        await peerBmc.ConfirmOn(AssertSafePeer,token);
+                        // A powered-on peer is not eligible until its pinned
+                        // agent confirms no VIP, a safe journal and stopped/manual service.
+                        while(true)
+                        {
+                            await AssertSafePeer(token);
+                            try
+                            {
+                                if((await Status(peerAgent,r.OtherPin)).Eligible)
+                                {
+                                    await AssertSafePeer(token);
+                                    return Results.Json(new VipFenceProvider.NodeEvidence(r.Scope,r.OwnerPin,r.Epoch,r.OtherPin,r.Nonce,
+                                        true,true,false,true),Json);
+                                }
+                            }
+                            catch(Exception e) when(e is HttpRequestException or InvalidDataException or OperationCanceledException)
+                            {token.ThrowIfCancellationRequested();}
+                            await Task.Delay(TimeSpan.FromSeconds(3),token);
+                        }
+                    }
                     var evidence=await VipProviderActions.Run(action,r,AssertOwner,ownerBmc.IsOff,peerBmc.IsOff,
                         (pin,activate,_)=>Status(pin==r.OwnerPin?ownerAgent:peerAgent,pin,
                             activate?"/v1/vip-node/activate":"/v1/vip-node/status"),
@@ -170,6 +205,7 @@ internal static class VipRedfishProvider
             app.MapPost("/v1/vip/node-status",(Delegate)(Func<HttpContext,Task<IResult>>)(ctx=>NodeAction(ctx,"node-status")));
             app.MapPost("/v1/vip/drain-node",(Delegate)(Func<HttpContext,Task<IResult>>)(ctx=>NodeAction(ctx,"drain-node")));
             app.MapPost("/v1/vip/activate-node",(Delegate)(Func<HttpContext,Task<IResult>>)(ctx=>NodeAction(ctx,"activate-node")));
+            app.MapPost("/v1/vip/rearm-node",(Delegate)(Func<HttpContext,Task<IResult>>)(ctx=>NodeAction(ctx,"rearm-node")));
             await app.RunAsync();
             return 0;
         }

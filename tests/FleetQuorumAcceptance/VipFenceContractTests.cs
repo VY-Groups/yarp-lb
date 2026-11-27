@@ -82,9 +82,12 @@ internal static class VipFenceContractTests
             {
                 if(journal.Pending!=intent)throw new Exception("pending transfer lost after restart");
                 journal.Complete(12);
+                journal.RecordRearm(newPin,12,oldPin);
+                try{journal.RecordRearm(newPin,12,oldPin);throw new Exception("Duplicate power-on intent accepted");}
+                catch(InvalidDataException){}
             }
             using(var journal=new VipAutomaticJournal(path,scope,oldPin,newPin))
-                if(journal.Pending!=null||journal.LastCompletedEpoch!=12)throw new Exception("completion lost");
+                if(journal.Pending!=null||journal.LastCompletedEpoch!=12||journal.LastRearmAttemptEpoch!=12)throw new Exception("completion lost");
         }
         finally{dir.Delete(true);}
         Console.WriteLine("PASS: fence provider exact response, failure remains revoked, exact resume, failover/failback policy and durable transition journal");

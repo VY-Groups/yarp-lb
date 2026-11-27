@@ -96,7 +96,7 @@ internal sealed class VipFenceProvider : IDisposable
     internal async Task<NodeEvidence> NodeAction(string action,string scope,string owner,long epoch,string other,CancellationToken token)
     {
         ValidatePair(scope,owner,other);
-        if(epoch<1||action is not ("node-status" or "drain-node" or "activate-node"))
+        if(epoch<1||action is not ("node-status" or "drain-node" or "activate-node" or "rearm-node"))
             throw new InvalidDataException("Invalid bounded provider action.");
         var request=new NodeRequest(scope,owner,epoch,other,Convert.ToHexString(RandomNumberGenerator.GetBytes(32)));
         using var response=await client.PostAsJsonAsync(new Uri(endpoint,"/v1/vip/"+action),request,Json,token);

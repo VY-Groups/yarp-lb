@@ -65,7 +65,7 @@ internal sealed class VipRedfishFence : IDisposable
         }
         catch{handler?.Dispose();ca.Dispose();throw;}
     }
-    private async Task<(string Power,bool CanOff)> Observe(CancellationToken token)
+    private async Task<(string Power,bool CanOff,bool CanOn)> Observe(CancellationToken token)
     {
         using var response=await client.GetAsync(system,token);
         if(response.StatusCode!=HttpStatusCode.OK)throw new InvalidDataException("Redfish observation refused.");
@@ -78,16 +78,42 @@ internal sealed class VipRedfishFence : IDisposable
             root.GetProperty("PowerRestorePolicy").GetString()!="AlwaysOff")
             throw new InvalidDataException("BMC identity or persistent power policy not confirmed.");
         var power=root.GetProperty("PowerState").GetString();
-        if(power is not ("On" or "Off" or "PoweringOff"))
+        if(power is not ("On" or "Off" or "PoweringOff" or "PoweringOn"))
             throw new InvalidDataException("Unrecognized or unsafe BMC power state.");
-        bool canOff=root.TryGetProperty("Actions",out var actions)&&
+        JsonElement allowed=default;
+        bool hasAction=root.TryGetProperty("Actions",out var actions)&&
             actions.TryGetProperty("#ComputerSystem.Reset",out var reset)&&
             reset.TryGetProperty("target",out var target)&&target.GetString()==action&&
-            reset.TryGetProperty("ResetType@Redfish.AllowableValues",out var allowed)&&
-            allowed.ValueKind==JsonValueKind.Array&&allowed.EnumerateArray().Any(x=>x.GetString()=="ForceOff");
-        return (power,canOff);
+            reset.TryGetProperty("ResetType@Redfish.AllowableValues",out allowed)&&allowed.ValueKind==JsonValueKind.Array;
+        return (power,hasAction&&allowed.EnumerateArray().Any(x=>x.GetString()=="ForceOff"),
+            hasAction&&allowed.EnumerateArray().Any(x=>x.GetString()=="On"));
     }
     internal async Task<bool> IsOff(CancellationToken token)=>(await Observe(token)).Power=="Off";
+    internal async Task ConfirmOn(Func<CancellationToken,Task> assertPeer,CancellationToken token)
+    {
+        await assertPeer(token);
+        var first=await Observe(token);
+        if(first.Power=="Off")
+        {
+            if(!first.CanOn||!first.CanOff)throw new InvalidDataException("Exact Redfish On and ForceOff actions required.");
+            await assertPeer(token);
+            using var response=await client.PostAsJsonAsync(new Uri(system,action),new Dictionary<string,string>{{"ResetType","On"}},token);
+            if(response.StatusCode is not (HttpStatusCode.OK or HttpStatusCode.Accepted or HttpStatusCode.NoContent))
+                throw new InvalidDataException("BMC power-on not accepted.");
+        }
+        else if(first.Power is not ("On" or "PoweringOn"))throw new InvalidDataException("Unsafe rearm power state.");
+        for(int i=0;i<30;i++)
+        {
+            await assertPeer(token);
+            if((await Observe(token)).Power=="On")
+            {
+                await assertPeer(token);
+                return;
+            }
+            await Task.Delay(TimeSpan.FromSeconds(1),token);
+        }
+        throw new InvalidOperationException("BMC power-on unconfirmed.");
+    }
     internal async Task ConfirmOff(Func<CancellationToken,Task> assertRevoked,CancellationToken token)
     {
         await assertRevoked(token);

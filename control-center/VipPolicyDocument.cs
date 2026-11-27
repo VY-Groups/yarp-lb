@@ -5,7 +5,7 @@ using System.Text.Json.Serialization;
 // document; only the independent writer loads it from a protected local file.
 internal sealed record VipPolicyDocument(int Version,string Scope,string PreferredPin,string OtherPin,
     [property:JsonRequired] bool FailbackEnabled,int PollSeconds,int FailureSamples,int FailureSeconds,
-    int FailbackEligibleSeconds,int MinimumOwnerSeconds)
+    int FailbackEligibleSeconds,int MinimumOwnerSeconds,bool RearmEnabled=false)
 {
     internal static readonly JsonSerializerOptions Json=new(JsonSerializerDefaults.Web)
         {UnmappedMemberHandling=JsonUnmappedMemberHandling.Disallow,WriteIndented=true};
