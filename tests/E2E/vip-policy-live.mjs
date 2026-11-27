@@ -36,11 +36,25 @@ try {
         if(await page.locator('#privacy-screen').isVisible())
             await page.locator('#privacy-accept').click();
         await page.locator('#app-shell').waitFor({state:'visible'});
+        // The shell becomes visible before asynchronous session initialization
+        // finishes. Wait for the initial configuration render before navigation.
+        await page.locator('#notice').filter({hasText:'Latest configuration loaded'}).waitFor({state:'visible'});
+        assert.match(await page.locator('#user-badge').innerText(),/Administrator/);
         const nav=page.locator('button.nav[data-view="inventory"]');
         const parent=nav.locator('xpath=ancestor::details');
         if(await parent.count() && await parent.getAttribute('open')===null)
             await parent.locator('summary').click();
-        await nav.click();
+        await nav.waitFor({state:'visible'});
+        const [inventoryResponse]=await Promise.all([
+            page.waitForResponse(r=>r.url()===fixture.origin+'/admin/api/network/interfaces'&&r.request().method()==='GET'),
+            nav.click()
+        ]);
+        assert.equal(inventoryResponse.status(),200,'real authenticated browser inventory');
+        const inventory=await inventoryResponse.json();
+        assert.ok(inventory.virtualAddresses.some(item=>item.haPolicyScope===fixture.policy.scope),
+            'browser inventory must contain the exact journal-bound scope');
+        assert.equal(await nav.getAttribute('aria-current'),'page','inventory navigation must remain selected');
+        await page.getByRole('heading',{name:'Independent HA policy',exact:true}).waitFor({state:'visible'});
         const policy=fixture.policy;
         await page.locator('#ha-scope').selectOption(policy.scope);
         await page.locator('#ha-preferred').fill(policy.preferredPin);

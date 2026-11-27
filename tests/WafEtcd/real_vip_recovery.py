@@ -300,6 +300,24 @@ def accept_live_policy(executable,scope,fleet,vip,reader,policy,expected_owner):
             if not session["privacyAccepted"]:
                 api("POST","/admin/api/privacy/accept",{"version":session["privacyVersion"]})
             if session["role"]!="Administrator" or not csrf:raise AssertionError("Missing authenticated administrator")
+            # Infrastructure navigation is intentionally hidden until the
+            # organization and deployment design are configured. Establish
+            # those prerequisites through the real authorized management API.
+            profile,_=api("GET","/admin/api/organization")
+            api("PUT","/admin/api/organization",{"organizationName":"Disposable VIP Acceptance",
+                "sector":"technology","region":"Lab","notes":"","expectedRevision":profile["revision"]})
+            onboarding,_=api("GET","/admin/api/onboarding")
+            plan={"mode":"standalone","controlPlane":"local","dataStore":"local-file",
+                "accessPattern":"segmented","gateways":[{"id":"gateway-01","hostname":"127.0.0.1","agentUrl":""}],
+                "workloads":[{"id":"policy-origin","application":"policy-fixture",
+                    "url":"http://127.0.0.1:"+str(backend_port)+"/","zone":"public","hostingEngine":"nginx"}]}
+            validation,_=api("POST","/admin/api/onboarding/validate",{"plan":plan})
+            if validation["issues"]:raise AssertionError("Disposable deployment design validation failed")
+            api("POST","/admin/api/onboarding",{"plan":plan,"confirmDesign":True,
+                "expectedRevision":onboarding["revision"]})
+            confirmed,_=api("GET","/admin/api/onboarding")
+            if confirmed["status"]!="design-confirmed":raise AssertionError("Deployment design confirmation failed")
+            print("PASS: real authorized organization and deployment design prerequisites confirmed",flush=True)
             inventory,_=api("GET","/admin/api/network/interfaces")
             rows=[r for r in inventory["virtualAddresses"] if r["id"]=="policy-vip"]
             if len(rows)!=1 or rows[0]["haPolicyScope"]!=scope or rows[0]["ownershipEpoch"]!=expected_owner[1]:
