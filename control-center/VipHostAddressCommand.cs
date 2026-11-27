@@ -33,10 +33,12 @@ internal static class VipHostAddressCommand
             using var deadline=new CancellationTokenSource(TimeSpan.FromSeconds(30));
             async Task Withdraw()
             {
+                // Compensation has an independent deadline even if the quorum check timed out.
+                using var withdrawalDeadline=new CancellationTokenSource(TimeSpan.FromSeconds(20));
                 if(log.Last?.Phase=="assigned")log.Append(log.Last.Epoch,"withdraw-intent");
                 if(log.Last?.Phase!="withdraw-intent")throw new InvalidDataException("Only a journal-confirmed owned address can be withdrawn.");
                 var current=VipHostAddressPlatform.Inspect(args[3],ip,management);
-                if(current.Present)await VipHostAddressPlatform.Change(current,ip,false,deadline.Token);
+                if(current.Present)await VipHostAddressPlatform.Change(current,ip,false,withdrawalDeadline.Token);
                 if(VipHostAddressPlatform.Inspect(args[3],ip,management).Present)throw new InvalidOperationException("Withdrawal unconfirmed.");
                 log.Append(log.Last.Epoch,"withdrawn");
             }
@@ -70,7 +72,6 @@ internal static class VipHostAddressCommand
         }
         catch(Exception error) when(error is IOException or InvalidDataException or UnauthorizedAccessException or
             InvalidOperationException or ArgumentException or System.ComponentModel.Win32Exception or
-            System.Net.NetworkInformation.NetworkInformationException or System.Net.Sockets.SocketException or
             HttpRequestException or JsonException or CryptographicException or PlatformNotSupportedException or OperationCanceledException)
         {
             Console.Error.WriteLine("VIP host action refused or unconfirmed: "+error.GetType().Name+". Inspect the journal and local address state before recovery.");
