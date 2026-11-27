@@ -215,16 +215,16 @@ internal static class DestinationAdmissionGrpcAcceptance
         using var managementClientCert = X509CertificateLoader.LoadPkcs12FromFile(
             managementPfx, password, managementClientKeyFlags);
 
-        var tlsPort = useHttp3 ? GetDualTransportPort() : GetTcpPort();
-        while (useHttp3 && tlsPort == backendPort) tlsPort = GetDualTransportPort();
-        var httpPort = GetTcpPort();
-        var adminPort = GetTcpPort();
-        var metricsPort = GetTcpPort();
-        while (new[] { httpPort, adminPort, metricsPort, tlsPort }.Distinct().Count() != 4 ||
-            (useHttp3 && new[] { httpPort, adminPort, metricsPort, tlsPort }.Contains(backendPort)))
-        {
-            httpPort = GetTcpPort(); adminPort = GetTcpPort(); metricsPort = GetTcpPort();
-        }
+        // Reserve the actual traffic AND management IPs. In particular, a
+        // free port on 127.0.0.1 says nothing about a listener on 127.0.0.2.
+        // Keep all reservations until the shipping process is ready to launch.
+        using var gatewayPorts = new GatewayPortReservations(
+            [new Uri(backendAddress).Port, primaryPort, backupPort]);
+        var managementIp = IPAddress.Parse("127.0.0.2");
+        var tlsPort = gatewayPorts.Reserve(IPAddress.Loopback, useHttp3);
+        var httpPort = gatewayPorts.Reserve(IPAddress.Loopback);
+        var adminPort = gatewayPorts.Reserve(managementIp);
+        var metricsPort = gatewayPorts.Reserve(managementIp);
 
         var listenerConfig = Path.Combine(root, "listeners.json");
         var listeners = new
@@ -307,6 +307,11 @@ internal static class DestinationAdmissionGrpcAcceptance
         start.Environment["Logging__LogLevel__Microsoft.AspNetCore.Server.Kestrel"] = "Debug";
         start.Environment["Logging__LogLevel__Microsoft.AspNetCore.Server.Kestrel.Https"] = "Trace";
         start.Environment["Logging__LogLevel__Microsoft.AspNetCore.Hosting.Diagnostics"] = "Debug";
+        Console.WriteLine($"START: {protocol} reserved traffic HTTP={httpPort} HTTPS={tlsPort}; management admin={adminPort} metrics={metricsPort}");
+        // A separate shipping process must bind its own sockets. Release only
+        // at this final handoff; actual readiness and all protocol assertions
+        // remain mandatory. Any external process winning the race fails CI.
+        gatewayPorts.Dispose();
         using var appProcess = Process.Start(start) ?? throw new Exception("Could not start real GatewayCore YARP process");
         var expectedStop = false;
         try
@@ -607,14 +612,63 @@ internal static class DestinationAdmissionGrpcAcceptance
             return request.CreateSelfSigned(DateTimeOffset.UtcNow.AddMinutes(-5), DateTimeOffset.UtcNow.AddDays(2));
         }
 
-        static int GetTcpPort()
+    }
+
+    // Disposable acceptance-only listener allocation. The explicit lower
+    // port range avoids the default Linux/Windows ephemeral ranges used by
+    // the concurrent health probes and clients. Never reserve production ports.
+    private sealed class GatewayPortReservations(IEnumerable<int> originPorts) : IDisposable
+    {
+        private readonly HashSet<int> used = new(originPorts);
+        private readonly List<Socket> reservations = [];
+        private bool released;
+
+        public int Reserve(IPAddress address, bool requireUdp = false)
         {
-            using var socket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
-            socket.Bind(new IPEndPoint(IPAddress.Loopback, 0));
-            return ((IPEndPoint)socket.LocalEndPoint!).Port;
+            if (released) throw new ObjectDisposedException(nameof(GatewayPortReservations));
+            for (var attempt = 0; attempt < 256; attempt++)
+            {
+                var port = Random.Shared.Next(20000, 30000);
+                if (used.Contains(port)) continue;
+                Socket? tcp = null, udp = null;
+                try
+                {
+                    var endpoint = new IPEndPoint(address, port);
+                    tcp = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+                    tcp.ExclusiveAddressUse = true;
+                    tcp.Bind(endpoint);
+                    tcp.Listen(1);
+                    if (requireUdp)
+                    {
+                        udp = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+                        udp.ExclusiveAddressUse = true;
+                        udp.Bind(endpoint);
+                    }
+                    reservations.Add(tcp);
+                    if (udp is not null) reservations.Add(udp);
+                    used.Add(port);
+                    return port;
+                }
+                catch (SocketException e) when (e.SocketErrorCode is SocketError.AddressAlreadyInUse or SocketError.AccessDenied)
+                {
+                    tcp?.Dispose(); udp?.Dispose();
+                }
+                catch
+                {
+                    tcp?.Dispose(); udp?.Dispose();
+                    throw;
+                }
+            }
+            throw new InvalidOperationException("No exclusive acceptance listener available on " + address);
         }
 
-
+        public void Dispose()
+        {
+            if (released) return;
+            released = true;
+            foreach (var socket in reservations) socket.Dispose();
+            reservations.Clear();
+        }
     }
 
     private sealed class DuplexGrpcContent : HttpContent
