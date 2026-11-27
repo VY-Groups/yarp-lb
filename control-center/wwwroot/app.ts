@@ -1,5 +1,5 @@
 type Obj = Record<string, any>;
-type State = {name:string;gateway:string;time:string;routes:Obj;clusters:Obj;disabled:Obj;monitorProfiles?:Obj;realServers?:Obj;mode:string;telemetry:string;revision:string};
+type State = {name:string;gateway:string;time:string;routes:Obj;clusters:Obj;disabled:Obj;monitorProfiles?:Obj;realServers?:Obj;serviceGroups?:Obj;mode:string;telemetry:string;revision:string};
 let data:State = {name:'GatewayCore',gateway:'unknown',time:'',routes:{},clusters:{},disabled:{},mode:'Local testing',telemetry:'',revision:''};
 let viewHistory:string[]=[];let lastRenderedView='setup';let restoringNavigation=false;
 function navigateBack(){if(viewHistory.length){restoringNavigation=true;view=viewHistory.pop()!;render()}else if(view!=='setup'){restoringNavigation=true;view='setup';render()}}
@@ -92,7 +92,7 @@ async function save() {
     if (!dirty || currentRole === 'Viewer')
         return;
     reasonDialog('Submit configuration for approval', 'Your draft contains ' + keys(data.routes).length + ' route(s) and ' + keys(data.clusters).length + ' backend group(s). Nothing goes live until a different authorized administrator approves this exact revision.', 12, 'Submit request', async reason => {
-        const x = await api('/admin/api/change-requests', 'POST', { reason, payload: { routes: data.routes, clusters: data.clusters, disabled: data.disabled, monitorProfiles: data.monitorProfiles || {}, realServers: data.realServers || {}, revision: data.revision } });
+        const x = await api('/admin/api/change-requests', 'POST', { reason, payload: { routes: data.routes, clusters: data.clusters, disabled: data.disabled, monitorProfiles: data.monitorProfiles || {}, realServers: data.realServers || {}, serviceGroups: data.serviceGroups || {}, revision: data.revision } });
         dirty = false;
         await reload();
         view = 'approvals';
@@ -308,6 +308,8 @@ function editMonitorProfile(id: string = '') {
 function deleteMonitorProfile(id: string) {
     if (currentRole === 'Viewer' || !Object.prototype.hasOwnProperty.call(data.monitorProfiles || {}, id))
         return;
+    if (keys(data.serviceGroups || {}).some(key => data.serviceGroups?.[key].MonitorProfile === id))
+        return show('Remove this monitor from service group templates first.', true);
     if (!confirm('Delete reusable profile ' + id + '? Existing assigned snapshots remain unchanged.'))
         return;
     const profiles = { ...data.monitorProfiles };
@@ -350,7 +352,146 @@ function monitorRegistryPanel() {
     }).join('');
     return `<div class="card"><div class="toolbar"><div><h2>Reusable monitor profiles</h2><p class="subtle">Independent templates; assign a snapshot to a service group. All changes require approval.</p></div>${currentRole === 'Viewer' ? '' : actionBtn('+ Create monitor profile', 'profile-add', '')}</div><div class="tablewrap"><table><thead><tr><th>Profile</th><th>Readiness path</th><th>Mode</th><th>Interval / timeout</th><th>Actions</th></tr></thead><tbody>${rows || '<tr><td colspan="5">No reusable profiles</td></tr>'}</tbody></table></div></div>`;
 }
-function clusters(){const rows=keys(data.clusters).map(id=>{const c=data.clusters[id];const active=!!c.HealthCheck?.Active?.Enabled,passive=!!c.HealthCheck?.Passive?.Enabled;const health=active&&passive?'<span class="chip good">Active + passive</span>':active?'<span class="chip good">Active</span>':passive?'<span class="chip warn">Passive only</span>':'<span class="chip">Disabled</span>';return `<tr><td><b>${esc(id)}</b></td><td>${esc(c.LoadBalancingPolicy||'Default')}</td><td>${keys(c.Destinations||{}).length}</td><td>${health}${c.Metadata?.[monitorSourceKey]?`<div class="subtle">Linked to ${esc(c.Metadata[monitorSourceKey])}</div>`:""}</td><td>${actionBtn('Edit','cluster-edit',id)} ${currentRole==='Viewer'?'':actionBtn('Health monitor','monitor-edit',id)+' '+actionBtn('Reuse monitor','monitor-copy',id)+' '+actionBtn('Assign profile','profile-assign',id)+(c.Metadata?.[monitorSourceKey]?' '+actionBtn('Unlink monitor','monitor-unlink',id):'')} ${actionBtn('Advanced','cluster-advanced',id)} ${actionBtn('Delete','cluster-delete',id,'danger-btn mini')}</td></tr>`}).join('');return `<div class="toolbar"><div><h2>Backend groups (clusters)</h2><p class="subtle">A group contains the servers for one application and defines traffic distribution. Use the policy guide below.</p></div>${actionBtn('+ Add cluster','cluster-add','')}</div><div class="tablewrap"><table><thead><tr><th>Cluster</th><th>Policy</th><th>Active backends</th><th>Health checks</th><th>Actions</th></tr></thead><tbody>${rows||'<tr><td colspan="5" class="empty">No clusters configured</td></tr>'}</tbody></table></div>${policyReference()}${monitorRegistryPanel()}`}
+const serviceGroupPolicies = ['RoundRobin', 'WeightedRoundRobin', 'WeightedRandom', 'LeastRequests', 'WeightedLeastRequests', 'FastestResponse', 'SourceIpHash', 'PrimaryBackup'];
+function editServiceGroup(id: string = '') {
+    if (currentRole === 'Viewer')
+        return;
+    const templates = data.serviceGroups || {};
+    const old = id ? templates[id] : undefined;
+    if (id && !Object.prototype.hasOwnProperty.call(templates, id))
+        return;
+    const servers = keys(data.realServers || {});
+    if (!servers.length)
+        return show('Create reusable real servers first.', true);
+    const profiles = ['(none)', ...keys(data.monitorProfiles || {})];
+    modal(id ? 'Edit service group template' : 'Create service group template', 'Choose a policy, monitor and initial member. Add more members after saving. Existing runtime groups are not updated automatically.', [
+        { name: 'id', label: 'Template ID (cannot rename)', value: id },
+        { name: 'policy', label: 'Load balancing policy', value: old?.Policy || 'RoundRobin', options: serviceGroupPolicies },
+        { name: 'monitor', label: 'Monitor profile', value: old?.MonitorProfile || '(none)', options: profiles },
+        { name: 'server', label: 'Initial or additional member', value: keys(old?.Members || {})[0] || servers[0], options: servers }
+    ], v => {
+        if (!validId(v.id) || (id && id !== v.id) || keys(templates).some(key => key !== id && key.toLowerCase() === v.id.toLowerCase()) || (!id && keys(templates).length >= 100))
+            throw Error('Use a unique template ID; at most 100 templates.');
+        if (!serviceGroupPolicies.includes(v.policy) || !profiles.includes(v.monitor) || !servers.includes(v.server) || (v.policy === 'PrimaryBackup' && v.monitor === '(none)'))
+            throw Error('Invalid policy, member or monitor. PrimaryBackup requires a monitor.');
+        const members = { ...(old?.Members || {}) };
+        if (!Object.prototype.hasOwnProperty.call(members, v.server))
+            Object.defineProperty(members, v.server, { value: { Weight: '1', TrafficRole: 'primary' }, enumerable: true, writable: true, configurable: true });
+        if (keys(members).length > 40 || (v.policy === 'PrimaryBackup' && !keys(members).some(key => members[key].TrafficRole === 'primary')))
+            throw Error('Maximum 40 members; PrimaryBackup requires a primary.');
+        data.serviceGroups = { ...templates, [v.id]: { Policy: v.policy, MonitorProfile: v.monitor === '(none)' ? '' : v.monitor, Members: members } };
+        edit();
+    });
+}
+function editServiceGroupMember(id: string) {
+    if (currentRole === 'Viewer' || !Object.prototype.hasOwnProperty.call(data.serviceGroups || {}, id))
+        return;
+    const template = data.serviceGroups?.[id];
+    const servers = keys(data.realServers || {});
+    const members = template.Members || {};
+    modal('Manage service group members', 'Add or update an existing member, or explicitly remove it. Changes affect the template only.', [
+        { name: 'server', label: 'Real server', value: keys(members)[0], options: servers },
+        { name: 'operation', label: 'Action', value: 'upsert', options: ['upsert', 'remove'] },
+        { name: 'weight', label: 'Weight (1–100)', value: '1' },
+        { name: 'role', label: 'Traffic role', value: 'primary', options: ['primary', 'backup'] }
+    ], v => {
+        if (!servers.includes(v.server) || !['upsert', 'remove'].includes(v.operation))
+            throw Error('Invalid server or action.');
+        const next = { ...members };
+        if (v.operation === 'remove') {
+            if (!Object.prototype.hasOwnProperty.call(next, v.server))
+                throw Error('Server is not a member.');
+            delete next[v.server];
+        }
+        else {
+            if (!/^(?:[1-9]|[1-9][0-9]|100)$/.test(v.weight) || !['primary', 'backup'].includes(v.role))
+                throw Error('Invalid weight or role.');
+            Object.defineProperty(next, v.server, { value: { Weight: v.weight, TrafficRole: v.role }, enumerable: true, writable: true, configurable: true });
+        }
+        if (!keys(next).length || keys(next).length > 40 || (template.Policy === 'PrimaryBackup' && !keys(next).some(key => next[key].TrafficRole === 'primary')))
+            throw Error('Keep 1–40 members and at least one primary for PrimaryBackup.');
+        template.Members = next;
+        edit();
+    });
+}
+function deleteServiceGroup(id: string) {
+    if (currentRole === 'Viewer' || !Object.prototype.hasOwnProperty.call(data.serviceGroups || {}, id))
+        return;
+    if (!confirm('Delete service group template ' + id + '? Existing runtime groups remain unchanged.'))
+        return;
+    const templates = { ...data.serviceGroups };
+    delete templates[id];
+    data.serviceGroups = templates;
+    edit();
+}
+function deployServiceGroup(id: string) {
+    if (currentRole === 'Viewer' || !Object.prototype.hasOwnProperty.call(data.serviceGroups || {}, id))
+        return;
+    const template = data.serviceGroups?.[id];
+    modal('Create backend group from template', 'Creates a separate backend group in the draft. Attach a route and submit for independent approval. Existing groups cannot be overwritten.', [{ name: 'id', label: 'New backend group ID', value: id + '-pool' }], v => {
+        if (!validId(v.id) || keys(data.clusters).some(key => key.toLowerCase() === v.id.toLowerCase()) || keys(data.clusters).length >= 100)
+            throw Error('Choose a new backend group ID.');
+        const destinations: Obj = {};
+        for (const serverId of keys(template.Members)) {
+            const server = data.realServers?.[serverId];
+            if (!server || !validCatalogOrigin(server.Address))
+                throw Error('Missing or invalid real server: ' + serverId);
+            const member = template.Members[serverId];
+            Object.defineProperty(destinations, serverId, { value: { Address: server.Address, Metadata: { Weight: member.Weight, TrafficRole: member.TrafficRole, TrafficState: 'active' } }, enumerable: true, writable: true, configurable: true });
+        }
+        const group: Obj = { LoadBalancingPolicy: template.Policy, Destinations: destinations };
+        if (template.MonitorProfile) {
+            const profile = data.monitorProfiles?.[template.MonitorProfile];
+            if (!profile)
+                throw Error('Referenced monitor profile is missing.');
+            applyMonitorSnapshot({ HealthCheck: { Active: profile.Active }, Metadata: profile.Metadata }, group);
+        }
+        data.clusters = { ...data.clusters, [v.id]: group };
+        edit();
+    });
+}
+function serviceGroupPanel() {
+    const templates = data.serviceGroups || {};
+    const rows = keys(templates).map(id => {
+        const group = templates[id];
+        return `<tr><td>${esc(id)}</td><td>${esc(group.Policy)}</td><td>${esc(group.MonitorProfile || 'None')}</td><td>${keys(group.Members).map(key => esc(key + ' · ' + group.Members[key].Weight + ' · ' + group.Members[key].TrafficRole)).join('<br>')}</td><td>${currentRole === 'Viewer' ? '' : actionBtn('Create backend group', 'service-group-deploy', id) + ' ' + actionBtn('Edit template', 'service-group-edit', id) + ' ' + actionBtn('Manage members', 'service-group-members', id) + ' ' + actionBtn('Delete template', 'service-group-delete', id, 'danger-btn mini')}</td></tr>`;
+    }).join('');
+    return `<div class="card"><div class="toolbar"><div><h2>Reusable service group templates</h2><p class="subtle">Combine real servers, weights, roles and a monitor. Create an independent backend group from a template.</p></div>${currentRole === 'Viewer' ? '' : actionBtn('+ Create service group template', 'service-group-add', '')}</div><div class="tablewrap"><table><thead><tr><th>Template</th><th>Policy</th><th>Monitor</th><th>Members</th><th>Actions</th></tr></thead><tbody>${rows || '<tr><td colspan="5">No reusable service groups</td></tr>'}</tbody></table></div></div>`;
+}
+function editSecurePersistence(id: string) {
+    if (currentRole === 'Viewer' || !Object.prototype.hasOwnProperty.call(data.clusters, id))
+        return;
+    const cluster = data.clusters[id];
+    const affinity = cluster.SessionAffinity || {};
+    const enabled = cluster.Metadata?.['ADC.Persistence.Profile'] === 'SecureCookie';
+    const parseMinutes = (value: string) => {
+        const m = /^(?:(\d+)\.)?(\d{2}):(\d{2}):00$/.exec(value);
+        return m ? String(Number(m[1] || 0) * 1440 + Number(m[2]) * 60 + Number(m[3])) : '30';
+    };
+    modal('HTTPS session persistence', 'Native encrypted affinity cookie. Requires HTTPS; not authentication. Expiry is browser-side. Select explicit failover behavior. This replaces the existing affinity configuration when applied.', [
+        { name: 'mode', label: 'Persistence mode', value: enabled ? 'SecureCookie' : 'off', options: ['off', 'SecureCookie'] },
+        { name: 'failure', label: 'When selected destination is unavailable', value: affinity.FailurePolicy === 'Return503Error' ? 'Return503Error' : 'Redistribute', options: ['Redistribute', 'Return503Error'] },
+        { name: 'minutes', label: 'Browser cookie lifetime (1–1440 minutes)', value: parseMinutes(String(affinity.Cookie?.MaxAge || '00:30:00')) },
+        { name: 'sameSite', label: 'SameSite policy', value: affinity.Cookie?.SameSite === 'Strict' ? 'Strict' : 'Lax', options: ['Lax', 'Strict'] }
+    ], v => {
+        if (!['off', 'SecureCookie'].includes(v.mode) || !['Redistribute', 'Return503Error'].includes(v.failure) || !['Lax', 'Strict'].includes(v.sameSite) || !/^\d{1,4}$/.test(v.minutes) || Number(v.minutes) < 1 || Number(v.minutes) > 1440)
+            throw Error('Invalid persistence policy or cookie lifetime.');
+        const metadata = { ...(cluster.Metadata || {}) };
+        if (v.mode === 'off') {
+            delete metadata['ADC.Persistence.Profile'];
+            cluster.SessionAffinity = { Enabled: false };
+        }
+        else {
+            const total = Number(v.minutes);
+            const age = (total === 1440 ? '1.' : '') + String(Math.floor(total % 1440 / 60)).padStart(2, '0') + ':' + String(total % 60).padStart(2, '0') + ':00';
+            metadata['ADC.Persistence.Profile'] = 'SecureCookie';
+            cluster.SessionAffinity = { Enabled: true, Policy: 'Cookie', FailurePolicy: v.failure, AffinityKeyName: '__Host-GatewayCore-' + id, Cookie: { Path: '/', HttpOnly: true, SecurePolicy: 'Always', SameSite: v.sameSite, MaxAge: age } };
+        }
+        cluster.Metadata = metadata;
+        edit();
+    });
+}
+function clusters(){const rows=keys(data.clusters).map(id=>{const c=data.clusters[id];const active=!!c.HealthCheck?.Active?.Enabled,passive=!!c.HealthCheck?.Passive?.Enabled;const health=active&&passive?'<span class="chip good">Active + passive</span>':active?'<span class="chip good">Active</span>':passive?'<span class="chip warn">Passive only</span>':'<span class="chip">Disabled</span>';return `<tr><td><b>${esc(id)}</b></td><td>${esc(c.LoadBalancingPolicy||'Default')}</td><td>${keys(c.Destinations||{}).length}</td><td>${health}${c.Metadata?.[monitorSourceKey]?`<div class="subtle">Linked to ${esc(c.Metadata[monitorSourceKey])}</div>`:""}</td><td>${actionBtn('Edit','cluster-edit',id)} ${currentRole==='Viewer'?'':actionBtn('Health monitor','monitor-edit',id)+' '+actionBtn('Reuse monitor','monitor-copy',id)+' '+actionBtn('Assign profile','profile-assign',id)+' '+actionBtn('Persistence','persistence-edit',id)+(c.Metadata?.[monitorSourceKey]?' '+actionBtn('Unlink monitor','monitor-unlink',id):'')} ${actionBtn('Advanced','cluster-advanced',id)} ${actionBtn('Delete','cluster-delete',id,'danger-btn mini')}</td></tr>`}).join('');return `<div class="toolbar"><div><h2>Backend groups (clusters)</h2><p class="subtle">A group contains the servers for one application and defines traffic distribution. Use the policy guide below.</p></div>${actionBtn('+ Add cluster','cluster-add','')}</div><div class="tablewrap"><table><thead><tr><th>Cluster</th><th>Policy</th><th>Active backends</th><th>Health checks</th><th>Actions</th></tr></thead><tbody>${rows||'<tr><td colspan="5" class="empty">No clusters configured</td></tr>'}</tbody></table></div>${policyReference()}${monitorRegistryPanel()}${serviceGroupPanel()}`}
 function validCatalogOrigin(value: string) {
     try {
         const uri = new URL(value);
@@ -385,6 +526,8 @@ function editRealServer(id: string = '') {
 function deleteRealServer(id: string) {
     if (currentRole === 'Viewer' || !Object.prototype.hasOwnProperty.call(data.realServers || {}, id))
         return;
+    if (keys(data.serviceGroups || {}).some(key => Object.prototype.hasOwnProperty.call(data.serviceGroups?.[key].Members || {}, id)))
+        return show('Remove this server from service group templates first.', true);
     if (!confirm('Delete real server template ' + id + '? Existing destinations remain unchanged.'))
         return;
     const servers = { ...data.realServers };
@@ -1255,6 +1398,11 @@ function act(type:string,id:string){
     if (type === 'real-server-add' || type === 'real-server-edit') { editRealServer(type === 'real-server-edit' ? id : ''); return; }
     if (type === 'real-server-delete') { deleteRealServer(id); return; }
     if (type === 'real-server-assign') { assignRealServer(id); return; }
+    if (type === 'service-group-add' || type === 'service-group-edit') { editServiceGroup(type === 'service-group-edit' ? id : ''); return; }
+    if (type === 'service-group-members') { editServiceGroupMember(id); return; }
+    if (type === 'service-group-delete') { deleteServiceGroup(id); return; }
+    if (type === 'service-group-deploy') { deployServiceGroup(id); return; }
+    if (type === 'persistence-edit') { editSecurePersistence(id); return; }
     if (type === 'profile-assign') { assignMonitorProfile(id); return; }
     if (type === 'monitor-copy') { copyActiveMonitor(id); return; }
  if(type==='invite-add'){inviteEmployee();return}

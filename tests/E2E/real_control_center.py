@@ -700,6 +700,101 @@ def verify_real_server_catalog(base, admin, operator, reviewer, viewer, origin_p
     check(admin.request("GET","/admin/api/state")["realServers"]["real-server-e2e"]==template,
           "legacy draft omitting catalog preserves persisted template")
 
+def verify_secure_affinity(base, https_base, admin, operator, reviewer, origin_port):
+    """Actual TLS proxy response and tampered-cookie failure-policy checks."""
+    import httpx
+    def submit(p,expected=200):
+        pending=operator.request("POST","/admin/api/change-requests",
+            {"reason":"Disposable secure affinity acceptance","payload":p})
+        reviewer.request("POST",f"/admin/api/change-requests/{pending['id']}/decision",
+            {"decision":"approve","reason":"Independent secure affinity fixture review"},expect=expected)
+    def snapshot():
+        state=admin.request("GET","/admin/api/state")
+        return {key:state[key] for key in ("routes","clusters","disabled","revision")}
+    p=snapshot()
+    key="__Host-GatewayCore-affinity-pool"
+    p["clusters"]["affinity-pool"]={"LoadBalancingPolicy":"RoundRobin",
+        "Destinations":{"origin":{"Address":f"http://127.0.0.1:{origin_port}/"}},
+        "Metadata":{"ADC.Persistence.Profile":"SecureCookie"},
+        "SessionAffinity":{"Enabled":True,"Policy":"Cookie","FailurePolicy":"Return503Error",
+            "AffinityKeyName":key,"Cookie":{"Path":"/","HttpOnly":True,
+                "SecurePolicy":"Always","SameSite":"Lax","MaxAge":"00:30:00"}}}
+    p["routes"]["affinity-route"]={"ClusterId":"affinity-pool","Match":{"Path":"/affinity-test/{**catch-all}"}}
+    submit(p)
+    # Disposable self-signed loopback certificate only.
+    with httpx.Client(verify=False,timeout=8.0,trust_env=False) as client:
+        url=https_base+"/affinity-test/ready"
+        for attempt in range(100):
+            response=client.get(url)
+            if response.status_code==200: break
+            time.sleep(.2)
+        check(response.status_code==200,"real HTTPS affinity traffic forwarded")
+        header=response.headers.get("set-cookie","").lower()
+        check(key.lower()+"=" in header and "secure" in header and "httponly" in header
+              and "samesite=lax" in header and "max-age=1800" in header and "domain=" not in header,
+              "real encrypted affinity cookie security attributes")
+        check(client.get(url).status_code==200,"valid affinity cookie accepted")
+        client.cookies.clear()
+        check(client.get(url,headers={"Cookie":key+"=tampered"}).status_code==503,
+              "invalid affinity returns 503 under fail-closed policy")
+        p=snapshot()
+        p["clusters"]["affinity-pool"]["SessionAffinity"]["FailurePolicy"]="Redistribute"
+        submit(p)
+        for attempt in range(100):
+            response=client.get(url,headers={"Cookie":key+"=tampered"})
+            if response.status_code==200: break
+            time.sleep(.2)
+        check(response.status_code==200,"redistribution policy accepts traffic with invalid affinity")
+        p=snapshot()
+        p["clusters"]["affinity-pool"]["SessionAffinity"]["Cookie"]["SecurePolicy"]="None"
+        submit(p,expected=400)
+        check(admin.request("GET","/admin/api/state")["clusters"]["affinity-pool"]["SessionAffinity"]["Cookie"]["SecurePolicy"]=="Always",
+              "insecure reviewed affinity draft rejected")
+        p=snapshot()
+        p["routes"].pop("affinity-route")
+        p["clusters"].pop("affinity-pool")
+        submit(p)
+
+def verify_reusable_adc_catalogs(base, admin, operator, reviewer, origin_port):
+    """Validate actual approved catalog storage, references and materialized traffic."""
+    def payload():
+        state=admin.request("GET","/admin/api/state")
+        return {key:state[key] for key in ("routes","clusters","disabled","revision")}
+    def approve(p, expected=200):
+        pending=operator.request("POST","/admin/api/change-requests",
+            {"reason":"Disposable ADC catalog acceptance","payload":p})
+        reviewer.request("POST",f"/admin/api/change-requests/{pending['id']}/decision",
+            {"decision":"approve","reason":"Independent ADC catalog fixture review"},expect=expected)
+    p=payload()
+    addr=f"http://127.0.0.1:{origin_port}/"
+    active={"Enabled":True,"Path":"/compound-ok","Interval":"00:00:05","Timeout":"00:00:02","Policy":"RiseFall"}
+    metadata={"RiseFall.Rise":"2","RiseFall.Fall":"3","ConsecutiveFailuresHealthPolicy.Threshold":"3"}
+    p["monitorProfiles"]={"catalog-health":{"Active":active,"Metadata":metadata}}
+    p["realServers"]={**admin.request("GET","/admin/api/state")["realServers"],"catalog-origin":{"Address":addr,"Description":"Disposable origin"}}
+    p["serviceGroups"]={"catalog-template":{"Policy":"RoundRobin","MonitorProfile":"catalog-health",
+        "Members":{"catalog-origin":{"Weight":"7","TrafficRole":"primary"}}}}
+    p["clusters"]["catalog-pool"]={"LoadBalancingPolicy":"RoundRobin",
+        "HealthCheck":{"Active":active},"Metadata":metadata,
+        "Destinations":{"catalog-origin":{"Address":addr,"Metadata":{"Weight":"7","TrafficRole":"primary"}}}}
+    p["routes"]["catalog-route"]={"ClusterId":"catalog-pool","Match":{"Path":"/catalog-test/{**catch-all}"}}
+    approve(p)
+    state=admin.request("GET","/admin/api/state")
+    check(state["monitorProfiles"]==p["monitorProfiles"] and state["realServers"]==p["realServers"]
+          and state["serviceGroups"]==p["serviceGroups"],"approved ADC catalog state round trip")
+    eventually(Client(base),"/catalog-test/ready","e2e-origin:/catalog-test/ready",seconds=20)
+    invalid=payload()
+    invalid["realServers"]={key:value for key,value in state["realServers"].items() if key!="catalog-origin"}
+    approve(invalid,expected=400)
+    check("catalog-origin" in admin.request("GET","/admin/api/state")["realServers"],
+          "referenced server deletion rejected without changing storage")
+    legacy=payload()
+    legacy["routes"].pop("catalog-route")
+    legacy["clusters"].pop("catalog-pool")
+    approve(legacy)
+    state=admin.request("GET","/admin/api/state")
+    check("catalog-template" in state["serviceGroups"] and "catalog-origin" in state["realServers"]
+          and "catalog-health" in state["monitorProfiles"],"legacy draft preserves ADC catalogs")
+
 def verify_compound_probe_endpoint(base, admin, operator, reviewer, viewer, origin_port):
     """Exercise the shipping authenticated probe API, not a mocked handler."""
     def apply(mode, path="/compound-fail"):
@@ -940,6 +1035,8 @@ def acceptance(base:str,https_base:str,origin_port:int):
         "authorized restore rolls routing config back")
     verify_compound_probe_endpoint(base,admin,operator,reviewer,viewer,origin_port)
     verify_real_server_catalog(base,admin,operator,reviewer,viewer,origin_port)
+    verify_reusable_adc_catalogs(base,admin,operator,reviewer,origin_port)
+    verify_secure_affinity(base,https_base,admin,operator,reviewer,origin_port)
     check(admin.request("GET","/admin/api/mail")["enabled"] is False,"SMTP starts disabled")
     admin.request("POST","/admin/api/mail/test",{},expect=409)
     admin.request("POST","/admin/api/mail",{"enabled":True,"host":"smtp.invalid","port":587,
@@ -982,7 +1079,7 @@ def acceptance(base:str,https_base:str,origin_port:int):
     check(not reviewer.session()["authenticated"],"logout revokes browser session")
     check("status" in anonymous.request("GET","/gateway/health"),"live traffic remains independent of management login")
     return {"auth":True,"roleIsolation":True,"onboarding":True,"approval":True,"routing":True,
-            "rollback":True,"freeze":True,"mailGuard":True,"directoryGuard":True,"compoundDiagnostics":True,"realServerCatalog":True}
+            "rollback":True,"freeze":True,"mailGuard":True,"directoryGuard":True,"compoundDiagnostics":True}
 
 def main():
     parser=argparse.ArgumentParser()
@@ -1010,8 +1107,10 @@ def main():
                 "topology survives process restart with protected key ring")
             check("e2e" not in admin.request("GET","/admin/api/state")["routes"],
                 "approved rollback survives restart")
-            catalog=admin.request("GET","/admin/api/state")["realServers"]
-            check(catalog["real-server-e2e"]=={"Address":f"http://127.0.0.1:{origin}/",
+            catalog=admin.request("GET","/admin/api/state")
+            check("catalog-template" in catalog["serviceGroups"] and "catalog-origin" in catalog["realServers"]
+                  and "catalog-health" in catalog["monitorProfiles"],"approved ADC catalogs survive process restart")
+            check(catalog["realServers"]["real-server-e2e"]=={"Address":f"http://127.0.0.1:{origin}/",
                 "Description":"Disposable real origin"},"approved real-server catalog survives real process restart")
         print("E2E_SUCCESS "+json.dumps(results,sort_keys=True),flush=True)
 

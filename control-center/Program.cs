@@ -294,7 +294,8 @@ builder.Configuration.AddJsonFile(applicationConfigPath, optional: false, reload
 builder.Services.AddReverseProxy()
     .LoadFromConfig(builder.Configuration.GetSection("ReverseProxy"))
     .AddConfigFilter<DestinationAdmissionConfigFilter>()
-    .AddConfigFilter<ActiveCompoundConfigFilter>();
+    .AddConfigFilter<ActiveCompoundConfigFilter>()
+    .AddConfigFilter<SecureAffinityContract>();
 builder.Services.AddSingleton<Yarp.ReverseProxy.Forwarder.IForwarderHttpClientFactory, CompoundForwarderFactory>();
 CompoundProbingRequestFactory.Register(builder.Services);
 builder.Services.AddSingleton<DestinationAdmissionManager>();
@@ -2304,6 +2305,7 @@ app.MapGet("/admin/api/state", () =>
         routes = proxy["Routes"] ?? new JsonObject(), clusters = proxy["Clusters"] ?? new JsonObject(), disabled,
         monitorProfiles = proxy[MonitorProfileRegistry.StorageKey] ?? new JsonObject(),
         realServers = proxy[RealServerCatalog.StorageKey] ?? new JsonObject(),
+        serviceGroups = proxy[ServiceGroupCatalog.StorageKey] ?? new JsonObject(),
         mode = "Authenticated local management", telemetry = "Local HTTP counters only; no backend or fleet metrics", revision = Convert.ToHexString(SHA256.HashData(snapshot)) });
 }).RequireAuthorization();
 
@@ -2389,6 +2391,10 @@ IResult? ValidateChangePayload(JsonObject submitted)
         return Results.BadRequest(new { error = serverError });
     if (MonitorProfileRegistry.Validate(submitted) is { } profileError)
         return Results.BadRequest(new { error = profileError });
+    if (ServiceGroupCatalog.Validate(submitted, ReadProxy()) is { } serviceGroupError)
+        return Results.BadRequest(new { error = serviceGroupError });
+    if (SecureAffinityContract.Validate(clusters) is { } affinityError)
+        return Results.BadRequest(new { error = affinityError });
     if (SharedMonitorContract.Validate(clusters) is { } monitorError)
         return Results.BadRequest(new { error = monitorError });
     foreach (var (key, clusterNode) in clusters)
@@ -2544,6 +2550,8 @@ async Task<IResult> CommitReviewedChange(HttpContext ctx, JsonObject submitted)
             proxy[MonitorProfileRegistry.StorageKey] = profiles.DeepClone();
         if (submitted[RealServerCatalog.PayloadKey] is JsonObject realServers)
             proxy[RealServerCatalog.StorageKey] = realServers.DeepClone();
+        if (submitted[ServiceGroupCatalog.PayloadKey] is JsonObject serviceGroups)
+            proxy[ServiceGroupCatalog.StorageKey] = serviceGroups.DeepClone();
         doc["ReverseProxy"] = proxy;
         var newConfig = doc.ToJsonString(new JsonSerializerOptions { WriteIndented = true });
         var (denied, backup) = await CommitRoutingBytes(ctx, snapshot, Encoding.UTF8.GetBytes(newConfig), "CONFIG_APPLY_INTENT");
@@ -2583,7 +2591,8 @@ app.MapPost("/admin/api/gitops/plan", async (HttpContext ctx) =>
         !version.TryGetValue<int>(out var schemaVersion) || schemaVersion != 1 ||
         request["payload"] is not JsonObject payload ||
         payload.Count != 4 + (payload.ContainsKey(MonitorProfileRegistry.PayloadKey) ? 1 : 0) +
-            (payload.ContainsKey(RealServerCatalog.PayloadKey) ? 1 : 0) ||
+            (payload.ContainsKey(RealServerCatalog.PayloadKey) ? 1 : 0) +
+            (payload.ContainsKey(ServiceGroupCatalog.PayloadKey) ? 1 : 0) ||
         payload["routes"] is not JsonObject routes ||
         payload["clusters"] is not JsonObject clusters ||
         payload["disabled"] is not JsonObject disabled ||
@@ -2618,7 +2627,9 @@ app.MapPost("/admin/api/gitops/plan", async (HttpContext ctx) =>
             monitorProfiles = Diff(current[MonitorProfileRegistry.StorageKey] as JsonObject,
                 payload[MonitorProfileRegistry.PayloadKey] as JsonObject ?? current[MonitorProfileRegistry.StorageKey] as JsonObject ?? new JsonObject()),
             realServers = Diff(current[RealServerCatalog.StorageKey] as JsonObject,
-                payload[RealServerCatalog.PayloadKey] as JsonObject ?? current[RealServerCatalog.StorageKey] as JsonObject ?? new JsonObject()) });
+                payload[RealServerCatalog.PayloadKey] as JsonObject ?? current[RealServerCatalog.StorageKey] as JsonObject ?? new JsonObject()),
+            serviceGroups = Diff(current[ServiceGroupCatalog.StorageKey] as JsonObject,
+                payload[ServiceGroupCatalog.PayloadKey] as JsonObject ?? current[ServiceGroupCatalog.StorageKey] as JsonObject ?? new JsonObject()) });
     }
     finally { gate.Release(); }
 }).RequireAuthorization(p => p.RequireRole("Administrator", "Operator"));
