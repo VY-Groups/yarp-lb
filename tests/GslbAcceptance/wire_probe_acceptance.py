@@ -85,6 +85,24 @@ def run():
                     time.sleep(0.1)
                 args = argparse.Namespace(host="127.0.0.1", port=port, zone=ZONE, timeout=3.0)
                 dns_wire_probe.run(args)
+                # A resolver may close before the authority replies. Exercise
+                # abandoned UDP queries, then require fresh authoritative
+                # answers on both transports and the same live process.
+                for _ in range(8):
+                    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as abandoned:
+                        abandoned.bind(("127.0.0.1", 0))
+                        _, packet = dns_wire_probe.question(ZONE, 6)
+                        abandoned.sendto(packet, ("127.0.0.1", port))
+                    time.sleep(0.05)
+                for tcp in (False, True):
+                    txid, packet = dns_wire_probe.question(ZONE, 6)
+                    reply = dns_wire_probe.exchange("127.0.0.1", port, packet, tcp, 3)
+                    flags, records = dns_wire_probe.parse(reply, txid, ZONE, 6)
+                    dns_wire_probe.require(flags & 0x0400 and dns_wire_probe.has_rr(records, "answer", ZONE, 6),
+                                           "authority did not survive abandoned UDP queries")
+                if process.poll() is not None:
+                    raise RuntimeError("DNS authority exited after abandoned UDP queries")
+                print("PASS: abandoned UDP clients do not terminate authority")
                 # Reserved zero QTYPE/QCLASS must never be normalized into
                 # authoritative NODATA. Exercise both transports and ensure
                 # a subsequent valid SOA query still works after rejection.
@@ -126,7 +144,8 @@ def run():
                 print("PASS: disposable Windows/Linux real-process DNS wire qualification")
             except BaseException:
                 output.flush()
-                print(log.read_text(encoding="utf-8", errors="replace")[-8000:], file=sys.stderr)
+                details = log.read_text(encoding="utf-8", errors="replace")
+                print(details[:6000] + "\n--- log tail ---\n" + details[-8000:], file=sys.stderr)
                 raise
             finally:
                 if process.poll() is None:

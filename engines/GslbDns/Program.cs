@@ -399,6 +399,11 @@ using var dnsSocket=new Socket(listen.AddressFamily,SocketType.Dgram,ProtocolTyp
 var ipv6 = listen.AddressFamily == AddressFamily.InterNetworkV6;
 if (ipv6) dnsSocket.DualMode = false;
 var receiveEndpoint = new IPEndPoint(ipv6 ? IPAddress.IPv6Any : IPAddress.Any, 0);
+// Windows delivers ICMP port-unreachable notifications as WSAECONNRESET
+// on unconnected UDP sockets. An abandoned DNS client must not stop the
+// entire authority. Disable only this asynchronous Winsock notification.
+if (OperatingSystem.IsWindows())
+    dnsSocket.IOControl(unchecked((int)0x9800000C), new byte[4], null); // SIO_UDP_CONNRESET
 dnsSocket.Bind(new IPEndPoint(listen,config.ListenPort));
 using var tcpListener = new TcpListener(listen, config.ListenPort);
 if (ipv6) tcpListener.Server.DualMode = false;
@@ -574,6 +579,9 @@ try
             receiveEndpoint,stop.Token); }
         catch(OperationCanceledException) when(stop.IsCancellationRequested){break;}
         catch(SocketException) when(stop.IsCancellationRequested){break;}
+        catch(SocketException e) when(OperatingSystem.IsWindows() &&
+            e.SocketErrorCode==SocketError.ConnectionReset)
+        { continue; } // recover from a delayed ICMP error, not a DNS query
         runtimeMetrics.QueryReceived(tcp: false);
         // IP-keyed response budget. Do not echo arbitrary UDP traffic without limits.
         // Loopback is still the required default deployment boundary.
