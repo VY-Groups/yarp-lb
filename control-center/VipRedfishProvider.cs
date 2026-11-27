@@ -206,6 +206,6 @@ internal static class VipRedfishProvider
         catch(Exception error) when(error is IOException or InvalidDataException or InvalidOperationException or
             UnauthorizedAccessException or HttpRequestException or OperationCanceledException or JsonException or
             CryptographicException or KeyNotFoundException or FormatException or ArgumentException)
-        {Console.Error.WriteLine("Independent Redfish provider refused at "+stage+": "+error.GetType().Name);return 78;}
+        {VipServiceSecurity.ReportWindowsFileAclRefusal(error,7801);Console.Error.WriteLine("Independent Redfish provider refused at "+stage+": "+error.GetType().Name);return 78;}
     }
 }

@@ -87,6 +87,6 @@ internal static class VipNodeAgent
         }
         catch(Exception e) when(e is IOException or InvalidDataException or InvalidOperationException or
             HttpRequestException or OperationCanceledException or JsonException or CryptographicException or UnauthorizedAccessException or ArgumentException)
-        {Console.Error.WriteLine("VIP node agent refused at "+stage+": "+e.GetType().Name);return 78;}
+        {VipServiceSecurity.ReportWindowsFileAclRefusal(e,7803);Console.Error.WriteLine("VIP node agent refused at "+stage+": "+e.GetType().Name);return 78;}
     }
 }

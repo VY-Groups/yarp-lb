@@ -39,6 +39,11 @@ if($Role -eq 'agent'){
  $gateway=Get-Service -Name GatewayCoreYarp
  if($gateway.Status -ne 'Stopped' -or $gateway.StartType -ne 'Manual'){throw 'Dedicated gateway must be stopped and Manual'}
 }
+# Fixed Windows security event source; services only write events.
+if(-not [Diagnostics.EventLog]::SourceExists('GatewayCoreVipSecurity')){
+ [Diagnostics.EventLog]::CreateEventSource('GatewayCoreVipSecurity','Application')
+}
+if([Diagnostics.EventLog]::LogNameFromSourceName('GatewayCoreVipSecurity','.') -ne 'Application'){throw 'Unexpected VIP security event log source'}
 # CIM avoids shell quoting/reparsing of the registered executable path.
 $created=Invoke-CimMethod -ClassName Win32_Service -MethodName Create -Arguments @{
  Name=$name;DisplayName=$name;PathName=$command;ServiceType=[byte]16;ErrorControl=[byte]1;

@@ -5,10 +5,25 @@ using GatewayCore.Gslb.Contracts;
 // identity. Never repair permissions silently or share an authority key.
 internal static class VipServiceSecurity
 {
+    // Emit a fixed event only for an exact file allow-ACE refusal.
+    // Never include paths, secret content, or exception text.
+    internal static void ReportWindowsFileAclRefusal(Exception error,int eventId)
+    {
+        if(!OperatingSystem.IsWindows()||error is not WindowsPrivateFileAclException)return;
+        try
+        {
+            System.Diagnostics.EventLog.WriteEntry("GatewayCoreVipSecurity",
+                "VIP service startup refused: unapproved private-file allow ACE.",
+                System.Diagnostics.EventLogEntryType.Error,eventId);
+        }
+        catch(Exception e) when(e is InvalidOperationException or System.ComponentModel.Win32Exception or
+            UnauthorizedAccessException or System.Security.SecurityException or ArgumentException)
+        {Console.Error.WriteLine("VIP Windows refusal event unavailable: "+e.GetType().Name);}
+    }
     internal static void Directory(string path)
     {
         if(!Path.IsPathFullyQualified(path))throw new InvalidDataException("Absolute private VIP state directory required.");
-        if(OperatingSystem.IsWindows())WindowsStateProtection.ValidateOfflineKeyRingDirectory(path);
+        if(OperatingSystem.IsWindows())WindowsStateProtection.ValidateOfflineKeyRingDirectory(path,true);
         else if(OperatingSystem.IsLinux())PrivateKeyFileSecurity.ValidateLinuxPrivateStateDirectory(path,"VIP service");
         else throw new PlatformNotSupportedException("Unsupported VIP service platform.");
     }

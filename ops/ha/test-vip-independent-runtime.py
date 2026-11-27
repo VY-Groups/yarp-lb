@@ -118,11 +118,17 @@ def install(role,name,binary,config,identity,extra=()):
         run("pwsh","-NoProfile","-File",HERE/"Install-VipService.ps1","-Role",role,"-Executable",binary,"-Config",config,*extra,"-Apply")
     else:
         run("bash",HERE/"install-vip-service.sh",role,binary,config,identity,*extra,"--apply")
+def refusal_event(event_id):
+    command="$e=Get-WinEvent -FilterHashtable @{LogName='Application';ProviderName='GatewayCoreVipSecurity';Id="+str(event_id)+"} -MaxEvents 1 -ErrorAction SilentlyContinue; if($e){$e.RecordId}else{0}"
+    return int(run("pwsh","-NoProfile","-Command",command).stdout.strip())
 def assert_refusal(name,path,port=None):
-    stop(name); expose(path)
+    stop(name)
+    event_id=7801 if name==PROVIDER else 7802
+    before=refusal_event(event_id) if WIN else 0
+    expose(path)
     try:
         start(name,check=False)
-        wait(lambda: stopped(name) and (port is None or closed(port)), "Exposed credential did not refuse startup")
+        wait(lambda: stopped(name) and (port is None or closed(port)) and (not WIN or refusal_event(event_id)>before), "Exposed credential did not produce specific refusal evidence")
         if not WIN and "ExecMainStatus=78" not in query(name).stdout:
             raise AssertionError("Expected explicit credential refusal")
     finally: restore(path)
@@ -214,6 +220,9 @@ try:
     def controller_ready(): return active(CONTROLLER) and journal.exists()
     if not WIN: print(run("systemctl","show",CONTROLLER+".service","-p","ExecStart","-p","User").stdout,flush=True)
     start(CONTROLLER);wait(controller_ready,"Installed writer did not open durable journal")
+    if WIN:
+        result=run("pwsh","-NoProfile","-File",HERE/"Test-VipRoleIsolation.ps1","-ProviderDirectory",pdir,"-ControllerDirectory",cdir,"-ProviderKey",secret,"-ControllerKey",ckey)
+        print(result.stdout,flush=True)
     time.sleep(6)
     if not active(CONTROLLER): raise AssertionError("Controller did not survive unavailable quorum")
     stop(CONTROLLER)

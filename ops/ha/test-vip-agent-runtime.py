@@ -81,6 +81,9 @@ def diagnostics(name):
     else:
         result=run("journalctl","-u",name+".service","--no-pager","-n","30",check=False)
     print(result.stdout,flush=True)
+def refusal_event():
+    command="$e=Get-WinEvent -FilterHashtable @{LogName='Application';ProviderName='GatewayCoreVipSecurity';Id=7803} -MaxEvents 1 -ErrorAction SilentlyContinue; if($e){$e.RecordId}else{0}"
+    return int(run("pwsh","-NoProfile","-Command",command).stdout.strip())
 def stopped(name):
     if WIN:
         r=run("sc.exe","query",name,check=False)
@@ -166,9 +169,14 @@ try:
     start(AGENT);wait_ready(port,ca,provider,providerkey)
     print("PASS: real service stop and restart restores pinned HTTPS listener",flush=True)
     stop(AGENT);wait_closed(port)
+    before=refusal_event() if WIN else 0
     if WIN: run("icacls",nodekey,"/grant","*S-1-5-32-545:R")
     else: nodekey.chmod(0o644)
     start(AGENT,check=False);wait_closed(port)
+    if WIN:
+        deadline=time.monotonic()+30
+        while refusal_event()<=before and time.monotonic()<deadline: time.sleep(.25)
+        if refusal_event()<=before: raise AssertionError("Expected new exact private-file ACL refusal event")
     if not WIN:
         status=run("systemctl","show","-p","ExecMainStatus","--value",AGENT+".service").stdout.strip()
         if status!="78": raise AssertionError("Expected explicit credential refusal exit 78, got "+status)

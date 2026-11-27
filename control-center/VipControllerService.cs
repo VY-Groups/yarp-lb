@@ -30,7 +30,7 @@ internal static class VipControllerService
                 completed(await VipOwnershipCommand.Run(args,stoppingToken));
             }
             catch(Exception e) when(e is IOException or InvalidDataException or InvalidOperationException or UnauthorizedAccessException or ArgumentException or System.Text.Json.JsonException or System.Security.Cryptography.CryptographicException)
-            {Console.Error.WriteLine("VIP controller startup refused: "+e.GetType().Name);completed(78);}
+            {VipServiceSecurity.ReportWindowsFileAclRefusal(e,7802);Console.Error.WriteLine("VIP controller startup refused: "+e.GetType().Name);completed(78);}
             finally{lifetime.StopApplication();}
         }
     }

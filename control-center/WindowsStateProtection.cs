@@ -2,6 +2,11 @@ using System.Security.AccessControl;
 using System.Security.Principal;
 using System.Runtime.Versioning;
 
+internal sealed class WindowsPrivateFileAclException : InvalidOperationException
+{
+    internal WindowsPrivateFileAclException():base("Existing Windows private file has an unapproved allow rule; use a reviewed offline ACL migration"){}
+}
+
 /// <summary>
 /// Creates the Windows control-plane state tree with an explicit ACL. DPAPI
 /// LocalMachine protects key contents but does not replace filesystem access
@@ -39,7 +44,9 @@ public static class WindowsStateProtection
     /// Verify the source/offline staging directory without creating it or
     /// modifying existing ACLs. Reject ancestors traversing reparse points.
     /// </summary>
-    public static void ValidateOfflineKeyRingDirectory(string path)
+    public static void ValidateOfflineKeyRingDirectory(string path) => ValidateOfflineKeyRingDirectory(path,false);
+
+    internal static void ValidateOfflineKeyRingDirectory(string path,bool classifyFileAcl)
     {
         if (!OperatingSystem.IsWindows() || string.IsNullOrWhiteSpace(path) ||
             !Path.IsPathFullyQualified(path) || !Directory.Exists(path))
@@ -47,7 +54,7 @@ public static class WindowsStateProtection
         RejectReparseAncestors(path);
         ValidatePrivateDirectoryAcl(path);
         foreach (var file in Directory.EnumerateFiles(path))
-            ValidatePrivateFile(file);
+            ValidatePrivateFile(file,classifyFileAcl);
     }
 
     /// <summary>
@@ -140,7 +147,7 @@ public static class WindowsStateProtection
         }
     }
 
-    private static void ValidatePrivateFile(string path)
+    private static void ValidatePrivateFile(string path,bool classifyFileAcl=false)
     {
         if ((File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0)
             throw new InvalidOperationException("Windows Data Protection key files must not be reparse points");
@@ -151,8 +158,11 @@ public static class WindowsStateProtection
         {
             if (rule.AccessControlType == AccessControlType.Allow &&
                 !allowed.Contains((SecurityIdentifier)rule.IdentityReference))
+            {
+                if(classifyFileAcl)throw new WindowsPrivateFileAclException();
                 throw new InvalidOperationException(
                     "Existing Windows Data Protection key file has an unapproved allow rule; use a reviewed offline ACL migration");
+            }
         }
     }
 
