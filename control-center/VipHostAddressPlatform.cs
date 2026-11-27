@@ -11,14 +11,22 @@ internal static class VipHostAddressPlatform
 {
     internal static IPAddress Parse(string text)
     {
-        if(!IPAddress.TryParse(text,out var ip)||ip.AddressFamily!=AddressFamily.InterNetwork||
-            ip.ToString()!=text)throw new InvalidDataException("Canonical IPv4 VIP required.");
+        if(!IPAddress.TryParse(text,out var ip)||ip.ToString()!=text)
+            throw new InvalidDataException("Canonical IP VIP required.");
         var bytes=ip.GetAddressBytes();
-        if(bytes[0] is 0 or 127 or >=224 || (bytes[0]==169&&bytes[1]==254))
+        if(ip.AddressFamily==AddressFamily.InterNetworkV6)
+        {
+            // Global unicast and unique-local only; no scoped, mapped, multicast,
+            // link-local, loopback, unspecified or IPv4-compatible addresses.
+            if(ip.ScopeId!=0||((bytes[0]&0xe0)!=0x20&&(bytes[0]&0xfe)!=0xfc))
+                throw new InvalidDataException("Special-purpose IPv6 address refused.");
+        }
+        else if(ip.AddressFamily!=AddressFamily.InterNetwork||
+            bytes[0] is 0 or 127 or >=224 || (bytes[0]==169&&bytes[1]==254))
             throw new InvalidDataException("Special-purpose IPv4 address refused.");
         return ip;
     }
-    internal sealed record Observation(string InterfaceId,string Name,int Index,bool Present);
+    internal sealed record Observation(string InterfaceId,string Name,int Index,bool Present,bool Ready);
     internal static Observation Inspect(string interfaceId,IPAddress address,IPAddress? management=null)
     {
         var snapshot=NetworkInterface.GetAllNetworkInterfaces();
@@ -32,24 +40,29 @@ internal static class VipHostAddressPlatform
         if(properties.GatewayAddresses.Count!=0 ||
             (management is not null && properties.UnicastAddresses.Any(x=>x.Address.Equals(management))))
             throw new InvalidDataException("Management or default gateway interface refused.");
-        var ipv4=properties.GetIPv4Properties()??throw new InvalidDataException("IPv4 interface required.");
-        var matches=new List<(string Id,int Prefix)>();
+        bool v6=address.AddressFamily==AddressFamily.InterNetworkV6;
+        int index=v6?(properties.GetIPv6Properties()?.Index??throw new InvalidDataException("IPv6 interface required.")):
+            (properties.GetIPv4Properties()?.Index??throw new InvalidDataException("IPv4 interface required."));
+        int prefix=v6?128:32;
+        var matches=new List<(string Id,int Prefix,bool Ready)>();
         foreach(var n in snapshot)
         {
             var entries=n.GetIPProperties().UnicastAddresses;
             if(entries.Count>128)throw new InvalidDataException("Incomplete address inventory.");
             foreach(var entry in entries)
-                if(entry.Address.Equals(address))matches.Add((n.Id,entry.PrefixLength));
+                if(entry.Address.Equals(address))
+                    matches.Add((n.Id,entry.PrefixLength,!v6||VipIpv6Readiness.IsReady(entry,index,n.Name,VipIpv6Readiness.ReadLinux())));
         }
-        if(matches.Count>1 || (matches.Count==1&&(matches[0].Id!=target.Id||matches[0].Prefix!=32)))
+        if(matches.Count>1 || (matches.Count==1&&(matches[0].Id!=target.Id||matches[0].Prefix!=prefix)))
             throw new InvalidDataException("VIP is already assigned elsewhere or with a different prefix.");
-        return new(target.Id,target.Name,ipv4.Index,matches.Count==1);
+        return new(target.Id,target.Name,index,matches.Count==1,matches.Count==1&&matches[0].Ready);
     }
     internal static async Task Change(Observation observation,IPAddress address,bool add,CancellationToken token)
     {
         var current=Inspect(observation.InterfaceId,address);
         if(current.Index!=observation.Index || current.Name!=observation.Name || current.Present==add)
             throw new InvalidDataException("Interface or address changed before mutation.");
+        bool v6=address.AddressFamily==AddressFamily.InterNetworkV6;
         ProcessStartInfo start;
         if(OperatingSystem.IsLinux())
         {
@@ -67,7 +80,7 @@ internal static class VipHostAddressPlatform
             if((File.GetUnixFileMode(resolved)&(UnixFileMode.GroupWrite|UnixFileMode.OtherWrite))!=0)
                 throw new InvalidDataException("Untrusted IP executable.");
             start=new ProcessStartInfo(resolved);
-            foreach(string arg in new[]{"-4","address",add?"add":"del",address+"/32","dev",current.Name})
+            foreach(string arg in new[]{v6?"-6":"-4","address",add?"add":"del",address+(v6?"/128":"/32"),"dev",current.Name})
                 start.ArgumentList.Add(arg);
             if(add)start.ArgumentList.Add("noprefixroute");
         }
@@ -79,14 +92,16 @@ internal static class VipHostAddressPlatform
             $ProgressPreference='SilentlyContinue'
             $i=[int]$env:GC_VIP_INTERFACE_INDEX
             $a=[string]$env:GC_VIP_ADDRESS
-            $iface=Get-NetIPInterface -InterfaceIndex $i -AddressFamily IPv4 -PolicyStore ActiveStore
+            $family=[string]$env:GC_VIP_FAMILY
+            $prefix=[int]$env:GC_VIP_PREFIX
+            $iface=Get-NetIPInterface -InterfaceIndex $i -AddressFamily $family -PolicyStore ActiveStore
             if($iface.Dhcp -ne 'Disabled'){throw 'Dedicated static interface required'}
-            $existing=@(Get-NetIPAddress -AddressFamily IPv4 -PolicyStore ActiveStore | Where-Object {$_.IPAddress -eq $a})
+            $existing=@(Get-NetIPAddress -AddressFamily $family -PolicyStore ActiveStore | Where-Object {$_.IPAddress -eq $a})
             if($env:GC_VIP_ADD -eq '1'){
               if($existing.Count -ne 0){throw 'Address already exists'}
-              New-NetIPAddress -InterfaceIndex $i -IPAddress $a -PrefixLength 32 -SkipAsSource $true -PolicyStore ActiveStore | Out-Null
+              New-NetIPAddress -InterfaceIndex $i -IPAddress $a -PrefixLength $prefix -SkipAsSource $true -PolicyStore ActiveStore | Out-Null
             } else {
-              if($existing.Count -ne 1 -or $existing[0].InterfaceIndex -ne $i -or $existing[0].PrefixLength -ne 32){throw 'Exact address required'}
+              if($existing.Count -ne 1 -or $existing[0].InterfaceIndex -ne $i -or $existing[0].PrefixLength -ne $prefix){throw 'Exact address required'}
               Remove-NetIPAddress -InputObject $existing[0] -Confirm:$false
             }
             """;
@@ -96,6 +111,8 @@ internal static class VipHostAddressPlatform
             start.Environment["GC_VIP_INTERFACE_INDEX"]=current.Index.ToString(CultureInfo.InvariantCulture);
             start.Environment["GC_VIP_ADDRESS"]=address.ToString();
             start.Environment["GC_VIP_ADD"]=add?"1":"0";
+            start.Environment["GC_VIP_FAMILY"]=v6?"IPv6":"IPv4";
+            start.Environment["GC_VIP_PREFIX"]=v6?"128":"32";
         }
         else throw new PlatformNotSupportedException("VIP address mutation supports Linux and Windows.");
         start.UseShellExecute=false;
@@ -115,7 +132,8 @@ internal static class VipHostAddressPlatform
         for(int attempt=0;attempt<20;attempt++)
         {
             token.ThrowIfCancellationRequested();
-            if(Inspect(current.InterfaceId,address).Present==add)return;
+            var observed=Inspect(current.InterfaceId,address);
+            if(add?observed.Ready:!observed.Present)return;
             await Task.Delay(250,token);
         }
         throw new InvalidOperationException("Operating system address state not confirmed.");
