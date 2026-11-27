@@ -83,6 +83,13 @@ internal static class VipFenceContractTests
             _=FleetQuorum.FilePath(idle,1024*1024,true,allowEmpty:true);
             using(var journal=new VipProviderRearmJournal(idle,scope,oldPin,newPin))
                 if(journal.LastEpoch!=0)throw new Exception("Idle provider journal restart failed");
+            using(var inspection=new VipProviderRearmJournal(idle,scope,oldPin,newPin,readOnly:true))
+            {
+                try{inspection.Record(new VipFenceProvider.NodeRequest(scope,oldPin,10,newPin,new string('D',64)));
+                    throw new Exception("Read-only provider inspection modified journal");}
+                catch(InvalidOperationException){}
+            }
+            if(new FileInfo(idle).Length!=0)throw new Exception("Provider inspection changed journal bytes");
             if(OperatingSystem.IsLinux())
             {
                 File.SetUnixFileMode(idle,UnixFileMode.UserRead|UnixFileMode.UserWrite|UnixFileMode.OtherRead);

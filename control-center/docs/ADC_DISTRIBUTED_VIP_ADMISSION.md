@@ -157,3 +157,12 @@ Before enabling the independent controller, run under its intended service ident
     GatewayCoreYarp --vip-owner <writer-config> <scope> inspect-policy <policy-file> <provider-config> <journal-file>
 
 On Windows use GatewayCoreYarp.exe. The command checks private path permissions, exact scope and policy bounds, pinned writer signing trust, independent writer identity, provider client configuration and existing journal sequence. It never creates an absent journal, edits an existing journal, opens a listener, contacts quorum/BMC or triggers a transfer. Successful output explicitly reports networkVerified=false and mutated=false, plus recoveryRequired and pending transition kind/epoch when applicable. If recoveryRequired is true, do not start automatic mode; independently inspect live authority and follow the explicit recovery procedure. This is a local provisioning check, not proof of site PKI revocation, quorum permissions, network reachability or actual hardware isolation. The real fixture checks absent and pending journal inspection and unsafe policy refusal; pure cross-platform regression verifies a read-only journal cannot commit a transition.
+
+### Offline provider and node provisioning inspection
+
+Run the protected local configurations under their intended service identities before starting roles:
+
+    GatewayCoreYarp --vip-redfish-provider <provider-config> inspect
+    GatewayCoreYarp --vip-node-agent <agent-config> inspect
+
+Provider inspection reuses the shipping credential, scope, Redfish configuration, mTLS and signing-key loading checks, validates an existing rearm journal read-only, and emits the public signing trust digest for comparison with the independent writer. Node inspection validates the shipping agent TLS and reader settings, the exact supervisor scope/reader, listener certificates, private journal directory and dedicated interface observation. Neither command starts a service, opens a listener, contacts hardware or quorum, or creates a journal or supervisor lock. Network and service readiness are explicitly unverified; do not confuse local preflight with commissioning. The live hosted fixture validates positive preflight and rejects a mismatched supervisor scope, and the cross-platform journal regression proves read-only provider inspection cannot record a power-on intent.

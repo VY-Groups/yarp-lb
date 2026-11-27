@@ -141,6 +141,7 @@ def accept_live_policy(executable,scope,fleet,vip,reader,policy,expected_owner):
                 "-days","2","-sha256","-extfile",ext,"-out",crt)
         k.chmod(0o600);return k,crt
     sk,sc=leaf("management","IP:127.0.0.1","serverAuth")
+    tk,tc=leaf("traffic","IP:"+vip,"serverAuth")
     ck,cc=leaf("operator","DNS:vip-ci-operator","clientAuth")
     dpkey=certdir/"dp.key";dpcrt=certdir/"dp.crt"
     openssl("req","-new","-x509","-nodes","-newkey","rsa:3072","-sha256","-days","7",
@@ -152,6 +153,7 @@ def accept_live_policy(executable,scope,fleet,vip,reader,policy,expected_owner):
         openssl("pkcs12","-export","-in",crt,"-inkey",key,"-out",output,"-passout","file:"+str(password))
         output.chmod(0o600);return str(output),str(password)
     server_pfx,server_pass=make_pfx("server",sk,sc)
+    traffic_pfx,traffic_pass=make_pfx("traffic",tk,tc)
     dp_pfx,dp_pass=make_pfx("dp",dpkey,dpcrt)
     thumb=hashlib.sha1(ssl.PEM_cert_to_DER_cert(cc.read_text())).hexdigest().upper()
     # Hold every port reservation concurrently until the configuration is built.
@@ -171,11 +173,11 @@ def accept_live_policy(executable,scope,fleet,vip,reader,policy,expected_owner):
         raise AssertionError("Existing VIP; refuse mutation")
     config=put(d,"listeners.json",{"trafficIp":"127.0.0.2","trafficHttpPort":ports[0],
         "trafficHttpsPort":ports[1],"managementIp":"127.0.0.1","adminPort":ports[2],
-        "metricsPort":ports[3],"trafficPfxPath":server_pfx,"trafficPfxPasswordFile":server_pass,
+        "metricsPort":ports[3],"trafficPfxPath":traffic_pfx,"trafficPfxPasswordFile":traffic_pass,
         "managementPfxPath":server_pfx,"managementPfxPasswordFile":server_pass,
         "clientCaPemPath":str(ca_crt),"clientThumbprints":[thumb],
         "allowedAdminCidrs":["127.0.0.1/32"],"maxConcurrentConnections":32,"httpVersion":"1.1",
-        "virtualServices":[{"id":"policy-vip","ip":vip,"port":ports[4],"protocol":"HTTP",
+        "virtualServices":[{"id":"policy-vip","ip":vip,"port":ports[4],"protocol":"HTTPS",
             "requireLocalAddressPresence":True,"vipFleetId":fleet,"vipQuorumConfigPath":str(reader),
             "vipJournalDirectory":str(journal_dir),"vipInterfaceId":nic}]})
     cfg=state/"config";cfg.mkdir(mode=0o700)
@@ -193,6 +195,26 @@ def accept_live_policy(executable,scope,fleet,vip,reader,policy,expected_owner):
     try:
         run("ip","link","add",nic,"type","veth","peer","name",peer);created=True
         run("ip","link","set",nic,"up");run("ip","link","set",peer,"up")
+        supervisor=put(d,"supervisor.json",{"scope":scope,"serviceId":"policy-vip",
+            "serviceName":"gatewaycore-vip-ci-gateway.service","listenerConfig":str(config),
+            "probePath":"/api/identity","probeCaFile":str(ca_crt),"probeLeafSha256":pin(tc),
+            "probeBodySha256":hashlib.sha256(b"fixture").hexdigest().upper()})
+        agent=put(d,"agent.json",{"scope":scope,"nodePin":policy["preferredPin"],"otherPin":policy["otherPin"],
+            "readerConfig":str(reader),"supervisorConfig":str(supervisor),"server":{"listenIp":"127.0.0.1",
+            "port":free_port(),"pfx":server_pfx,"passwordFile":server_pass,"clientCaFile":str(ca_crt),"clientPin":pin(cc)}})
+        inspected=subprocess.run([str(executable),"--vip-node-agent",str(agent),"inspect"],
+            env=env,capture_output=True,text=True,timeout=60,check=True)
+        preflight=json.loads(inspected.stdout)
+        if (not preflight["validated"] or preflight["mutated"] or preflight["networkVerified"] or
+            preflight["serviceVerified"] or list(journal_dir.iterdir()) or Path(str(supervisor)+".lock").exists()):
+            raise AssertionError("Node offline preflight mutated state or overclaimed readiness")
+        bad=json.loads(supervisor.read_text());bad["scope"]="0"*64
+        put(d,"supervisor.json",bad)
+        rejected=subprocess.run([str(executable),"--vip-node-agent",str(agent),"inspect"],
+            env=env,capture_output=True,text=True,timeout=60)
+        if rejected.returncode!=78 or list(journal_dir.iterdir()) or Path(str(supervisor)+".lock").exists():
+            raise AssertionError("Mismatched supervisor scope was accepted or mutated state")
+        bad["scope"]=scope;put(d,"supervisor.json",bad)
         result=address("reconcile");assigned=True
         if not result.get("eligibleToStart") or result.get("epoch")!=expected_owner[1]:
             raise AssertionError("Real journal-bound address not ready at signed epoch")
@@ -396,6 +418,14 @@ try:
     own(pdir,pa);own(cdir,wa)
     def writer(*args,check=True):
         return run("runuser","-u",wa,"--",executable,"--vip-owner",writer_path,scope,*args,check=check,timeout=270)
+    stage="offline-provider-preflight"
+    result=run("runuser","-u",pa,"--",executable,"--vip-redfish-provider",provider_cfg,"inspect")
+    provider_inspection=json.loads(result.stdout)
+    if (not provider_inspection["validated"] or provider_inspection["mutated"] or
+        provider_inspection["networkVerified"] or not provider_inspection["remoteLifecycleConfigured"] or
+        provider_inspection["rearmJournalExists"] or rearm.exists() or
+        provider_inspection["signingPublicKeySha256"]!=wc["vipFencePublicKeySha256"]):
+        raise AssertionError("Offline provider preflight mutated state or trust mismatch")
     stage="offline-controller-preflight"
     inspection=json.loads(writer("inspect-policy",policy,client,journal).stdout)
     if not inspection["validated"] or inspection["networkVerified"] or inspection["mutated"] or inspection["journalExists"] or journal.exists():

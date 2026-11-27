@@ -24,7 +24,8 @@ internal static class VipRedfishProvider
         string stage="configuration";
         try
         {
-            if(args.Length!=2)throw new InvalidDataException("Usage: --vip-redfish-provider <private-config>");
+            bool inspect=args.Length==3&&args[2]=="inspect";
+            if(args.Length!=2&&!inspect)throw new InvalidDataException("Usage: --vip-redfish-provider <private-config> [inspect]");
             var s=JsonSerializer.Deserialize<Settings>(File.ReadAllBytes(VipServiceSecurity.RequireFile(args[1],32768)),Json)
                 ??throw new InvalidDataException("Missing provider configuration.");
             if(!IPAddress.TryParse(s.ListenIp,out var ip)||ip.Equals(IPAddress.Any)||ip.Equals(IPAddress.IPv6Any)||
@@ -63,7 +64,9 @@ internal static class VipRedfishProvider
                 !Path.IsPathFullyQualified(s.RearmJournalFile)))
                 throw new InvalidDataException("Approved standby boot requires a protected provider rearm journal.");
             if(s.StandbyBootIsolationApproved)VipServiceSecurity.Journal(s.RearmJournalFile!);
-            using var rearmJournal=s.StandbyBootIsolationApproved?new VipProviderRearmJournal(s.RearmJournalFile!,s.Scope,s.Nodes[0].Pin,s.Nodes[1].Pin):null;
+            // Inspection must never create an absent journal or open it for writes.
+            using var rearmJournal=s.StandbyBootIsolationApproved&&(!inspect||File.Exists(s.RearmJournalFile!))
+                ?new VipProviderRearmJournal(s.RearmJournalFile!,s.Scope,s.Nodes[0].Pin,s.Nodes[1].Pin,readOnly:inspect):null;
             stage="signer and TLS credentials";
             using var signer=ECDsa.Create();
             signer.ImportFromPem(File.ReadAllText(VipServiceSecurity.RequireFile(s.SigningKeyFile,8192)));
@@ -86,6 +89,14 @@ internal static class VipRedfishProvider
                 chain.ChainPolicy.DisableCertificateDownloads=true;
                 chain.ChainPolicy.ApplicationPolicy.Add(new Oid("1.3.6.1.5.5.7.3.2"));
                 return chain.Build(cert);
+            }
+            if(inspect)
+            {
+                Console.WriteLine(JsonSerializer.Serialize(new{validated=true,mutated=false,networkVerified=false,
+                    scope=s.Scope,remoteLifecycleConfigured=remote,rearmConfigured=s.StandbyBootIsolationApproved,
+                    rearmJournalExists=rearmJournal is not null,lastRearmEpoch=rearmJournal?.LastEpoch??0,
+                    signingPublicKeySha256=Convert.ToHexString(SHA256.HashData(signer.ExportSubjectPublicKeyInfo()))}));
+                return 0;
             }
             stage="host initialization";
             var builder=WebApplication.CreateSlimBuilder(new WebApplicationOptions

@@ -21,15 +21,17 @@ internal static class VipNodeSupervisor
     {
         try
         {
-            if(args.Length!=4||args[2] is not ("activate" or "stop-withdraw" or "owner-check" or "standby-check")||
-                !long.TryParse(args[3],NumberStyles.None,CultureInfo.InvariantCulture,out long epoch)||epoch<1)
-                throw new InvalidDataException("Usage: --vip-node <private-config> activate|stop-withdraw <epoch>");
+            bool inspect=args.Length==3&&args[2]=="inspect";
+            long epoch=0;
+            if(!inspect&&(args.Length!=4||args[2] is not ("activate" or "stop-withdraw" or "owner-check" or "standby-check")||
+                !long.TryParse(args[3],NumberStyles.None,CultureInfo.InvariantCulture,out epoch)||epoch<1))
+                throw new InvalidDataException("Usage: --vip-node <private-config> inspect | activate|stop-withdraw <epoch>");
             var config=FleetQuorum.FilePath(args[1],16384,true);
             var directory=Path.GetDirectoryName(config)!;
             if(OperatingSystem.IsLinux())PrivateKeyFileSecurity.ValidateLinuxPrivateStateDirectory(directory,"VIP node supervisor");
             else if(OperatingSystem.IsWindows())WindowsStateProtection.ValidateOfflineKeyRingDirectory(directory);
             else throw new PlatformNotSupportedException();
-            using var exclusive=new FileStream(config+".lock",FileMode.OpenOrCreate,FileAccess.ReadWrite,FileShare.None);
+            using var exclusive=inspect?null:new FileStream(config+".lock",FileMode.OpenOrCreate,FileAccess.ReadWrite,FileShare.None);
             var s=JsonSerializer.Deserialize<Settings>(File.ReadAllBytes(config),Json)??throw new InvalidDataException("Missing supervisor configuration.");
             if(!VipFenceProvider.Pin(s.Scope)||!VipFenceProvider.Pin(s.ProbeLeafSha256)||!VipFenceProvider.Pin(s.ProbeBodySha256)||
                 !Regex.IsMatch(s.ServiceName??"",@"\A[A-Za-z0-9][A-Za-z0-9_.-]{0,79}\z")||
@@ -57,6 +59,15 @@ internal static class VipNodeSupervisor
             if((requiredScope is not null&&s.Scope!=requiredScope)||(requiredPin is not null&&authority.VipReaderPin!=requiredPin))
                 throw new InvalidDataException("Agent and supervisor identity mismatch.");
             using var ca=X509CertificateLoader.LoadCertificateFromFile(FleetQuorum.FilePath(s.ProbeCaFile,65536));
+            if(inspect)
+            {
+                VipServiceSecurity.Quorum(service.VipQuorumConfigPath);
+                VipServiceSecurity.Directory(service.VipJournalDirectory);
+                // Local interface inspection is read-only and requires the same
+                // exact dedicated identity and prefix constraints as activation.
+                _=VipHostAddressPlatform.Inspect(service.VipInterfaceId,address,management);
+                return 0;
+            }
             using var handler=new HttpClientHandler{UseProxy=false,AllowAutoRedirect=false,UseCookies=false};
             byte[] pin=Convert.FromHexString(s.ProbeLeafSha256),bodyHash=Convert.FromHexString(s.ProbeBodySha256);
             handler.ServerCertificateCustomValidationCallback=(_,leaf,_,errors)=>

@@ -6,17 +6,20 @@ internal sealed class VipProviderRearmJournal:IDisposable
     internal sealed record Attempt(string Scope,string OwnerPin,long Epoch,string OtherPin);
     private readonly FileStream file;
     private readonly string scope,first,second;
+    private readonly bool readOnly;
     internal long LastEpoch {get;private set;}
-    internal VipProviderRearmJournal(string path,string scope,string first,string second)
+    internal VipProviderRearmJournal(string path,string scope,string first,string second,bool readOnly=false)
     {
         VipFenceProvider.ValidatePair(scope,first,second);
-        this.scope=scope;this.first=first;this.second=second;
+        this.scope=scope;this.first=first;this.second=second;this.readOnly=readOnly;
         if(!Path.IsPathFullyQualified(path)||!Directory.Exists(Path.GetDirectoryName(path))||
             (File.GetAttributes(Path.GetDirectoryName(path)!)&FileAttributes.ReparsePoint)!=0||
             (File.Exists(path)&&(File.GetAttributes(path)&FileAttributes.ReparsePoint)!=0))
             throw new InvalidDataException("Protected provider rearm journal required.");
-        var options=new FileStreamOptions{Mode=FileMode.OpenOrCreate,Access=FileAccess.ReadWrite,Share=FileShare.None,Options=FileOptions.WriteThrough};
-        if(OperatingSystem.IsLinux())options.UnixCreateMode=UnixFileMode.UserRead|UnixFileMode.UserWrite;
+        var options=readOnly
+            ?new FileStreamOptions{Mode=FileMode.Open,Access=FileAccess.Read,Share=FileShare.Read}
+            :new FileStreamOptions{Mode=FileMode.OpenOrCreate,Access=FileAccess.ReadWrite,Share=FileShare.None,Options=FileOptions.WriteThrough};
+        if(!readOnly&&OperatingSystem.IsLinux())options.UnixCreateMode=UnixFileMode.UserRead|UnixFileMode.UserWrite;
         file=new FileStream(path,options);
         try
         {
@@ -37,6 +40,7 @@ internal sealed class VipProviderRearmJournal:IDisposable
             throw new InvalidDataException("Stale or duplicate provider power-on intent.");
         if(persist)
         {
+            if(readOnly)throw new InvalidOperationException("Read-only provider rearm journal.");
             var bytes=Encoding.UTF8.GetBytes(JsonSerializer.Serialize(attempt)+"\n");
             if(file.Length+bytes.Length>1024*1024)throw new InvalidDataException("Provider rearm journal full.");
             file.Write(bytes);file.Flush(true);

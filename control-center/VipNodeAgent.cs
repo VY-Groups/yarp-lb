@@ -15,7 +15,8 @@ internal static class VipNodeAgent
         string stage="configuration";
         try
         {
-            if(args.Length!=2)throw new InvalidDataException("Usage: --vip-node-agent <private-config>");
+            bool inspect=args.Length==3&&args[2]=="inspect";
+            if(args.Length!=2&&!inspect)throw new InvalidDataException("Usage: --vip-node-agent <private-config> [inspect]");
             var s=JsonSerializer.Deserialize<Settings>(File.ReadAllBytes(VipServiceSecurity.RequireFile(args[1],16384)),VipMachineTransport.Json)
                 ??throw new InvalidDataException("Missing node agent settings.");
             VipFenceProvider.ValidatePair(s.Scope,s.NodePin,s.OtherPin);
@@ -34,6 +35,19 @@ internal static class VipNodeAgent
             using var cert=X509CertificateLoader.LoadPkcs12FromFile(VipServiceSecurity.RequireFile(t.Pfx),
                 File.ReadAllText(VipServiceSecurity.RequireFile(t.PasswordFile,4096)).TrimEnd('\r','\n'),
                 OperatingSystem.IsWindows()?X509KeyStorageFlags.UserKeySet:X509KeyStorageFlags.EphemeralKeySet);
+            if(!cert.HasPrivateKey||cert.NotBefore.ToUniversalTime()>DateTime.UtcNow||
+                cert.NotAfter.ToUniversalTime()<=DateTime.UtcNow)
+                throw new InvalidDataException("Node agent server certificate unavailable.");
+            if(inspect)
+            {
+                stage="supervisor preflight";
+                if(await VipNodeSupervisor.Run(["--vip-node",s.SupervisorConfig,"inspect"],s.Scope,s.NodePin)!=0)
+                    throw new InvalidDataException("Supervisor offline preflight failed.");
+                Console.WriteLine(JsonSerializer.Serialize(new{validated=true,mutated=false,networkVerified=false,
+                    serviceVerified=false,scope=s.Scope,nodePin=s.NodePin,otherPin=s.OtherPin,
+                    serverLeafSha256=Convert.ToHexString(SHA256.HashData(cert.RawData))}));
+                return 0;
+            }
             bool Allowed(X509Certificate2? leaf)=>VipMachineTransport.Pinned(leaf,ca,t.ClientPin,"1.3.6.1.5.5.7.3.2");
             stage="host initialization";
             var builder=WebApplication.CreateSlimBuilder(new WebApplicationOptions
