@@ -131,7 +131,9 @@ try
                         await Task.Delay(250,deadline.Token);
                     }
                 }
-                using var client=new System.Net.Sockets.TcpClient(ip.AddressFamily);
+                // SkipAsSource intentionally prevents implicit source selection. Bind the
+                // local smoke-test client to the exact VIP rather than an unrelated NIC.
+                using var client=new System.Net.Sockets.TcpClient(new System.Net.IPEndPoint(ip,0));
                 var endpoint=(System.Net.IPEndPoint)listener.LocalEndpoint;
                 await client.ConnectAsync(ip,endpoint.Port,deadline.Token);
                 using var accepted=await listener.AcceptTcpClientAsync(deadline.Token);

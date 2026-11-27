@@ -12,6 +12,7 @@ internal static class VipNodeAgent
         string SupervisorConfig,VipMachineTransport.ServerSettings Server);
     internal static async Task<int> Run(string[] args)
     {
+        string stage="configuration";
         try
         {
             if(args.Length!=2)throw new InvalidDataException("Usage: --vip-node-agent <private-config>");
@@ -23,16 +24,20 @@ internal static class VipNodeAgent
                 ip.IsIPv4MappedToIPv6||ip.IsIPv6Multicast||t.Port is <1024 or >65535||
                 !VipFenceProvider.Pin(t.ClientPin)||t.ClientPin==s.NodePin||t.ClientPin==s.OtherPin)
                 throw new InvalidDataException("Require isolated node agent and independent provider certificate.");
+            stage="quorum credentials";
             VipServiceSecurity.Quorum(s.ReaderConfig);
             using var authority=FleetQuorum.OpenVip(s.ReaderConfig,s.Scope);
             if(authority.VipReaderPin!=s.NodePin)throw new InvalidDataException("Node identity mismatch.");
             _=VipServiceSecurity.RequireFile(s.SupervisorConfig,16384);
+            stage="server credentials";
             using var ca=X509CertificateLoader.LoadCertificateFromFile(VipServiceSecurity.RequireFile(t.ClientCaFile));
             using var cert=X509CertificateLoader.LoadPkcs12FromFile(VipServiceSecurity.RequireFile(t.Pfx),
                 File.ReadAllText(VipServiceSecurity.RequireFile(t.PasswordFile,4096)).TrimEnd('\r','\n'),
                 OperatingSystem.IsWindows()?X509KeyStorageFlags.UserKeySet:X509KeyStorageFlags.EphemeralKeySet);
             bool Allowed(X509Certificate2? leaf)=>VipMachineTransport.Pinned(leaf,ca,t.ClientPin,"1.3.6.1.5.5.7.3.2");
-            var builder=WebApplication.CreateSlimBuilder(Array.Empty<string>());
+            stage="host initialization";
+            var builder=WebApplication.CreateSlimBuilder(new WebApplicationOptions
+                {Args=Array.Empty<string>(),ContentRootPath=AppContext.BaseDirectory});
             builder.Services.AddWindowsService(o=>o.ServiceName="GatewayCoreVipNodeAgent");
             builder.Services.Configure<HostOptions>(o=>o.ShutdownTimeout=TimeSpan.FromSeconds(120));
             builder.Configuration.Sources.Clear();builder.Logging.ClearProviders();
@@ -77,10 +82,11 @@ internal static class VipNodeAgent
             }
             app.MapPost("/v1/vip-node/status",(Delegate)(Func<HttpContext,Task<IResult>>)(ctx=>Handle(ctx,false)));
             app.MapPost("/v1/vip-node/activate",(Delegate)(Func<HttpContext,Task<IResult>>)(ctx=>Handle(ctx,true)));
+            stage="HTTPS service lifetime";
             await app.RunAsync();return 0;
         }
         catch(Exception e) when(e is IOException or InvalidDataException or InvalidOperationException or
             HttpRequestException or OperationCanceledException or JsonException or CryptographicException or UnauthorizedAccessException or ArgumentException)
-        {Console.Error.WriteLine("VIP node agent refused: "+e.GetType().Name);return 78;}
+        {Console.Error.WriteLine("VIP node agent refused at "+stage+": "+e.GetType().Name);return 78;}
     }
 }

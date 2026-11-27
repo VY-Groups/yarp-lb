@@ -21,6 +21,7 @@ internal static class VipRedfishProvider
         {UnmappedMemberHandling=JsonUnmappedMemberHandling.Disallow};
     internal static async Task<int> Run(string[] args)
     {
+        string stage="configuration";
         try
         {
             if(args.Length!=2)throw new InvalidDataException("Usage: --vip-redfish-provider <private-config>");
@@ -34,6 +35,7 @@ internal static class VipRedfishProvider
             if(s.Nodes.Any(n=>n.Pin==s.WriterPin)||s.Nodes[0].Bmc.Origin==s.Nodes[1].Bmc.Origin||
                 string.Equals(s.Nodes[0].Bmc.SystemUuid,s.Nodes[1].Bmc.SystemUuid,StringComparison.OrdinalIgnoreCase))
                 throw new InvalidDataException("Independent writer and distinct BMC identities required.");
+            stage="quorum and BMC credentials";
             VipServiceSecurity.Quorum(s.ReaderConfig);
             foreach(var node in s.Nodes)
             {
@@ -62,6 +64,7 @@ internal static class VipRedfishProvider
                 throw new InvalidDataException("Approved standby boot requires a protected provider rearm journal.");
             if(s.StandbyBootIsolationApproved)VipServiceSecurity.Journal(s.RearmJournalFile!);
             using var rearmJournal=s.StandbyBootIsolationApproved?new VipProviderRearmJournal(s.RearmJournalFile!,s.Scope,s.Nodes[0].Pin,s.Nodes[1].Pin):null;
+            stage="signer and TLS credentials";
             using var signer=ECDsa.Create();
             signer.ImportFromPem(File.ReadAllText(VipServiceSecurity.RequireFile(s.SigningKeyFile,8192)));
             if(signer.KeySize!=256||signer.ExportParameters(true).D is not {Length:32})
@@ -84,7 +87,9 @@ internal static class VipRedfishProvider
                 chain.ChainPolicy.ApplicationPolicy.Add(new Oid("1.3.6.1.5.5.7.3.2"));
                 return chain.Build(cert);
             }
-            var builder=WebApplication.CreateSlimBuilder(Array.Empty<string>());
+            stage="host initialization";
+            var builder=WebApplication.CreateSlimBuilder(new WebApplicationOptions
+                {Args=Array.Empty<string>(),ContentRootPath=AppContext.BaseDirectory});
             builder.Services.AddWindowsService(o=>o.ServiceName="GatewayCoreVipFenceProvider");
             builder.Services.Configure<HostOptions>(o=>o.ShutdownTimeout=TimeSpan.FromSeconds(120));
             builder.Configuration.Sources.Clear();
@@ -194,12 +199,13 @@ internal static class VipRedfishProvider
             app.MapPost("/v1/vip/drain-node",(Delegate)(Func<HttpContext,Task<IResult>>)(ctx=>NodeAction(ctx,"drain-node")));
             app.MapPost("/v1/vip/activate-node",(Delegate)(Func<HttpContext,Task<IResult>>)(ctx=>NodeAction(ctx,"activate-node")));
             app.MapPost("/v1/vip/rearm-node",(Delegate)(Func<HttpContext,Task<IResult>>)(ctx=>NodeAction(ctx,"rearm-node")));
+            stage="HTTPS service lifetime";
             await app.RunAsync();
             return 0;
         }
         catch(Exception error) when(error is IOException or InvalidDataException or InvalidOperationException or
             UnauthorizedAccessException or HttpRequestException or OperationCanceledException or JsonException or
             CryptographicException or KeyNotFoundException or FormatException or ArgumentException)
-        {Console.Error.WriteLine("Independent Redfish provider refused: "+error.GetType().Name);return 78;}
+        {Console.Error.WriteLine("Independent Redfish provider refused at "+stage+": "+error.GetType().Name);return 78;}
     }
 }

@@ -22,7 +22,7 @@ EXE = Path(sys.argv[1]).resolve(strict=True)
 GATEWAY = "GatewayCoreYarp" if WIN else "gatewaycore-vip-ci-gateway"
 AGENT = "GatewayCoreVipNodeAgent" if WIN else "gatewaycore-vip-node-agent"
 OPENSSL = shutil.which("openssl") or (r"C:\Program Files\Git\usr\bin\openssl.exe" if WIN else "/usr/bin/openssl")
-root = Path(tempfile.mkdtemp(prefix="gc-vip-runtime-"))
+root = Path(tempfile.mkdtemp(prefix="gc-vip-runtime-", dir=os.environ["ProgramData"] if WIN else "/tmp"))
 created = []
 def run(*args, check=True, timeout=100):
     return subprocess.run([str(x) for x in args], check=check, timeout=timeout, capture_output=True, text=True)
@@ -54,14 +54,14 @@ def start(name,check=True):
 def stop(name):
     run(*(("sc.exe","stop",name) if WIN else ("systemctl","stop",name+".service")),check=False)
     deadline=time.monotonic()+35
-    while active(name) and time.monotonic()<deadline: time.sleep(.25)
-    if active(name): raise AssertionError("Service did not stop")
-def call(port, ca, cert=None, key=None):
+    while not stopped(name) and time.monotonic()<deadline: time.sleep(.25)
+    if not stopped(name): raise AssertionError("Service did not stop")
+def call(port, ca, cert=None, key=None, route="/v1/vip-node/status", body='{"unexpected":true}'):
     context=ssl.create_default_context(cafile=str(ca))
     if cert is not None: context.load_cert_chain(str(cert),str(key))
     with_connection=http.client.HTTPSConnection("127.0.0.1",port,context=context,timeout=3)
     try:
-        with_connection.request("POST","/v1/vip-node/status",body='{"unexpected":true}',headers={"Content-Type":"application/json"})
+        with_connection.request("POST",route,body=body,headers={"Content-Type":"application/json"})
         response=with_connection.getresponse()
         response.read(4096)
         return response.status
@@ -73,7 +73,14 @@ def wait_ready(port,ca,cert,key):
             if active(AGENT) and call(port,ca,cert,key)==503: return
         except (OSError,http.client.HTTPException): pass
         time.sleep(.25)
+    diagnostics(AGENT)
     raise AssertionError("Shipping agent did not become an authenticated HTTPS service")
+def diagnostics(name):
+    if WIN:
+        result=run("sc.exe","queryex",name,check=False)
+    else:
+        result=run("journalctl","-u",name+".service","--no-pager","-n","30",check=False)
+    print(result.stdout,flush=True)
 def stopped(name):
     if WIN:
         r=run("sc.exe","query",name,check=False)
@@ -129,7 +136,26 @@ try:
         write("supervisor.json",json.dumps({"serviceName":GATEWAY+".service"}))
         created.append(AGENT)
         run("bash",HERE/"install-vip-service.sh","agent",EXE,config,"root","--apply")
-    start(AGENT);wait_ready(port,ca,provider,providerkey)
+    # Use the very same shipping executable/config before SCM startup to expose
+    # safe stage diagnostics. This never substitutes for the installed test.
+    process=subprocess.Popen([str(EXE),"--vip-node-agent",str(config)],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+    try:
+        deadline=time.monotonic()+20
+        while time.monotonic()<deadline and process.poll() is None:
+            try:
+                if call(port,ca,provider,providerkey)==503: break
+            except (OSError,http.client.HTTPException): pass
+            time.sleep(.25)
+        else: raise AssertionError("Foreground agent did not become ready")
+    finally:
+        if process.poll() is None: process.terminate()
+        try: output,errors=process.communicate(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.kill();output,errors=process.communicate(timeout=10)
+        print(errors[-4000:],flush=True)
+    try: start(AGENT);wait_ready(port,ca,provider,providerkey)
+    except (AssertionError,subprocess.CalledProcessError):
+        diagnostics(AGENT);raise
     for cert,key in ((None,None),(wrong,wrongkey)):
         try: status=call(port,ca,cert,key)
         except (OSError,http.client.HTTPException): continue
