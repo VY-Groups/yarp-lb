@@ -18,6 +18,7 @@ import tempfile
 import threading
 import time
 import uuid
+from vip_http_body import read_json_body
 
 HERE = Path(__file__).resolve().parents[2]
 if os.geteuid()!=0 or os.getenv("GITHUB_ACTIONS")!="true" or os.getenv("RUNNER_ENVIRONMENT")!="github-hosted":
@@ -115,9 +116,8 @@ class JsonHandler(http.server.BaseHTTPRequestHandler):
         self.send_response(status);self.send_header("Content-Type","application/json")
         self.send_header("Content-Length",str(len(data)));self.end_headers();self.wfile.write(data)
     def body(self):
-        n=int(self.headers.get("Content-Length","0"))
-        if n>4096:raise ValueError("Oversize")
-        return json.loads(self.rfile.read(n))
+        self.connection.settimeout(5)
+        return read_json_body(self.headers,self.rfile)
 try:
     if installed(provider) or installed(controller):raise AssertionError("Existing service; refuse mutation")
     if not all(c.startswith("waf-etcd-") for c in manifest["containers"]) or len(manifest["containers"])!=3:
@@ -174,7 +174,8 @@ try:
                 self.response(200,obj)
             def do_POST(self):
                 if self.headers.get("Authorization")!=expected_basic or self.path!=path+"/Actions/ComputerSystem.Reset":return self.response(403)
-                action=self.body().get("ResetType")
+                try:action=self.body().get("ResetType")
+                except (ValueError,OSError):return self.response(400)
                 with lock:
                     if action=="ForceOff":
                         power[node]=False;serving[node]=False
@@ -189,7 +190,8 @@ try:
             def do_POST(self):
                 peer=self.connection.getpeercert(binary_form=True)
                 if not peer or hashlib.sha256(peer).hexdigest().upper()!=reader_pin:return self.response(403)
-                r=self.body()
+                try:r=self.body()
+                except (ValueError,OSError):return self.response(400)
                 if r.get("scope")!=scope:return self.response(403)
                 try:owner,epoch=owner_state()
                 except Exception:return self.response(503)
