@@ -28,7 +28,7 @@ def run(*args,env=None,ok=True):
 with tempfile.TemporaryDirectory(prefix="gc-fleet-raft-") as tmp:
     root=Path(tmp)
     root.chmod(0o700)
-    ca,ids=certs(root/"certs")
+    ca,ids=certs(root/"certs",("vip-successor",))
     label=secrets.token_hex(8)
     network="gc-fleet-raft-"+label
     containers=[]
@@ -77,7 +77,7 @@ with tempfile.TemporaryDirectory(prefix="gc-fleet-raft-") as tmp:
         vip_scope=hashlib.sha256(b"gatewaycore-adc-vip-v1\nci\n192.0.2.10").hexdigest().upper()
         vip_key=base64.b64encode(("/gatewaycore/adc-vip/v1/"+vip_scope).encode()).decode()
         vip_reader=root/"vip-reader.json";vip_writer=root/"vip-writer.json";vip_successor=root/"vip-successor.json"
-        for path,role in [(vip_reader,"reader"),(vip_writer,"writer"),(vip_successor,"ci1")]:
+        for path,role in [(vip_reader,"reader"),(vip_writer,"writer"),(vip_successor,"vip-successor")]:
             cert,key,_=ids[role]
             path.write_text(json.dumps({"scope":vip_scope,"clusterId":cluster,"caFile":ca,"certFile":cert,
                                         "keyFile":key,"endpoints":endpoints}));path.chmod(0o600)
@@ -95,7 +95,7 @@ with tempfile.TemporaryDirectory(prefix="gc-fleet-raft-") as tmp:
             subprocess.run(["openssl","dgst","-sha256","-sign",str(fence_key),"-out",str(sig),str(message)],check=True)
         def owner(*args,ok=True):
             return json.loads(run("--vip-owner",vip_writer,vip_scope,*args,ok=ok)) if ok else run("--vip-owner",vip_writer,vip_scope,*args,ok=False)
-        reader_pin=ids["reader"][2];successor_pin=ids["ci1"][2]
+        reader_pin=ids["reader"][2];successor_pin=ids["vip-successor"][2]
         run("vip-check",vip_reader,vip_scope,1,ok=False)
         expires=int(time.time())+120
         permit("-",0,reader_pin,expires)

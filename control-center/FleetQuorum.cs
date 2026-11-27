@@ -168,8 +168,14 @@ internal sealed class FleetQuorum : IDisposable
     internal async Task<Fence?> ObserveVip(CancellationToken token)
     {
         RequireVipWriter();
-        return (await Read(token)).State;
+        var state=(await Read(token)).State;
+        var initialized=(await Read(token,VipInitializationKey)).State;
+        if((state is null)!=(initialized is null) ||
+            (initialized is not null && initialized.Transaction!="vip_initialized"))
+            throw new InvalidDataException("VIP initialization and owner records disagree; independent recovery required.");
+        return state;
     }
+    private string VipInitializationKey=>Base64(namespaceKey+"/initialized");
     internal async Task<Fence> RevokeVip(string ownerPin,long epoch,CancellationToken token)
     {
         RequireVipWriter();
@@ -200,14 +206,25 @@ internal sealed class FleetQuorum : IDisposable
     {
         var before=await Read(token);
         if(before.State!=expected)throw new FleetQuorumContentionException();
+        var initialized=(await Read(token,VipInitializationKey)).State;
+        if(expected is null ? initialized is not null : initialized?.Transaction!="vip_initialized")
+            throw new InvalidDataException("Missing or previously initialized VIP owner record; refuse bootstrap or transfer.");
+        var marker=VipInitializationKey;
         object[] compare=expected is null
-            ? [new {key,result="EQUAL",target="CREATE",createRevision="0"}]
+            ? [new {key,result="EQUAL",target="CREATE",createRevision="0"},
+               new {key=marker,result="EQUAL",target="CREATE",createRevision="0"}]
             : [new {key,result="EQUAL",target="MOD",modRevision=expected.Epoch.ToString(CultureInfo.InvariantCulture)},
-               new {key,result="EQUAL",target="VALUE",value=Base64(expected.Transaction)}];
+               new {key,result="EQUAL",target="VALUE",value=Base64(expected.Transaction)},
+               new {key=marker,result="EQUAL",target="MOD",modRevision=initialized!.Epoch.ToString(CultureInfo.InvariantCulture)},
+               new {key=marker,result="EQUAL",target="VALUE",value=Base64("vip_initialized")}];
+        object[] writes=expected is null
+            ? [new {requestPut=new {key,value=Base64(next)}},
+               new {requestPut=new {key=marker,value=Base64("vip_initialized")}}]
+            : [new {requestPut=new {key,value=Base64(next)}}];
         verify?.Invoke();
         token.ThrowIfCancellationRequested();
         var result=await Post(before.Peer,"/v3/kv/txn",new {
-            compare,success=new[]{new {requestPut=new {key,value=Base64(next)}}},failure=Array.Empty<object>()},token);
+            compare,success=writes,failure=Array.Empty<object>()},token);
         if(!result.TryGetProperty("succeeded",out var success)||success.ValueKind!=JsonValueKind.True)
             throw new FleetQuorumContentionException();
         var revision=checked((long)Number(result.GetProperty("header").GetProperty("revision")));
@@ -240,9 +257,9 @@ internal sealed class FleetQuorum : IDisposable
             var epoch=checked((long)Number(row.GetProperty("mod_revision")));
             if(tx.Length is <1 or >120 || tx.Any(c=>c is < (char)33 or > (char)126) ||
                 Number(root.GetProperty("header").GetProperty("revision"))<(ulong)epoch ||
-                (!namespaceKey.StartsWith("/gatewaycore/adc-vip/v1/",StringComparison.Ordinal) && Number(row.GetProperty("version"))!=1))
+                ((!namespaceKey.StartsWith("/gatewaycore/adc-vip/v1/",StringComparison.Ordinal) || readKey!=key) && Number(row.GetProperty("version"))!=1))
                 throw new InvalidDataException("Invalid or overwritten transaction fence.");
-            if(namespaceKey.StartsWith("/gatewaycore/adc-vip/v1/",StringComparison.Ordinal))
+            if(namespaceKey.StartsWith("/gatewaycore/adc-vip/v1/",StringComparison.Ordinal) && readKey==key)
             {
                 _=Number(row.GetProperty("version"));
                 if(!(tx.StartsWith("vip_",StringComparison.Ordinal) && Hex(tx[4..])) &&

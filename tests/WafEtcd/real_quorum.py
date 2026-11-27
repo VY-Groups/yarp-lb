@@ -43,7 +43,7 @@ def checked(args, timeout=30):
     return result.stdout.decode("utf-8", "strict").strip()
 
 
-def certs(folder):
+def certs(folder, extra_client_subjects=()):
     folder.mkdir(mode=0o700)
     ca = folder / "ca.pem"
     ca_key = folder / "ca.key"
@@ -53,7 +53,7 @@ def certs(folder):
              "-addext", "keyUsage=critical,keyCertSign,cRLSign",
              "-keyout", str(ca_key), "-out", str(ca)])
     identities = {}
-    for subject in ("ci1", "ci2", "ci3", "writer", "reader"):
+    for subject in ("ci1", "ci2", "ci3", "writer", "reader", *extra_client_subjects):
         key = folder / (subject + ".key")
         csr = folder / (subject + ".csr")
         crt = folder / (subject + ".pem")

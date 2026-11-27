@@ -36,7 +36,7 @@ internal static class VipOwnershipCommand
             Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(new {owner=state?.Transaction,epoch=state?.Epoch??0}));
             return 0;
         }
-        catch(Exception error) when(error is IOException or CryptographicException or ArgumentException or
+        catch(Exception error) when(error is IOException or InvalidDataException or CryptographicException or ArgumentException or
             InvalidOperationException or UnauthorizedAccessException or HttpRequestException or OperationCanceledException or
             System.Text.Json.JsonException or KeyNotFoundException or FormatException or OverflowException)
         {
