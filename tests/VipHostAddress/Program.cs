@@ -116,7 +116,21 @@ try
                 // Bind the actual address and exchange data over a local TCP
                 // connection rather than treating inventory as traffic evidence.
                 using var listener=new System.Net.Sockets.TcpListener(ip,0);
-                listener.Start();
+                // Windows may briefly report Preferred before Winsock can bind.
+                // Retry only WSAEADDRNOTAVAIL, with exact identity and readiness
+                // rechecked; no wildcard bind or skipped traffic assertion.
+                for(int attempt=0;;attempt++)
+                {
+                    deadline.Token.ThrowIfCancellationRequested();
+                    try {listener.Start();break;}
+                    catch(System.Net.Sockets.SocketException e) when(
+                        e.SocketErrorCode==System.Net.Sockets.SocketError.AddressNotAvailable && attempt<19)
+                    {
+                        var retry=VipHostAddressPlatform.Inspect(nic.Id,ip);
+                        if(!retry.Ready||retry.Index!=assigned.Index||retry.Name!=assigned.Name)throw;
+                        await Task.Delay(250,deadline.Token);
+                    }
+                }
                 using var client=new System.Net.Sockets.TcpClient(ip.AddressFamily);
                 var endpoint=(System.Net.IPEndPoint)listener.LocalEndpoint;
                 await client.ConnectAsync(ip,endpoint.Port,deadline.Token);

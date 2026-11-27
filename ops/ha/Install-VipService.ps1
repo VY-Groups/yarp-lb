@@ -41,7 +41,7 @@ if($Role -eq 'agent'){
 }
 # CIM avoids shell quoting/reparsing of the registered executable path.
 $created=Invoke-CimMethod -ClassName Win32_Service -MethodName Create -Arguments @{
- Name=$name;DisplayName=$name;PathName=$command;ServiceType=[uint32]16;ErrorControl=[uint32]1;
+ Name=$name;DisplayName=$name;PathName=$command;ServiceType=[byte]16;ErrorControl=[byte]1;
  StartMode=$startup;DesktopInteract=$false;StartName=$identity
 }
 if($created.ReturnValue -ne 0){throw "SCM service creation failed: $($created.ReturnValue)"}
