@@ -2263,6 +2263,7 @@ app.MapGet("/admin/api/network/interfaces", (HttpContext ctx) =>
                 return new { observed.Id, observed.Ip, observed.Port, observed.Protocol, observed.Status,
                     observed.Interfaces, service.RequireLocalAddressPresence, distributedOwnershipRequired = service.VipQuorumConfigPath is not null, admission = localVipAdmission?.Status(service.Id) ?? "disabled", activeGuardedRequests = localVipAdmission?.Active(service.Id) ?? 0,
                     ownershipMode=service.VipJournalDirectory is not null?"journal-bound":service.VipOwnershipEpoch is not null?"fixed-epoch":"local-only",
+                    haPolicyScope=service.VipJournalDirectory is not null?FleetQuorum.VipScope(service.VipFleetId!,service.Ip):null,
                     plannedDrain=localVipAdmission?.IsManualDrain(service.Id)??false,
                     automaticDrain=localVipAdmission?.IsAutomaticDrain(service.Id)??false,
                     automaticDrainConfigured=vipMachineAddress==IPAddress.Parse(service.Ip).ToString(),
@@ -2277,6 +2278,20 @@ app.MapGet("/admin/api/network/interfaces", (HttpContext ctx) =>
         InvalidOperationException or PlatformNotSupportedException or System.Net.Sockets.SocketException)
     { return Results.Json(new { error = "Local network inventory unavailable." }, statusCode: 503); }
 }).RequireAuthorization(policy => policy.RequireRole("Administrator", "Operator"));
+// Nonsecret policy proposal only: never mutates the independent controller.
+app.MapPost("/admin/api/network/virtual-services/ha-policy",async (HttpContext ctx,VipPolicyDocument proposal)=>
+{
+    if(!await AuditActorCurrent(ctx,true))return Results.StatusCode(403);
+    var configured=(guardedVirtualServices??[]).Any(s=>s.VipJournalDirectory is not null&&
+        FleetQuorum.VipScope(s.VipFleetId!,s.Ip)==proposal.Scope);
+    if(!configured)return Results.BadRequest(new{error="Choose an existing journal-bound VIP."});
+    try{proposal.Validate(proposal.Scope);}
+    catch(InvalidDataException){return Results.BadRequest(new{error="Invalid HA policy: verify exact scope, two distinct pins and safety bounds."});}
+    var json=JsonSerializer.Serialize(proposal,VipPolicyDocument.Json);
+    var digest=Convert.ToHexString(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(json)));
+    await Audit(Actor(ctx),"VIP_HA_POLICY_EXPORTED",new{scope=proposal.Scope,sha256=digest});
+    return Results.Ok(new{json,sha256=digest,applied=false});
+}).RequireAuthorization(policy=>policy.RequireRole("Administrator"));
 // Machine-only endpoint is isolated on the mTLS administration socket.
 // It cannot authenticate as a user, clear manual drains, or change routes.
 app.MapPost("/admin/vip-machine/drain",async (HttpContext ctx,VipMachineDrainInput input)=>

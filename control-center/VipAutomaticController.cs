@@ -70,7 +70,8 @@ internal sealed class VipAutomaticPolicy
     private FleetQuorum.Fence? last;
     private long observedAt,eligibleAt,failingAt;
     private int failures,eligible;
-    internal VipAutomaticPolicy(TimeProvider clock){this.clock=clock;}
+    private readonly VipPolicyDocument? settings;
+    internal VipAutomaticPolicy(TimeProvider clock,VipPolicyDocument? settings=null){this.clock=clock;this.settings=settings;}
     internal void Reset(){last=null;failures=eligible=0;}
     internal string? Observe(FleetQuorum.Fence state,VipFenceProvider.NodeEvidence sample,string preferred,bool failback)
     {
@@ -81,14 +82,14 @@ internal sealed class VipAutomaticPolicy
         {
             eligible=0;
             if(failures++==0)failingAt=now;
-            if(failures>=3&&clock.GetElapsedTime(failingAt,now)>=TimeSpan.FromSeconds(10))return "failover";
+            if(failures>=(settings?.FailureSamples??3)&&clock.GetElapsedTime(failingAt,now)>=TimeSpan.FromSeconds(settings?.FailureSeconds??10))return "failover";
             return null;
         }
         failures=0;
         if(!failback||sample.OtherPin!=preferred||sample.OwnerDrained){eligible=0;return null;}
         if(eligible++==0)eligibleAt=now;
-        if(eligible>=3&&clock.GetElapsedTime(eligibleAt,now)>=TimeSpan.FromMinutes(2)&&
-            clock.GetElapsedTime(observedAt,now)>=TimeSpan.FromMinutes(5))return "failback";
+        if(eligible>=3&&clock.GetElapsedTime(eligibleAt,now)>=TimeSpan.FromSeconds(settings?.FailbackEligibleSeconds??120)&&
+            clock.GetElapsedTime(observedAt,now)>=TimeSpan.FromSeconds(settings?.MinimumOwnerSeconds??300))return "failback";
         return null;
     }
 }
@@ -143,11 +144,15 @@ internal static class VipAutomaticController
         Console.WriteLine(JsonSerializer.Serialize(new{decision=intent.Kind,owner=intent.NewPin,epoch=state.Epoch}));
     }
     internal static async Task Run(string scope,string preferred,string other,string providerConfig,string journalPath,
-        bool failback,bool recover,FleetQuorum authority,CancellationToken stop)
+        bool failback,bool recover,FleetQuorum authority,CancellationToken stop,VipPolicyDocument? settings=null)
     {
         using var provider=VipFenceProvider.Open(providerConfig,scope,preferred,other);
         using var journal=new VipAutomaticJournal(journalPath,scope,preferred,other);
-        var policy=new VipAutomaticPolicy(TimeProvider.System);
+        settings??=VipPolicyDocument.Default(scope,preferred,other,failback);
+        settings.Validate(scope);
+        if(settings.PreferredPin!=preferred||settings.OtherPin!=other||settings.FailbackEnabled!=failback)
+            throw new InvalidDataException("HA policy identity mismatch.");
+        var policy=new VipAutomaticPolicy(TimeProvider.System,settings);
         string Other(string pin)=>pin==preferred?other:pin==other?preferred:throw new InvalidDataException("Unknown VIP owner identity.");
         Task Execute(VipAutomaticJournal.Transition intent,CancellationToken token)=>
             ExecuteTransition(scope,intent,journal,authority.ObserveVip,authority.RevokeVip,
@@ -160,7 +165,7 @@ internal static class VipAutomaticController
             return;
         }
         if(journal.Pending is not null)throw new InvalidDataException("Unresolved transition; use explicit recovery.");
-        using var timer=new PeriodicTimer(TimeSpan.FromSeconds(5));
+        using var timer=new PeriodicTimer(TimeSpan.FromSeconds(settings.PollSeconds));
         do
         {
             using var deadline=CancellationTokenSource.CreateLinkedTokenSource(stop);

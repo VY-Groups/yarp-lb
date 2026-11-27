@@ -37,6 +37,11 @@ internal static class VipFenceContractTests
         }
         await VipRedfishFenceTests.Run();
         await VipRemoteIntegrationTests.Run();
+        var strict=VipPolicyDocument.Default(scope,oldPin,newPin,true) with{PollSeconds=10,FailureSeconds=20};
+        strict.Validate(scope);
+        foreach(var invalid in new[]{strict with{FailureSamples=2},strict with{PollSeconds=1},strict with{FailureSeconds=10},
+            strict with{MinimumOwnerSeconds=60},strict with{OtherPin=oldPin}})
+        {try{invalid.Validate(scope);throw new Exception("Unsafe HA policy accepted.");}catch(InvalidDataException){}}
         var clock=new TestClock();
         var policy=new VipAutomaticPolicy(clock);
         var nodeRequest=new VipFenceProvider.NodeRequest(scope,oldPin,10,newPin,"nonce");

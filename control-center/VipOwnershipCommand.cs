@@ -15,6 +15,18 @@ internal static class VipOwnershipCommand
                 args[3] is "transfer" or "resume-transfer"?90:25));
             long Number(string s)=>long.Parse(s,NumberStyles.None,CultureInfo.InvariantCulture);
             FleetQuorum.Fence? state;
+            if((args[3] is "automatic-policy" or "recover-policy")&&args.Length==7)
+            {
+                var policy=VipPolicyDocument.Load(args[4],args[2]);
+                using var stop=new CancellationTokenSource();
+                ConsoleCancelEventHandler cancel=(_,eventArgs)=>{eventArgs.Cancel=true;stop.Cancel();};
+                Console.CancelKeyPress+=cancel;
+                try{await VipAutomaticController.Run(args[2],policy.PreferredPin,policy.OtherPin,args[5],args[6],
+                    policy.FailbackEnabled,args[3]=="recover-policy",authority,stop.Token,policy);}
+                catch(OperationCanceledException) when(stop.IsCancellationRequested){}
+                finally{Console.CancelKeyPress-=cancel;}
+                return 0;
+            }
             if((args[3] is "automatic" or "recover-automatic")&&args.Length==9&&args[8] is "failback-on" or "failback-off")
             {
                 using var stop=new CancellationTokenSource();
