@@ -37,6 +37,17 @@ internal static class VipServiceSecurity
         RequireFile(p.CaFile);RequireFile(p.CertFile);RequireFile(p.KeyFile);
         if(!Path.IsPathFullyQualified(args[6]))throw new InvalidDataException("Absolute journal path required.");
         Directory(Path.GetDirectoryName(args[6])!);
-        if(File.Exists(args[6]))RequireFile(args[6],1024*1024);
+        if(File.Exists(args[6]))
+        {
+            // A valid idle controller may have an empty journal. Protect it
+            // without treating zero bytes as a missing credential.
+            var info=new FileInfo(args[6]);
+            if(info.Length>1024*1024||(info.Attributes&FileAttributes.ReparsePoint)!=0)
+                throw new InvalidDataException("Invalid controller journal.");
+            if(OperatingSystem.IsLinux()&&(File.GetUnixFileMode(args[6])&
+                (UnixFileMode.GroupRead|UnixFileMode.GroupWrite|UnixFileMode.GroupExecute|
+                 UnixFileMode.OtherRead|UnixFileMode.OtherWrite|UnixFileMode.OtherExecute))!=0)
+                throw new InvalidDataException("Controller journal must be owner-private.");
+        }
     }
 }

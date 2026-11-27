@@ -26,7 +26,7 @@ internal static class VipControllerService
                 VipServiceSecurity.Controller(args);
                 completed(await VipOwnershipCommand.Run(args,stoppingToken));
             }
-            catch(Exception e) when(e is IOException or InvalidOperationException or UnauthorizedAccessException or ArgumentException or System.Text.Json.JsonException)
+            catch(Exception e) when(e is IOException or InvalidDataException or InvalidOperationException or UnauthorizedAccessException or ArgumentException or System.Text.Json.JsonException)
             {Console.Error.WriteLine("VIP controller startup refused: "+e.GetType().Name);completed(78);}
             finally{lifetime.StopApplication();}
         }

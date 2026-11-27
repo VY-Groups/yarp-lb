@@ -74,10 +74,16 @@ def wait_ready(port,ca,cert,key):
         except (OSError,http.client.HTTPException): pass
         time.sleep(.25)
     raise AssertionError("Shipping agent did not become an authenticated HTTPS service")
+def stopped(name):
+    if WIN:
+        r=run("sc.exe","query",name,check=False)
+        return r.returncode==0 and "STOPPED" in r.stdout
+    state=run("systemctl","show","-p","ActiveState","--value",name+".service").stdout.strip()
+    return state in ("inactive","failed")
 def wait_closed(port):
     deadline=time.monotonic()+45
     while time.monotonic()<deadline:
-        if not active(AGENT):
+        if stopped(AGENT):
             try:
                 with socket.create_connection(("127.0.0.1",port),timeout=.5): pass
             except OSError: return
@@ -136,6 +142,9 @@ try:
     if WIN: run("icacls",nodekey,"/grant","*S-1-5-32-545:R")
     else: nodekey.chmod(0o644)
     start(AGENT,check=False);wait_closed(port)
+    if not WIN:
+        status=run("systemctl","show","-p","ExecMainStatus","--value",AGENT+".service").stdout.strip()
+        if status!="78": raise AssertionError("Expected explicit credential refusal exit 78, got "+status)
     if WIN: run("icacls",nodekey,"/remove:g","*S-1-5-32-545")
     else: nodekey.chmod(0o600)
     start(AGENT);wait_ready(port,ca,provider,providerkey)
