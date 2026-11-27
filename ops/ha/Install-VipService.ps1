@@ -28,8 +28,10 @@ switch($Role){
   $command="$binary --vip-owner $configArg $Scope automatic-policy $p $f $j"
  }
 }
-[pscustomobject]@{Name=$name;Identity=$identity;Startup=$startup;Command=$command;Applied=[bool]$Apply}
-if(-not $Apply){return}
+if(-not $Apply){
+ [pscustomobject]@{Name=$name;Identity=$identity;Startup=$startup;Command=$command;Applied=$false}
+ return
+}
 $principal=[Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
 if(-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)){throw 'Elevated local installation required'}
 if(Get-Service -Name $name -ErrorAction SilentlyContinue){throw 'Existing service; refuse overwrite'}
@@ -37,11 +39,11 @@ if($Role -eq 'agent'){
  $gateway=Get-Service -Name GatewayCoreYarp
  if($gateway.Status -ne 'Stopped' -or $gateway.StartType -ne 'Manual'){throw 'Dedicated gateway must be stopped and Manual'}
 }
-$start=if($startup -eq 'Automatic'){'auto'}else{'demand'}
 # CIM avoids shell quoting/reparsing of the registered executable path.
 $created=Invoke-CimMethod -ClassName Win32_Service -MethodName Create -Arguments @{
  Name=$name;DisplayName=$name;PathName=$command;ServiceType=[uint32]16;ErrorControl=[uint32]1;
- StartMode=$startup;DesktopInteract=$false;StartName=$identity;StartPassword=''
+ StartMode=$startup;DesktopInteract=$false;StartName=$identity
 }
 if($created.ReturnValue -ne 0){throw "SCM service creation failed: $($created.ReturnValue)"}
-Write-Output 'Installed; not started. Provision service-identity ACLs and validate topology before starting.'
+Write-Verbose 'Installed; not started. Provision service-identity ACLs and validate topology before starting.'
+[pscustomobject]@{Name=$name;Identity=$identity;Startup=$startup;Command=$command;Applied=$true}

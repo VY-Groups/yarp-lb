@@ -33,3 +33,11 @@ jobs:
           Set-Content -LiteralPath $config -Value '{}'
           $plan = & ./ops/ha/Install-VipService.ps1 -Role agent -Executable "$env:SystemRoot\System32\whoami.exe" -Config $config
           if ($plan.Name -ne 'GatewayCoreVipNodeAgent' -or $plan.Applied) { throw 'Unexpected offline installation plan' }
+      - name: Real disposable Linux systemd role registration
+        if: runner.os == 'Linux'
+        shell: bash
+        run: sudo -n env GITHUB_ACTIONS=true RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" bash ops/ha/test-vip-service-install.sh
+      - name: Real disposable Windows SCM role registration
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./ops/ha/Test-VipServiceInstall.ps1
