@@ -1,6 +1,40 @@
 using System.Net.NetworkInformation;
 static void Must(bool ok,string label){if(!ok)throw new Exception(label);Console.WriteLine("PASS: "+label);}
 static void Refused(Action work){try{work();}catch(InvalidDataException){return;}throw new Exception("Expected refusal");}
+var steps=new List<string>();
+Task Step(string name,CancellationToken token){steps.Add(name);return Task.CompletedTask;}
+Task<bool> Owned(long epoch,CancellationToken token){steps.Add("owner");return Task.FromResult(epoch==5);}
+Task<bool> Health(CancellationToken token){steps.Add("health");return Task.FromResult(true);}
+await VipNodeLifecycle.Activate(5,Owned,t=>Step("reconcile",t),t=>Step("start",t),Health,
+    t=>Step("stop",t),t=>Step("withdraw",t),default);
+Must(steps.SequenceEqual(new[]{"owner","reconcile","owner","start","owner","health","owner"}),
+    "node startup checks exact ownership around every activation stage");
+steps.Clear();
+try
+{
+    await VipNodeLifecycle.Activate(4,Owned,t=>Step("reconcile",t),t=>Step("start",t),Health,
+        t=>Step("stop",t),t=>Step("withdraw",t),default);
+    throw new Exception("Stale activation accepted");
+}
+catch(InvalidDataException){}
+Must(steps.SequenceEqual(new[]{"owner"}),"stale activation causes no service or address mutation");
+steps.Clear();
+try
+{
+    await VipNodeLifecycle.Activate(5,Owned,t=>Step("reconcile",t),t=>Step("start",t),_=>Task.FromResult(false),
+        t=>Step("stop",t),t=>Step("withdraw",t),default);
+    throw new Exception("Failed application health accepted");
+}
+catch(InvalidOperationException){}
+Must(steps.TakeLast(2).SequenceEqual(new[]{"stop","withdraw"}),"failed real health compensates service then address");
+steps.Clear();
+try
+{
+    await VipNodeLifecycle.StopAndWithdraw(_=>throw new InvalidOperationException("stop failed"),t=>Step("withdraw",t),default);
+    throw new Exception("Unconfirmed stop accepted");
+}
+catch(InvalidOperationException){}
+Must(steps.SequenceEqual(new[]{"withdraw"}),"withdrawal still attempted after failed service stop");
 var dir=Directory.CreateTempSubdirectory("gc-vip-journal-");
 try
 {

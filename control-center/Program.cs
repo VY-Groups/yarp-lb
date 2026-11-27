@@ -62,6 +62,13 @@ if(args.Length>0 && args[0]=="--vip-redfish-provider")
     return;
 }
 
+// Privileged independent node lifecycle; not callable from traffic listeners.
+if(args.Length>0 && args[0]=="--vip-node")
+{
+    Environment.ExitCode=await VipNodeSupervisor.Run(args);
+    return;
+}
+
 // Privileged local host administration, never an HTTP management endpoint.
 if(args.Length>0 && args[0]=="--vip-address")
 {
