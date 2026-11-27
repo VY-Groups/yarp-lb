@@ -112,6 +112,8 @@ class Origin(BaseHTTPRequestHandler):
         try:
             self.send_response(200)
             self.send_header("Content-Type", "text/plain")
+            if self.path.startswith("/affinity-test/"):
+                self.send_header("X-Affinity-Fixture-Origin",str(self.server.server_address[1]))
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             # Headers arrive immediately but the full response stream remains open.
@@ -736,6 +738,43 @@ def verify_secure_affinity(base, https_base, admin, operator, reviewer, origin_p
               and "samesite=lax" in header and "max-age=1800" in header and "domain=" not in header,
               "real encrypted affinity cookie security attributes")
         check(client.get(url).status_code==200,"valid affinity cookie accepted")
+        original_token=client.cookies.get(key)
+        check(bool(original_token),"original origin affinity token retained")
+        client.cookies.clear()
+        with backend() as second_port:
+            p=snapshot()
+            dests=p["clusters"]["affinity-pool"]["Destinations"]
+            dests["origin"]["Metadata"]={"TrafficState":"draining"}
+            dests["second"]={"Address":f"http://127.0.0.1:{second_port}/"}
+            submit(p)
+            old_cookie={"Cookie":key+"="+original_token}
+            for attempt in range(100):
+                client.cookies.clear()
+                response=client.get(url,headers=old_cookie)
+                if response.status_code==503:break
+                time.sleep(.2)
+            check(response.status_code==503 and "X-Affinity-Fixture-Origin" not in response.headers,
+                  "draining affinitized origin returns local 503 under Return503Error")
+            p=snapshot()
+            p["clusters"]["affinity-pool"]["SessionAffinity"]["FailurePolicy"]="Redistribute"
+            submit(p)
+            for attempt in range(100):
+                client.cookies.clear()
+                response=client.get(url,headers=old_cookie)
+                if response.status_code==200:break
+                time.sleep(.2)
+            check(response.status_code==200 and response.headers.get("X-Affinity-Fixture-Origin")==str(second_port),
+                  "Redistribute routes an old draining-origin token to the second real backend")
+            new_token=client.cookies.get(key)
+            check(bool(new_token) and new_token!=original_token,"redistributed request receives replacement affinity")
+            response=client.get(url)
+            check(response.status_code==200 and response.headers.get("X-Affinity-Fixture-Origin")==str(second_port),
+                  "replacement affinity remains on healthy second backend")
+            p=snapshot()
+            p["clusters"]["affinity-pool"]["Destinations"].pop("second")
+            p["clusters"]["affinity-pool"]["Destinations"]["origin"].pop("Metadata")
+            p["clusters"]["affinity-pool"]["SessionAffinity"]["FailurePolicy"]="Return503Error"
+            submit(p)
         client.cookies.clear()
         check(client.get(url,headers={"Cookie":key+"=tampered"}).status_code==503,
               "invalid affinity returns 503 under fail-closed policy")
