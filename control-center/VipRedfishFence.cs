@@ -87,6 +87,7 @@ internal sealed class VipRedfishFence : IDisposable
             allowed.ValueKind==JsonValueKind.Array&&allowed.EnumerateArray().Any(x=>x.GetString()=="ForceOff");
         return (power,canOff);
     }
+    internal async Task<bool> IsOff(CancellationToken token)=>(await Observe(token)).Power=="Off";
     internal async Task ConfirmOff(Func<CancellationToken,Task> assertRevoked,CancellationToken token)
     {
         await assertRevoked(token);

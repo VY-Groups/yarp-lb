@@ -142,7 +142,7 @@ internal static class VipAutomaticController
         if(recover)
         {
             using var deadline=CancellationTokenSource.CreateLinkedTokenSource(stop);
-            deadline.CancelAfter(TimeSpan.FromSeconds(90));
+            deadline.CancelAfter(TimeSpan.FromSeconds(240));
             await Execute(journal.Pending??throw new InvalidDataException("No pending transition."),deadline.Token);
             return;
         }
@@ -173,7 +173,7 @@ internal static class VipAutomaticController
                 var intent=new VipAutomaticJournal.Transition(scope,evidence!.OwnerPin,state!.Epoch,evidence.OtherPin,decision);
                 journal.Begin(intent);
                 using var transitionDeadline=CancellationTokenSource.CreateLinkedTokenSource(stop);
-                transitionDeadline.CancelAfter(TimeSpan.FromSeconds(90));
+                transitionDeadline.CancelAfter(TimeSpan.FromSeconds(240));
                 await Execute(intent,transitionDeadline.Token);
                 policy.Reset();
             }

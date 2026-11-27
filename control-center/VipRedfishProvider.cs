@@ -12,7 +12,8 @@ using Microsoft.AspNetCore.Server.Kestrel.Https;
 // or credentials from the network. BMC access is limited to configured nodes.
 internal static class VipRedfishProvider
 {
-    private sealed record Node(string Pin,VipRedfishFence.Settings Bmc);
+    private sealed record Node(string Pin,VipRedfishFence.Settings Bmc,
+        VipMachineTransport.ClientSettings? Agent=null,VipMachineTransport.ClientSettings? Drain=null);
     private sealed record Settings(string ListenIp,int Port,string Scope,string ReaderConfig,
         string ServerPfx,string ServerPasswordFile,string WriterCaFile,string WriterPin,
         string SigningKeyFile,Node[] Nodes);
@@ -38,6 +39,16 @@ internal static class VipRedfishProvider
                 throw new InvalidDataException("Provider requires an independent read-only Raft identity.");
             using var first=VipRedfishFence.Open(s.Nodes[0].Bmc);
             using var second=VipRedfishFence.Open(s.Nodes[1].Bmc);
+            bool remote=s.Nodes.All(n=>n.Agent is not null&&n.Drain is not null);
+            if(!remote&&s.Nodes.Any(n=>n.Agent is not null||n.Drain is not null))
+                throw new InvalidDataException("Configure all node agent and drain clients together.");
+            if(remote&&(s.Nodes[0].Agent!.Origin==s.Nodes[1].Agent!.Origin||
+                s.Nodes[0].Drain!.Origin==s.Nodes[1].Drain!.Origin))
+                throw new InvalidDataException("Distinct node management origins required.");
+            using var agent0=remote?VipMachineTransport.Open(s.Nodes[0].Agent!):null;
+            using var agent1=remote?VipMachineTransport.Open(s.Nodes[1].Agent!):null;
+            using var drain0=remote?VipMachineTransport.Open(s.Nodes[0].Drain!):null;
+            using var drain1=remote?VipMachineTransport.Open(s.Nodes[1].Drain!):null;
             using var signer=ECDsa.Create();
             signer.ImportFromPem(File.ReadAllText(FleetQuorum.FilePath(s.SigningKeyFile,8192,true)));
             if(signer.KeySize!=256||signer.ExportParameters(true).D is not {Length:32})
@@ -112,6 +123,88 @@ internal static class VipRedfishProvider
                 finally{gate.Release();}
             }
             app.MapPost("/v1/vip/hard-fence",(Delegate)(Func<HttpContext,Task<IResult>>)Fence);
+            async Task<IResult> NodeAction(HttpContext ctx,string action)
+            {
+                if(!WriterAllowed(ctx.Connection.ClientCertificate)||!remote)return Results.StatusCode(403);
+                if(!await gate.WaitAsync(0,ctx.RequestAborted))return Results.Conflict();
+                try
+                {
+                    var r=await ctx.Request.ReadFromJsonAsync<VipFenceProvider.NodeRequest>(Json,ctx.RequestAborted)
+                        ??throw new InvalidDataException("Missing node action.");
+                    var request=new VipRemoteNode.Request(r.Scope,r.OwnerPin,r.Epoch,r.OtherPin,r.Nonce);
+                    VipRemoteNode.Validate(request,s.Scope,s.Nodes[0].Pin);
+                    if(!s.Nodes.Any(n=>n.Pin==r.OwnerPin)||!s.Nodes.Any(n=>n.Pin==r.OtherPin))return Results.BadRequest();
+                    bool firstOwner=r.OwnerPin==s.Nodes[0].Pin;
+                    var ownerAgent=(firstOwner?agent0:agent1)!;var peerAgent=(firstOwner?agent1:agent0)!;
+                    var ownerDrain=(firstOwner?drain0:drain1)!;
+                    var ownerBmc=firstOwner?first:second;var peerBmc=firstOwner?second:first;
+                    using var deadline=CancellationTokenSource.CreateLinkedTokenSource(ctx.RequestAborted);
+                    deadline.CancelAfter(TimeSpan.FromSeconds(action=="node-status"?18:110));
+                    var token=deadline.Token;
+                    var expected=new FleetQuorum.Fence("vip_"+r.OwnerPin,r.Epoch);
+                    async Task AssertOwner()
+                    {
+                        if(await reader.ReadVipState(token)!=expected)throw new InvalidDataException("Exact active ownership changed.");
+                    }
+                    async Task<VipRemoteNode.Evidence> Status(VipMachineTransport client,string pin,string path="/v1/vip-node/status")
+                    {
+                        var fresh=request with{Nonce=Convert.ToHexString(RandomNumberGenerator.GetBytes(32))};
+                        return VipRemoteNode.Match(fresh,pin,await client.Post<VipRemoteNode.Evidence>(path,fresh,token));
+                    }
+                    async Task<VipRemoteNode.DrainEvidence> Drain(bool mutate)
+                    {
+                        var req=new VipRemoteNode.DrainRequest(r.Scope,r.Epoch,Convert.ToHexString(RandomNumberGenerator.GetBytes(32)),mutate);
+                        return VipRemoteNode.Match(req,await ownerDrain.Post<VipRemoteNode.DrainEvidence>("/admin/vip-machine/drain",req,token));
+                    }
+                    await AssertOwner();
+                    bool serving=false,eligible=false,drained=false;
+                    if(action=="activate-node")
+                    {
+                        // Before starting the successor, independently re-observe
+                        // physical isolation of the predecessor.
+                        if(!await peerBmc.IsOff(token))return Results.Conflict();
+                        await AssertOwner();
+                        serving=(await Status(ownerAgent,r.OwnerPin,"/v1/vip-node/activate")).Serving;
+                        if(!serving||!await peerBmc.IsOff(token))return Results.StatusCode(503);
+                    }
+                    else
+                    {
+                        if(!await peerBmc.IsOff(token))
+                            eligible=(await Status(peerAgent,r.OtherPin)).Eligible;
+                        if(!await ownerBmc.IsOff(token))
+                        {
+                            var health=await Status(ownerAgent,r.OwnerPin);
+                            serving=health.Serving;
+                            var before=await Drain(false);
+                            drained=before.ManualDrain||before.Draining;
+                            if(action=="drain-node")
+                            {
+                                if(!eligible||before.ManualDrain)return Results.Conflict();
+                                await AssertOwner();
+                                var observed=await Drain(true);
+                                while(observed.Active!=0)
+                                {
+                                    await Task.Delay(250,token);await AssertOwner();
+                                    observed=await Drain(false);
+                                }
+                                if(!observed.Draining||observed.ManualDrain)return Results.Conflict();
+                                drained=true;serving=false;
+                            }
+                        }
+                        else if(action=="drain-node")return Results.Conflict();
+                    }
+                    await AssertOwner();
+                    return Results.Json(new VipFenceProvider.NodeEvidence(r.Scope,r.OwnerPin,r.Epoch,r.OtherPin,r.Nonce,
+                        serving,eligible,drained,true),Json);
+                }
+                catch(Exception e) when(e is IOException or InvalidDataException or InvalidOperationException or
+                    HttpRequestException or OperationCanceledException or JsonException or CryptographicException or UnauthorizedAccessException or ArgumentException)
+                {return Results.StatusCode(503);}
+                finally{gate.Release();}
+            }
+            app.MapPost("/v1/vip/node-status",(HttpContext ctx)=>NodeAction(ctx,"node-status"));
+            app.MapPost("/v1/vip/drain-node",(HttpContext ctx)=>NodeAction(ctx,"drain-node"));
+            app.MapPost("/v1/vip/activate-node",(HttpContext ctx)=>NodeAction(ctx,"activate-node"));
             await app.RunAsync();
             return 0;
         }

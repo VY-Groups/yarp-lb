@@ -62,6 +62,12 @@ if(args.Length>0 && args[0]=="--vip-redfish-provider")
     return;
 }
 
+if(args.Length>0 && args[0]=="--vip-node-agent")
+{
+    Environment.ExitCode=await VipNodeAgent.Run(args);
+    return;
+}
+
 // Privileged independent node lifecycle; not callable from traffic listeners.
 if(args.Length>0 && args[0]=="--vip-node")
 {

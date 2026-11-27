@@ -16,11 +16,12 @@ internal static class VipNodeSupervisor
         string ProbePath,string ProbeCaFile,string ProbeLeafSha256,string ProbeBodySha256);
     private static readonly JsonSerializerOptions Json=new(JsonSerializerDefaults.Web)
         {UnmappedMemberHandling=JsonUnmappedMemberHandling.Disallow};
-    internal static async Task<int> Run(string[] args)
+    internal static async Task<int> Run(string[] args,string? requiredScope=null,string? requiredPin=null,
+        string? expectedOwner=null,CancellationToken externalToken=default)
     {
         try
         {
-            if(args.Length!=4||args[2] is not ("activate" or "stop-withdraw")||
+            if(args.Length!=4||args[2] is not ("activate" or "stop-withdraw" or "owner-check" or "standby-check")||
                 !long.TryParse(args[3],NumberStyles.None,CultureInfo.InvariantCulture,out long epoch)||epoch<1)
                 throw new InvalidDataException("Usage: --vip-node <private-config> activate|stop-withdraw <epoch>");
             var config=FleetQuorum.FilePath(args[1],16384,true);
@@ -53,6 +54,8 @@ internal static class VipNodeSupervisor
             if(FleetQuorum.VipScope(service.VipFleetId!,service.Ip)!=s.Scope)
                 throw new InvalidDataException("Supervisor scope mismatch.");
             using var authority=FleetQuorum.OpenVip(service.VipQuorumConfigPath,s.Scope);
+            if((requiredScope is not null&&s.Scope!=requiredScope)||(requiredPin is not null&&authority.VipReaderPin!=requiredPin))
+                throw new InvalidDataException("Agent and supervisor identity mismatch.");
             using var ca=X509CertificateLoader.LoadCertificateFromFile(FleetQuorum.FilePath(s.ProbeCaFile,65536));
             using var handler=new HttpClientHandler{UseProxy=false,AllowAutoRedirect=false,UseCookies=false};
             byte[] pin=Convert.FromHexString(s.ProbeLeafSha256),bodyHash=Convert.FromHexString(s.ProbeBodySha256);
@@ -94,9 +97,9 @@ internal static class VipNodeSupervisor
                     VipHostAddressPlatform.Inspect(service.VipInterfaceId,address,management).Present)
                     throw new InvalidOperationException("Local withdrawal not confirmed.");
             }
-            async Task<bool> Serving(CancellationToken token)
+            async Task<bool> Serving(CancellationToken token,int attempts=12)
             {
-                for(int i=0;i<12;i++)
+                for(int i=0;i<attempts;i++)
                 {
                     token.ThrowIfCancellationRequested();
                     if(!bindingReady()||!await authority.IsVipOwner(epoch,token))return false;
@@ -113,7 +116,30 @@ internal static class VipNodeSupervisor
                 }
                 return false;
             }
-            using var deadline=new CancellationTokenSource(TimeSpan.FromSeconds(90));
+            using var deadline=CancellationTokenSource.CreateLinkedTokenSource(externalToken);
+            deadline.CancelAfter(TimeSpan.FromSeconds(90));
+            if(expectedOwner is not null&&await authority.ReadVipState(deadline.Token)!=new FleetQuorum.Fence("vip_"+expectedOwner,epoch))
+                throw new InvalidDataException("Agent request ownership changed.");
+            if(args[2]=="owner-check")
+            {
+                if(!await authority.IsVipOwner(epoch,deadline.Token))throw new InvalidDataException("Owner check identity mismatch.");
+                return await Serving(deadline.Token,1)?0:1;
+            }
+            if(args[2]=="standby-check")
+            {
+                if(expectedOwner is null||expectedOwner==authority.VipReaderPin)
+                    throw new InvalidDataException("Standby check requires the exact peer owner.");
+                var observed=VipHostAddressPlatform.Inspect(service.VipInterfaceId,address,management);
+                if(observed.Present)return 1;
+                var journalFile=Path.Combine(service.VipJournalDirectory,Convert.ToHexString(SHA256.HashData(Encoding.ASCII.GetBytes(address.ToString())))+".journal");
+                if(File.Exists(journalFile))
+                {
+                    using var journal=new VipAddressJournal(journalFile,s.Scope,service.VipInterfaceId,address.ToString(),readOnly:true);
+                    if(journal.Last?.Phase is "assign-intent" or "reassign-intent" || (journal.Last?.Epoch??0)>=epoch)return 1;
+                }
+                await Service(s.ServiceName,false,deadline.Token,checkOnly:true);
+                return 0;
+            }
             if(args[2]=="activate")
             {
                 await VipNodeLifecycle.Activate(epoch,authority.IsVipOwner,Reconcile,
@@ -138,7 +164,7 @@ internal static class VipNodeSupervisor
         {Console.Error.WriteLine("VIP node lifecycle refused or unconfirmed: "+error.GetType().Name);return 78;}
     }
 
-    private static async Task Service(string name,bool start,CancellationToken token)
+    private static async Task Service(string name,bool start,CancellationToken token,bool checkOnly=false)
     {
         ProcessStartInfo info;
         if(OperatingSystem.IsLinux())
@@ -149,14 +175,17 @@ internal static class VipNodeSupervisor
                 (File.GetUnixFileMode(tool)&(UnixFileMode.GroupWrite|UnixFileMode.OtherWrite))!=0)
                 throw new InvalidDataException("Trusted systemctl unavailable.");
             info=new ProcessStartInfo(tool);
-            foreach(var arg in new[]{start?"start":"stop","--",name})info.ArgumentList.Add(arg);
+            foreach(var arg in checkOnly?new[]{"show","--property=ActiveState,UnitFileState,LoadState","--",name}:
+                new[]{start?"start":"stop","--",name})info.ArgumentList.Add(arg);
         }
         else
         {
             const string script="""
                 $ErrorActionPreference='Stop'
                 $s=Get-Service -Name $env:GC_VIP_SERVICE
-                if($env:GC_VIP_START -eq '1'){
+                if($env:GC_VIP_CHECK -eq '1'){
+                  if($s.Status -ne 'Stopped' -or $s.StartType -ne 'Manual'){throw 'Standby service must be stopped and manual'}
+                } elseif($env:GC_VIP_START -eq '1'){
                   Start-Service -InputObject $s
                   $s.WaitForStatus('Running',[TimeSpan]::FromSeconds(20))
                 } else {
@@ -169,6 +198,7 @@ internal static class VipNodeSupervisor
                 info.ArgumentList.Add(arg);
             info.Environment["GC_VIP_SERVICE"]=name;
             info.Environment["GC_VIP_START"]=start?"1":"0";
+            info.Environment["GC_VIP_CHECK"]=checkOnly?"1":"0";
         }
         info.UseShellExecute=false;info.CreateNoWindow=true;info.RedirectStandardOutput=true;info.RedirectStandardError=true;
         using var process=Process.Start(info)??throw new InvalidOperationException("Service action unavailable.");
@@ -181,5 +211,12 @@ internal static class VipNodeSupervisor
         }
         await Task.WhenAll(output,error);
         if(process.ExitCode!=0)throw new InvalidOperationException("Service transition not confirmed.");
+        if(checkOnly&&OperatingSystem.IsLinux())
+        {
+            var lines=(await output).Split('\n',StringSplitOptions.TrimEntries|StringSplitOptions.RemoveEmptyEntries);
+            if(!lines.Contains("ActiveState=inactive")||!lines.Contains("LoadState=loaded")||
+                !(lines.Contains("UnitFileState=disabled")||lines.Contains("UnitFileState=static")))
+                throw new InvalidOperationException("Standby service must be installed, stopped and not automatically enabled.");
+        }
     }
 }
