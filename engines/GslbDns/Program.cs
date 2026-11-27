@@ -391,6 +391,18 @@ using var sigterm=OperatingSystem.IsLinux()
     ? System.Runtime.InteropServices.PosixSignalRegistration.Create(
         System.Runtime.InteropServices.PosixSignal.SIGTERM, e=>{e.Cancel=true;stop.Cancel();})
     : null;
+// Reserve both DNS transports before starting other listeners or outbound
+// health probes. On Windows, an outbound ephemeral socket could otherwise
+// consume the configured DNS port before the TCP/UDP listeners bind.
+// Do not publish a loaded configuration revision for a failed DNS bind.
+using var dnsSocket=new Socket(listen.AddressFamily,SocketType.Dgram,ProtocolType.Udp);
+var ipv6 = listen.AddressFamily == AddressFamily.InterNetworkV6;
+if (ipv6) dnsSocket.DualMode = false;
+var receiveEndpoint = new IPEndPoint(ipv6 ? IPAddress.IPv6Any : IPAddress.Any, 0);
+dnsSocket.Bind(new IPEndPoint(listen,config.ListenPort));
+using var tcpListener = new TcpListener(listen, config.ListenPort);
+if (ipv6) tcpListener.Server.DualMode = false;
+tcpListener.Start(32);
 if (reportServer is not null) await reportServer.StartAsync(stop.Token);
 if (metricsServer is not null) await metricsServer.StartAsync(stop.Token);
 // A 301/302/307/308 must NOT become healthy by redirecting readiness to a
@@ -467,14 +479,6 @@ var probes=Task.Run(async()=>{
     }
     catch(OperationCanceledException) when(stop.IsCancellationRequested){}
 });
-using var dnsSocket=new Socket(listen.AddressFamily,SocketType.Dgram,ProtocolType.Udp);
-var ipv6 = listen.AddressFamily == AddressFamily.InterNetworkV6;
-if (ipv6) dnsSocket.DualMode = false;
-var receiveEndpoint = new IPEndPoint(ipv6 ? IPAddress.IPv6Any : IPAddress.Any, 0);
-dnsSocket.Bind(new IPEndPoint(listen,config.ListenPort));
-using var tcpListener = new TcpListener(listen, config.ListenPort);
-if (ipv6) tcpListener.Server.DualMode = false;
-tcpListener.Start(32);
 using var tcpSlots = new SemaphoreSlim(32);
 var tcpPeerAdmission = config.MaxTcpSessionsPerClient == 0 ? null : new DnsTcpPeerAdmission(config.MaxTcpSessionsPerClient);
 var tcpSessions = new List<Task>();
