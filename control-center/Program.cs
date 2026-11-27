@@ -51,6 +51,11 @@ catch (Exception ex) when (ex is IOException or CryptographicException or
 // Independent local VIP authority administration, not a gateway service action.
 if(args.Length>0 && args[0]=="--vip-owner")
 {
+    if(args.Length==7&&args[3]=="inspect-policy")
+    {
+        Environment.ExitCode=VipServiceSecurity.InspectController(args);
+        return;
+    }
     if(args.Length==7&&args[3]=="recover-policy")
     {
         try{VipServiceSecurity.Controller(args);}

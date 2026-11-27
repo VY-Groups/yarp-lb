@@ -52,9 +52,37 @@ internal static class VipServiceSecurity
     }
     internal static void Client(VipMachineTransport.ClientSettings s)
     {RequireFile(s.CaFile);RequireFile(s.CertFile);RequireFile(s.KeyFile);}
+    // Local, offline and nonmutating. Run as the intended independent
+    // controller identity with the service stopped. Never claim network readiness.
+    internal static int InspectController(string[] args)
+    {
+        try
+        {
+            Controller(args);
+            var policy=VipPolicyDocument.Load(args[4],args[2]);
+            using var authority=FleetQuorum.OpenVipWriter(args[1],args[2]);
+            if(authority.VipReaderPin==policy.PreferredPin||authority.VipReaderPin==policy.OtherPin)
+                throw new InvalidDataException("Writer must be independent from gateway identities.");
+            using var provider=VipFenceProvider.Open(args[5],args[2],policy.PreferredPin,policy.OtherPin);
+            bool exists=File.Exists(args[6]);
+            using var journal=exists?new VipAutomaticJournal(args[6],args[2],policy.PreferredPin,policy.OtherPin,readOnly:true):null;
+            Console.WriteLine(JsonSerializer.Serialize(new{
+                validated=true,networkVerified=false,mutated=false,scope=policy.Scope,
+                journalExists=exists,recoveryRequired=journal?.Pending is not null,
+                lastCompletedEpoch=journal?.LastCompletedEpoch??0,
+                lastRearmAttemptEpoch=journal?.LastRearmAttemptEpoch??0,
+                pending=journal?.Pending is { } intent?new {intent.OldEpoch,intent.Kind}:null
+            }));
+            return 0;
+        }
+        catch(Exception e) when(e is IOException or InvalidDataException or InvalidOperationException or
+            UnauthorizedAccessException or ArgumentException or JsonException or System.Security.Cryptography.CryptographicException or
+            FormatException or OverflowException or PlatformNotSupportedException)
+        {Console.Error.WriteLine("VIP offline controller validation refused: "+e.GetType().Name);return 78;}
+    }
     internal static void Controller(string[] args)
     {
-        if(args.Length!=7||args[3] is not ("automatic-policy" or "recover-policy"))throw new InvalidDataException("Hosted policy command required.");
+        if(args.Length!=7||args[3] is not ("automatic-policy" or "recover-policy" or "inspect-policy"))throw new InvalidDataException("Hosted policy command required.");
         Quorum(args[1],true);RequireFile(args[4],8192);
         var p=JsonSerializer.Deserialize<VipFenceProvider.Settings>(File.ReadAllBytes(RequireFile(args[5],16384)),VipMachineTransport.Json)
             ??throw new InvalidDataException("Missing fencing provider settings.");

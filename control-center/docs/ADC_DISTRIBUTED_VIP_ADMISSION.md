@@ -149,3 +149,11 @@ The disposable real-Raft workflow now also starts the shipping gateway with a se
 ### Real browser HA policy export
 
 The same live-Raft, kernel-address fixture now opens a separate real Chromium session with the generated management client certificate, signs in through the shipping UI, accepts the privacy policy if needed, selects the journal-bound scope and fills the actual HA controls. It first requires a rejected unsafe timing submission with no download, then verifies the downloaded file byte-for-byte against the independent positive API response and SHA-256. The fixture-only browser accepts its disposable self-signed server chain; the separate Python management client continues to verify the actual CA and server name, and the server still requires the pinned client certificate. Production browser trust must be provisioned independently. No site credentials or real hardware are accessed.
+
+### Offline controller provisioning and recovery inspection
+
+Before enabling the independent controller, run under its intended service identity with the controller stopped:
+
+    GatewayCoreYarp --vip-owner <writer-config> <scope> inspect-policy <policy-file> <provider-config> <journal-file>
+
+On Windows use GatewayCoreYarp.exe. The command checks private path permissions, exact scope and policy bounds, pinned writer signing trust, independent writer identity, provider client configuration and existing journal sequence. It never creates an absent journal, edits an existing journal, opens a listener, contacts quorum/BMC or triggers a transfer. Successful output explicitly reports networkVerified=false and mutated=false, plus recoveryRequired and pending transition kind/epoch when applicable. If recoveryRequired is true, do not start automatic mode; independently inspect live authority and follow the explicit recovery procedure. This is a local provisioning check, not proof of site PKI revocation, quorum permissions, network reachability or actual hardware isolation. The real fixture checks absent and pending journal inspection and unsafe policy refusal; pure cross-platform regression verifies a read-only journal cannot commit a transition.

@@ -396,6 +396,15 @@ try:
     own(pdir,pa);own(cdir,wa)
     def writer(*args,check=True):
         return run("runuser","-u",wa,"--",executable,"--vip-owner",writer_path,scope,*args,check=check,timeout=270)
+    stage="offline-controller-preflight"
+    inspection=json.loads(writer("inspect-policy",policy,client,journal).stdout)
+    if not inspection["validated"] or inspection["networkVerified"] or inspection["mutated"] or inspection["journalExists"] or journal.exists():
+        raise AssertionError("Offline preflight created state or falsely claimed network readiness")
+    invalid_policy=put(cdir,"invalid-policy.json",dict(json.loads(policy.read_text()),pollSeconds=1))
+    own(cdir,wa)
+    if writer("inspect-policy",invalid_policy,client,journal,check=False).returncode!=78 or journal.exists():
+        raise AssertionError("Offline preflight accepted unsafe policy")
+    invalid_policy.unlink()
     stage="signed-bootstrap"
     writer("activate","-","0",first,str(expires),sig)
     initial=owner_state()
@@ -443,6 +452,11 @@ try:
         raise AssertionError("Failed activation did not preserve exact durable recovery intent")
     if power[first] or serving[first] or serving[second]:raise AssertionError("Failed transition did not fail closed")
     stage="explicit-recovery-real-quorum"
+    before_inspection=journal.read_bytes()
+    inspection=json.loads(writer("inspect-policy",policy,client,journal).stdout)
+    if (not inspection["recoveryRequired"] or inspection["pending"]["OldEpoch"]!=initial[1] or
+        inspection["mutated"] or journal.read_bytes()!=before_inspection or owner_state()!=successor):
+        raise AssertionError("Offline recovery inspection failed or changed ownership/journal")
     with lock:failure["activate"]=False
     writer("recover-policy",policy,client,journal)
     if owner_state()!=successor or not serving[second] or power[first]:

@@ -6,13 +6,14 @@ internal sealed class VipAutomaticJournal : IDisposable
     internal sealed record Transition(string Scope,string OldPin,long OldEpoch,string NewPin,string Kind,long FinalEpoch=0);
     private readonly FileStream file;
     private readonly string scope,preferred,other;
+    private readonly bool readOnly;
     internal Transition? Pending {get;private set;}
     internal long LastCompletedEpoch {get;private set;}
     internal long LastRearmAttemptEpoch {get;private set;}
-    internal VipAutomaticJournal(string path,string scope,string preferred,string other)
+    internal VipAutomaticJournal(string path,string scope,string preferred,string other,bool readOnly=false)
     {
         VipFenceProvider.ValidatePair(scope,preferred,other);
-        this.scope=scope;this.preferred=preferred;this.other=other;
+        this.scope=scope;this.preferred=preferred;this.other=other;this.readOnly=readOnly;
         if(!Path.IsPathFullyQualified(path)||!Directory.Exists(Path.GetDirectoryName(path))||
             (File.GetAttributes(Path.GetDirectoryName(path)!)&FileAttributes.ReparsePoint)!=0)
             throw new InvalidDataException("Protected absolute controller journal required.");
@@ -22,8 +23,10 @@ internal sealed class VipAutomaticJournal : IDisposable
             throw new InvalidDataException("Controller journal directory must be owner-private.");
         if(File.Exists(path)&&(File.GetAttributes(path)&FileAttributes.ReparsePoint)!=0)
             throw new InvalidDataException("Linked controller journal refused.");
-        var options=new FileStreamOptions{Mode=FileMode.OpenOrCreate,Access=FileAccess.ReadWrite,Share=FileShare.None,Options=FileOptions.WriteThrough};
-        if(OperatingSystem.IsLinux())options.UnixCreateMode=UnixFileMode.UserRead|UnixFileMode.UserWrite;
+        var options=readOnly
+            ?new FileStreamOptions{Mode=FileMode.Open,Access=FileAccess.Read,Share=FileShare.Read}
+            :new FileStreamOptions{Mode=FileMode.OpenOrCreate,Access=FileAccess.ReadWrite,Share=FileShare.None,Options=FileOptions.WriteThrough};
+        if(!readOnly&&OperatingSystem.IsLinux())options.UnixCreateMode=UnixFileMode.UserRead|UnixFileMode.UserWrite;
         file=new FileStream(path,options);
         try
         {
@@ -65,6 +68,7 @@ internal sealed class VipAutomaticJournal : IDisposable
     }
     private void Append(Transition value)
     {
+        if(readOnly)throw new InvalidOperationException("Read-only controller journal.");
         var bytes=Encoding.UTF8.GetBytes(JsonSerializer.Serialize(value)+"\n");
         if(file.Length+bytes.Length>1024*1024)throw new InvalidDataException("Controller journal full.");
         file.Write(bytes);file.Flush(true);

@@ -93,6 +93,14 @@ internal static class VipFenceContractTests
             var path=Path.Combine(dir.FullName,"journal");
             var intent=new VipAutomaticJournal.Transition(scope,oldPin,10,newPin,"failover");
             using(var journal=new VipAutomaticJournal(path,scope,oldPin,newPin))journal.Begin(intent);
+            var beforeInspection=File.ReadAllBytes(path);
+            using(var inspection=new VipAutomaticJournal(path,scope,oldPin,newPin,readOnly:true))
+            {
+                if(inspection.Pending!=intent)throw new Exception("Read-only recovery inspection lost intent");
+                try{inspection.Complete(12);throw new Exception("Read-only inspection modified journal");}
+                catch(InvalidOperationException){}
+            }
+            if(!beforeInspection.SequenceEqual(File.ReadAllBytes(path)))throw new Exception("Inspection changed journal bytes");
             using(var journal=new VipAutomaticJournal(path,scope,oldPin,newPin))
             {
                 if(journal.Pending!=intent)throw new Exception("pending transfer lost after restart");
