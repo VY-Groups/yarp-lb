@@ -1,7 +1,7 @@
 name: ADC external VIP fencing provider contracts
 on:
   pull_request:
-    paths: ["control-center/**", "tests/FleetQuorumAcceptance/**", ".github/workflows/adc-vip-fence-provider.yml"]
+    paths: ["control-center/**", "tests/FleetQuorumAcceptance/**", "ops/ha/**", ".github/workflows/adc-vip-fence-provider.yml"]
   workflow_dispatch:
 permissions:
   contents: read
@@ -17,3 +17,19 @@ jobs:
         with:
           dotnet-version: "10.0.x"
       - run: dotnet run --project tests/FleetQuorumAcceptance/FleetQuorumAcceptance.csproj -c Release -- --vip-fence-contract
+      - name: Check Linux offline service installer syntax and plan
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          bash -n ops/ha/install-vip-service.sh
+          d=$(mktemp -d)
+          touch "$d/config.json"
+          bash ops/ha/install-vip-service.sh agent /usr/bin/true "$d/config.json" root | grep 'PLAN ONLY'
+      - name: Check Windows offline service installer syntax and plan
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $config = Join-Path $env:RUNNER_TEMP 'vip-agent-plan.json'
+          Set-Content -LiteralPath $config -Value '{}'
+          $plan = & ./ops/ha/Install-VipService.ps1 -Role agent -Executable "$env:SystemRoot\System32\whoami.exe" -Config $config
+          if ($plan.Name -ne 'GatewayCoreVipNodeAgent' -or $plan.Applied) { throw 'Unexpected offline installation plan' }

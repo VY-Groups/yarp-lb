@@ -72,6 +72,8 @@ internal static class VipRedfishProvider
                 return chain.Build(cert);
             }
             var builder=WebApplication.CreateSlimBuilder(Array.Empty<string>());
+            builder.Services.AddWindowsService(o=>o.ServiceName="GatewayCoreVipFenceProvider");
+            builder.Services.Configure<HostOptions>(o=>o.ShutdownTimeout=TimeSpan.FromSeconds(120));
             builder.Configuration.Sources.Clear();
             builder.Logging.ClearProviders();
             builder.WebHost.ConfigureKestrel(options=>

@@ -32,6 +32,8 @@ internal static class VipNodeAgent
                 OperatingSystem.IsWindows()?X509KeyStorageFlags.UserKeySet:X509KeyStorageFlags.EphemeralKeySet);
             bool Allowed(X509Certificate2? leaf)=>VipMachineTransport.Pinned(leaf,ca,t.ClientPin,"1.3.6.1.5.5.7.3.2");
             var builder=WebApplication.CreateSlimBuilder(Array.Empty<string>());
+            builder.Services.AddWindowsService(o=>o.ServiceName="GatewayCoreVipNodeAgent");
+            builder.Services.Configure<HostOptions>(o=>o.ShutdownTimeout=TimeSpan.FromSeconds(120));
             builder.Configuration.Sources.Clear();builder.Logging.ClearProviders();
             builder.WebHost.ConfigureKestrel(o=>
             {

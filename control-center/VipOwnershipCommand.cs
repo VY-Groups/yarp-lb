@@ -5,7 +5,7 @@ using System.Security.Cryptography;
 // must be independently provisioned and must not run on either gateway node.
 internal static class VipOwnershipCommand
 {
-    internal static async Task<int> Run(string[] args)
+    internal static async Task<int> Run(string[] args,CancellationToken externalToken=default)
     {
         try
         {
@@ -18,7 +18,7 @@ internal static class VipOwnershipCommand
             if((args[3] is "automatic-policy" or "recover-policy")&&args.Length==7)
             {
                 var policy=VipPolicyDocument.Load(args[4],args[2]);
-                using var stop=new CancellationTokenSource();
+                using var stop=CancellationTokenSource.CreateLinkedTokenSource(externalToken);
                 ConsoleCancelEventHandler cancel=(_,eventArgs)=>{eventArgs.Cancel=true;stop.Cancel();};
                 Console.CancelKeyPress+=cancel;
                 try{await VipAutomaticController.Run(args[2],policy.PreferredPin,policy.OtherPin,args[5],args[6],
@@ -29,7 +29,7 @@ internal static class VipOwnershipCommand
             }
             if((args[3] is "automatic" or "recover-automatic")&&args.Length==9&&args[8] is "failback-on" or "failback-off")
             {
-                using var stop=new CancellationTokenSource();
+                using var stop=CancellationTokenSource.CreateLinkedTokenSource(externalToken);
                 ConsoleCancelEventHandler cancel=(_,eventArgs)=>{eventArgs.Cancel=true;stop.Cancel();};
                 Console.CancelKeyPress+=cancel;
                 try{await VipAutomaticController.Run(args[2],args[4],args[5],args[6],args[7],
