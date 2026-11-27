@@ -27,10 +27,10 @@ def check(ok,name,detail=None):
 def run(*cmd):
     return subprocess.run(cmd,check=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
 def chmod(path): path.chmod(0o600)
-def req(url,context=None,method='GET'):
+def req(url,context=None,method='GET',headers=None):
     opener=build_opener(ProxyHandler({}),HTTPSHandler(context=context or ssl.create_default_context()))
     try:
-        with opener.open(Request(url,method=method),timeout=3) as response:
+        with opener.open(Request(url,method=method,headers=headers or {}),timeout=3) as response:
             return response.status,response.read()
     except HTTPError as error:
         return error.code,error.read()
@@ -83,6 +83,12 @@ with tempfile.TemporaryDirectory(prefix='gateway-sockets-') as td:
                   'Metadata':{'ADC.VirtualServer.Id':'vip-http'},'Transforms':[{'PathSet':'/api/virtual-http'}]},
               'virtual-https':{'ClusterId':'api','Match':{'Path':'/api/{**catch-all}'},
                   'Metadata':{'ADC.VirtualServer.Id':'vip-https'},'Transforms':[{'PathSet':'/api/virtual-https'}]},
+              'restricted':{'ClusterId':'api','Match':{'Path':'/restricted'},
+                  'Metadata':{'ADC.Access.RequireHttps':'true','ADC.Access.AllowedNetworks':'127.0.0.1/32'},
+                  'Transforms':[{'PathSet':'/api/identity'}]},
+              'denied':{'ClusterId':'api','Match':{'Path':'/denied'},
+                  'Metadata':{'ADC.Access.AllowedNetworks':'192.0.2.0/24'},
+                  'Transforms':[{'PathSet':'/api/identity'}]},
               'legacy-only':{'ClusterId':'api','Match':{'Path':'/legacy-only'},'Transforms':[{'PathSet':'/api/identity'}]},
               'virtual-only':{'ClusterId':'api','Match':{'Path':'/virtual-only'},
                   'Metadata':{'ADC.VirtualServer.Id':'vip-http'},'Transforms':[{'PathSet':'/api/virtual-http'}]}},
@@ -169,6 +175,13 @@ with tempfile.TemporaryDirectory(prefix='gateway-sockets-') as td:
             check(status==404,'bound route cannot leak onto another virtual socket',status)
             status,_=req(f'http://127.0.0.3:{vip_http}/dashboard')
             check(status==403,'virtual service cannot expose management dashboard',status)
+            status,_=req(f'http://127.0.0.2:{ports[0]}/restricted',headers={'X-Forwarded-Proto':'https'})
+            check(status==403,'spoofed forwarded scheme cannot bypass TLS requirement',status)
+            status,body=req(f'https://127.0.0.2:{ports[1]}/restricted',ca_context)
+            check(status==200 and body==b'{"node":"CI"}','TLS and allowed real socket peer admitted',status)
+            status,_=req(f'https://127.0.0.2:{ports[1]}/denied',ca_context,
+                headers={'X-Forwarded-For':'192.0.2.7','Forwarded':'for=192.0.2.7'})
+            check(status==403,'spoofed source cannot bypass route network policy',status)
             check(denied('127.0.0.2',ports[2]),'admin socket unreachable on data-plane IP')
             check(denied('127.0.0.2',ports[3]),'metrics socket unreachable on data-plane IP')
             check(denied('127.0.0.1',ports[0]),'traffic socket unreachable on management IP')

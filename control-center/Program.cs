@@ -300,7 +300,8 @@ builder.Services.AddReverseProxy()
     .LoadFromConfig(builder.Configuration.GetSection("ReverseProxy"))
     .AddConfigFilter<DestinationAdmissionConfigFilter>()
     .AddConfigFilter<ActiveCompoundConfigFilter>()
-    .AddConfigFilter<SecureAffinityContract>();
+    .AddConfigFilter<SecureAffinityContract>()
+    .AddConfigFilter<ApplicationAccessFilter>();
 builder.Services.AddSingleton<Yarp.ReverseProxy.Forwarder.IForwarderHttpClientFactory, CompoundForwarderFactory>();
 CompoundProbingRequestFactory.Register(builder.Services);
 builder.Services.AddSingleton<DestinationAdmissionManager>();
@@ -2474,6 +2475,8 @@ IResult? ValidateChangePayload(JsonObject submitted)
     foreach (var (id, routeNode) in routes)
     {
         if (!ValidId(id) || routeNode is not JsonObject r) return Results.BadRequest(new { error = "Invalid route ID" });
+        if (!ApplicationAccessPolicy.Validate(r))
+            return Results.BadRequest(new { error = $"Invalid application access policy on route {id}" });
         if (r["Metadata"] is JsonObject routeMetadata && routeMetadata.ContainsKey(VirtualServiceBinding.Key) &&
             (routeMetadata[VirtualServiceBinding.Key] is not JsonValue binding || !binding.TryGetValue<string>(out var socketId) ||
              !VirtualServiceBinding.ValidId(socketId) || isolatedListeners?.HasVirtualService(socketId!) != true))
@@ -3554,6 +3557,16 @@ app.MapReverseProxy(proxyPipeline =>
     // Existing forwarded streams are not linked to ApplicationStopping.
     var stopping = app.Lifetime.ApplicationStopping;
     GatewayOpenTelemetry.UseShutdownFence(proxyPipeline, stopping);
+    proxyPipeline.Use(async (context, next) =>
+    {
+        if (!ApplicationAccessFilter.Permits(context.GetReverseProxyFeature().Route.Config, context))
+        {
+            context.Response.StatusCode = StatusCodes.Status403Forbidden;
+            GatewayOpenTelemetry.MarkLocalRejection(context, "application_access_denied");
+            return;
+        }
+        await next();
+    });
     if (peerStateJournal is not null)
         proxyPipeline.Use(async (context,next) => {
             // Telemetry only. Never use eventual peer counters for strict admission.
