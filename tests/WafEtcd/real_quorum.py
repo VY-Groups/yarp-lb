@@ -574,7 +574,9 @@ def main():
             }),encoding="ascii")
             vip_input.chmod(0o600)
             subprocess.run(["sudo","-n","env","GITHUB_ACTIONS=true","RUNNER_ENVIRONMENT=github-hosted",
-                "DOTNET_ROOT="+os.environ["DOTNET_ROOT"],sys.executable,
+                "DOTNET_ROOT="+os.environ["DOTNET_ROOT"],
+                "PLAYWRIGHT_BROWSERS_PATH="+os.environ["PLAYWRIGHT_BROWSERS_PATH"],
+                "VIP_BROWSER_NODE="+os.environ["VIP_BROWSER_NODE"],sys.executable,
                 str(ROOT/"tests/WafEtcd/real_vip_recovery.py"),str(vip_input),
                 os.environ["DP_RUNTIME_PRODUCT_DLL"]],check=True,timeout=1050)
 

@@ -223,8 +223,9 @@ def accept_live_policy(executable,scope,fleet,vip,reader,policy,expected_owner):
                 except HTTPError as err:status,raw,cache=err.code,err.read(65536),err.headers.get("Cache-Control")
                 if status!=expected:raise AssertionError("Real policy API "+method+" "+path+" status "+str(status))
                 return (json.loads(raw),cache) if status==200 else (None,cache)
+            admin_password=uuid.uuid4().hex
             api("POST","/admin/api/bootstrap",{"username":"vip-policy-admin",
-                "password":uuid.uuid4().hex,"email":"vip-policy@example.invalid"})
+                "password":admin_password,"email":"vip-policy@example.invalid"})
             session,_=api("GET","/admin/api/session");csrf=session["csrf"]
             if not session["privacyAccepted"]:
                 api("POST","/admin/api/privacy/accept",{"version":session["privacyVersion"]})
@@ -242,6 +243,16 @@ def accept_live_policy(executable,scope,fleet,vip,reader,policy,expected_owner):
                 reply["sha256"]!=hashlib.sha256(reply["json"].encode("utf-8")).hexdigest().upper() or
                 cache!="no-store"):
                 raise AssertionError("Real exported policy bytes, digest or cache contract mismatch")
+            # Use a separate real browser session: no page.route(), mocked
+            # API, injected authentication cookie or direct download helper.
+            browser_input=put(d,"browser-input.json",{
+                "origin":"https://127.0.0.1:"+str(ports[2]),
+                "certificate":str(cc),"key":str(ck),"password":admin_password,
+                "policy":policy,"expectedJson":reply["json"],"expectedSha256":reply["sha256"]})
+            try:
+                subprocess.run([os.environ["VIP_BROWSER_NODE"],str(HERE/"tests/E2E/vip-policy-live.mjs"),
+                    str(browser_input)],check=True,timeout=120)
+            finally:browser_input.unlink(missing_ok=True)
             if owner_state()!=expected_owner or journal_files[0].read_bytes()!=original_journal:
                 raise AssertionError("Policy export changed live ownership or address journal")
             print("PASS: real journal-bound gateway + actual Raft + kernel VIP + mTLS administrator: positive audited policy export, digest and negative scope/CSRF/timing checks",flush=True)

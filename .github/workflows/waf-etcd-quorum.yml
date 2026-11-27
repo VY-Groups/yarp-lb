@@ -32,6 +32,24 @@ jobs:
           echo "ETCD_IMAGE=$selected" >> "$GITHUB_ENV"
       - name: Verify actual HTTP fixed-length and chunked fixture framing
         run: python3 tests/WafEtcd/test_vip_http_body.py
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install pinned browser for live HA policy acceptance
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install --prefix tests/E2E --no-package-lock --ignore-scripts
+          export PLAYWRIGHT_BROWSERS_PATH="$RUNNER_TEMP/gc-vip-chromium"
+          for attempt in 1 2 3; do
+            if (cd tests/E2E && timeout --kill-after=15s 120s npx --no-install playwright install chromium); then
+              echo "PLAYWRIGHT_BROWSERS_PATH=$PLAYWRIGHT_BROWSERS_PATH" >> "$GITHUB_ENV"
+              echo "VIP_BROWSER_NODE=$(command -v node)" >> "$GITHUB_ENV"
+              exit 0
+            fi
+            if [ "$attempt" -eq 3 ]; then exit 1; fi
+            sleep "$((attempt * 10))"
+          done
       - name: Run disposable real mTLS etcd consensus and failure acceptance
         shell: bash
         run: |
