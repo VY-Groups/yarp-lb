@@ -50,3 +50,7 @@ On the isolated writer host only, configure a separate owner-private JSON file w
     dotnet GatewayCoreYarp.dll --vip-owner <writer-config> <scope> resume-transfer <old-pin> <revoked-epoch> <new-pin> <provider-config>
 
 The command first verifies the exact active revision, revokes by CAS, confirms the persistent revoked state, then requests a signed permit over mTLS. Only a matching fresh response and the existing independent signature verification permit successor activation. Any failure leaves the ownership denied or unconfirmed; observe before explicit resume, never force rollback. This does not automatically decide failure, provision the successor address/listener epoch, or start services. Pure negative contract tests cover failed provider, exact resume and mismatched permit; live provider, multi-host failover and physical acceptance remain outstanding.
+
+### Distributed runtime address validation and planned drain acceptance
+
+A distributed VIP must be observed exactly once with the actuator's /32 or /128 prefix on a non-loopback, non-tunnel, up interface without a default gateway. A confirmed quorum owner does not override invalid local address state. A real isolated socket fixture exercises administrator mTLS bootstrap, CSRF rejection, address-wide drain across two sockets, completion of admitted streams, zero active counts, process restart with persistent drain, and explicit resume, followed by emergency withdrawal. These tests do not replace external hardware or multi-host acceptance.

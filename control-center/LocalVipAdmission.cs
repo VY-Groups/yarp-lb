@@ -103,8 +103,21 @@ internal sealed class LocalVipAdmission : BackgroundService
             statuses.Add(id, snapshot.Truncated ? "incomplete-observation" :
                 NetworkObservation.ObserveVirtualAddress(id, ip, 0, "", snapshot).Status);
         foreach(var id in authorities.Keys)
-            if(statuses[id]=="present-interface-up" && (confirmed is null || !confirmed.TryGetValue(id,out var allowed) || !allowed))
+        {
+            if(statuses[id]!="present-interface-up")continue;
+            var address=System.Net.IPAddress.Parse(required[id]);
+            int prefix=address.AddressFamily==AddressFamily.InterNetworkV6?128:32;
+            var entries=snapshot.Interfaces.SelectMany(n=>n.Addresses.Select(a=>(Nic:n,Address:a)))
+                .Where(x=>System.Net.IPAddress.TryParse(x.Address.Address,out var observed)&&address.Equals(observed)).ToArray();
+            // Quorum is necessary but cannot legitimize an ambiguous, non-ready,
+            // or non-host-prefix assignment on a distributed VIP.
+            if(entries.Length!=1||entries[0].Address.PrefixLength!=prefix||!entries[0].Address.Ready||
+                entries[0].Nic.Truncated||entries[0].Nic.DefaultGateways.Length!=0||
+                entries[0].Nic.Type is "Loopback" or "Tunnel")
+                statuses[id]="distributed-address-invalid";
+            else if(confirmed is null||!confirmed.TryGetValue(id,out var allowed)||!allowed)
                 statuses[id]="quorum-ownership-unconfirmed";
+        }
         RequestLease[] invalid;
         lock(lifecycle)
         {

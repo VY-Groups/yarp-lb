@@ -41,6 +41,17 @@ internal static class LocalVipAdmissionTests
         Must(!gate.Allows("guarded"),"failed observation closes admission");
         using var quorumGate=new LocalVipAdmission([("guarded","192.0.2.10")],clock,
             new(){{"guarded",_=>Task.FromResult(true)}});
+        var confirmed=new Dictionary<string,bool>{{"guarded",true}};
+        quorumGate.Refresh(clock.Now,snapshot,confirmed);
+        Must(!quorumGate.Allows("guarded"),"quorum cannot authorize an incorrect host prefix");
+        row=row with{Addresses=[new("192.0.2.10",32)]};
+        snapshot=snapshot with{Interfaces=[row]};
+        quorumGate.Refresh(clock.Now,snapshot with{Interfaces=[row with{DefaultGateways=["192.0.2.1"]}]},confirmed);
+        Must(!quorumGate.Allows("guarded"),"quorum cannot authorize a default-route interface");
+        quorumGate.Refresh(clock.Now,snapshot with{Interfaces=[row with{Type="Loopback"}]},confirmed);
+        Must(!quorumGate.Allows("guarded"),"quorum cannot authorize a loopback interface");
+        quorumGate.Refresh(clock.Now,snapshot with{Interfaces=[row with{Addresses=[new("192.0.2.10",32),new("192.0.2.10",32)]}]},confirmed);
+        Must(!quorumGate.Allows("guarded"),"quorum cannot authorize duplicate address records");
         quorumGate.Refresh(clock.Now,snapshot);
         Must(!quorumGate.Allows("guarded"),"local address alone cannot authorize distributed VIP");
         quorumGate.Refresh(clock.Now,snapshot,new Dictionary<string,bool>{{"guarded",true}});
