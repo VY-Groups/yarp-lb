@@ -3572,6 +3572,15 @@ app.MapReverseProxy(proxyPipeline =>
             GatewayOpenTelemetry.MarkLocalRejection(context, "application_access_denied");
             return;
         }
+        if (!ApplicationAccessFilter.PermitsMethod(context.GetReverseProxyFeature().Route.Config,
+            context.Request.Method, out var allow))
+        {
+            context.Response.StatusCode = StatusCodes.Status405MethodNotAllowed;
+            context.Response.Headers.Allow = allow;
+            context.Response.Headers.CacheControl = "no-store";
+            GatewayOpenTelemetry.MarkLocalRejection(context, "traffic_method_denied");
+            return;
+        }
         await next();
     });
     if (peerStateJournal is not null)

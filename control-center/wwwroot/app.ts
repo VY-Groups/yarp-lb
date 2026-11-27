@@ -143,17 +143,25 @@ function editApplicationAccess(id: string) {
         return;
     const route = data.routes[id];
     const meta = route.Metadata || {};
-    modal('Application access policy', 'Restrict this route using actual connection source networks and TLS. Forwarded headers are not trusted. This is not user authentication. Empty allowlist permits all peers. Public asset compression is HTTP-only and excludes private or authenticated traffic.', [
+    modal('Application access policy', 'Restrict this route using actual connection source networks and TLS. Forwarded headers are not trusted. This is not user authentication. Empty allowlist permits all peers. Public asset compression is HTTP-only and excludes private or authenticated traffic. Method restrictions reject traffic on this selected route before forwarding.', [
         { name: 'tls', label: 'Require HTTPS', value: meta['ADC.Access.RequireHttps'] || 'false', options: ['false', 'true'] },
         { name: 'networks', label: 'Allowed CIDRs (comma separated, optional)', value: meta['ADC.Access.AllowedNetworks'] || '', optional: true },
-        { name: 'compression', label: 'Public HTTP asset compression', value: meta['ADC.Acceleration.PublicHttpCompression'] || 'false', options: ['false', 'true'] }
+        { name: 'compression', label: 'Public HTTP asset compression', value: meta['ADC.Acceleration.PublicHttpCompression'] || 'false', options: ['false', 'true'] },
+        { name: 'methods', label: 'Allowed HTTP methods (comma separated, optional)', value: meta['ADC.Traffic.AllowedMethods'] || '', optional: true }
     ], v => {
         const networks: string = v.networks.trim();
         if (!['true', 'false'].includes(v.tls) || networks.length > 2048 || (networks && (networks.split(',').length > 32 || networks.split(',').some(part => !/^[0-9a-fA-F:.]+\/[0-9]{1,3}$/.test(part.trim())))))
             throw Error('Use at most 32 IPv4/IPv6 CIDRs. The server validates address and prefix semantics.');
         if (!['true', 'false'].includes(v.compression) || (v.compression === 'true' && v.tls === 'true'))
             throw Error('Public HTTP compression cannot be combined with Require HTTPS.');
+        const methods: string = v.methods.trim();
+        const allowed = methods ? methods.split(',').map(method => method.trim()) : [];
+        if (methods.length > 64 || allowed.length > 7 || new Set(allowed).size !== allowed.length || allowed.some(method => !['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'].includes(method)))
+            throw Error('Use distinct uppercase HTTP methods: GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS.');
         const metadata = { ...meta };
+        delete metadata['ADC.Traffic.AllowedMethods'];
+        if (allowed.length)
+            metadata['ADC.Traffic.AllowedMethods'] = allowed.join(',');
         delete metadata['ADC.Acceleration.PublicHttpCompression'];
         if (v.compression === 'true')
             metadata['ADC.Acceleration.PublicHttpCompression'] = 'true';

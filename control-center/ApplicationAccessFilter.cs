@@ -16,6 +16,15 @@ public sealed class ApplicationAccessFilter : IProxyConfigFilter
         var entry = Get(route);
         return entry.Valid && entry.Policy.Permits(context.Request.IsHttps, context.Connection.RemoteIpAddress);
     }
+    public static bool PermitsMethod(RouteConfig route, string method, out string allow)
+    {
+        var entry = Get(route);
+        allow = "";
+        if (!entry.Valid) return false;
+        if (entry.Policy.PermitsMethod(method)) return true;
+        allow = string.Join(", ", entry.Policy.AllowedMethods!);
+        return false;
+    }
     public ValueTask<ClusterConfig> ConfigureClusterAsync(ClusterConfig cluster, CancellationToken cancel) =>
         ValueTask.FromResult(cluster);
     public ValueTask<RouteConfig> ConfigureRouteAsync(RouteConfig route, ClusterConfig? cluster, CancellationToken cancel)

@@ -1095,7 +1095,7 @@ def acceptance(base:str,https_base:str,origin_port:int):
     payload = {key:snapshot[key] for key in ("routes","clusters","disabled","revision")}
     payload["routes"]["compression-fixture"] = {
         "ClusterId":"fixture","Match":{"Path":"/adc-compression/{**catch-all}"},
-        "Metadata":{"ADC.Acceleration.PublicHttpCompression":"true"}}
+        "Metadata":{"ADC.Acceleration.PublicHttpCompression":"true","ADC.Traffic.AllowedMethods":"GET,HEAD"}}
     pending = operator.request("POST","/admin/api/change-requests",
         {"reason":"Public HTTP compression fixture","payload":payload})
     reviewer.request("POST",f"/admin/api/change-requests/{pending['id']}/decision",
@@ -1110,6 +1110,10 @@ def acceptance(base:str,https_base:str,origin_port:int):
         check(response.status_code==200 and response.headers.get("content-encoding")=="gzip" and
               response.content==expected and "accept-encoding" in response.headers.get("vary","").lower(),
               "real gateway gzip public asset and decoded body")
+        denied = compression_client.post(url,content=b"must never reach origin",headers={"Accept-Encoding":"identity"})
+        check(denied.status_code==405 and denied.headers.get("allow")=="GET, HEAD" and
+              denied.headers.get("cache-control")=="no-store",
+              "selected route method policy rejects POST before upstream (fixture origin would return 404)")
         for target, headers in (
             (url, {"Accept-Encoding":"identity"}),
             (url, {"Accept-Encoding":"gzip","Authorization":"Bearer fixture"}),
