@@ -163,6 +163,7 @@ internal static class VipAutomaticController
         using var journal=new VipAutomaticJournal(journalPath,scope,preferred,other);
         settings??=VipPolicyDocument.Default(scope,preferred,other,failback);
         settings.Validate(scope);
+        Console.Error.WriteLine("VIP controller opened durable transition journal.");
         if(settings.PreferredPin!=preferred||settings.OtherPin!=other||settings.FailbackEnabled!=failback)
             throw new InvalidDataException("HA policy identity mismatch.");
         var policy=new VipAutomaticPolicy(TimeProvider.System,settings);

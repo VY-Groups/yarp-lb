@@ -99,7 +99,7 @@ def wait_closed(port):
 try:
     if installed(GATEWAY) or installed(AGENT): raise AssertionError("Existing service; refuse mutation")
     if WIN:
-        run("icacls",root,"/inheritance:r","/grant:r","*S-1-5-18:(OI)(CI)F","*S-1-5-32-544:(OI)(CI)F")
+        run("pwsh","-NoProfile","-File",HERE/"Set-VipFixtureAcl.ps1","-Directory",root,"-Identity","NT AUTHORITY\\SYSTEM")
     else: root.chmod(0o700)
     ca=root/"ca.pem"; cak=root/"ca.key"
     openssl("req","-x509","-newkey","rsa:2048","-nodes","-days","1","-subj","/CN=Disposable VIP CA","-addext","basicConstraints=critical,CA:TRUE","-addext","keyUsage=critical,keyCertSign,cRLSign","-keyout",cak,"-out",ca)
@@ -136,6 +136,7 @@ try:
         write("supervisor.json",json.dumps({"serviceName":GATEWAY+".service"}))
         created.append(AGENT)
         run("bash",HERE/"install-vip-service.sh","agent",EXE,config,"root","--apply")
+    if WIN: run("pwsh","-NoProfile","-File",HERE/"Set-VipFixtureAcl.ps1","-Directory",root,"-Identity","NT AUTHORITY\\SYSTEM")
     # Use the very same shipping executable/config before SCM startup to expose
     # safe stage diagnostics. This never substitutes for the installed test.
     process=subprocess.Popen([str(EXE),"--vip-node-agent",str(config)],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)

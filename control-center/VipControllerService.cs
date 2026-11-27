@@ -7,12 +7,13 @@ internal static class VipControllerService
 {
     internal static async Task<int> Run(string[] args)
     {
-        var builder=Host.CreateApplicationBuilder(Array.Empty<string>());
+        var builder=Host.CreateApplicationBuilder(new HostApplicationBuilderSettings
+            {Args=Array.Empty<string>(),ContentRootPath=AppContext.BaseDirectory});
         builder.Configuration.Sources.Clear();
         builder.Services.AddWindowsService(o=>o.ServiceName="GatewayCoreVipController");
         builder.Services.Configure<HostOptions>(o=>o.ShutdownTimeout=TimeSpan.FromSeconds(90));
         int result=78;
-        builder.Services.AddHostedService(sp=>new Worker(args,sp.GetRequiredService<IHostApplicationLifetime>(),code=>result=code));
+        builder.Services.AddSingleton<IHostedService>(sp=>new Worker(args,sp.GetRequiredService<IHostApplicationLifetime>(),code=>result=code));
         using var host=builder.Build();
         await host.RunAsync();return result;
     }
@@ -23,10 +24,12 @@ internal static class VipControllerService
             try
             {
                 // The hosted controller accepts only its installed bounded policy mode.
+                Console.Error.WriteLine("VIP controller validating installed configuration.");
                 VipServiceSecurity.Controller(args);
+                Console.Error.WriteLine("VIP controller configuration accepted; opening durable authority.");
                 completed(await VipOwnershipCommand.Run(args,stoppingToken));
             }
-            catch(Exception e) when(e is IOException or InvalidDataException or InvalidOperationException or UnauthorizedAccessException or ArgumentException or System.Text.Json.JsonException)
+            catch(Exception e) when(e is IOException or InvalidDataException or InvalidOperationException or UnauthorizedAccessException or ArgumentException or System.Text.Json.JsonException or System.Security.Cryptography.CryptographicException)
             {Console.Error.WriteLine("VIP controller startup refused: "+e.GetType().Name);completed(78);}
             finally{lifetime.StopApplication();}
         }

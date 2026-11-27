@@ -32,7 +32,7 @@ def temp(prefix):
     p=Path(tempfile.mkdtemp(prefix=prefix,dir=parent))
     roots.append(p)
     if WIN:
-        run("icacls",p,"/inheritance:r","/grant:r","*S-1-5-18:(OI)(CI)F","*S-1-5-32-544:(OI)(CI)F")
+        run("pwsh","-NoProfile","-File",HERE/"Set-VipFixtureAcl.ps1","-Directory",p,"-Identity","NT AUTHORITY\\SYSTEM")
     else: p.chmod(0o700)
     return p
 def write(directory,name,value):
@@ -101,7 +101,7 @@ def account(role):
     users.append(name); return name
 def protect(directory,identity):
     if WIN:
-        run("icacls",directory,"/grant:r",identity+":(OI)(CI)F","/T")
+        run("pwsh","-NoProfile","-File",HERE/"Set-VipFixtureAcl.ps1","-Directory",directory,"-Identity",identity)
     else:
         run("chown","-R",identity,directory)
         directory.chmod(0o700)
@@ -212,6 +212,7 @@ try:
     start(PROVIDER);wait(provider_ready,"Provider did not recover after credential restoration")
     print("PASS: installed independent provider, pinned mTLS, empty journal restart, exposed signing key refusal and restoration",flush=True)
     def controller_ready(): return active(CONTROLLER) and journal.exists()
+    if not WIN: print(run("systemctl","show",CONTROLLER+".service","-p","ExecStart","-p","User").stdout,flush=True)
     start(CONTROLLER);wait(controller_ready,"Installed writer did not open durable journal")
     time.sleep(6)
     if not active(CONTROLLER): raise AssertionError("Controller did not survive unavailable quorum")

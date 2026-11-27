@@ -39,7 +39,7 @@ internal static class VipServiceSecurity
     {RequireFile(s.CaFile);RequireFile(s.CertFile);RequireFile(s.KeyFile);}
     internal static void Controller(string[] args)
     {
-        if(args.Length!=7||args[3]!="automatic-policy")throw new InvalidDataException("Hosted policy command required.");
+        if(args.Length!=7||args[3] is not ("automatic-policy" or "recover-policy"))throw new InvalidDataException("Hosted policy command required.");
         Quorum(args[1],true);RequireFile(args[4],8192);
         var p=JsonSerializer.Deserialize<VipFenceProvider.Settings>(File.ReadAllBytes(RequireFile(args[5],16384)),VipMachineTransport.Json)
             ??throw new InvalidDataException("Missing fencing provider settings.");
