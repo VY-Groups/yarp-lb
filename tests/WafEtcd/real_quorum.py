@@ -19,6 +19,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import traceback
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "ops" / "waf"))
@@ -605,7 +606,19 @@ if __name__ == "__main__":
     try:
         main()
     except (OSError, ValueError, KeyError, RuntimeError,
-            subprocess.SubprocessError, ssl.SSLError, http.client.HTTPException):
+            subprocess.SubprocessError, ssl.SSLError, http.client.HTTPException) as error:
         print("FAIL: real isolated three-member etcd quorum test at "+STAGE,
               file=sys.stderr)
-        raise SystemExit(1)
+        # Never print exception messages, command arguments, response bodies,
+        # child output or local variables: they may contain credentials.
+        # Repository-relative source locations and exception type are enough
+        # to distinguish failed assertions from subprocess/transport failures.
+        print("Failure type: "+type(error).__name__, file=sys.stderr)
+        for frame in traceback.extract_tb(error.__traceback__):
+            source = Path(frame.filename).resolve()
+            if source.is_relative_to(ROOT):
+                print("Failure location: "+source.relative_to(ROOT).as_posix()
+                      +":"+str(frame.lineno), file=sys.stderr)
+        if isinstance(error, subprocess.CalledProcessError):
+            print("Child exit status: "+str(error.returncode), file=sys.stderr)
+        raise SystemExit(1) from None
