@@ -5,6 +5,8 @@
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="Yarp.ReverseProxy" Version="2.3.0" />
+    <Compile Include="../../LocalNetworkInventory.cs" Link="LocalNetworkInventory.cs" />
+    <Compile Include="../../NetworkObservation.cs" Link="NetworkObservation.cs" />
     <Compile Include="../../ExpiringCookieAffinityPolicy.cs" Link="ExpiringCookieAffinityPolicy.cs" />
     <Compile Include="../../SecureAffinityDraft.cs" Link="SecureAffinityDraft.cs" />
     <Compile Include="../../SecureAffinityContract.cs" Link="SecureAffinityContract.cs" />

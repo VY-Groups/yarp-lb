@@ -938,6 +938,9 @@ def acceptance(base:str,https_base:str,origin_port:int):
         check(net_snapshot["platform"]=="Linux" and isinstance(net_snapshot["interfaces"],list) and
               any(i["type"]=="Loopback" and any(a["address"]=="127.0.0.1" and a["prefixLength"]==8 for a in i["addresses"]) for i in net_snapshot["interfaces"]),
               "authorized live OS network snapshot includes loopback prefix")
+        check(net_snapshot["vlans"]["status"] in ("observed","kernel-inventory-unavailable","unavailable","truncated","invalid-kernel-inventory") and
+              isinstance(net_snapshot["vlans"]["interfaces"],list) and isinstance(net_snapshot["virtualAddresses"],list),
+              "live Linux VLAN observation and virtual socket evidence are explicit")
     operator.request("POST","/admin/api/network/interfaces",{},expect=405)
     viewer.request("POST","/admin/api/inventory",{"id":"bad"},expect=403)
     operator.request("POST","/admin/api/users",{"username":"bad"},expect=403)
