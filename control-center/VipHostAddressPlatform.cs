@@ -55,9 +55,14 @@ internal static class VipHostAddressPlatform
         {
             if(!Regex.IsMatch(current.Name,@"\A[A-Za-z0-9_.-]{1,15}\z") || current.Name.StartsWith('-'))
                 throw new InvalidDataException("Unsupported Linux interface name.");
-            const string binary="/usr/sbin/ip";
-            PrivateKeyFileSecurity.ValidateLinuxTrustedExecutableDirectory("/usr/sbin","VIP address tool");
-            var resolved=File.ResolveLinkTarget(binary,true)?.FullName??binary;
+            // Ubuntu's iproute2 can expose /usr/sbin/ip -> /bin/ip with /bin
+            // itself a merged-usr link. Choose the actual installed regular
+            // executable in an allowlisted canonical directory, never a PATH
+            // lookup or an arbitrary symlink target.
+            var resolved=new[]{"/usr/bin/ip","/usr/sbin/ip"}
+                .FirstOrDefault(candidate=>File.Exists(candidate) &&
+                    (File.GetAttributes(candidate)&FileAttributes.ReparsePoint)==0)
+                ??throw new InvalidDataException("Canonical iproute2 executable unavailable.");
             PrivateKeyFileSecurity.ValidateLinuxTrustedExecutableDirectory(Path.GetDirectoryName(resolved)!,"VIP address tool");
             if((File.GetUnixFileMode(resolved)&(UnixFileMode.GroupWrite|UnixFileMode.OtherWrite))!=0)
                 throw new InvalidDataException("Untrusted IP executable.");
