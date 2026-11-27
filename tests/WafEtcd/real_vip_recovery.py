@@ -46,6 +46,8 @@ def wait(predicate,label,seconds=90):
         try:
             if predicate(): return
         except (OSError,http.client.HTTPException): pass
+        except RuntimeError as error:
+            if str(error)!="Disposable quorum request denied":raise
         time.sleep(.3)
     raise AssertionError(label)
 def private_dir(name):
