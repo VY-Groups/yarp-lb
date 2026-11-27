@@ -47,5 +47,42 @@ internal static class LocalVipAdmissionTests
         Must(quorumGate.Allows("guarded"),"local and exact quorum observation required");
         quorumGate.Refresh(clock.Now,snapshot,new Dictionary<string,bool>{{"guarded",false}});
         Must(!quorumGate.Allows("guarded"),"lost ownership closes guarded socket");
+        clock.Now=4000;
+        quorumGate.Refresh(clock.Now,snapshot,new Dictionary<string,bool>{{"guarded",true}});
+        int aborted=0;
+        Must(quorumGate.TryEnter("guarded",()=>aborted++,out var completed),"fresh request tracked");
+        completed!.Dispose();
+        Must(quorumGate.TryEnter("guarded",()=>aborted++,out var active),"second request tracked");
+        Must(quorumGate.Active("guarded")==1,"in-flight count excludes completed request");
+        clock.Now=7000;
+        quorumGate.Sweep();
+        quorumGate.Sweep();
+        Must(aborted==1&&!quorumGate.TryEnter("guarded",()=>{},out _),"stale watchdog aborts once and rejects new traffic");
+        active!.Dispose();
+        Must(quorumGate.Active("guarded")==0,"aborted pipeline completion releases slot");
+        quorumGate.Refresh(clock.Now,snapshot,new Dictionary<string,bool>{{"guarded",true}});
+        Must(quorumGate.TryEnter("guarded",()=>aborted++,out active),"recovered admission");
+        quorumGate.Refresh(clock.Now,snapshot,new Dictionary<string,bool>{{"guarded",false}});
+        Must(aborted==2,"ownership denial aborts immediately");
+        active!.Dispose();
+        quorumGate.Refresh(clock.Now,snapshot,new Dictionary<string,bool>{{"guarded",true}});
+        Must(quorumGate.TryEnter("guarded",()=>aborted++,out active),"fresh request after denial");
+        clock.Now=10000;
+        quorumGate.Refresh(clock.Now,snapshot,new Dictionary<string,bool>{{"guarded",true}});
+        Must(aborted==3,"fresh sample cannot hide expired earlier authorization");
+        active!.Dispose();
+        var leases=new List<IDisposable>();
+        try
+        {
+            for(int i=0;i<4096;i++)
+            {
+                MustQuiet(quorumGate.TryEnter("guarded",()=>{},out var item));
+                leases.Add(item!);
+            }
+            Must(!quorumGate.TryEnter("guarded",()=>{},out _),"bounded per-socket tracking");
+        }
+        finally {foreach(var item in leases)item.Dispose();}
+        Must(quorumGate.Active("guarded")==0,"all tracked slots released");
+        static void MustQuiet(bool ok){if(!ok)throw new Exception("VIP request tracking refused early");}
     }
 }

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Real socket validation of the shipping .NET 10 Control Center; disposable CI only."""
 import argparse
+import http.client
 import json
 import os
 import secrets
@@ -59,7 +60,16 @@ def pfx(root,name,key,crt,ca):
     chmod(output);return output,passfile
 
 class Backend(BaseHTTPRequestHandler):
+    release_stream=threading.Event()
     def do_GET(self):
+        if self.path == '/api/virtual-stream':
+            self.send_response(200);self.send_header('Content-Length','10');self.end_headers()
+            try:
+                self.wfile.write(b'first');self.wfile.flush()
+                self.release_stream.wait(15)
+                self.wfile.write(b'last!');self.wfile.flush()
+            except (BrokenPipeError,ConnectionResetError):pass
+            return
         if self.path == '/health/ready': status,body=200,b'ok'
         elif self.path == '/api/identity': status,body=200,b'{"node":"CI"}'
         elif self.path == '/api/virtual-http': status,body=200,b'virtual-http'
@@ -105,6 +115,9 @@ with tempfile.TemporaryDirectory(prefix='gateway-sockets-') as td:
             fixture['ReverseProxy']['Routes']['guarded-vip']={'ClusterId':'api',
                 'Match':{'Path':'/api/{**catch-all}'},'Metadata':{'ADC.VirtualServer.Id':'vip-guarded'},
                 'Transforms':[{'PathSet':'/api/virtual-http'}]}
+            fixture['ReverseProxy']['Routes']['guarded-stream']={'ClusterId':'api',
+                'Match':{'Path':'/stream'},'Metadata':{'ADC.VirtualServer.Id':'vip-guarded'},
+                'Transforms':[{'PathSet':'/api/virtual-stream'}]}
             appconfig.write_text(json.dumps(fixture))
         chmod(appconfig)
         ca_key=root/'ca.key';ca_crt=root/'ca.crt'
@@ -191,12 +204,26 @@ with tempfile.TemporaryDirectory(prefix='gateway-sockets-') as td:
                     return status,body
                 check(await_status(503)[0]==503,'guarded virtual socket refuses unassigned loopback IP')
                 run('sudo','-n','ip','address','add','127.0.0.4/32','dev','lo')
+                connection=http.client.HTTPConnection('127.0.0.4',guarded_port,timeout=7)
                 try:
-                    status,body=await_status(200)
-                    check(status==200 and body==b'virtual-http','fresh assigned local VIP admits real proxy traffic')
+                    try:
+                        status,body=await_status(200)
+                        check(status==200 and body==b'virtual-http','fresh assigned local VIP admits real proxy traffic')
+                        connection.request('GET','/stream')
+                        response=connection.getresponse()
+                        check(response.status==200 and response.read(5)==b'first','real guarded stream is in flight')
+                    finally:
+                        run('sudo','-n','ip','address','del','127.0.0.4/32','dev','lo')
+                    aborted=False
+                    try:
+                        response.read()
+                    except (http.client.IncompleteRead,ConnectionResetError,ConnectionAbortedError):
+                        aborted=True
+                    check(aborted,'withdrawal aborts in-flight response before backend completion')
+                    check(await_status(503)[0]==503,'withdrawn VIP closes new requests on still-bound socket')
                 finally:
-                    run('sudo','-n','ip','address','del','127.0.0.4/32','dev','lo')
-                check(await_status(503)[0]==503,'withdrawn VIP closes new requests on still-bound socket')
+                    Backend.release_stream.set()
+                    connection.close()
             status,body=req(f'http://127.0.0.2:{ports[0]}/api/identity')
             check(status==200 and body==b'{"node":"CI"}','legacy listener still selects unbound route')
             status,_=req(f'http://127.0.0.3:{vip_http}/legacy-only')
