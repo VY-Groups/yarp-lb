@@ -44,7 +44,16 @@ jobs:
       - run: python tests/GslbAcceptance/ipv6_transport.py
       - name: Install independent DNS clients
         if: runner.os == 'Linux'
-        run: sudo apt-get update -qq && sudo apt-get install -y dnsutils knot-dnsutils
+        run: |
+          set -euo pipefail
+          # These clients come from the signed Ubuntu archive, not third-party
+          # Microsoft/runner repositories. Do not disable signature checks.
+          test -r /etc/apt/sources.list.d/ubuntu.sources
+          apt_source=(-o Dir::Etc::sourcelist=/etc/apt/sources.list.d/ubuntu.sources -o Dir::Etc::sourceparts=- -o Acquire::Retries=3)
+          sudo apt-get "${apt_source[@]}" update -qq
+          sudo apt-get "${apt_source[@]}" install -y dnsutils knot-dnsutils
+          command -v dig
+          command -v kdig
       - name: Validate DNSSEC signatures and denial proofs independently
         if: runner.os == 'Linux'
         run: |

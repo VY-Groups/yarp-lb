@@ -135,6 +135,7 @@ public static class EngineConfigContract
                 !Num(config["ProbeIntervalSeconds"],1,60) ||
                 (config.TryGetPropertyValue("MaxUdpQueriesPerSecond", out var aggregate) &&
                  !Num(aggregate,0,0) && !Num(aggregate,20,200000)) ||
+                (config.TryGetPropertyValue("MaxTcpSessionsPerClient", out var tcpPeerLimit) && !Num(tcpPeerLimit,0,32)) ||
                 (config.TryGetPropertyValue("BlockedResolverCidrs", out var blockedResolvers) &&
                  !ValidBlockedResolvers(blockedResolvers)) ||
                 (config.TryGetPropertyValue("GroupIpv6UdpClientsByPrefix", out var groupIpv6) &&

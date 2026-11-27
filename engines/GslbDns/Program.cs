@@ -42,6 +42,7 @@ if (!IPAddress.TryParse(config.ListenHost, out var listen) ||
     config.ProbeIntervalSeconds is < 1 or > 60 ||
     config.MaxResponsesPerSecondPerClient is < 20 or > 20000 ||
     (config.MaxUdpQueriesPerSecond != 0 && config.MaxUdpQueriesPerSecond is < 20 or > 200000) ||
+    config.MaxTcpSessionsPerClient is < 0 or > 32 ||
     config.MaxConcurrentHealthProbes is < 1 or > 128 ||
     config.MetricsListenPort is < 0 or > 65535 ||
     config.Zones is not { Length: >= 1 and <= 64 })
@@ -390,6 +391,23 @@ using var sigterm=OperatingSystem.IsLinux()
     ? System.Runtime.InteropServices.PosixSignalRegistration.Create(
         System.Runtime.InteropServices.PosixSignal.SIGTERM, e=>{e.Cancel=true;stop.Cancel();})
     : null;
+// Reserve both DNS transports before starting other listeners or outbound
+// health probes. On Windows, an outbound ephemeral socket could otherwise
+// consume the configured DNS port before the TCP/UDP listeners bind.
+// Do not publish a loaded configuration revision for a failed DNS bind.
+using var dnsSocket=new Socket(listen.AddressFamily,SocketType.Dgram,ProtocolType.Udp);
+var ipv6 = listen.AddressFamily == AddressFamily.InterNetworkV6;
+if (ipv6) dnsSocket.DualMode = false;
+var receiveEndpoint = new IPEndPoint(ipv6 ? IPAddress.IPv6Any : IPAddress.Any, 0);
+// Windows delivers ICMP port-unreachable notifications as WSAECONNRESET
+// on unconnected UDP sockets. An abandoned DNS client must not stop the
+// entire authority. Disable only this asynchronous Winsock notification.
+if (OperatingSystem.IsWindows())
+    dnsSocket.IOControl(unchecked((int)0x9800000C), new byte[4], null); // SIO_UDP_CONNRESET
+dnsSocket.Bind(new IPEndPoint(listen,config.ListenPort));
+using var tcpListener = new TcpListener(listen, config.ListenPort);
+if (ipv6) tcpListener.Server.DualMode = false;
+tcpListener.Start(32);
 if (reportServer is not null) await reportServer.StartAsync(stop.Token);
 if (metricsServer is not null) await metricsServer.StartAsync(stop.Token);
 // A 301/302/307/308 must NOT become healthy by redirecting readiness to a
@@ -466,15 +484,8 @@ var probes=Task.Run(async()=>{
     }
     catch(OperationCanceledException) when(stop.IsCancellationRequested){}
 });
-using var dnsSocket=new Socket(listen.AddressFamily,SocketType.Dgram,ProtocolType.Udp);
-var ipv6 = listen.AddressFamily == AddressFamily.InterNetworkV6;
-if (ipv6) dnsSocket.DualMode = false;
-var receiveEndpoint = new IPEndPoint(ipv6 ? IPAddress.IPv6Any : IPAddress.Any, 0);
-dnsSocket.Bind(new IPEndPoint(listen,config.ListenPort));
-using var tcpListener = new TcpListener(listen, config.ListenPort);
-if (ipv6) tcpListener.Server.DualMode = false;
-tcpListener.Start(32);
 using var tcpSlots = new SemaphoreSlim(32);
+var tcpPeerAdmission = config.MaxTcpSessionsPerClient == 0 ? null : new DnsTcpPeerAdmission(config.MaxTcpSessionsPerClient);
 var tcpSessions = new List<Task>();
 var tcpAccept = Task.Run(async () =>
 {
@@ -485,7 +496,8 @@ var tcpAccept = Task.Run(async () =>
         catch (OperationCanceledException) when (stop.IsCancellationRequested) { break; }
         catch (SocketException) when (stop.IsCancellationRequested) { break; }
         // Reject the actual TCP socket peer before it can acquire a session slot.
-        if (sourceFirewall.Blocks((session.Client.RemoteEndPoint as IPEndPoint)?.Address))
+        var tcpPeer = (session.Client.RemoteEndPoint as IPEndPoint)?.Address;
+        if (tcpPeer is null || sourceFirewall.Blocks(tcpPeer))
         {
             runtimeMetrics.FirewallBlocked(tcp: true);
             session.Dispose();
@@ -496,8 +508,17 @@ var tcpAccept = Task.Run(async () =>
             session.Dispose(); // bounded concurrency, no unbounded pending requests
             continue;
         }
+        var peerLease = tcpPeerAdmission?.Acquire(tcpPeer);
+        if (tcpPeerAdmission is not null && peerLease is null)
+        {
+            runtimeMetrics.TcpPeerLimitRejected();
+            tcpSlots.Release();
+            session.Dispose();
+            continue;
+        }
         var task = Task.Run(async () =>
         {
+            using (peerLease)
             using (session)
             using (var deadline = CancellationTokenSource.CreateLinkedTokenSource(stop.Token))
             {
@@ -535,7 +556,7 @@ var tcpAccept = Task.Run(async () =>
                 }
                 catch (Exception ex) when (ex is IOException or SocketException or
                     OperationCanceledException or ObjectDisposedException) { }
-                finally { tcpSlots.Release(); }
+                finally { peerLease?.Dispose(); tcpSlots.Release(); }
             }
         });
         lock (tcpSessions)
@@ -558,6 +579,9 @@ try
             receiveEndpoint,stop.Token); }
         catch(OperationCanceledException) when(stop.IsCancellationRequested){break;}
         catch(SocketException) when(stop.IsCancellationRequested){break;}
+        catch(SocketException e) when(OperatingSystem.IsWindows() &&
+            e.SocketErrorCode==SocketError.ConnectionReset)
+        { continue; } // recover from a delayed ICMP error, not a DNS query
         runtimeMetrics.QueryReceived(tcp: false);
         // IP-keyed response budget. Do not echo arbitrary UDP traffic without limits.
         // Loopback is still the required default deployment boundary.
@@ -614,6 +638,7 @@ sealed record DnsConfig(bool AllowNonLoopbackListeners,string ListenHost,int Lis
     public int MaxUdpQueriesPerSecond {get;init;} = 0;
     public bool GroupIpv6UdpClientsByPrefix {get;init;} = false;
     public JsonElement BlockedResolverCidrs { get; init; }
+    public int MaxTcpSessionsPerClient { get; init; }
     public int MaxConcurrentHealthProbes {get;init;} = 32;
     public string MetricsListenHost { get; init; } = "127.0.0.1";
     public int MetricsListenPort { get; init; }

@@ -255,6 +255,7 @@ public static class SpecialistDrafts
                 blocked.Add(JsonValue.Create(row[0]));
             config["BlockedResolverCidrs"] = blocked;
         }
+        if (x.MaxTcpSessionsPerClient is int tcpLimit) config["MaxTcpSessionsPerClient"] = tcpLimit;
         // ValidatedGslbCandidate applies the exact signed agent schema.
         return config;
     }
@@ -265,5 +266,5 @@ public sealed record GslbDraftInput(string? Name, string? SoaContact, uint Seria
     string? Policy, int ProbeInterval, int FailureThreshold, int SuccessThreshold, string? Sites, string? NameServers,
     string? DnssecMode = null, string? DnssecKeyPath = null, string? DnssecPrepublishPaths = null,
     string? DnssecAdditionalPaths = null, string? DnssecSalt = null, int? DnssecIterations = null,
-    string? Delegations = null, string? DelegationDs = null, string? BlockedResolverCidrs = null);
+    string? Delegations = null, string? DelegationDs = null, string? BlockedResolverCidrs = null, int? MaxTcpSessionsPerClient = null);
 public sealed record BackendCertificateCheck(string? Thumbprint);
