@@ -60,15 +60,7 @@ internal static class VipRedfishProvider
             if(s.StandbyBootIsolationApproved&&(!remote||string.IsNullOrWhiteSpace(s.RearmJournalFile)||
                 !Path.IsPathFullyQualified(s.RearmJournalFile)))
                 throw new InvalidDataException("Approved standby boot requires a protected provider rearm journal.");
-            if(s.StandbyBootIsolationApproved)
-            {
-                string dir=Path.GetDirectoryName(s.RearmJournalFile!)!;
-                if(OperatingSystem.IsWindows())WindowsStateProtection.ValidateOfflineKeyRingDirectory(dir);
-                else if(OperatingSystem.IsLinux())GatewayCore.Gslb.Contracts.PrivateKeyFileSecurity.ValidateLinuxPrivateStateDirectory(dir,"VIP provider rearm");
-                else throw new InvalidOperationException("Unsupported provider platform.");
-            }
-            if(s.StandbyBootIsolationApproved&&File.Exists(s.RearmJournalFile!))
-                VipServiceSecurity.RequireFile(s.RearmJournalFile!,1024*1024);
+            if(s.StandbyBootIsolationApproved)VipServiceSecurity.Journal(s.RearmJournalFile!);
             using var rearmJournal=s.StandbyBootIsolationApproved?new VipProviderRearmJournal(s.RearmJournalFile!,s.Scope,s.Nodes[0].Pin,s.Nodes[1].Pin):null;
             using var signer=ECDsa.Create();
             signer.ImportFromPem(File.ReadAllText(VipServiceSecurity.RequireFile(s.SigningKeyFile,8192)));

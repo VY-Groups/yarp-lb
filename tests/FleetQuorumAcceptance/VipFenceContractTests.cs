@@ -75,6 +75,21 @@ internal static class VipFenceContractTests
         try
         {
             if(OperatingSystem.IsLinux())File.SetUnixFileMode(dir.FullName,UnixFileMode.UserRead|UnixFileMode.UserWrite|UnixFileMode.UserExecute);
+            var idle=Path.Combine(dir.FullName,"idle-rearm");
+            using(var journal=new VipProviderRearmJournal(idle,scope,oldPin,newPin))
+                if(journal.LastEpoch!=0)throw new Exception("New rearm journal not idle");
+            try{_=FleetQuorum.FilePath(idle,1024*1024,true);throw new Exception("Empty credential accepted");}
+            catch(InvalidDataException){}
+            _=FleetQuorum.FilePath(idle,1024*1024,true,allowEmpty:true);
+            using(var journal=new VipProviderRearmJournal(idle,scope,oldPin,newPin))
+                if(journal.LastEpoch!=0)throw new Exception("Idle provider journal restart failed");
+            if(OperatingSystem.IsLinux())
+            {
+                File.SetUnixFileMode(idle,UnixFileMode.UserRead|UnixFileMode.UserWrite|UnixFileMode.OtherRead);
+                try{_=FleetQuorum.FilePath(idle,1024*1024,true,allowEmpty:true);throw new Exception("Exposed idle journal accepted");}
+                catch(InvalidDataException){}
+            }
+            Console.WriteLine("PASS: protected empty provider journal restarts; empty credentials and exposed journals refused");
             var path=Path.Combine(dir.FullName,"journal");
             var intent=new VipAutomaticJournal.Transition(scope,oldPin,10,newPin,"failover");
             using(var journal=new VipAutomaticJournal(path,scope,oldPin,newPin))journal.Begin(intent);

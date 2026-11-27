@@ -19,6 +19,15 @@ internal static class VipServiceSecurity
         Directory(Path.GetDirectoryName(path)!);
         return FleetQuorum.FilePath(path,max,true);
     }
+    internal static void Journal(string path)
+    {
+        if(!Path.IsPathFullyQualified(path))throw new InvalidDataException("Absolute private journal path required.");
+        Directory(Path.GetDirectoryName(path)!);
+        // An idle journal is legitimately empty; credentials never are.
+        if(File.Exists(path))_ = FleetQuorum.FilePath(path,1024*1024,true,allowEmpty:true);
+        else if(new FileInfo(path).LinkTarget is not null || System.IO.Directory.Exists(path))
+            throw new InvalidDataException("Invalid journal path.");
+    }
     internal static void Quorum(string path,bool writer=false)
     {
         var s=JsonSerializer.Deserialize<FleetQuorum.Settings>(File.ReadAllBytes(RequireFile(path,16384)),VipMachineTransport.Json)
@@ -35,19 +44,6 @@ internal static class VipServiceSecurity
         var p=JsonSerializer.Deserialize<VipFenceProvider.Settings>(File.ReadAllBytes(RequireFile(args[5],16384)),VipMachineTransport.Json)
             ??throw new InvalidDataException("Missing fencing provider settings.");
         RequireFile(p.CaFile);RequireFile(p.CertFile);RequireFile(p.KeyFile);
-        if(!Path.IsPathFullyQualified(args[6]))throw new InvalidDataException("Absolute journal path required.");
-        Directory(Path.GetDirectoryName(args[6])!);
-        if(File.Exists(args[6]))
-        {
-            // A valid idle controller may have an empty journal. Protect it
-            // without treating zero bytes as a missing credential.
-            var info=new FileInfo(args[6]);
-            if(info.Length>1024*1024||(info.Attributes&FileAttributes.ReparsePoint)!=0)
-                throw new InvalidDataException("Invalid controller journal.");
-            if(OperatingSystem.IsLinux()&&(File.GetUnixFileMode(args[6])&
-                (UnixFileMode.GroupRead|UnixFileMode.GroupWrite|UnixFileMode.GroupExecute|
-                 UnixFileMode.OtherRead|UnixFileMode.OtherWrite|UnixFileMode.OtherExecute))!=0)
-                throw new InvalidDataException("Controller journal must be owner-private.");
-        }
+        Journal(args[6]);
     }
 }
