@@ -49,7 +49,8 @@ public sealed class ExpiringCookieAffinityPolicy(ExpiringAffinityTokens tokens, 
         if (id is null) return new(null, AffinityStatus.AffinityKeyExtractionFailed);
         foreach (var destination in destinations)
         {
-            if (!string.Equals(destination.DestinationId, id, StringComparison.Ordinal)) continue;
+            if (!string.Equals(destination.DestinationId, id, StringComparison.Ordinal) ||
+                TrafficLifecycle.IsDraining(destination)) continue;
             context.Items[Affinitized] = true;
             return new(new[] { destination }, AffinityStatus.OK);
         }
@@ -60,7 +61,8 @@ public sealed class ExpiringCookieAffinityPolicy(ExpiringAffinityTokens tokens, 
         DestinationState destination)
     {
         if (context.RequestAborted.IsCancellationRequested || !context.Request.IsHttps ||
-            context.Items.ContainsKey(Affinitized) || config.Cookie?.MaxAge is not { } lifetime) return;
+            context.Items.ContainsKey(Affinitized) || TrafficLifecycle.IsDraining(destination) ||
+            config.Cookie?.MaxAge is not { } lifetime) return;
         var value = tokens.Issue(cluster.ClusterId, config.AffinityKeyName, lifetime,
             destination.DestinationId, clock.GetUtcNow().Add(lifetime));
         context.Response.Cookies.Append(config.AffinityKeyName, value, new CookieOptions
