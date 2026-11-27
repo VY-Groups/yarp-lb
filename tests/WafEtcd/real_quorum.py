@@ -139,7 +139,7 @@ def main():
         root = Path(folder)
         root.chmod(0o700)
         STAGE = "disposable-ca"
-        ca, ids = certs(root / "certs")
+        ca, ids = certs(root / "certs", ("vip-node-a", "vip-node-b", "ci4", "ci5", "ci6", "ci7", "ci8"))
         ports = [open_port() for _ in range(3)]
         while len(set(ports)) != 3:
             ports = [open_port() for _ in range(3)]
@@ -562,6 +562,20 @@ def main():
             STAGE = "real-dotnet-distributed-key-ring"
             dp_runtime = real_dp_runtime.run(root, endpoints, cluster, ca, ids,
                                              addr, post, checked)
+
+            STAGE = "installed-vip-live-raft-recovery"
+            vip_input = root / "vip-runtime-input.json"
+            vip_input.write_text(json.dumps({
+                "ca":ca,"endpoints":endpoints,"cluster":str(cluster),"writer":ids["writer"],
+                "reader":ids["reader"],"nodeA":ids["vip-node-a"],"nodeB":ids["vip-node-b"],
+                "providerServer":ids["ci4"],"bmc0":ids["ci5"],"bmc1":ids["ci6"],
+                "agent0":ids["ci7"],"agent1":ids["ci8"],"containers":created
+            }),encoding="ascii")
+            vip_input.chmod(0o600)
+            subprocess.run(["sudo","-n","env","GITHUB_ACTIONS=true","RUNNER_ENVIRONMENT=github-hosted",
+                "DOTNET_ROOT="+os.environ["DOTNET_ROOT"],sys.executable,
+                str(ROOT/"tests/WafEtcd/real_vip_recovery.py"),str(vip_input),
+                os.environ["DP_RUNTIME_PRODUCT_DLL"]],check=True,timeout=1050)
 
             # Lose 2/3 independent members: the surviving member cannot
             # authorize mutation. No automatic rescue via a local JSON lease.

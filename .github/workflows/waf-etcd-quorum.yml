@@ -2,9 +2,9 @@ name: Live three-member etcd quorum fencing CI
 on:
   push:
     branches: [main, "feature/**"]
-    paths: ["ops/waf/etcd_quorum_fence.py", "ops/waf/test_etcd_quorum_fence.py", "tests/WafEtcd/**", "ops/fleet/linux_dp_wrap_delivery.py", "ops/fleet/test_linux_dp_wrap_delivery.py", "control-center/LinuxKeyProtection.cs", "control-center/LinuxDistributedKeyIssue.cs", "control-center/Program.cs", "control-center/tests/LinuxKeyProtectionTests/**", "ops/waf/mtls_fenced_node.py", "ops/waf/waf_node_service.py", "ops/waf/test_mtls_fenced_node.py", "ops/waf/two_node_transaction.py", "ops/waf/test_two_node_transaction.py", "ops/waf/etcd_cas_writer.py", "ops/waf/test_etcd_cas_writer.py", "ops/fleet/linux_dp_quorum_authority.py", "ops/fleet/test_linux_dp_quorum_authority.py", ".github/workflows/waf-etcd-quorum.yml"]
+    paths: ["ops/waf/etcd_quorum_fence.py", "ops/waf/test_etcd_quorum_fence.py", "tests/WafEtcd/**", "control-center/Vip*.cs", "control-center/FleetQuorum.cs", "ops/ha/**", "ops/fleet/linux_dp_wrap_delivery.py", "ops/fleet/test_linux_dp_wrap_delivery.py", "control-center/LinuxKeyProtection.cs", "control-center/LinuxDistributedKeyIssue.cs", "control-center/Program.cs", "control-center/tests/LinuxKeyProtectionTests/**", "ops/waf/mtls_fenced_node.py", "ops/waf/waf_node_service.py", "ops/waf/test_mtls_fenced_node.py", "ops/waf/two_node_transaction.py", "ops/waf/test_two_node_transaction.py", "ops/waf/etcd_cas_writer.py", "ops/waf/test_etcd_cas_writer.py", "ops/fleet/linux_dp_quorum_authority.py", "ops/fleet/test_linux_dp_quorum_authority.py", ".github/workflows/waf-etcd-quorum.yml"]
   pull_request:
-    paths: ["ops/waf/etcd_quorum_fence.py", "ops/waf/test_etcd_quorum_fence.py", "tests/WafEtcd/**", "ops/fleet/linux_dp_wrap_delivery.py", "ops/fleet/test_linux_dp_wrap_delivery.py", "control-center/LinuxKeyProtection.cs", "control-center/LinuxDistributedKeyIssue.cs", "control-center/Program.cs", "control-center/tests/LinuxKeyProtectionTests/**", "ops/waf/mtls_fenced_node.py", "ops/waf/waf_node_service.py", "ops/waf/test_mtls_fenced_node.py", "ops/waf/two_node_transaction.py", "ops/waf/test_two_node_transaction.py", "ops/waf/etcd_cas_writer.py", "ops/waf/test_etcd_cas_writer.py", "ops/fleet/linux_dp_quorum_authority.py", "ops/fleet/test_linux_dp_quorum_authority.py", ".github/workflows/waf-etcd-quorum.yml"]
+    paths: ["ops/waf/etcd_quorum_fence.py", "ops/waf/test_etcd_quorum_fence.py", "tests/WafEtcd/**", "control-center/Vip*.cs", "control-center/FleetQuorum.cs", "ops/ha/**", "ops/fleet/linux_dp_wrap_delivery.py", "ops/fleet/test_linux_dp_wrap_delivery.py", "control-center/LinuxKeyProtection.cs", "control-center/LinuxDistributedKeyIssue.cs", "control-center/Program.cs", "control-center/tests/LinuxKeyProtectionTests/**", "ops/waf/mtls_fenced_node.py", "ops/waf/waf_node_service.py", "ops/waf/test_mtls_fenced_node.py", "ops/waf/two_node_transaction.py", "ops/waf/test_two_node_transaction.py", "ops/waf/etcd_cas_writer.py", "ops/waf/test_etcd_cas_writer.py", "ops/fleet/linux_dp_quorum_authority.py", "ops/fleet/test_linux_dp_quorum_authority.py", ".github/workflows/waf-etcd-quorum.yml"]
   workflow_dispatch:
 permissions:
   contents: read
@@ -12,7 +12,7 @@ jobs:
   real-quorum:
     name: Actual three-member etcd Raft lease CAS/revoke/partition with pinned mTLS
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
