@@ -1,7 +1,7 @@
 name: ADC external VIP fencing provider contracts
 on:
   pull_request:
-    paths: ["control-center/**", "tests/FleetQuorumAcceptance/**", "ops/ha/**", ".github/workflows/adc-vip-fence-provider.yml"]
+    paths: ["control-center/**", "tests/FleetQuorumAcceptance/**", "ops/ha/**", "ops/release/**", ".github/workflows/adc-vip-fence-provider.yml"]
   workflow_dispatch:
 permissions:
   contents: read
@@ -45,6 +45,40 @@ jobs:
       - name: Build shipping node-agent executable
         id: shipping-build
         run: dotnet build control-center/GatewayCoreYarp.csproj -c Release
+      - name: Build and verify offline VIP commissioning package
+        shell: bash
+        run: |
+          set -euo pipefail
+          rid=linux-x64
+          if [[ "$RUNNER_OS" == Windows ]]; then rid=win-x64; fi
+          sha=$(git rev-parse HEAD)
+          dotnet publish control-center/GatewayCoreYarp.csproj -c Release -r "$rid" --self-contained true -p:PublishReadyToRun=false -o vip-candidate/app
+          rm -f vip-candidate/app/appsettings.json
+          printf '%s\n' "$sha" > vip-candidate/SOURCE_COMMIT.txt
+          python ops/release/stage_vip_tools.py --root vip-candidate --rid "$rid"
+          python -m unittest discover -s ops/release/tests -p test_stage_vip_tools.py -v
+          python ops/release/package_candidate.py --root vip-candidate --rid "$rid" --sha "$sha" --out vip-archive
+          python ops/release/extract_candidate.py --archive-dir vip-archive --out vip-extracted
+      - name: Verify extracted Linux commissioning tool in plan-only mode
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          d=$(mktemp -d)
+          touch "$d/config.json"
+          bash vip-extracted/ops/ha/install-vip-service.sh agent "$PWD/vip-extracted/app/GatewayCoreYarp" "$d/config.json" root | grep 'PLAN ONLY'
+      - name: Verify extracted Windows commissioning tool in plan-only mode
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $config = Join-Path $env:RUNNER_TEMP 'vip-packaged-plan.json'
+          Set-Content -LiteralPath $config -Value '{}'
+          $plan = & ./vip-extracted/ops/ha/Install-VipService.ps1 -Role agent -Executable (Resolve-Path ./vip-extracted/app/GatewayCoreYarp.exe).Path -Config $config
+          if ($plan.Applied -or $plan.Name -ne 'GatewayCoreVipNodeAgent') { throw 'Packaged installer plan invalid' }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: adc-vip-offline-commissioning-${{ matrix.os }}-${{ github.sha }}
+          path: vip-archive/
+          if-no-files-found: error
       - name: Installed Linux agent runtime and protected credential acceptance
         if: runner.os == 'Linux'
         shell: bash
