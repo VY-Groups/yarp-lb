@@ -55,6 +55,13 @@ if(args.Length>0 && args[0]=="--vip-owner")
     return;
 }
 
+// Privileged local host administration, never an HTTP management endpoint.
+if(args.Length>0 && args[0]=="--vip-address")
+{
+    Environment.ExitCode=await VipHostAddressCommand.Run(args);
+    return;
+}
+
 // Initial TLS cannot depend on a web dashboard that has not started yet.
 // This local command validates existing host-provisioned credentials and
 // writes only a new configuration file; no listeners or runtime state start.

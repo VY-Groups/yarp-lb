@@ -1,0 +1,32 @@
+name: ADC local VIP address and durable journal
+on:
+  pull_request:
+    paths: ["control-center/**", "tests/VipHostAddress/**", ".github/workflows/adc-vip-host-address.yml"]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  contracts:
+    strategy:
+      matrix:
+        os: [ubuntu-24.04, windows-2022]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+      - run: dotnet build tests/VipHostAddress/VipHostAddress.csproj -c Release
+      - run: dotnet run --project tests/VipHostAddress/VipHostAddress.csproj -c Release --no-build
+      - name: Real disposable Linux namespace address lifecycle
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo -n unshare --net -- bash -euc '
+            ip link add gc-vip0 type veth peer name gc-vip1
+            ip link set gc-vip0 up
+            ip link set gc-vip1 up
+            export GITHUB_ACTIONS=true
+            "$1" "$2" --isolated-linux-veth
+          ' _ "$DOTNET_ROOT/dotnet" "$PWD/tests/VipHostAddress/bin/Release/net10.0/VipHostAddress.dll"
