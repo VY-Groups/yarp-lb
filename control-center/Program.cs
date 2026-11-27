@@ -2288,6 +2288,7 @@ app.MapGet("/admin/api/network/interfaces", (HttpContext ctx) =>
 // Nonsecret policy proposal only: never mutates the independent controller.
 app.MapPost("/admin/api/network/virtual-services/ha-policy",async (HttpContext ctx,VipPolicyDocument proposal)=>
 {
+    ctx.Response.Headers.CacheControl = "no-store";
     if(!await AuditActorCurrent(ctx,true))return Results.StatusCode(403);
     var configured=(guardedVirtualServices??[]).Any(s=>s.VipJournalDirectory is not null&&
         FleetQuorum.VipScope(s.VipFleetId!,s.Ip)==proposal.Scope);

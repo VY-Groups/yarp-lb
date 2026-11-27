@@ -239,6 +239,15 @@ with tempfile.TemporaryDirectory(prefix='gateway-sockets-') as td:
                         if not session['privacyAccepted']:
                             admin('POST','/admin/api/privacy/accept',{'version':session['privacyVersion']})
                         check(session['role']=='Administrator' and bool(csrf),'real mTLS administrator session')
+                        policy_path='/admin/api/network/virtual-services/ha-policy'
+                        policy={'version':1,'scope':'A'*64,'preferredPin':'B'*64,'otherPin':'C'*64,
+                                'failbackEnabled':False,'rearmEnabled':False,'pollSeconds':5,
+                                'failureSamples':3,'failureSeconds':10,'failbackEligibleSeconds':120,
+                                'minimumOwnerSeconds':300}
+                        # A local-only VIP cannot export a distributed HA policy;
+                        # valid administrator credentials do not bypass scope checks.
+                        admin('POST',policy_path,policy,expected=403,include_csrf=False)
+                        admin('POST',policy_path,policy,expected=400)
                         drain_path='/admin/api/network/virtual-services/vip-guarded/drain'
                         drain={'draining':True,'reason':'Disposable planned drain acceptance'}
                         second_url=f'http://127.0.0.4:{guarded_second_port}/api/identity'

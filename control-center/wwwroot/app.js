@@ -1805,12 +1805,28 @@ function updateDest(id = '') {
         edit();
     });
 }
+async function verifiedHaPolicyExport(reply, proposal) {
+    if (reply.applied !== false || typeof reply.json !== 'string' || typeof reply.sha256 !== 'string' || !/^[A-F0-9]{64}$/.test(reply.sha256))
+        throw new Error('HA policy export response is invalid; no file downloaded.');
+    const document = JSON.parse(reply.json);
+    if (!document || typeof document !== 'object' || Array.isArray(document) ||
+        Object.keys(document).length !== Object.keys(proposal).length ||
+        Object.keys(proposal).some(key => !Object.prototype.hasOwnProperty.call(document, key) || document[key] !== proposal[key]))
+        throw new Error('HA policy export does not match the reviewed form; no file downloaded.');
+    if (!globalThis.crypto?.subtle)
+        throw new Error('Secure browser context required to verify the HA policy digest.');
+    const digest = Array.from(new Uint8Array(await globalThis.crypto.subtle.digest('SHA-256', new TextEncoder().encode(reply.json))), value => value.toString(16).padStart(2, '0')).join('').toUpperCase();
+    if (digest !== reply.sha256)
+        throw new Error('HA policy digest mismatch; no file downloaded.');
+    return reply.json;
+}
 function act(type, id) {
     if (type === 'ha-policy-export') {
         const value = (field) => $(field).value;
         const proposal = { version: 1, scope: value('ha-scope'), preferredPin: value('ha-preferred').trim().toUpperCase(), otherPin: value('ha-other').trim().toUpperCase(), failbackEnabled: $('ha-failback').checked, rearmEnabled: $('ha-rearm').checked, pollSeconds: Number(value('ha-poll')), failureSamples: Number(value('ha-samples')), failureSeconds: Number(value('ha-failure')), failbackEligibleSeconds: Number(value('ha-eligible')), minimumOwnerSeconds: Number(value('ha-owner')) };
-        void api('/admin/api/network/virtual-services/ha-policy', 'POST', proposal).then(reply => {
-            const url = URL.createObjectURL(new Blob([reply.json], { type: 'application/json' }));
+        void api('/admin/api/network/virtual-services/ha-policy', 'POST', proposal).then(async reply => {
+            const policy = await verifiedHaPolicyExport(reply, proposal);
+            const url = URL.createObjectURL(new Blob([policy], { type: 'application/json' }));
             const link = document.createElement('a');
             link.href = url;
             link.download = 'gatewaycore-ha-policy.json';
