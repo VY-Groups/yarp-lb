@@ -1,0 +1,19 @@
+name: ADC external VIP fencing provider contracts
+on:
+  pull_request:
+    paths: ["control-center/FleetQuorum.cs", "control-center/VipOwnershipCommand.cs", "control-center/VipFenceProvider.cs", "tests/FleetQuorumAcceptance/**", ".github/workflows/adc-vip-fence-provider.yml"]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  contracts:
+    strategy:
+      matrix:
+        os: [ubuntu-24.04, windows-2022]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+      - run: dotnet run --project tests/FleetQuorumAcceptance/FleetQuorumAcceptance.csproj -c Release -- --vip-fence-contract

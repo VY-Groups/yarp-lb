@@ -33,7 +33,7 @@ internal sealed class FleetQuorum : IDisposable
     private static bool Hex(string? value)=>value is {Length:64} && value.All(c=>c is >= '0' and <= '9' or >= 'A' and <= 'F');
     private static bool Tx(string? value)=>value is not null && Regex.IsMatch(value,@"\Arollout_[A-F0-9]{24}\z",RegexOptions.CultureInvariant);
     private static string Base64(string text)=>Convert.ToBase64String(Encoding.ASCII.GetBytes(text));
-    private static string FilePath(string path,int max,bool secret=false)
+    internal static string FilePath(string path,int max,bool secret=false)
     {
         if(!Path.IsPathFullyQualified(path))throw new InvalidDataException("Absolute quorum credential/config path required.");
         var info=new FileInfo(path);

@@ -17,6 +17,16 @@ internal static class VipOwnershipCommand
             if(args[3]=="status" && args.Length==4)state=await authority.ObserveVip(timeout.Token);
             else if(args[3]=="revoke" && args.Length==6)
                 state=await authority.RevokeVip(args[4],Number(args[5]),timeout.Token);
+            else if(args[3] is "transfer" or "resume-transfer" && args.Length==8)
+            {
+                // Explicit local independently authorized writer only. Provider
+                // is configured before any quorum mutation; a failed provider
+                // never re-enables the old or successor owner.
+                using var provider=VipFenceProvider.Open(args[7],args[2],args[4],args[6]);
+                state=await VipFencedTransfer.Run(args[2],args[4],Number(args[5]),args[6],
+                    args[3]=="resume-transfer",authority.ObserveVip,authority.RevokeVip,
+                    provider.Fence,authority.ActivateVip,timeout.Token);
+            }
             else if(args[3]=="activate" && args.Length==9)
             {
                 // Permit is a detached DER ECDSA signature, not a password or
