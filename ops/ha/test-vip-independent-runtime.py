@@ -212,7 +212,8 @@ try:
     journal=cdir/"controller.journal"
     pa=account("provider"); wa=account("controller")
     install("provider",PROVIDER,binary,provider_config,pa)
-    extra=("-Scope",scope,"-Policy",policy,"-Provider",provider_client,"-Journal",journal) if WIN else (scope,policy,provider_client,journal)
+    approved_digest=hashlib.sha256(policy.read_bytes()).hexdigest().upper()
+    extra=("-Scope",scope,"-Policy",policy,"-Provider",provider_client,"-Journal",journal,"-PolicySha256",approved_digest) if WIN else (scope,policy,provider_client,journal,approved_digest)
     install("controller",CONTROLLER,binary,writer_path,wa,extra)
     protect(pdir,pa); protect(cdir,wa)
     if WIN:
@@ -256,7 +257,21 @@ try:
     if not active(CONTROLLER): raise AssertionError("Controller did not survive unavailable quorum")
     stop(CONTROLLER)
     if journal.stat().st_size!=0: raise AssertionError("Unexpected owner transition without quorum")
+    approved_bytes=policy.read_bytes()
+    changed=dict(json.loads(approved_bytes),failbackEnabled=True)
+    policy.write_text(json.dumps(changed),encoding="ascii")
+    protect(cdir,wa)
+    try:
+        start(CONTROLLER,check=False)
+        wait(lambda: stopped(CONTROLLER),"Controller did not refuse altered approved policy")
+        if not WIN and "ExecMainStatus=78" not in query(CONTROLLER).stdout:
+            raise AssertionError("Expected explicit policy digest refusal")
+        if journal.stat().st_size!=0: raise AssertionError("Altered policy mutated journal")
+    finally:
+        policy.write_bytes(approved_bytes)
+        protect(cdir,wa)
     start(CONTROLLER);wait(controller_ready,"Idle controller journal restart failed")
+    print("PASS: installed controller refuses altered approved policy and recovers with exact approved bytes",flush=True)
     assert_refusal(CONTROLLER,ckey)
     start(CONTROLLER);wait(controller_ready,"Writer did not recover after credential restoration")
     time.sleep(6)

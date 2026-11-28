@@ -51,18 +51,18 @@ catch (Exception ex) when (ex is IOException or CryptographicException or
 // Independent local VIP authority administration, not a gateway service action.
 if(args.Length>0 && args[0]=="--vip-owner")
 {
-    if(args.Length==7&&args[3]=="inspect-policy")
+    if(args.Length is (7 or 8)&&args[3]=="inspect-policy")
     {
         Environment.ExitCode=VipServiceSecurity.InspectController(args);
         return;
     }
-    if(args.Length==7&&args[3]=="recover-policy")
+    if(args.Length is (7 or 8)&&args[3]=="recover-policy")
     {
         try{VipServiceSecurity.Controller(args);}
         catch(Exception e) when(e is IOException or InvalidDataException or InvalidOperationException or UnauthorizedAccessException or ArgumentException or JsonException)
         {Console.Error.WriteLine("VIP recovery configuration refused: "+e.GetType().Name);Environment.ExitCode=78;return;}
     }
-    Environment.ExitCode=args.Length==7&&args[3]=="automatic-policy"
+    Environment.ExitCode=args.Length is (7 or 8)&&args[3]=="automatic-policy"
         ?await VipControllerService.Run(args):await VipOwnershipCommand.Run(args);
     return;
 }

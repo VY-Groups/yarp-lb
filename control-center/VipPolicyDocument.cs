@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
@@ -20,9 +21,21 @@ internal sealed record VipPolicyDocument(int Version,string Scope,string Preferr
             MinimumOwnerSeconds<FailbackEligibleSeconds)
             throw new InvalidDataException("HA policy exceeds supported safety bounds or scope.");
     }
-    internal static VipPolicyDocument Load(string path,string scope)
+    internal static VipPolicyDocument Load(string path,string scope,string? expectedSha256=null)=>
+        Load(path,scope,out _,expectedSha256);
+
+    // Hash the exact bytes that are parsed, not a separate file read. The
+    // independently approved digest is an integrity binding, not a signature.
+    internal static VipPolicyDocument Load(string path,string scope,out string digest,string? expectedSha256=null)
     {
-        var policy=JsonSerializer.Deserialize<VipPolicyDocument>(File.ReadAllBytes(FleetQuorum.FilePath(path,8192,true)),Json)
+        var bytes=File.ReadAllBytes(FleetQuorum.FilePath(path,8192,true));
+        if(bytes.Length is <1 or >8192)throw new InvalidDataException("HA policy size refused.");
+        digest=Convert.ToHexString(SHA256.HashData(bytes));
+        if(expectedSha256 is not null &&
+            (expectedSha256.Length!=64 || expectedSha256.Any(c=>!Uri.IsHexDigit(c)) ||
+             !string.Equals(digest,expectedSha256,StringComparison.OrdinalIgnoreCase)))
+            throw new InvalidDataException("HA policy does not match the independently approved SHA-256.");
+        var policy=JsonSerializer.Deserialize<VipPolicyDocument>(bytes,Json)
             ??throw new InvalidDataException("Missing HA policy.");
         policy.Validate(scope);return policy;
     }

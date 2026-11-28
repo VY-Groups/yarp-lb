@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Offline, plan-only by default. Execute locally under site change control.
 set -euo pipefail
-usage(){ echo 'Usage: install-vip-service.sh agent|provider|controller executable config user [scope policy provider journal] [--apply]' >&2; exit 2; }
+usage(){ echo 'Usage: install-vip-service.sh agent|provider|controller executable config user [scope policy provider journal [approved-policy-sha256]] [--apply]' >&2; exit 2; }
 [[ $# -ge 4 ]] || usage
 role=$1; binary=$2; config=$3; account=$4; shift 4
 apply=false
@@ -13,11 +13,16 @@ safe_path "$binary"; safe_path "$config"
 case "$role" in
  agent) [[ $# == 0 && "$account" == root ]] || usage; name=gatewaycore-vip-node-agent; args="--vip-node-agent $config"; boot=true;;
  provider) [[ $# == 0 && "$account" != root ]] || usage; name=gatewaycore-vip-fence-provider; args="--vip-redfish-provider $config"; boot=false;;
- controller) [[ $# == 4 && "$account" != root && "$1" =~ ^[A-F0-9]{64}$ ]] || usage
+ controller) [[ ( $# == 4 || $# == 5 ) && "$account" != root && "$1" =~ ^[A-F0-9]{64}$ ]] || usage
   scope=$1; policy=$2; provider=$3; journal=$4
   for path in "$policy" "$provider" "$journal"; do safe_path "$path"; done
   [[ -f "$policy" && ! -L "$policy" && -f "$provider" && ! -L "$provider" && -d "$(dirname "$journal")" && ! -L "$journal" ]] || usage
-  name=gatewaycore-vip-controller; args="--vip-owner $config $scope automatic-policy $policy $provider $journal"; boot=false;;
+  name=gatewaycore-vip-controller; args="--vip-owner $config $scope automatic-policy $policy $provider $journal"
+  if [[ $# == 5 ]]; then
+    [[ "$5" =~ ^[A-Fa-f0-9]{64}$ ]] || usage
+    args+=" $5"
+  fi
+  boot=false;;
  *) usage;;
 esac
 unit=$(cat <<EOF

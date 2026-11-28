@@ -59,7 +59,7 @@ internal static class VipServiceSecurity
         try
         {
             Controller(args);
-            var policy=VipPolicyDocument.Load(args[4],args[2]);
+            var policy=VipPolicyDocument.Load(args[4],args[2],out var digest,args.Length==8?args[7]:null);
             using var authority=FleetQuorum.OpenVipWriter(args[1],args[2]);
             if(authority.VipReaderPin==policy.PreferredPin||authority.VipReaderPin==policy.OtherPin)
                 throw new InvalidDataException("Writer must be independent from gateway identities.");
@@ -68,6 +68,7 @@ internal static class VipServiceSecurity
             using var journal=exists?new VipAutomaticJournal(args[6],args[2],policy.PreferredPin,policy.OtherPin,readOnly:true):null;
             Console.WriteLine(JsonSerializer.Serialize(new{
                 validated=true,networkVerified=false,mutated=false,scope=policy.Scope,
+                policySha256=digest,digestVerified=args.Length==8,
                 journalExists=exists,recoveryRequired=journal?.Pending is not null,
                 lastCompletedEpoch=journal?.LastCompletedEpoch??0,
                 lastRearmAttemptEpoch=journal?.LastRearmAttemptEpoch??0,
@@ -82,7 +83,7 @@ internal static class VipServiceSecurity
     }
     internal static void Controller(string[] args)
     {
-        if(args.Length!=7||args[3] is not ("automatic-policy" or "recover-policy" or "inspect-policy"))throw new InvalidDataException("Hosted policy command required.");
+        if(args.Length is not (7 or 8)||args[3] is not ("automatic-policy" or "recover-policy" or "inspect-policy"))throw new InvalidDataException("Hosted policy command required.");
         Quorum(args[1],true);RequireFile(args[4],8192);
         var p=JsonSerializer.Deserialize<VipFenceProvider.Settings>(File.ReadAllBytes(RequireFile(args[5],16384)),VipMachineTransport.Json)
             ??throw new InvalidDataException("Missing fencing provider settings.");

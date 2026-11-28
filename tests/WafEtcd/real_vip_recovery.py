@@ -357,6 +357,8 @@ def accept_live_policy(executable,scope,fleet,vip,reader,policy,expected_owner):
             if owner_state()!=expected_owner or journal_files[0].read_bytes()!=original_journal:
                 raise AssertionError("Policy export changed live ownership or address journal")
             print("PASS: real journal-bound gateway + actual Raft + kernel VIP + mTLS administrator: positive audited policy export, digest and negative scope/CSRF/timing checks",flush=True)
+            # Chromium verified these exact bytes against its actual downloaded file.
+            return reply["json"].encode("utf-8"),reply["sha256"]
     finally:
         if proc is not None:
             proc.terminate()
@@ -543,12 +545,34 @@ try:
     node_cert=copy(policy_dir,"node.pem",manifest["nodeA"][0]);node_key=copy(policy_dir,"node.key",manifest["nodeA"][1])
     node_ca=copy(policy_dir,"ca.pem",ca)
     node_reader=put(policy_dir,"reader.json",quorum(node_ca,node_cert,node_key))
-    accept_live_policy(executable,scope,fleet,vip,node_reader,json.loads(policy.read_text()),initial)
+    exported,approved_digest=accept_live_policy(executable,scope,fleet,vip,node_reader,json.loads(policy.read_text()),initial)
+    stage="protected-operator-policy-handoff"
+    if hashlib.sha256(exported).hexdigest().upper()!=approved_digest:
+        raise AssertionError("Exported policy digest mismatch")
+    # The independent operator copies the approved bytes to the protected
+    # controller directory, not to the provider or gateway state directory.
+    policy.write_bytes(exported)
+    own(cdir,wa)
+    proof=json.loads(writer("inspect-policy",policy,client,journal,approved_digest).stdout)
+    if (not proof["digestVerified"] or proof["policySha256"]!=approved_digest or
+        proof["mutated"] or proof["networkVerified"] or proof["journalExists"]):
+        raise AssertionError("Independent exported policy preflight not verified")
+    modified=put(cdir,"modified-policy.json",dict(json.loads(exported),failbackEnabled=False))
+    own(cdir,wa)
+    # A valid, safety-bounded but unapproved policy must still be refused.
+    if writer("inspect-policy",modified,client,journal,check=False).returncode!=0:
+        raise AssertionError("Modified test policy is not independently valid")
+    if writer("inspect-policy",modified,client,journal,approved_digest,check=False).returncode!=78:
+        raise AssertionError("Unapproved policy digest accepted")
+    modified.unlink()
+    if journal.exists() or owner_state()!=initial:
+        raise AssertionError("Offline policy handoff mutated authority or journal")
+    print("PASS: audited browser policy bytes handed to protected independent controller; exact digest accepted, valid changed policy refused",flush=True)
     stage="install-roles"
     services.append(provider)
     run("bash",HERE/"ops/ha/install-vip-service.sh","provider",executable,provider_cfg,pa,"--apply")
     services.append(controller)
-    run("bash",HERE/"ops/ha/install-vip-service.sh","controller",executable,writer_path,wa,scope,policy,client,journal,"--apply")
+    run("bash",HERE/"ops/ha/install-vip-service.sh","controller",executable,writer_path,wa,scope,policy,client,journal,approved_digest,"--apply")
     run("systemctl","start",provider+".service")
     def provider_ready():
         if not active(provider):return False
@@ -581,12 +605,14 @@ try:
     if power[first] or serving[first] or serving[second]:raise AssertionError("Failed transition did not fail closed")
     stage="explicit-recovery-real-quorum"
     before_inspection=journal.read_bytes()
-    inspection=json.loads(writer("inspect-policy",policy,client,journal).stdout)
-    if (not inspection["recoveryRequired"] or inspection["pending"]["OldEpoch"]!=initial[1] or
+    inspection=json.loads(writer("inspect-policy",policy,client,journal,approved_digest).stdout)
+    if (not inspection["digestVerified"] or inspection["policySha256"]!=approved_digest or not inspection["recoveryRequired"] or inspection["pending"]["OldEpoch"]!=initial[1] or
         inspection["mutated"] or journal.read_bytes()!=before_inspection or owner_state()!=successor):
         raise AssertionError("Offline recovery inspection failed or changed ownership/journal")
     with lock:failure["activate"]=False
-    writer("recover-policy",policy,client,journal)
+    if writer("recover-policy",policy,client,journal,"0"*64,check=False).returncode!=78 or journal.read_bytes()!=before_inspection or owner_state()!=successor:
+        raise AssertionError("Unapproved policy recovery mutated authority or journal")
+    writer("recover-policy",policy,client,journal,approved_digest)
     if owner_state()!=successor or not serving[second] or power[first]:
         raise AssertionError("Recovery changed owner epoch or admitted predecessor")
     rows=journal_rows(journal)

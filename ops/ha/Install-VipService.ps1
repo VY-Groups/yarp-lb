@@ -4,6 +4,7 @@ param(
  [Parameter(Mandatory)][string]$Executable,
  [Parameter(Mandatory)][string]$Config,
  [string]$Scope,[string]$Policy,[string]$Provider,[string]$Journal,
+ [string]$PolicySha256,
  [switch]$Apply
 )
 $ErrorActionPreference='Stop'
@@ -17,6 +18,7 @@ function LocalPath([string]$Path,[bool]$MustExist=$true){
 }
 $binary=LocalPath $Executable
 $configArg=LocalPath $Config
+if($PSBoundParameters.ContainsKey("PolicySha256") -and ($Role -ne "controller" -or $PolicySha256 -notmatch "^[A-Fa-f0-9]{64}$")){throw "Invalid approved controller policy SHA-256"}
 switch($Role){
  'agent' {$name='GatewayCoreVipNodeAgent';$identity='LocalSystem';$startup='Automatic';$command="$binary --vip-node-agent $configArg"}
  'provider' {$name='GatewayCoreVipFenceProvider';$identity="NT SERVICE\$name";$startup='Manual';$command="$binary --vip-redfish-provider $configArg"}
@@ -26,6 +28,7 @@ switch($Role){
   if(-not(Test-Path -LiteralPath (Split-Path -Parent $Journal) -PathType Container)){throw 'Existing protected journal directory required'}
   $name='GatewayCoreVipController';$identity="NT SERVICE\$name";$startup='Manual'
   $command="$binary --vip-owner $configArg $Scope automatic-policy $p $f $j"
+  if($PolicySha256){$command+=" $PolicySha256"}
  }
 }
 if(-not $Apply){
