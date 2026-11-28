@@ -435,6 +435,9 @@ try:
         stage="prepare-two-shipping-nodes"
         real_nodes=RealVipNodes(root,executable,manifest,scope,fleet,vip,run,put,copy,fixture_passfile)
         real_nodes.prepare()
+        # Only the public server CA crosses into provider trust. Provider
+        # client certificates and Raft identities remain independently pinned.
+        real_node_ca=copy(pdir,"node-server-ca.pem",real_nodes.ca)
     power={first:True,second:True}
     serving={first:True,second:False}
     draining={first:False,second:False}
@@ -523,8 +526,8 @@ try:
         ac,ak,ap=manifest["agent"+str(i)]
         bmc=tls_server(bmc_handler(node),bc,bk)
         if real_mode:
-            machine=real_nodes.machine(node,pca,pcert,pkey)
-            drain_machine=real_nodes.machine(node,pca,pcert,pkey,drain=True)
+            machine=real_nodes.machine(node,real_node_ca,pcert,pkey)
+            drain_machine=real_nodes.machine(node,real_node_ca,pcert,pkey,drain=True)
         else:
             agent=tls_server(agent_handler(node),ac,ak,ca)
             machine={"origin":agent,"leafSha256":ap,"caFile":str(pca),"certFile":str(pcert),"keyFile":str(pkey)}

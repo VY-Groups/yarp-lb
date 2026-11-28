@@ -13,6 +13,7 @@ import json
 import os
 from pathlib import Path
 import select
+import re
 import socket
 import socketserver
 import ssl
@@ -93,7 +94,7 @@ class RealVipNodes:
         self.ca_key=self.ca_dir/"ca.key"
         self.ca=self.ca_dir/"ca.pem"
         self.run("openssl","req","-new","-x509","-nodes","-newkey","rsa:3072",
-            "-sha256","-days","2","-subj","/CN=Disposable two-node VIP CA",
+            "-sha256","-days","3","-subj","/CN=Disposable two-node VIP CA",
             "-addext","basicConstraints=critical,CA:TRUE",
             "-addext","keyUsage=keyCertSign,cRLSign","-keyout",self.ca_key,"-out",self.ca)
         self.ca_key.chmod(0o600)
@@ -206,13 +207,25 @@ class RealVipNodes:
         node=self.manifest["nodeA" if i==0 else "nodeB"]
         other=self.manifest["nodeB" if i==0 else "nodeA"]
         _,_,provider_pin=self.manifest["reader"]
-        server_cert,server_key,server_pin=self.manifest["agent"+str(i)]
         ca=self.copy(certdir,"quorum-ca.pem",self.manifest["ca"])
         node_cert=self.copy(certdir,"node.pem",node[0])
         node_key=self.copy(certdir,"node.key",node[1])
         reader=self.put(d,"reader.json",{"scope":self.scope,"clusterId":str(self.manifest["cluster"]),
             "caFile":str(ca),"certFile":str(node_cert),"keyFile":str(node_key),
             "endpoints":[dict(e,memberId=str(e["memberId"])) for e in self.manifest["endpoints"]]})
+        # The Raft manifest leaf certificates expire after one day, whereas
+        # shipping gateway listeners require strictly more than 24 hours.
+        # Issue an independent short-lived server leaf from the disposable
+        # node fixture CA. Client identity validation still uses the Raft CA.
+        server_key=certdir/"management.key";server_cert=certdir/"management.pem"
+        server_csr=certdir/"management.csr"
+        self.openssl("req","-new","-nodes","-newkey","rsa:2048","-subj","/CN=Disposable management "+label,
+            "-keyout",server_key,"-out",server_csr)
+        server_ext=self.put(certdir,"management.ext","subjectAltName=IP:127.0.0.1,IP:"+node_ip+"\nextendedKeyUsage=serverAuth\n")
+        self.openssl("x509","-req","-in",server_csr,"-CA",self.ca,"-CAkey",self.ca_key,"-CAcreateserial",
+            "-days","2","-sha256","-extfile",server_ext,"-out",server_cert)
+        self.openssl("x509","-in",server_cert,"-checkend","90000","-noout")
+        server_pin=self.pin(server_cert)
         server_pfx,server_pass=self.pfx(certdir,"management",server_key,server_cert)
         tk=certdir/"traffic.key";tc=certdir/"traffic.pem";csr=certdir/"traffic.csr"
         self.openssl("req","-new","-nodes","-newkey","rsa:2048","-subj","/CN=Disposable VIP "+label,
@@ -286,7 +299,14 @@ class RealVipNodes:
             GATEWAYCORE_VIP_DRAIN_SCOPE=self.scope)
         self.unit(gateway,ns,[],env)
         self.unit(agent,ns,["--vip-node-agent",agent_config],common)
-        inspection=self.run("ip","netns","exec",ns,self.executable,"--vip-node-agent",agent_config,"inspect")
+        inspection=self.run("ip","netns","exec",ns,self.executable,"--vip-node-agent",agent_config,"inspect",check=False)
+        if inspection.returncode:
+            # Only fixed shipping stage/type diagnostics; no private paths,
+            # certificate contents, configuration or unbounded stderr.
+            for line in inspection.stderr.splitlines():
+                if re.fullmatch(r"VIP (?:node agent refused at [a-z ]+:|node lifecycle refused or unconfirmed:) [A-Za-z0-9_]+",line):
+                    print(line,flush=True)
+            raise AssertionError("Actual node offline preflight exit "+str(inspection.returncode))
         evidence=json.loads(inspection.stdout)
         if not evidence["validated"] or evidence["mutated"] or evidence["networkVerified"] or evidence["nodePin"]!=node[2]:
             raise AssertionError("Actual node preflight not confirmed")
@@ -311,7 +331,7 @@ class RealVipNodes:
     def request_agent(self,pin,route,payload):
         node=self.nodes[pin]
         cert,key,_=self.manifest["reader"]
-        ctx=ssl.create_default_context(cafile=self.manifest["ca"])
+        ctx=ssl.create_default_context(cafile=str(self.ca))
         ctx.load_cert_chain(cert,key)
         conn=http.client.HTTPSConnection("127.0.0.1",node["agent_port"],context=ctx,timeout=105)
         try:
