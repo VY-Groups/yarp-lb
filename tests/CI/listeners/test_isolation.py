@@ -18,6 +18,7 @@ from urllib.error import HTTPError, URLError
 parser = argparse.ArgumentParser()
 parser.add_argument('--dll', type=Path, required=True)
 parser.add_argument('--out', type=Path, required=True)
+parser.add_argument('--exercise-vip-address-transition', action='store_true', help='disposable Linux CI only: temporarily add/remove 127.0.0.4/32 on lo')
 args=parser.parse_args()
 args.out.mkdir(parents=True,exist_ok=True)
 evidence=[]
@@ -99,6 +100,12 @@ with tempfile.TemporaryDirectory(prefix='gateway-sockets-') as td:
               'GatewayCore.Admission.MaxInFlight':'8',
               'GatewayCore.Admission.MaxPending':'4',
               'GatewayCore.Admission.QueueTimeoutMs':'1000'}}}}}}}))
+        if args.exercise_vip_address_transition:
+            fixture=json.loads(appconfig.read_text())
+            fixture['ReverseProxy']['Routes']['guarded-vip']={'ClusterId':'api',
+                'Match':{'Path':'/api/{**catch-all}'},'Metadata':{'ADC.VirtualServer.Id':'vip-guarded'},
+                'Transforms':[{'PathSet':'/api/virtual-http'}]}
+            appconfig.write_text(json.dumps(fixture))
         chmod(appconfig)
         ca_key=root/'ca.key';ca_crt=root/'ca.crt'
         run('openssl','req','-new','-x509','-nodes','-newkey','rsa:3072',
@@ -131,6 +138,13 @@ with tempfile.TemporaryDirectory(prefix='gateway-sockets-') as td:
         while vip_https in ports or vip_https==vip_http: vip_https=available('127.0.0.2')
         settings['virtualServices']=[{'id':'vip-http','ip':'127.0.0.3','port':vip_http,'protocol':'HTTP'},
             {'id':'vip-https','ip':'127.0.0.2','port':vip_https,'protocol':'HTTPS'}]
+        if args.exercise_vip_address_transition:
+            existing=json.loads(run('ip','-j','address','show','dev','lo').stdout)
+            check(not any(a.get('local')=='127.0.0.4' for i in existing for a in i.get('addr_info',[])),
+                  'disposable VIP fixture address initially absent')
+            guarded_port=available('127.0.0.4')
+            settings['virtualServices'].append({'id':'vip-guarded','ip':'127.0.0.4',
+                'port':guarded_port,'protocol':'HTTP','requireLocalAddressPresence':True})
         config=root/'listeners.json'
         def write_config(payload):
             config.write_text(json.dumps(payload));chmod(config)
@@ -165,6 +179,24 @@ with tempfile.TemporaryDirectory(prefix='gateway-sockets-') as td:
             check(status==200 and body==b'virtual-http','overlapping route selected by real HTTP virtual socket')
             status,body=req(f'https://127.0.0.2:{vip_https}/api/identity',ca_context)
             check(status==200 and body==b'virtual-https','overlapping route selected by real TLS virtual socket')
+            if args.exercise_vip_address_transition:
+                guarded_url=f'http://127.0.0.4:{guarded_port}/api/identity'
+                def await_status(expected):
+                    deadline=time.monotonic()+10
+                    status,body=None,None
+                    while time.monotonic()<deadline:
+                        status,body=req(guarded_url)
+                        if status==expected:return status,body
+                        time.sleep(.2)
+                    return status,body
+                check(await_status(503)[0]==503,'guarded virtual socket refuses unassigned loopback IP')
+                run('sudo','-n','ip','address','add','127.0.0.4/32','dev','lo')
+                try:
+                    status,body=await_status(200)
+                    check(status==200 and body==b'virtual-http','fresh assigned local VIP admits real proxy traffic')
+                finally:
+                    run('sudo','-n','ip','address','del','127.0.0.4/32','dev','lo')
+                check(await_status(503)[0]==503,'withdrawn VIP closes new requests on still-bound socket')
             status,body=req(f'http://127.0.0.2:{ports[0]}/api/identity')
             check(status==200 and body==b'{"node":"CI"}','legacy listener still selects unbound route')
             status,_=req(f'http://127.0.0.3:{vip_http}/legacy-only')

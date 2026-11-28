@@ -187,6 +187,11 @@ if (auditOutbox is { } configuredAuditOutbox)
 else GatewayOpenTelemetry.ReportAuditOutboxStatus(false, 0, false, false);
 // Explicit v0.1 multi-socket mode; legacy loopback remains CI migration-only.
 var isolatedListeners = GatewayListenerIsolation.FromEnvironment();
+var guardedVirtualServices = isolatedListeners?.VirtualServices.Where(s => s.RequireLocalAddressPresence).ToArray();
+LocalVipAdmission? localVipAdmission = guardedVirtualServices is { Length: > 0 }
+    ? new LocalVipAdmission(guardedVirtualServices.Select(s => (s.Id, s.Ip)), TimeProvider.System) : null;
+if (localVipAdmission is not null)
+    builder.Services.AddHostedService<LocalVipAdmission>(_ => localVipAdmission);
 var acmeChallengeSetting = Environment.GetEnvironmentVariable("YARP_ACME_HTTP01_PUBLIC_ENTRYPOINT");
 if (acmeChallengeSetting is not null && !bool.TryParse(acmeChallengeSetting, out _))
     throw new InvalidOperationException("YARP_ACME_HTTP01_PUBLIC_ENTRYPOINT must be true or false");
@@ -607,6 +612,12 @@ app.Use(async (ctx, next) =>
     if (isolatedListeners is not null && !isolatedListeners.Permit(ctx))
     {
         ctx.Response.StatusCode = 403; return;
+    }
+    if (localVipAdmission is not null && !localVipAdmission.Allows(isolatedListeners?.VirtualServiceId(ctx)))
+    {
+        ctx.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+        ctx.Response.Headers.CacheControl = "no-store";
+        return;
     }
     if (adminPath)
     {
@@ -2149,7 +2160,12 @@ app.MapGet("/admin/api/network/interfaces", (HttpContext ctx) =>
     {
         var snapshot = LocalNetworkInventory.Read();
         var virtualAddresses = (isolatedListeners?.VirtualServices ?? Array.Empty<GatewayListenerIsolation.VirtualSocket>())
-            .Select(service => NetworkObservation.ObserveVirtualAddress(service.Id, service.Ip, service.Port, service.Protocol, snapshot))
+            .Select(service =>
+            {
+                var observed = NetworkObservation.ObserveVirtualAddress(service.Id, service.Ip, service.Port, service.Protocol, snapshot);
+                return new { observed.Id, observed.Ip, observed.Port, observed.Protocol, observed.Status,
+                    observed.Interfaces, service.RequireLocalAddressPresence, admission = localVipAdmission?.Status(service.Id) ?? "disabled" };
+            })
             .ToArray();
         return Results.Ok(new { snapshot.Scope, snapshot.Platform, snapshot.ObservedUtc, snapshot.Interfaces,
             snapshot.Truncated, vlans = NetworkObservation.ReadVlans(), virtualAddresses });

@@ -26,3 +26,4 @@ SecureAffinityContractTests.Run();
 
 ExpiringAffinityTests.Run();
 NetworkObservationTests.Run();
+LocalVipAdmissionTests.Run();
