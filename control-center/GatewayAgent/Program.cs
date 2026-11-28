@@ -533,7 +533,8 @@ app.MapPost("/agent/v1/engines/{engineId}/config/prepare", async (string engineI
     await revisionLock.WaitAsync();
     try
     {
-        if (engineId == "l4" && !AdcListenerPlan.AllowsL4(Encoding.UTF8.GetBytes(candidate.ToJsonString())))
+        var planEnforced = false;
+        if (engineId == "l4" && !AdcListenerPlan.AllowsL4(Encoding.UTF8.GetBytes(candidate.ToJsonString()), false, out planEnforced))
             return Results.BadRequest(new {error="L4 config conflicts with host ADC listener plan"});
         var original=await File.ReadAllBytesAsync(configPath);
         var revision=Sha(original);
@@ -564,8 +565,14 @@ app.MapPost("/agent/v1/engines/{engineId}/config/prepare", async (string engineI
         var proposed=Encoding.UTF8.GetBytes(candidate.ToJsonString(new JsonSerializerOptions{WriteIndented=true}));
         await File.WriteAllBytesAsync(Path.Combine(tx,"original.json"),original);
         await File.WriteAllBytesAsync(Path.Combine(tx,"prepared.json"),proposed);
-        await File.WriteAllTextAsync(Path.Combine(tx,"sequence.txt"),input.Sequence.ToString(
-            System.Globalization.CultureInfo.InvariantCulture));
+        var transactionSequence = engineId == "l4"
+            ? AdcListenerPlan.FormatTransactionSequence(input.Sequence, planEnforced)
+            : input.Sequence.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        using (var journal = new FileStream(Path.Combine(tx,"sequence.txt"), FileMode.CreateNew, FileAccess.Write, FileShare.None))
+        {
+            journal.Write(Encoding.UTF8.GetBytes(transactionSequence));
+            journal.Flush(flushToDisk: true);
+        }
         return Results.Ok(new {state="prepared",engineId,transactionId=input.TransactionId,
             originalRevision=revision,preparedRevision=Sha(proposed)});
     }
@@ -589,7 +596,8 @@ app.MapPost("/agent/v1/engines/{engineId}/config/activate", async (string engine
             return Results.NotFound();
         if (EngineConfigContract.IsRollbackFenced(tx))
             return Results.Conflict(new {error="Engine transaction fenced by rollback"});
-        if (!long.TryParse(await File.ReadAllTextAsync(seqFile),out var sequence) ||
+        if (!AdcListenerPlan.TryReadTransactionSequence(await File.ReadAllTextAsync(seqFile), engineId == "l4",
+                out var sequence, out var planRequired) ||
             sequence != FleetSequenceState.Read(Path.Combine(stage,"last-accepted-sequence.txt")))
             return Results.Conflict(new {error="Transaction superseded"});
         var proposed=await File.ReadAllBytesAsync(prepared);
@@ -598,7 +606,7 @@ app.MapPost("/agent/v1/engines/{engineId}/config/activate", async (string engine
         var original=await File.ReadAllBytesAsync(originalPath);
         if (Sha(await File.ReadAllBytesAsync(configPath)) != Sha(original))
             return Results.Conflict(new {error="Engine config changed after prepare"});
-        if (engineId == "l4" && !AdcListenerPlan.AllowsL4(proposed))
+        if (engineId == "l4" && !AdcListenerPlan.AllowsL4(proposed, planRequired))
             return Results.Conflict(new {error="Host ADC listener plan changed; activation refused"});
         await File.WriteAllBytesAsync(configPath+".next",proposed);
 #if GATEWAYCORE_COMMERCIAL
@@ -627,7 +635,8 @@ app.MapPost("/agent/v1/engines/{engineId}/config/rollback", async (string engine
         var seqFile=Path.Combine(tx,"sequence.txt");
         if (!File.Exists(originalPath) || !File.Exists(preparedPath) || !File.Exists(seqFile))
             return Results.NotFound();
-        if (!long.TryParse(await File.ReadAllTextAsync(seqFile),out var sequence) ||
+        if (!AdcListenerPlan.TryReadTransactionSequence(await File.ReadAllTextAsync(seqFile), engineId == "l4",
+                out var sequence, out var planRequired) ||
             sequence != FleetSequenceState.Read(Path.Combine(stage,"last-accepted-sequence.txt")))
             return Results.Conflict(new {error="Cannot roll back superseded transaction"});
         var original=await File.ReadAllBytesAsync(originalPath);
@@ -640,7 +649,7 @@ app.MapPost("/agent/v1/engines/{engineId}/config/rollback", async (string engine
 #if GATEWAYCORE_COMMERCIAL
         if (!await VerifyFleetFence(input.TransactionId,sequence,rollback:true)) return Results.StatusCode(409);
 #endif
-        if (engineId == "l4" && !AdcListenerPlan.AllowsL4(original))
+        if (engineId == "l4" && !AdcListenerPlan.AllowsL4(original, planRequired))
             return Results.Conflict(new {error="Restore compatible host ADC listener plan before L4 rollback"});
         // Persist the fence before restoring bytes. Even rollback of a merely
         // prepared transaction must prohibit a delayed activation after restart.

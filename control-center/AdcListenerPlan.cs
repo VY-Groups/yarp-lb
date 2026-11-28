@@ -99,19 +99,44 @@ public sealed class AdcListenerPlan
             throw new InvalidDataException("Missing ADC listener plan.");
         return Create(document);
     }
-    // Signed agent uses the same check on prepare, activate and rollback.
-    public static bool AllowsL4(byte[] bytes)
+    // Capture enforcement from the same manifest read used for validation.
+    public static bool AllowsL4(byte[] bytes, bool planRequired = false) =>
+        AllowsL4(bytes, planRequired, out _);
+
+    public static bool AllowsL4(byte[] bytes, bool planRequired, out bool planEnforced)
     {
+        planEnforced = false;
         try
         {
             var plan = ReadFromEnvironment();
-            if (plan is null) return true;
+            if (plan is null) return !planRequired;
+            planEnforced = true;
             if (JsonNode.Parse(bytes) is not JsonObject candidate) return false;
             plan.RequireL4(candidate);
             return true;
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or
+        catch (Exception ex) when (ex is InvalidDataException or IOException or UnauthorizedAccessException or JsonException or
             InvalidOperationException or ArgumentException or FormatException or NullReferenceException)
         { return false; }
+    }
+
+    // Store mode with the sequence, not in an optional sidecar: missing or
+    // corrupt mode cannot silently turn an enforced transaction into legacy.
+    public static string FormatTransactionSequence(long sequence, bool planEnforced) =>
+        sequence.ToString(System.Globalization.CultureInfo.InvariantCulture) +
+        (planEnforced ? ":plan-required" : ":legacy");
+
+    public static bool TryReadTransactionSequence(string value, bool l4, out long sequence, out bool planRequired)
+    {
+        sequence = 0;
+        planRequired = false;
+        if (!l4) return long.TryParse(value, out sequence);
+        var parts = value.Split(':');
+        if (parts.Length != 2 || parts[1] is not ("plan-required" or "legacy") ||
+            !long.TryParse(parts[0], System.Globalization.NumberStyles.None,
+                System.Globalization.CultureInfo.InvariantCulture, out sequence) || sequence <= 0)
+            return false;
+        planRequired = parts[1] == "plan-required";
+        return true;
     }
 }
