@@ -19,10 +19,15 @@ import threading
 import time
 import uuid
 from vip_http_body import read_json_body
+from real_vip_nodes import RealVipNodes
 
 HERE = Path(__file__).resolve().parents[2]
 if os.geteuid()!=0 or os.getenv("GITHUB_ACTIONS")!="true" or os.getenv("RUNNER_ENVIRONMENT")!="github-hosted":
     raise SystemExit("Disposable elevated hosted CI only")
+if len(sys.argv) not in (3,4) or (len(sys.argv)==4 and sys.argv[3]!="--real-nodes"):
+    raise SystemExit("Expected manifest, product and optional --real-nodes")
+real_mode=len(sys.argv)==4
+real_nodes=None
 manifest=json.loads(Path(sys.argv[1]).read_text())
 product=Path(sys.argv[2]).resolve(strict=True)
 provider="gatewaycore-vip-fence-provider"
@@ -426,12 +431,18 @@ try:
     bmc_auth=os.urandom(32).hex()
     bmc_credential=put(pdir,"bmc.json",{"username":"fixture","password":bmc_auth})
     expected_basic="Basic "+b64("fixture:"+bmc_auth)
+    if real_mode:
+        stage="prepare-two-shipping-nodes"
+        real_nodes=RealVipNodes(root,executable,manifest,scope,fleet,vip,run,put,copy,fixture_passfile)
+        real_nodes.prepare()
     power={first:True,second:True}
     serving={first:True,second:False}
     draining={first:False,second:False}
     inflight={first:0,second:0}
     systemids={p:str(uuid.uuid4()) for p in node_pins}
     events=[]; failure={"activate":True}
+    def is_serving(node):
+        return real_nodes.probe(node) if real_mode else serving[node]
     def bmc_handler(node):
         path="/redfish/v1/Systems/fixture"
         class Bmc(JsonHandler):
@@ -449,8 +460,10 @@ try:
                 except (ValueError,OSError):return self.response(400)
                 with lock:
                     if action=="ForceOff":
+                        if real_mode:real_nodes.power_off(node)
                         power[node]=False;serving[node]=False
                     elif action=="On":
+                        if real_mode:real_nodes.power_on(node)
                         power[node]=True;serving[node]=False;draining[node]=False
                     else:return self.response(400)
                     events.append((action,node))
@@ -494,11 +507,16 @@ try:
         bc,bk,bp=manifest["bmc"+str(i)]
         ac,ak,ap=manifest["agent"+str(i)]
         bmc=tls_server(bmc_handler(node),bc,bk)
-        agent=tls_server(agent_handler(node),ac,ak,ca)
-        machine={"origin":agent,"leafSha256":ap,"caFile":str(pca),"certFile":str(pcert),"keyFile":str(pkey)}
+        if real_mode:
+            machine=real_nodes.machine(node,pca,pcert,pkey)
+            drain_machine=real_nodes.machine(node,pca,pcert,pkey,drain=True)
+        else:
+            agent=tls_server(agent_handler(node),ac,ak,ca)
+            machine={"origin":agent,"leafSha256":ap,"caFile":str(pca),"certFile":str(pcert),"keyFile":str(pkey)}
+            drain_machine=machine
         nodes.append({"pin":node,"bmc":{"origin":bmc,"leafSha256":bp,"caFile":str(pca),
             "systemPath":"/redfish/v1/Systems/fixture","systemUuid":systemids[node],"credentialFile":str(bmc_credential)},
-            "agent":machine,"drain":machine})
+            "agent":machine,"drain":drain_machine})
     port=free_port(); rearm=pdir/"rearm.journal"
     provider_cfg=put(pdir,"provider.json",{"listenIp":"127.0.0.1","port":port,"scope":scope,"readerConfig":str(preader),
         "serverPfx":str(pfx),"serverPasswordFile":str(password),"writerCaFile":str(pca),"writerPin":writer_pin,
@@ -568,6 +586,10 @@ try:
     if journal.exists() or owner_state()!=initial:
         raise AssertionError("Offline policy handoff mutated authority or journal")
     print("PASS: audited browser policy bytes handed to protected independent controller; exact digest accepted, valid changed policy refused",flush=True)
+    if real_mode:
+        stage="activate-real-initial-owner"
+        real_nodes.activate_initial(first,initial[1])
+        time.sleep(6)
     stage="install-roles"
     services.append(provider)
     run("bash",HERE/"ops/ha/install-vip-service.sh","provider",executable,provider_cfg,pa,"--apply")
@@ -588,32 +610,42 @@ try:
     stage="real-majority-partition"
     for name in manifest["containers"][1:]:
         run("docker","pause",name);paused.append(name)
-    with lock:serving[first]=False
+    if real_mode:
+        real_nodes.healthy(first,False)
+        real_nodes.healthy(second,False) # actual readiness failure on successor activation
+    else:
+        with lock:serving[first]=False
     time.sleep(22)
+    if real_mode:real_nodes.assert_outage()
     if journal_rows(journal) or events:raise AssertionError("HA mutation without real quorum majority")
     for name in reversed(paused):run("docker","unpause",name)
     paused.clear()
     stage="automatic-failover-injected-activation-failure"
     def failed_successor():
         state=owner_state()
-        return state[0]=="vip_"+second and not active(controller) and any(e==("activation-refused",second) for e in events)
+        return state[0]=="vip_"+second and not active(controller) and (real_nodes.compensated(second) if real_mode else any(e==("activation-refused",second) for e in events))
     wait(failed_successor,"Controller did not preserve failed successor transition",150)
     successor=owner_state()
     rows=journal_rows(journal)
     if len(rows)!=1 or field(rows[0],"finalEpoch")!=0 or events.count(("ForceOff",first))!=1:
         raise AssertionError("Failed activation did not preserve exact durable recovery intent")
-    if power[first] or serving[first] or serving[second]:raise AssertionError("Failed transition did not fail closed")
+    if power[first] or is_serving(first) or is_serving(second):raise AssertionError("Failed transition did not fail closed")
+    if real_mode:
+        if real_nodes.present(first) or real_nodes.present(second):raise AssertionError("Failed transition left an actual VIP assigned")
+        print("PASS: two actual node agents and gateway services; failed successor readiness stopped service and withdrew kernel VIP",flush=True)
     stage="explicit-recovery-real-quorum"
     before_inspection=journal.read_bytes()
     inspection=json.loads(writer("inspect-policy",policy,client,journal,approved_digest).stdout)
     if (not inspection["digestVerified"] or inspection["policySha256"]!=approved_digest or not inspection["recoveryRequired"] or inspection["pending"]["OldEpoch"]!=initial[1] or
         inspection["mutated"] or journal.read_bytes()!=before_inspection or owner_state()!=successor):
         raise AssertionError("Offline recovery inspection failed or changed ownership/journal")
-    with lock:failure["activate"]=False
+    if real_mode:real_nodes.healthy(second,True)
+    else:
+        with lock:failure["activate"]=False
     if writer("recover-policy",policy,client,journal,"0"*64,check=False).returncode!=78 or journal.read_bytes()!=before_inspection or owner_state()!=successor:
         raise AssertionError("Unapproved policy recovery mutated authority or journal")
     writer("recover-policy",policy,client,journal,approved_digest)
-    if owner_state()!=successor or not serving[second] or power[first]:
+    if owner_state()!=successor or not is_serving(second) or power[first]:
         raise AssertionError("Recovery changed owner epoch or admitted predecessor")
     rows=journal_rows(journal)
     if len(rows)!=2 or field(rows[-1],"finalEpoch")!=successor[1]:
@@ -623,17 +655,28 @@ try:
     stage="provider-and-controller-restart-rearm"
     stop(provider);run("systemctl","start",provider+".service");wait(provider_ready,"Provider restart failed")
     run("systemctl","start",controller+".service")
-    wait(lambda:events.count(("On",first))==1 and power[first] and not serving[first],"Standby rearm did not complete",150)
+    wait(lambda:events.count(("On",first))==1 and power[first] and not is_serving(first),"Standby rearm did not complete",150)
+    if real_mode and (real_nodes.present(first) or not real_nodes.present(second)):
+        raise AssertionError("Actual rearm exposed wrong kernel VIP")
     stage="automatic-drained-failback"
     def completed_failback():
         current=owner_state()
         rows=journal_rows(journal)
-        return current[0]=="vip_"+first and current[1]>successor[1] and serving[first] and bool(rows) and field(rows[-1],"finalEpoch")==current[1] and field(rows[-1],"kind")=="failback"
+        return current[0]=="vip_"+first and current[1]>successor[1] and is_serving(first) and bool(rows) and field(rows[-1],"finalEpoch")==current[1] and field(rows[-1],"kind")=="failback"
     # Real production policy minimum owner interval is deliberately unchanged.
     wait(completed_failback,"Full policy-timed failback failed",420)
     stop(controller)
-    if serving[second] or events.count(("ForceOff",second))!=1 or events.count(("drain",second))!=1:
-        raise AssertionError("Failback did not drain and hard-fence former owner exactly once")
+    if is_serving(second) or events.count(("ForceOff",second))!=1:
+        raise AssertionError("Failback did not hard-fence former owner exactly once")
+    if real_mode:
+        if not real_nodes.present(first) or real_nodes.present(second):
+            raise AssertionError("Actual final kernel ownership mismatch")
+        drain_file=real_nodes.nodes[second]["state"]/("vip-auto-drain-"+scope+".json")
+        if not drain_file.is_file():raise AssertionError("Actual former owner did not persist automatic drain")
+        real_nodes.verify_traffic()
+        print("PASS: two shipping GatewayCore/node-agent systemd pairs, actual kernel VIP and TLS/YARP traffic through failover, explicit recovery, standby rearm and drained failback; BMC power is simulated",flush=True)
+    elif events.count(("drain",second))!=1:
+        raise AssertionError("Simulated predecessor drain not confirmed")
     print("PASS: installed provider restart, durable standby rearm, policy-timed drained failback and exact real Raft epoch convergence",flush=True)
 except Exception:
     print("FAIL: live installed VIP recovery stage="+stage,flush=True)
@@ -650,5 +693,6 @@ finally:
             (Path("/etc/systemd/system")/(name+".service")).unlink(missing_ok=True)
     run("systemctl","daemon-reload")
     for s in servers:s.shutdown();s.server_close()
+    if real_nodes is not None:real_nodes.close()
     for u in reversed(users):run("userdel",u)
     shutil.rmtree(root)

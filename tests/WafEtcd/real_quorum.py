@@ -579,6 +579,13 @@ def main():
                 "VIP_BROWSER_NODE="+os.environ["VIP_BROWSER_NODE"],sys.executable,
                 str(ROOT/"tests/WafEtcd/real_vip_recovery.py"),str(vip_input),
                 os.environ["DP_RUNTIME_PRODUCT_DLL"]],check=True,timeout=1050)
+            STAGE = "two-shipping-vip-nodes-live-raft-recovery"
+            subprocess.run(["sudo","-n","env","GITHUB_ACTIONS=true","RUNNER_ENVIRONMENT=github-hosted",
+                "DOTNET_ROOT="+os.environ["DOTNET_ROOT"],
+                "PLAYWRIGHT_BROWSERS_PATH="+os.environ["PLAYWRIGHT_BROWSERS_PATH"],
+                "VIP_BROWSER_NODE="+os.environ["VIP_BROWSER_NODE"],sys.executable,
+                str(ROOT/"tests/WafEtcd/real_vip_recovery.py"),str(vip_input),
+                os.environ["DP_RUNTIME_PRODUCT_DLL"],"--real-nodes"],check=True,timeout=1050)
 
             # Lose 2/3 independent members: the surviving member cannot
             # authorize mutation. No automatic rescue via a local JSON lease.
