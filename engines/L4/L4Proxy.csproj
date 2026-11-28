@@ -4,5 +4,6 @@
     <OutputType>Exe</OutputType><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable>
     <Version>0.1</Version>
   </PropertyGroup>
+  <ItemGroup><Compile Include="../../control-center/AdcListenerPlan.cs" Link="AdcListenerPlan.cs" /></ItemGroup>
   <Import Project="../../src/CommercialEngine/CommercialEngine.props" />
 </Project>

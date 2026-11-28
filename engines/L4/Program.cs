@@ -48,6 +48,15 @@ foreach (var listener in listeners)
             ip.AddressFamily != AddressFamily.InterNetwork))
         throw new InvalidDataException($"Invalid listener {listener.Name}; addresses must be IPv4 literals and public binds require explicit opt-in.");
 }
+var plan = AdcListenerPlan.ReadFromEnvironment();
+if (plan is not null)
+    plan.RequireExact(config.Tcp.Select(x => new AdcListenerPlan.Entry(x.Name,x.ListenHost,x.ListenPort,"TCP"))
+        .Concat(config.Udp.Select(x => new AdcListenerPlan.Entry(x.Name,x.ListenHost,x.ListenPort,"UDP"))), true);
+// Bind every socket before starting any forwarding loop. A failed bind disposes
+// all earlier reservations and never publishes partial engine readiness.
+using var reserved = new L4SocketReservations();
+foreach (var tcp in config.Tcp) reserved.ReserveTcp(tcp);
+foreach (var udp in config.Udp) reserved.ReserveUdp(udp);
 using var stop = new CancellationTokenSource();
 Console.CancelKeyPress += (_, e) => { e.Cancel = true; stop.Cancel(); };
 using var sigterm = OperatingSystem.IsLinux()
@@ -82,9 +91,9 @@ var activeTcp = new ConcurrentDictionary<long, Task>();
 long nextTcp = 0;
 var loops = new List<Task>();
 foreach (var tcp in config.Tcp)
-    loops.Add(RunTcp(tcp, stop.Token));
+    loops.Add(RunTcp(tcp, reserved.Tcp[tcp.Name], stop.Token));
 foreach (var udp in config.Udp)
-    loops.Add(RunUdp(udp, stop.Token));
+    loops.Add(RunUdp(udp, reserved.Udp[udp.Name], stop.Token));
 try
 {
     // A listener can fail during bind or later while other listeners are
@@ -121,10 +130,8 @@ return Volatile.Read(ref entitlementLost)!=0?78:0;
 return 0;
 #endif
 
-async Task RunTcp(L4Listener cfg, CancellationToken token)
+async Task RunTcp(L4Listener cfg, TcpListener listener, CancellationToken token)
 {
-    var listener = new TcpListener(IPAddress.Parse(cfg.ListenHost), cfg.ListenPort);
-    listener.Start(256);
     Console.WriteLine($"L4_TCP_READY {cfg.Name} {cfg.ListenHost}:{cfg.ListenPort}");
     long cursor = -1;
     int admitted = 0;
@@ -330,10 +337,8 @@ async Task Pump(Stream from, Stream to, Socket destination,
         catch (ObjectDisposedException) { }
     }
 }
-async Task RunUdp(L4Listener cfg, CancellationToken token)
+async Task RunUdp(L4Listener cfg, Socket listener, CancellationToken token)
 {
-    using var listener = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
-    listener.Bind(new IPEndPoint(IPAddress.Parse(cfg.ListenHost), cfg.ListenPort));
     Console.WriteLine($"L4_UDP_READY {cfg.Name} {cfg.ListenHost}:{cfg.ListenPort}");
     var sessions = new Dictionary<string, UdpSession>();
     var targets = cfg.Backends.Select(b => new UdpTarget(b)).ToArray();
@@ -527,5 +532,38 @@ sealed class UdpSession
     public void Close()
     {
         if (Interlocked.Exchange(ref closed, 1) == 0) Upstream.Dispose();
+    }
+}
+
+sealed class L4SocketReservations : IDisposable
+{
+    public Dictionary<string,TcpListener> Tcp { get; } = new(StringComparer.Ordinal);
+    public Dictionary<string,Socket> Udp { get; } = new(StringComparer.Ordinal);
+    public void ReserveTcp(L4Listener cfg)
+    {
+        var socket = new TcpListener(IPAddress.Parse(cfg.ListenHost),cfg.ListenPort);
+        try
+        {
+            if (OperatingSystem.IsWindows()) socket.ExclusiveAddressUse = true;
+            socket.Start(256);
+            Tcp.Add(cfg.Name,socket);
+        }
+        catch { socket.Stop(); throw; }
+    }
+    public void ReserveUdp(L4Listener cfg)
+    {
+        var socket = new Socket(AddressFamily.InterNetwork,SocketType.Dgram,ProtocolType.Udp);
+        try
+        {
+            if (OperatingSystem.IsWindows()) socket.ExclusiveAddressUse = true;
+            socket.Bind(new IPEndPoint(IPAddress.Parse(cfg.ListenHost),cfg.ListenPort));
+            Udp.Add(cfg.Name,socket);
+        }
+        catch { socket.Dispose(); throw; }
+    }
+    public void Dispose()
+    {
+        foreach (var socket in Tcp.Values) socket.Stop();
+        foreach (var socket in Udp.Values) socket.Dispose();
     }
 }

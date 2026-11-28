@@ -3,6 +3,7 @@
   <ImplicitUsings>enable</ImplicitUsings></PropertyGroup>
   <ItemGroup><Compile Include="../../FleetConfigSignature.cs" Link="FleetConfigSignature.cs" /><Compile Include="../../FleetSequenceState.cs" Link="FleetSequenceState.cs" /><Compile Include="../../FleetRolloutJournal.cs" Link="FleetRolloutJournal.cs" /></ItemGroup>
   <ItemGroup>
+    <Compile Include="../../AdcListenerPlan.cs" Link="AdcListenerPlan.cs" />
     <Compile Include="../../FleetAdcContract.cs" Link="FleetAdcContract.cs" />
     <Compile Include="../../MonitorProfileRegistry.cs" Link="MonitorProfileRegistry.cs" />
     <Compile Include="../../RealServerCatalog.cs" Link="RealServerCatalog.cs" />

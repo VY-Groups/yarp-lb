@@ -35,6 +35,7 @@ public sealed class GatewayListenerIsolation : IDisposable
 
     public sealed record VirtualSocket(string Id, string Ip, int Port, string Protocol, bool RequireLocalAddressPresence = false, string? VipFleetId = null, string? VipQuorumConfigPath = null, long? VipOwnershipEpoch = null, string? VipJournalDirectory = null, string? VipInterfaceId = null);
     private readonly (VirtualSocket Config, IPAddress Address)[] _virtualServices;
+    public AdcListenerPlan? UnifiedPlan { get; }
 
     public readonly Settings Config;
     private readonly IPAddress _traffic, _management;
@@ -102,6 +103,21 @@ public sealed class GatewayListenerIsolation : IDisposable
                 throw new InvalidOperationException("All sockets on a distributed VIP must share the exact same authority and epoch.");
         }
         _virtualServices = validated.ToArray();
+        UnifiedPlan = AdcListenerPlan.ReadFromEnvironment();
+        if (UnifiedPlan is not null)
+        {
+            var https = config.HttpVersion == "3" ? "HTTPS3" : "HTTPS";
+            var endpoints = new List<AdcListenerPlan.Entry>
+            {
+                new("gateway-http", _traffic.ToString(), config.TrafficHttpPort, "HTTP"),
+                new("gateway-https", _traffic.ToString(), config.TrafficHttpsPort, https),
+                new("gateway-admin", _management.ToString(), config.AdminPort, "ADMIN"),
+                new("gateway-metrics", _management.ToString(), config.MetricsPort, "METRICS")
+            };
+            endpoints.AddRange(validated.Select(x => new AdcListenerPlan.Entry(x.Item1.Id,
+                x.Item2.ToString(), x.Item1.Port, x.Item1.Protocol == "HTTPS" ? https : "HTTP")));
+            UnifiedPlan.RequireExact(endpoints, false);
+        }
         if (config.MaxConcurrentConnections <= 0)
             throw new InvalidOperationException("REQUIRED_INPUT MaxConcurrentConnections must be derived from measured peak");
         _ = TrafficHttpProtocols.Parse(config.HttpVersion);
@@ -293,6 +309,8 @@ public sealed class GatewayListenerIsolation : IDisposable
     public static GatewayListenerIsolation? FromEnvironment()
     {
         var config = ReadSettingsFromEnvironment();
+        if (config is null && AdcListenerPlan.ReadFromEnvironment() is not null)
+            throw new InvalidOperationException("Unified ADC listener plan requires isolated gateway listeners.");
         return config is null ? null : new GatewayListenerIsolation(config);
     }
 

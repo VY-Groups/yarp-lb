@@ -10,6 +10,7 @@
   </ItemGroup>
   <Import Project="../../src/CommercialEngine/CommercialEngine.props" />
   <ItemGroup>
+    <Compile Include="../AdcListenerPlan.cs" Link="AdcListenerPlan.cs" />
     <Compile Include="../FleetAdcContract.cs" Link="FleetAdcContract.cs" />
     <Compile Include="../MonitorProfileRegistry.cs" Link="MonitorProfileRegistry.cs" />
     <Compile Include="../RealServerCatalog.cs" Link="RealServerCatalog.cs" />
