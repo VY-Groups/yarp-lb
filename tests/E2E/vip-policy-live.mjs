@@ -5,7 +5,9 @@ import fs from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 if (process.env.GITHUB_ACTIONS !== 'true' || process.env.RUNNER_ENVIRONMENT !== 'github-hosted')
     throw new Error('Disposable hosted CI only');
-const fixture=JSON.parse(await fs.readFile(process.argv[2],'utf8'));
+const chunks=[];
+for await (const chunk of process.stdin) chunks.push(chunk);
+const fixture=JSON.parse(Buffer.concat(chunks).toString('utf8'));
 if (!/^https:\/\/127\.0\.0\.1:[0-9]+$/.test(fixture.origin))
     throw new Error('Disposable loopback origin required');
 const browser=await chromium.launch({headless:true});

@@ -141,7 +141,7 @@ with tempfile.TemporaryDirectory(prefix='gateway-sockets-') as td:
             '-addext','keyUsage=critical,keyEncipherment',
             '-keyout',str(dp_key),'-out',str(dp_crt))
         dp_pfx,dp_password=pfx(root,'dp',dp_key,dp_crt,ca_crt)
-        thumb=run('openssl','x509','-in',str(client_crt),'-fingerprint','-sha1','-noout').stdout.split('=',1)[1].strip().replace(':','')
+        thumb=run('openssl','x509','-in',str(client_crt),'-fingerprint','-sha256','-noout').stdout.split('=',1)[1].strip().replace(':','')
         ports=[available('127.0.0.2') for _ in range(2)]+[available('127.0.0.1') for _ in range(2)]
         while len(set(ports))!=4:ports=[available('127.0.0.2') for _ in range(2)]+[available('127.0.0.1') for _ in range(2)]
         settings={'trafficIp':'127.0.0.2','trafficHttpPort':ports[0],'trafficHttpsPort':ports[1],

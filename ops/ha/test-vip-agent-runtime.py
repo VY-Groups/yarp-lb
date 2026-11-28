@@ -39,7 +39,9 @@ def private(path):
     if not WIN: path.chmod(0o600)
 def write(name, data):
     p = root/name
-    p.write_text(data, encoding="ascii")
+    fd=os.open(p,os.O_WRONLY|os.O_CREAT|os.O_TRUNC,0o600)
+    with os.fdopen(fd,"w",encoding="ascii") as stream:
+        stream.write(data)
     private(p)
     return p
 def openssl(*args):
@@ -128,7 +130,13 @@ try:
     peer,_=issue("peer")
     provider,providerkey=issue("provider")
     wrong,wrongkey=issue("wrong")
-    pfx=root/"server.pfx"; password=write("password","disposable-fixture-only")
+    # The installed service consumes a protected password file. Generate a
+    # unique disposable credential directly into an exclusively created file.
+    password=root/"password"
+    os.close(os.open(password,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600))
+    openssl("rand","-hex","-out",password,"32")
+    private(password)
+    pfx=root/"server.pfx"
     openssl("pkcs12","-export","-inkey",serverkey,"-in",server,"-out",pfx,"-passout","file:"+str(password))
     private(pfx)
     scope="A"*64; port=free_port()

@@ -55,8 +55,19 @@ def private_dir(name):
     d=root/name;d.mkdir(mode=0o700);return d
 def put(d,name,value):
     p=d/name
-    p.write_text(value if isinstance(value,str) else json.dumps(value),encoding="ascii")
+    # A private fixture directory is required by the installed role; create
+    # files with owner-only mode before writing any data, including rewrites.
+    fd=os.open(p,os.O_WRONLY|os.O_CREAT|os.O_TRUNC|os.O_NOFOLLOW,0o600)
+    with os.fdopen(fd,"w",encoding="ascii") as stream:
+        if isinstance(value,str): stream.write(value)
+        else: json.dump(value,stream)
     p.chmod(0o600);return p
+def fixture_passfile(d,name):
+    p=d/name
+    os.close(os.open(p,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600))
+    openssl("rand","-hex","-out",p,"32")
+    return p
+
 def copy(d,name,source):
     p=d/name;shutil.copyfile(source,p);p.chmod(0o600);return p
 def identity(name):
@@ -104,6 +115,7 @@ def free_port():
 def tls_server(handler,cert,key,ca=None):
     server=http.server.ThreadingHTTPServer(("127.0.0.1",0),handler)
     ctx=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.minimum_version=ssl.TLSVersion.TLSv1_2
     ctx.load_cert_chain(cert,key)
     if ca:
         ctx.verify_mode=ssl.CERT_REQUIRED;ctx.load_verify_locations(cafile=ca)
@@ -151,14 +163,14 @@ def accept_live_policy(executable,scope,fleet,vip,reader,policy,expected_owner):
             "-subj","/CN=Disposable VIP DP","-addext","basicConstraints=critical,CA:FALSE",
             "-addext","keyUsage=critical,keyEncipherment","-keyout",dpkey,"-out",dpcrt)
     def make_pfx(name,key,crt):
-        password=put(certdir,name+".password",uuid.uuid4().hex)
+        password=fixture_passfile(certdir,name+".password")
         output=certdir/(name+".pfx")
         openssl("pkcs12","-export","-in",crt,"-inkey",key,"-out",output,"-passout","file:"+str(password))
         output.chmod(0o600);return str(output),str(password)
     server_pfx,server_pass=make_pfx("server",sk,sc)
     traffic_pfx,traffic_pass=make_pfx("traffic",tk,tc)
     dp_pfx,dp_pass=make_pfx("dp",dpkey,dpcrt)
-    thumb=hashlib.sha1(ssl.PEM_cert_to_DER_cert(cc.read_text())).hexdigest().upper()
+    thumb=pin(cc)
     # Hold every port reservation concurrently until the configuration is built.
     reservations=[]
     try:
@@ -335,14 +347,13 @@ def accept_live_policy(executable,scope,fleet,vip,reader,policy,expected_owner):
                 raise AssertionError("Real exported policy bytes, digest or cache contract mismatch")
             # Use a separate real browser session: no page.route(), mocked
             # API, injected authentication cookie or direct download helper.
-            browser_input=put(d,"browser-input.json",{
-                "origin":"https://127.0.0.1:"+str(ports[2]),
+            # Pass the short-lived administrator credential through a private
+            # child-process pipe, not a disk file, environment or argument.
+            browser_input=json.dumps({"origin":"https://127.0.0.1:"+str(ports[2]),
                 "certificate":str(cc),"key":str(ck),"password":admin_password,
                 "policy":policy,"expectedJson":reply["json"],"expectedSha256":reply["sha256"]})
-            try:
-                subprocess.run([os.environ["VIP_BROWSER_NODE"],str(HERE/"tests/E2E/vip-policy-live.mjs"),
-                    str(browser_input)],check=True,timeout=120)
-            finally:browser_input.unlink(missing_ok=True)
+            subprocess.run([os.environ["VIP_BROWSER_NODE"],str(HERE/"tests/E2E/vip-policy-live.mjs")],
+                input=browser_input,text=True,check=True,timeout=120)
             if owner_state()!=expected_owner or journal_files[0].read_bytes()!=original_journal:
                 raise AssertionError("Policy export changed live ownership or address journal")
             print("PASS: real journal-bound gateway + actual Raft + kernel VIP + mTLS administrator: positive audited policy export, digest and negative scope/CSRF/timing checks",flush=True)
@@ -407,11 +418,12 @@ try:
     wc.update(vipFencePublicKeyFile=str(pub),vipFencePublicKeySha256=hashlib.sha256(der.read_bytes()).hexdigest().upper())
     writer_path=put(cdir,"writer.json",wc)
     server_cert,server_key,server_pin=manifest["providerServer"]
-    password=put(pdir,"password",uuid.uuid4().hex)
+    password=fixture_passfile(pdir,"password")
     pfx=pdir/"server.pfx"
     openssl("pkcs12","-export","-in",server_cert,"-inkey",server_key,"-out",pfx,"-passout","file:"+str(password))
-    bmc_credential=put(pdir,"bmc.json",{"username":"fixture","password":"disposable-only"})
-    expected_basic="Basic "+b64("fixture:disposable-only")
+    bmc_auth=os.urandom(32).hex()
+    bmc_credential=put(pdir,"bmc.json",{"username":"fixture","password":bmc_auth})
+    expected_basic="Basic "+b64("fixture:"+bmc_auth)
     power={first:True,second:True}
     serving={first:True,second:False}
     draining={first:False,second:False}

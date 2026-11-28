@@ -46,7 +46,10 @@ def temp(prefix):
     return p
 def write(directory,name,value):
     p=directory/name
-    p.write_text(value if isinstance(value,str) else json.dumps(value),encoding="ascii")
+    fd=os.open(p,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+    with os.fdopen(fd,"w",encoding="ascii") as stream:
+        if isinstance(value,str): stream.write(value)
+        else: json.dump(value,stream)
     if not WIN: p.chmod(0o600)
     return p
 def copy(directory,source):
@@ -183,9 +186,13 @@ try:
     writer_config=quorum(cca,ccert,ckey)
     writer_config.update(vipFencePublicKeyFile=str(public),vipFencePublicKeySha256=hashlib.sha256(der.read_bytes()).hexdigest().upper())
     writer_path=write(cdir,"writer.json",writer_config)
-    provider_pfx=pdir/"server.pfx"; pw=write(pdir,"password","disposable-fixture-only")
+    provider_pfx=pdir/"server.pfx"; pw=pdir/"password"
+    os.close(os.open(pw,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600))
+    openssl("rand","-hex","-out",pw,"32")
     openssl("pkcs12","-export","-inkey",serverkey,"-in",server,"-out",provider_pfx,"-passout","file:"+str(pw))
-    bmc_credential=write(pdir,"bmc.json",{"username":"fixture","password":"unused-disposable"})
+    # This fixture never contacts a BMC. Use a unique non-reusable credential,
+    # with the same private file ACL as the installed provider contract.
+    bmc_credential=write(pdir,"bmc.json",{"username":"fixture","password":os.urandom(32).hex()})
     nodes=[]
     for index,owner in enumerate(owners):
         def machine(offset):

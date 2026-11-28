@@ -110,8 +110,8 @@ public sealed class GatewayListenerIsolation : IDisposable
         if (config.ClientThumbprints is null || config.ClientThumbprints.Length == 0)
             throw new InvalidOperationException("At least one pinned management client certificate is required");
         _pins = new HashSet<string>(config.ClientThumbprints.Select(NormalizeThumbprint), StringComparer.Ordinal);
-        if (_pins.Any(x => x.Length != 40 || x.Any(c => !Uri.IsHexDigit(c))))
-            throw new InvalidOperationException("Invalid pinned management client certificate SHA1 thumbprint");
+        if (_pins.Any(x => (x.Length != 40 && x.Length != 64) || x.Any(c => !Uri.IsHexDigit(c))))
+            throw new InvalidOperationException("Invalid pinned management client certificate thumbprint (SHA-256 or legacy SHA-1)");
         if (config.AllowedAdminCidrs is null || config.AllowedAdminCidrs.Length == 0)
             throw new InvalidOperationException("A nonempty management IP allowlist is required");
         _allowed = config.AllowedAdminCidrs.Select(s =>
@@ -298,7 +298,9 @@ public sealed class GatewayListenerIsolation : IDisposable
 
     private bool ClientAllowed(X509Certificate2? certificate)
     {
-        if (certificate is null || !_pins.Contains(NormalizeThumbprint(certificate.Thumbprint)) ||
+        if (certificate is null ||
+            !(_pins.Contains(certificate.GetCertHashString(HashAlgorithmName.SHA256)) ||
+              _pins.Contains(NormalizeThumbprint(certificate.Thumbprint))) ||
             certificate.NotBefore.ToUniversalTime() > DateTime.UtcNow || certificate.NotAfter.ToUniversalTime() < DateTime.UtcNow)
             return false;
         using var chain = new X509Chain();
