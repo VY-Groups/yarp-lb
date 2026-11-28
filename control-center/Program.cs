@@ -2662,8 +2662,11 @@ IResult? ValidateChangePayload(JsonObject submitted)
         return Results.BadRequest(new { error = serverError });
     if (MonitorProfileRegistry.Validate(submitted) is { } profileError)
         return Results.BadRequest(new { error = profileError });
-    if (ServiceGroupCatalog.Validate(submitted, ReadProxy()) is { } serviceGroupError)
+    var currentCatalog = ReadProxy();
+    if (ServiceGroupCatalog.Validate(submitted, currentCatalog) is { } serviceGroupError)
         return Results.BadRequest(new { error = serviceGroupError });
+    if (ServiceGroupCatalog.ValidateLinked(clusters, disabled, submitted, currentCatalog) is { } linkedError)
+        return Results.BadRequest(new { error = linkedError });
     if (SecureAffinityContract.Validate(clusters) is { } affinityError)
         return Results.BadRequest(new { error = affinityError });
     if (SharedMonitorContract.Validate(clusters) is { } monitorError)

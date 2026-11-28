@@ -23,6 +23,20 @@ internal static class FleetAdcContractTests
             snapshot["AdminRealServers"] is JsonObject { Count:1 } &&
             snapshot["AdminServiceGroups"] is JsonObject { Count:1 },"all ADC sections copied");
         Check(FleetAdcContract.Validate(snapshot,new()) is null,"receiver accepts signed object snapshot");
+        var linked = snapshot.DeepClone().AsObject();
+        linked["AdminDisabledDestinations"]=new JsonObject();
+        var pool=linked["Clusters"]!["pool"]!.AsObject();
+        pool["LoadBalancingPolicy"]="RoundRobin";
+        pool["Metadata"]=new JsonObject { [ServiceGroupCatalog.LinkKey]="web" };
+        pool["HealthCheck"]=new JsonObject { ["Active"]=linked["AdminMonitorProfiles"]!["health"]!["Active"]!.DeepClone() };
+        pool["Destinations"]!["app"]!["Metadata"]=new JsonObject { ["Weight"]="3",["TrafficRole"]="primary" };
+        Check(FleetAdcContract.Validate(linked,new()) is null,"signed receiver accepts exact linked snapshot");
+        linked["AdminRealServers"]!["app"]!["Address"]="https://new.invalid/";
+        Check(FleetAdcContract.Validate(linked,snapshot) is not null,"signed receiver rejects divergent linked origin");
+        pool["Destinations"]!["app"]!["Address"]="https://new.invalid/";
+        Check(FleetAdcContract.Validate(linked,snapshot) is null,"signed receiver accepts synchronized linked snapshot");
+        linked["AdminServiceGroups"]=new JsonObject();
+        Check(FleetAdcContract.Validate(linked,snapshot) is not null,"signed receiver rejects linked template removal");
         var legacy = JsonNode.Parse("""{"Routes":{},"Clusters":{}}""")!.AsObject();
         Check(FleetAdcContract.Validate(legacy,new()) is null,"legacy empty node compatible");
         Check(FleetAdcContract.Validate(legacy,snapshot) is not null,"legacy omission cannot erase node catalog");

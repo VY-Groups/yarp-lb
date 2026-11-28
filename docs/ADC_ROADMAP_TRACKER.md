@@ -8,11 +8,11 @@ Current comparison: Overview has a route-to-cluster-to-destination snapshot but 
 
 | ID | Requirement and acceptance | Evidence implementation | Gate status |
 |---|---|---|---|
-| P1-01 | Dedicated responsive service-map navigation; approved revision and draft state visible; show actual route, listener reference, cluster, policy, member address/weight/role/configured state, empty and unreferenced groups. Search by route/host/group/member. Never imply live VIP/health. | app.ts/app.js, index.html, style.css; existing Chromium + live Kestrel test | Implemented; CI and review pending |
-| P1-02 | Direct route/group/member/policy/monitor/persistence/listener actions use existing reviewed editors; drain/resume and enable/disable remain local draft; cancellation and reload preserve approved state. Viewer has no map mutation affordances. | ADC browser workflow in tests/E2E/management.spec.mjs; existing API change approval tests | Implemented; CI and review pending |
-| P1-03 | API-backed explicit implemented/partial/unavailable coverage; list scope limits and evidence reference; separate L4/DNS and snapshot catalogs; no feature-deployment or production claim. | CapabilityRegistry.cs; real_control_center.py and Chromium feature coverage checks | Implemented; CI and review pending |
-| P1-04 | Authenticated API: anonymous access denied, all roles inspect same approved state, no mutation on map/coverage inspection; approval workflow requires different administrator; browser shows approved route and read-only Viewer after approval. | real_control_center.py + management.spec.mjs; existing real API approval/RBAC/CSRF tests | Implemented; CI and review pending |
-| P1-05 | Exact-head Windows/Linux build, frontend reproducibility, real Chromium and API checks, no regressions, independent approval, merged-main verification. Capture exact head/run evidence before marking phase complete. | control-center-ci.yml, e2e-real-control-center.yml, required repository checks | Pending |
+| P1-01 | Dedicated responsive service-map navigation; approved revision and draft state visible; show actual route, listener reference, cluster, policy, member address/weight/role/configured state, empty and unreferenced groups. Search by route/host/group/member. Never imply live VIP/health. | app.ts/app.js, index.html, style.css; existing Chromium + live Kestrel test | Accepted in #592; exact head 560bf023 (53/53) |
+| P1-02 | Direct route/group/member/policy/monitor/persistence/listener actions use existing reviewed editors; drain/resume and enable/disable remain local draft; cancellation and reload preserve approved state. Viewer has no map mutation affordances. | ADC browser workflow in tests/E2E/management.spec.mjs; existing API change approval tests | Accepted in #592; exact head 560bf023 (53/53) |
+| P1-03 | API-backed explicit implemented/partial/unavailable coverage; list scope limits and evidence reference; separate L4/DNS and snapshot catalogs; no feature-deployment or production claim. | CapabilityRegistry.cs; real_control_center.py and Chromium feature coverage checks | Accepted in #592; exact head 560bf023 (53/53) |
+| P1-04 | Authenticated API: anonymous access denied, all roles inspect same approved state, no mutation on map/coverage inspection; approval workflow requires different administrator; browser shows approved route and read-only Viewer after approval. | real_control_center.py + management.spec.mjs; existing real API approval/RBAC/CSRF tests | Accepted in #592; exact head 560bf023 (53/53) |
+| P1-05 | Exact-head Windows/Linux build, frontend reproducibility, real Chromium and API checks, no regressions, independent approval, merged-main verification. Capture exact head/run evidence before marking phase complete. | control-center-ci.yml, e2e-real-control-center.yml, required repository checks | Accepted; merge a0e525f4, 38/38 post-merge checks |
 
 ## Later phases (do not start before Phase 1 acceptance)
 
@@ -26,3 +26,16 @@ Current comparison: Overview has a route-to-cluster-to-destination snapshot but 
 | 7 Observability, CLI, SOP and training | Partial: local telemetry, diagnostics CLI and operator manual | Unified service analytics, scoped CLI, audit/privacy, validated offline docs and training workflows, final integrated regression and release handoff |
 
 Every implementation item requires a reviewed PR, exact-head evidence, backend/API/browser/traffic tests as appropriate, no weakening of security/approval or production gates, and merged-main verification. Update this tracker with exact commit and workflow links after review. Earlier frozen artifacts remain the physical-test baseline until a new candidate is explicitly accepted.
+
+## Phase 2 — active development (base a0e525f4)
+
+Phase 1 merged after independent approval at 560bf023031e3145ef1df05c82fa72d48b11576f (53/53); main a0e525f49dd9a930c5ca3114061871b965ecb040 (38/38 checks, 13/13 workflows). Browser/API Actions run `46137456705` and full application Actions run `46137456594`.
+
+| ID | Acceptance criterion | Implementation / evidence | Status |
+|---|---|---|---|
+| P2-01 | Opt-in persistent reusable group link; legacy independent snapshots unchanged; materialized enabled/disabled membership, address, weight, role, policy and active monitor match reviewed catalog. Reject dangling and divergent references on controller and signed receiver. | ServiceGroupCatalog, FleetAdcContract, unit tests | PR acceptance pending |
+| P2-02 | Guided linked creation, explicit synchronization and unlink; retained member drain/disabled state and unrelated settings preserved; deletion blocked while linked. No unapproved live write. | Existing reviewed draft, browser and real API acceptance | PR acceptance pending |
+| P2-03 | Unified typed L4/L7 listener model with conflict checks (HTTP3 UDP included), protected management and metrics, actual runtime binding and restart/rollback contract. | Existing VirtualServiceBinding, GatewayListenerIsolation, EngineConfigContract | Pending separate implementation |
+| P2-04 | Complete cross-engine reusable object lifecycle, migration, signed fleet rollout/recovery and real socket/browser/API acceptance. | Pending integration and exact-main evidence | Pending |
+
+The linked HTTP group increment does not create a unified L4/L7 registry or claim Phase 2 complete. No runtime mutation without reviewed materialization; physical #36 unchanged.

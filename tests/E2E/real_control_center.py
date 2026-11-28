@@ -829,11 +829,29 @@ def verify_reusable_adc_catalogs(base, admin, operator, reviewer, origin_port):
         "HealthCheck":{"Active":active},"Metadata":metadata,
         "Destinations":{"catalog-origin":{"Address":addr,"Metadata":{"Weight":"7","TrafficRole":"primary"}}}}
     p["routes"]["catalog-route"]={"ClusterId":"catalog-pool","Match":{"Path":"/catalog-test/{**catch-all}"}}
+    p["clusters"]["catalog-pool"]["Metadata"]={**metadata,"ADC.ServiceGroupTemplate":"catalog-template"}
     approve(p)
     state=admin.request("GET","/admin/api/state")
     check(state["monitorProfiles"]==p["monitorProfiles"] and state["realServers"]==p["realServers"]
           and state["serviceGroups"]==p["serviceGroups"],"approved ADC catalog state round trip")
     eventually(Client(base),"/catalog-test/ready","e2e-origin:/catalog-test/ready",seconds=20)
+    stale=payload()
+    stale["serviceGroups"]=json.loads(json.dumps(state["serviceGroups"]))
+    stale["serviceGroups"]["catalog-template"]["Members"]["catalog-origin"]["Weight"]="9"
+    approve(stale,expected=400)
+    check(admin.request("GET","/admin/api/state")["revision"]==state["revision"],
+          "divergent linked group rejected without modifying approved revision")
+    stale["clusters"]["catalog-pool"]["Destinations"]["catalog-origin"]["Metadata"]["Weight"]="9"
+    approve(stale)
+    state=admin.request("GET","/admin/api/state")
+    check(state["clusters"]["catalog-pool"]["Destinations"]["catalog-origin"]["Metadata"]["Weight"]=="9",
+          "same-draft catalog and linked materialization accepted")
+    eventually(Client(base),"/catalog-test/ready","e2e-origin:/catalog-test/ready",seconds=20)
+    remove=payload()
+    remove["serviceGroups"]={}
+    approve(remove,expected=400)
+    check("catalog-template" in admin.request("GET","/admin/api/state")["serviceGroups"],
+          "linked runtime group prevents template deletion")
     invalid=payload()
     invalid["realServers"]={key:value for key,value in state["realServers"].items() if key!="catalog-origin"}
     approve(invalid,expected=400)
