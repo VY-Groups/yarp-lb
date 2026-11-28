@@ -81,7 +81,7 @@ jobs:
           rm -f candidate/app/appsettings.json
           test -f candidate/app/GatewayCoreYarp.dll
           printf '%s\n' "$EXACT_SHA" > candidate/SOURCE_COMMIT.txt
-          cp ops/release/ISSUE48_CANDIDATE.md candidate/README.md
+          python ops/release/stage_candidate_handoff.py --root candidate --rid "$RID"
       - name: Archive and verify candidate package
         shell: bash
         env:
@@ -92,7 +92,10 @@ jobs:
           python ops/release/package_candidate.py --root candidate --rid "$RID" --sha "$EXACT_SHA" --out artifacts/candidate
       - name: Verify checksum and extract into fresh directory
         shell: bash
-        run: python ops/release/extract_candidate.py --archive-dir artifacts/candidate --out extracted
+        env:
+          EXACT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          RID: ${{ matrix.rid }}
+        run: python ops/release/extract_candidate.py --archive-dir artifacts/candidate --out extracted --sha "$EXACT_SHA" --rid "$RID"
       - name: Actual archived Linux apphost production start, negative keys and restart
         if: runner.os == 'Linux'
         shell: bash
