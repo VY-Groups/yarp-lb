@@ -1,5 +1,8 @@
 name: ADC external VIP fencing provider contracts
 on:
+  push:
+    branches: [main]
+    paths: ["control-center/**", "tests/FleetQuorumAcceptance/**", "ops/ha/**", "ops/release/**", ".github/workflows/adc-vip-fence-provider.yml"]
   pull_request:
     paths: ["control-center/**", "tests/FleetQuorumAcceptance/**", "ops/ha/**", "ops/release/**", ".github/workflows/adc-vip-fence-provider.yml"]
   workflow_dispatch:
