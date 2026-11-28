@@ -18,7 +18,16 @@ if os.environ.get("GITHUB_ACTIONS") != "true" or os.environ.get("RUNNER_ENVIRONM
 if not WIN and os.geteuid() != 0:
     raise SystemExit("Elevated disposable CI only")
 HERE = Path(__file__).resolve().parent
-EXE = Path(sys.argv[1]).resolve(strict=True)
+# Exercise the extracted offline package, not a build output or source installer.
+if len(sys.argv) != 2:
+    raise SystemExit("Usage: acceptance.py <extracted-offline-package-root>")
+PACKAGE = Path(sys.argv[1]).resolve(strict=True)
+EXE = (PACKAGE / "app" / ("GatewayCoreYarp.exe" if WIN else "GatewayCoreYarp")).resolve(strict=True)
+INSTALLER = (PACKAGE / "ops" / "ha" / ("Install-VipService.ps1" if WIN else "install-vip-service.sh")).resolve(strict=True)
+if not EXE.is_relative_to(PACKAGE) or not INSTALLER.is_relative_to(PACKAGE):
+    raise SystemExit("Package payload escaped the extracted root")
+if not EXE.is_file() or not INSTALLER.is_file():
+    raise SystemExit("Missing offline service payload")
 GATEWAY = "GatewayCoreYarp" if WIN else "gatewaycore-vip-ci-gateway"
 AGENT = "GatewayCoreVipNodeAgent" if WIN else "gatewaycore-vip-node-agent"
 OPENSSL = shutil.which("openssl") or (r"C:\Program Files\Git\usr\bin\openssl.exe" if WIN else "/usr/bin/openssl")
@@ -130,7 +139,7 @@ try:
         created.append(GATEWAY)
         run("sc.exe","create",GATEWAY,"binPath=",str(Path(os.environ["SystemRoot"])/"System32/whoami.exe"),"start=","demand")
         created.append(AGENT)
-        run("pwsh","-NoProfile","-File",HERE/"Install-VipService.ps1","-Role","agent","-Executable",EXE,"-Config",config,"-Apply")
+        run("pwsh","-NoProfile","-File",INSTALLER,"-Role","agent","-Executable",EXE,"-Config",config,"-Apply")
     else:
         created.append(GATEWAY)
         unit=Path("/etc/systemd/system")/(GATEWAY+".service")
@@ -138,7 +147,7 @@ try:
         run("systemctl","daemon-reload")
         write("supervisor.json",json.dumps({"serviceName":GATEWAY+".service"}))
         created.append(AGENT)
-        run("bash",HERE/"install-vip-service.sh","agent",EXE,config,"root","--apply")
+        run("bash",INSTALLER,"agent",EXE,config,"root","--apply")
     if WIN: run("pwsh","-NoProfile","-File",HERE/"Set-VipFixtureAcl.ps1","-Directory",root,"-Identity","NT AUTHORITY\\SYSTEM")
     # Use the very same shipping executable/config before SCM startup to expose
     # safe stage diagnostics. This never substitutes for the installed test.

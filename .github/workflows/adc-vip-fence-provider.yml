@@ -46,6 +46,7 @@ jobs:
         id: shipping-build
         run: dotnet build control-center/GatewayCoreYarp.csproj -c Release
       - name: Build and verify offline VIP commissioning package
+        id: offline-package
         shell: bash
         run: |
           set -euo pipefail
@@ -79,19 +80,19 @@ jobs:
           name: adc-vip-offline-commissioning-${{ matrix.os }}-${{ github.sha }}
           path: vip-archive/
           if-no-files-found: error
-      - name: Installed Linux agent runtime and protected credential acceptance
+      - name: Installed Linux offline package agent runtime and protected credential acceptance
         if: runner.os == 'Linux'
         shell: bash
-        run: sudo -n env GITHUB_ACTIONS=true RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" DOTNET_ROOT="$DOTNET_ROOT" "$(command -v python3)" ops/ha/test-vip-agent-runtime.py "$PWD/control-center/bin/Release/net10.0/GatewayCoreYarp"
-      - name: Installed Windows agent runtime and protected credential acceptance
+        run: sudo -n env GITHUB_ACTIONS=true RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" DOTNET_ROOT="$DOTNET_ROOT" "$(command -v python3)" ops/ha/test-vip-agent-runtime.py "$PWD/vip-extracted"
+      - name: Installed Windows offline package agent runtime and protected credential acceptance
         if: runner.os == 'Windows'
         shell: pwsh
-        run: python ops/ha/test-vip-agent-runtime.py "$PWD/control-center/bin/Release/net10.0/GatewayCoreYarp.exe"
-      - name: Installed Linux provider and controller runtime
-        if: ${{ !cancelled() && steps.shipping-build.outcome == 'success' && runner.os == 'Linux' }}
+        run: python ops/ha/test-vip-agent-runtime.py "$PWD/vip-extracted"
+      - name: Installed Linux offline package provider and controller runtime
+        if: ${{ !cancelled() && steps.offline-package.outcome == 'success' && runner.os == 'Linux' }}
         shell: bash
-        run: sudo -n env GITHUB_ACTIONS=true RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" DOTNET_ROOT="$DOTNET_ROOT" "$(command -v python3)" ops/ha/test-vip-independent-runtime.py "$PWD/control-center/bin/Release/net10.0/GatewayCoreYarp"
-      - name: Installed Windows provider and controller runtime
-        if: ${{ !cancelled() && steps.shipping-build.outcome == 'success' && runner.os == 'Windows' }}
+        run: sudo -n env GITHUB_ACTIONS=true RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" DOTNET_ROOT="$DOTNET_ROOT" "$(command -v python3)" ops/ha/test-vip-independent-runtime.py "$PWD/vip-extracted"
+      - name: Installed Windows offline package provider and controller runtime
+        if: ${{ !cancelled() && steps.offline-package.outcome == 'success' && runner.os == 'Windows' }}
         shell: pwsh
-        run: python ops/ha/test-vip-independent-runtime.py "$PWD/control-center/bin/Release/net10.0/GatewayCoreYarp.exe"
+        run: python ops/ha/test-vip-independent-runtime.py "$PWD/vip-extracted"

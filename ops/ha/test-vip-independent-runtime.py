@@ -20,7 +20,16 @@ if os.environ.get("GITHUB_ACTIONS") != "true" or os.environ.get("RUNNER_ENVIRONM
 if not WIN and os.geteuid() != 0:
     raise SystemExit("Elevated disposable CI only")
 HERE = Path(__file__).resolve().parent
-EXE = Path(sys.argv[1]).resolve(strict=True)
+# Exercise the extracted offline package, not a build output or source installer.
+if len(sys.argv) != 2:
+    raise SystemExit("Usage: acceptance.py <extracted-offline-package-root>")
+PACKAGE = Path(sys.argv[1]).resolve(strict=True)
+EXE = (PACKAGE / "app" / ("GatewayCoreYarp.exe" if WIN else "GatewayCoreYarp")).resolve(strict=True)
+INSTALLER = (PACKAGE / "ops" / "ha" / ("Install-VipService.ps1" if WIN else "install-vip-service.sh")).resolve(strict=True)
+if not EXE.is_relative_to(PACKAGE) or not INSTALLER.is_relative_to(PACKAGE):
+    raise SystemExit("Package payload escaped the extracted root")
+if not EXE.is_file() or not INSTALLER.is_file():
+    raise SystemExit("Missing offline service payload")
 PROVIDER = "GatewayCoreVipFenceProvider" if WIN else "gatewaycore-vip-fence-provider"
 CONTROLLER = "GatewayCoreVipController" if WIN else "gatewaycore-vip-controller"
 OPENSSL = shutil.which("openssl") or (r"C:\Program Files\Git\usr\bin\openssl.exe" if WIN else "/usr/bin/openssl")
@@ -115,9 +124,9 @@ def restore(path):
 def install(role,name,binary,config,identity,extra=()):
     services.append(name)
     if WIN:
-        run("pwsh","-NoProfile","-File",HERE/"Install-VipService.ps1","-Role",role,"-Executable",binary,"-Config",config,*extra,"-Apply")
+        run("pwsh","-NoProfile","-File",INSTALLER,"-Role",role,"-Executable",binary,"-Config",config,*extra,"-Apply")
     else:
-        run("bash",HERE/"install-vip-service.sh",role,binary,config,identity,*extra,"--apply")
+        run("bash",INSTALLER,role,binary,config,identity,*extra,"--apply")
 def refusal_event(event_id):
     command="$e=Get-WinEvent -FilterHashtable @{LogName='Application';ProviderName='GatewayCoreVipSecurity';Id="+str(event_id)+"} -MaxEvents 1 -ErrorAction SilentlyContinue; if($e){$e.RecordId}else{0}"
     return int(run("pwsh","-NoProfile","-Command",command).stdout.strip())
