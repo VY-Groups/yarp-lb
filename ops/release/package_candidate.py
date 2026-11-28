@@ -54,7 +54,9 @@ def package(root,rid,sha,out):
                 with archive.extractfile(m) as stream:
                     if hashlib.file_digest(stream,"sha256").hexdigest()!=files[m.name]:
                         raise ValueError("archive payload hash mismatch")
-    (out/"SHA256SUMS.txt").write_text(sha256(target)+"  "+target.name+"\n",encoding="ascii")
+    digest=sha256(target)
+    (out/"SHA256SUMS.txt").write_text(digest+"  "+target.name+"\n",encoding="ascii")
+    print("Candidate archive SHA256:",digest,target.name)
     print("PASS: exact candidate archive inventory and per-file SHA256 verified")
 
 if __name__=="__main__":
