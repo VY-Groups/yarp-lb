@@ -211,8 +211,20 @@ if(guardedVirtualServices is not null)
             FleetQuorum.VipScope(service.VipFleetId!,service.Ip),service.VipOwnershipEpoch!.Value));
 LocalVipAdmission? localVipAdmission = guardedVirtualServices is { Length: > 0 }
     ? new LocalVipAdmission(guardedVirtualServices.Select(s => (s.Id, s.Ip)), TimeProvider.System,vipAuthorityChecks) : null;
+// Planned drain is address-wide and excludes any shared primary/unguarded socket.
+var vipDrainPath=Path.Combine(privateDir,"vip-drain.json");
+var vipDrainGroups=(isolatedListeners?.VirtualServices??Array.Empty<GatewayListenerIsolation.VirtualSocket>())
+    .GroupBy(s=>IPAddress.Parse(s.Ip).ToString(),StringComparer.Ordinal)
+    .Where(group=>group.All(s=>s.RequireLocalAddressPresence) &&
+        isolatedListeners is not null && !IPAddress.Parse(group.Key).Equals(IPAddress.Parse(isolatedListeners.Config.TrafficIp)) &&
+        !IPAddress.Parse(group.Key).Equals(IPAddress.Parse(isolatedListeners.Config.ManagementIp)))
+    .ToDictionary(group=>group.Key,group=>group.Select(s=>s.Id).ToArray(),StringComparer.Ordinal);
+var persistedVipDrains=VipDrainState.Read(vipDrainPath,vipDrainGroups.Keys);
 if (localVipAdmission is not null)
+{
+    localVipAdmission.SetPlannedDrains(persistedVipDrains.SelectMany(ip=>vipDrainGroups[ip]));
     builder.Services.AddHostedService<LocalVipAdmission>(_ => localVipAdmission);
+}
 var acmeChallengeSetting = Environment.GetEnvironmentVariable("YARP_ACME_HTTP01_PUBLIC_ENTRYPOINT");
 if (acmeChallengeSetting is not null && !bool.TryParse(acmeChallengeSetting, out _))
     throw new InvalidOperationException("YARP_ACME_HTTP01_PUBLIC_ENTRYPOINT must be true or false");
@@ -1125,7 +1137,8 @@ app.Use(async (ctx, next) =>
     if (ctx.Request.Method is "POST" or "PUT" or "PATCH" or "DELETE" &&
         (ctx.Request.Path.StartsWithSegments("/admin/api/change-requests") ||
          ctx.Request.Path.StartsWithSegments("/admin/api/restore") ||
-         ctx.Request.Path.StartsWithSegments("/admin/api/fleet/rollout")) &&
+         ctx.Request.Path.StartsWithSegments("/admin/api/fleet/rollout") ||
+         ctx.Request.Path.StartsWithSegments("/admin/api/network/virtual-services")) &&
         SetupCenter.ReadFreeze(privateDir).Frozen)
     {
         ctx.Response.StatusCode = 423;
@@ -2187,7 +2200,9 @@ app.MapGet("/admin/api/network/interfaces", (HttpContext ctx) =>
             {
                 var observed = NetworkObservation.ObserveVirtualAddress(service.Id, service.Ip, service.Port, service.Protocol, snapshot);
                 return new { observed.Id, observed.Ip, observed.Port, observed.Protocol, observed.Status,
-                    observed.Interfaces, service.RequireLocalAddressPresence, distributedOwnershipRequired = service.VipQuorumConfigPath is not null, admission = localVipAdmission?.Status(service.Id) ?? "disabled", activeGuardedRequests = localVipAdmission?.Active(service.Id) ?? 0 };
+                    observed.Interfaces, service.RequireLocalAddressPresence, distributedOwnershipRequired = service.VipQuorumConfigPath is not null, admission = localVipAdmission?.Status(service.Id) ?? "disabled", activeGuardedRequests = localVipAdmission?.Active(service.Id) ?? 0,
+                    plannedDrain=localVipAdmission?.IsDraining(service.Id)??false,
+                    drainEligible=vipDrainGroups.ContainsKey(IPAddress.Parse(service.Ip).ToString()) };
             })
             .ToArray();
         return Results.Ok(new { snapshot.Scope, snapshot.Platform, snapshot.ObservedUtc, snapshot.Interfaces,
@@ -2197,6 +2212,37 @@ app.MapGet("/admin/api/network/interfaces", (HttpContext ctx) =>
         InvalidOperationException or PlatformNotSupportedException or System.Net.Sockets.SocketException)
     { return Results.Json(new { error = "Local network inventory unavailable." }, statusCode: 503); }
 }).RequireAuthorization(policy => policy.RequireRole("Administrator", "Operator"));
+app.MapPost("/admin/api/network/virtual-services/{id}/drain",async (HttpContext ctx,string id,VipDrainInput input)=>
+{
+    if(input.Draining is null || string.IsNullOrWhiteSpace(input.Reason) ||
+        input.Reason.Length>240 || input.Reason.Any(char.IsControl))
+        return Results.BadRequest(new {error="Explicit drain/resume choice and reason required (1–240 characters)."});
+    var service=isolatedListeners?.VirtualServices.SingleOrDefault(s=>s.Id==id);
+    if(service is null || localVipAdmission is null ||
+        !vipDrainGroups.TryGetValue(IPAddress.Parse(service.Ip).ToString(),out var group))
+        return Results.NotFound(new {error="No eligible dedicated guarded VIP group."});
+    var address=IPAddress.Parse(service.Ip).ToString();
+    await gate.WaitAsync(ctx.RequestAborted);
+    try
+    {
+        var before=AuditStateBytes(vipDrainPath);
+        var current=VipDrainState.Read(vipDrainPath,vipDrainGroups.Keys);
+        if(vipDrainGroups.Any(pair=>pair.Value.Any(socket=>localVipAdmission.IsDraining(socket)!=current.Contains(pair.Key))))
+            return Results.Conflict(new {error="Persistent and live drain states differ. Independently reconcile before changing traffic."});
+        if(!input.Draining.Value && group.Any(socket=>!localVipAdmission.Allows(socket)))
+            return Results.Conflict(new {error="Fresh local and required quorum authorization must be confirmed before resuming."});
+        if(input.Draining.Value)current.Add(address);else current.Remove(address);
+        var proposed=VipDrainState.Encode(current);
+        await Audit(Actor(ctx),"VIP_PLANNED_DRAIN_REQUESTED",new {serviceId=id,draining=input.Draining.Value,reason=input.Reason});
+        var denied=await ConfirmAndWriteResourceMutation(ctx,vipDrainPath,before,proposed,"VIP_PLANNED_DRAIN_INTENT",true);
+        if(denied is not null)return denied;
+        localVipAdmission.SetPlannedDrains(current.SelectMany(ip=>vipDrainGroups[ip]));
+        await Audit(Actor(ctx),"VIP_PLANNED_DRAIN_COMMITTED",new {serviceId=id,draining=input.Draining.Value});
+        return Results.Ok(new {plannedDrain=input.Draining.Value,activeGuardedRequests=group.Sum(localVipAdmission.Active),
+            scope="local gateway; not hard-fencing evidence"});
+    }
+    finally{gate.Release();}
+}).RequireAuthorization(policy=>policy.RequireRole("Administrator"));
 app.MapPost("/admin/api/inventory", async (HttpContext ctx, InventoryInput input) =>
 {
     if (!ValidId(input.Id) || input.Name.Length is < 1 or > 100 ||
@@ -4012,6 +4058,7 @@ record UserInput(string Username, string Role, string Password, string? Email);
 record PasswordInput(string Password);
 record ChangeDecision(string Decision, string? Reason);
 record InventoryInput(string Id, string Name, string Type, string Address, string Notes);
+record VipDrainInput(bool? Draining,string? Reason);
 record AdminUser(string Username, string Role, string Salt, string Hash, string? Email = null, bool Enabled = true, string SecurityStamp = "", string Provider = "Local", string DistinguishedName = "", long OidcRevokedBefore = 0, long OidcLogoutAuditThrough = 0);
 
 record FleetGateway(string Id, string Url, string ClientCertificateThumbprint);

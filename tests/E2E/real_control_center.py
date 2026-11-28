@@ -981,6 +981,10 @@ def acceptance(base:str,https_base:str,origin_port:int):
               isinstance(net_snapshot["vlans"]["interfaces"],list) and isinstance(net_snapshot["virtualAddresses"],list),
               "live Linux VLAN observation and virtual socket evidence are explicit")
     operator.request("POST","/admin/api/network/interfaces",{},expect=405)
+    for blocked in (operator,viewer):
+        blocked.request("POST","/admin/api/network/virtual-services/unknown/drain",{"draining":True,"reason":"CI fixture"},expect=403)
+    admin.request("POST","/admin/api/network/virtual-services/unknown/drain",{"draining":True,"reason":"CI fixture"},expect=404)
+    admin.request("POST","/admin/api/network/virtual-services/unknown/drain",{"draining":True},expect=400)
     viewer.request("POST","/admin/api/inventory",{"id":"bad"},expect=403)
     operator.request("POST","/admin/api/users",{"username":"bad"},expect=403)
     for client in (admin,operator,viewer):
