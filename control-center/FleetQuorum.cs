@@ -57,14 +57,14 @@ internal sealed class FleetQuorum : IDisposable
         var opts=new JsonSerializerOptions(JsonSerializerDefaults.Web){UnmappedMemberHandling=JsonUnmappedMemberHandling.Disallow};
         var settings=JsonSerializer.Deserialize<Settings>(File.ReadAllBytes(FilePath(path,16384,true)),opts)
             ??throw new InvalidDataException("Missing quorum settings.");
-        return new FleetQuorum(settings,writable);
+        return new FleetQuorum(settings,writable,"/gatewaycore/commercial-fleet/v1/");
     }
-    private FleetQuorum(Settings settings,bool writable)
+    private FleetQuorum(Settings settings,bool writable,string keyPrefix)
     {
         if(!Hex(settings.Scope) || settings.Endpoints is not {Length:3})
             throw new InvalidDataException("Require one deployment scope and exactly three pinned members.");
         Scope=settings.Scope;this.writable=writable;cluster=Number(settings.ClusterId);
-        namespaceKey="/gatewaycore/commercial-fleet/v1/"+Scope;
+        namespaceKey=keyPrefix+Scope;
         key=Base64(namespaceKey);
         var endpoints=settings.Endpoints.Select(e=>
         {
@@ -111,6 +111,31 @@ internal sealed class FleetQuorum : IDisposable
         if(Number(header.GetProperty("cluster_id"))!=cluster || Number(header.GetProperty("member_id"))!=peer.Id)
             throw new InvalidDataException("Pinned Raft identity mismatch.");
         return root.Clone();
+    }
+    // Separate, read-only namespace for a persistent VIP owner. The owner value
+    // is bound to this node's independently provisioned TLS client certificate.
+    internal static string VipScope(string fleet,string ip)
+    {
+        if (fleet is null || !Regex.IsMatch(fleet,@"\A[a-zA-Z0-9_-]{1,64}\z",RegexOptions.CultureInvariant) ||
+            !System.Net.IPAddress.TryParse(ip,out var address))
+            throw new InvalidDataException("Invalid VIP fleet or address.");
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes("gatewaycore-adc-vip-v1\n"+fleet+"\n"+address)));
+    }
+    internal static FleetQuorum OpenVip(string path,string scope)
+    {
+        var opts=new JsonSerializerOptions(JsonSerializerDefaults.Web){UnmappedMemberHandling=JsonUnmappedMemberHandling.Disallow};
+        var settings=JsonSerializer.Deserialize<Settings>(File.ReadAllBytes(FilePath(path,16384,true)),opts)
+            ??throw new InvalidDataException("Missing VIP quorum settings.");
+        if(settings.Scope!=scope)throw new InvalidDataException("VIP quorum scope must match fleet and canonical address.");
+        return new FleetQuorum(settings,false,"/gatewaycore/adc-vip/v1/");
+    }
+    internal async Task<bool> IsVipOwner(long expectedEpoch,CancellationToken token)
+    {
+        if(expectedEpoch<1 || writable || !namespaceKey.StartsWith("/gatewaycore/adc-vip/v1/",StringComparison.Ordinal))
+            return false;
+        var owner="vip_"+Convert.ToHexString(SHA256.HashData(credential.RawData));
+        var read=await Read(token);
+        return read.State==new Fence(owner,expectedEpoch);
     }
     private string ReceiptKey(string tx)=>Base64(namespaceKey+"/completed/"+tx);
     private async Task<(Peer Peer,Fence? State)?> ReadOne(Peer peer,string readKey,CancellationToken token)

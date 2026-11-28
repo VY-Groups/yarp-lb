@@ -39,5 +39,13 @@ internal static class LocalVipAdmissionTests
         Must(!gate.Allows("guarded"),"backward timestamp refuses observation");
         gate.Invalidate();
         Must(!gate.Allows("guarded"),"failed observation closes admission");
+        using var quorumGate=new LocalVipAdmission([("guarded","192.0.2.10")],clock,
+            new(){{"guarded",_=>Task.FromResult(true)}});
+        quorumGate.Refresh(clock.Now,snapshot);
+        Must(!quorumGate.Allows("guarded"),"local address alone cannot authorize distributed VIP");
+        quorumGate.Refresh(clock.Now,snapshot,new Dictionary<string,bool>{{"guarded",true}});
+        Must(quorumGate.Allows("guarded"),"local and exact quorum observation required");
+        quorumGate.Refresh(clock.Now,snapshot,new Dictionary<string,bool>{{"guarded",false}});
+        Must(!quorumGate.Allows("guarded"),"lost ownership closes guarded socket");
     }
 }

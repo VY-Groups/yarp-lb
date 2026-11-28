@@ -188,8 +188,15 @@ else GatewayOpenTelemetry.ReportAuditOutboxStatus(false, 0, false, false);
 // Explicit v0.1 multi-socket mode; legacy loopback remains CI migration-only.
 var isolatedListeners = GatewayListenerIsolation.FromEnvironment();
 var guardedVirtualServices = isolatedListeners?.VirtualServices.Where(s => s.RequireLocalAddressPresence).ToArray();
+// Readers have no write or lease capability; the node identity is its pinned client certificate.
+using var vipAuthorityReaders = new VipAuthorityReaders();
+var vipAuthorityChecks = new Dictionary<string,Func<CancellationToken,Task<bool>>>(StringComparer.Ordinal);
+if(guardedVirtualServices is not null)
+    foreach(var service in guardedVirtualServices.Where(s=>s.VipQuorumConfigPath is not null))
+        vipAuthorityChecks.Add(service.Id,vipAuthorityReaders.For(service.VipQuorumConfigPath!,
+            FleetQuorum.VipScope(service.VipFleetId!,service.Ip),service.VipOwnershipEpoch!.Value));
 LocalVipAdmission? localVipAdmission = guardedVirtualServices is { Length: > 0 }
-    ? new LocalVipAdmission(guardedVirtualServices.Select(s => (s.Id, s.Ip)), TimeProvider.System) : null;
+    ? new LocalVipAdmission(guardedVirtualServices.Select(s => (s.Id, s.Ip)), TimeProvider.System,vipAuthorityChecks) : null;
 if (localVipAdmission is not null)
     builder.Services.AddHostedService<LocalVipAdmission>(_ => localVipAdmission);
 var acmeChallengeSetting = Environment.GetEnvironmentVariable("YARP_ACME_HTTP01_PUBLIC_ENTRYPOINT");
@@ -2164,7 +2171,7 @@ app.MapGet("/admin/api/network/interfaces", (HttpContext ctx) =>
             {
                 var observed = NetworkObservation.ObserveVirtualAddress(service.Id, service.Ip, service.Port, service.Protocol, snapshot);
                 return new { observed.Id, observed.Ip, observed.Port, observed.Protocol, observed.Status,
-                    observed.Interfaces, service.RequireLocalAddressPresence, admission = localVipAdmission?.Status(service.Id) ?? "disabled" };
+                    observed.Interfaces, service.RequireLocalAddressPresence, distributedOwnershipRequired = service.VipQuorumConfigPath is not null, admission = localVipAdmission?.Status(service.Id) ?? "disabled" };
             })
             .ToArray();
         return Results.Ok(new { snapshot.Scope, snapshot.Platform, snapshot.ObservedUtc, snapshot.Interfaces,
@@ -2356,7 +2363,9 @@ app.MapGet("/admin/api/state", () =>
 
 app.MapGet("/admin/api/virtual-servers", () => Results.Ok(new {
     isolated = isolatedListeners is not null,
-    services = isolatedListeners?.VirtualServices ?? Array.Empty<GatewayListenerIsolation.VirtualSocket>(),
+    services = (isolatedListeners?.VirtualServices ?? Array.Empty<GatewayListenerIsolation.VirtualSocket>())
+        .Select(service=>new { service.Id,service.Ip,service.Port,service.Protocol,
+            service.RequireLocalAddressPresence, distributedOwnershipRequired=service.VipQuorumConfigPath is not null }),
     scope = "Locally provisioned data-plane sockets; operating-system VIP ownership is external"
 })).RequireAuthorization();
 

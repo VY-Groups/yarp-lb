@@ -7,12 +7,16 @@ internal sealed class LocalVipAdmission : BackgroundService
 {
     private readonly Dictionary<string,string> required;
     private readonly TimeProvider clock;
+    private readonly Dictionary<string, Func<CancellationToken,Task<bool>>> authorities;
     private sealed record Sample(long Started, Dictionary<string,string> Status);
     private Sample? current;
-    internal LocalVipAdmission(IEnumerable<(string Id,string Ip)> targets, TimeProvider clock)
+    internal LocalVipAdmission(IEnumerable<(string Id,string Ip)> targets, TimeProvider clock,
+        Dictionary<string,Func<CancellationToken,Task<bool>>>? authorities = null)
     {
         required = targets.ToDictionary(x => x.Id, x => x.Ip, StringComparer.Ordinal);
         this.clock = clock;
+        this.authorities = authorities is null ? new(StringComparer.Ordinal) : new(authorities,StringComparer.Ordinal);
+        if(this.authorities.Keys.Any(id=>!required.ContainsKey(id)))throw new InvalidOperationException("Unknown VIP authority target.");
     }
     internal string Status(string? id)
     {
@@ -24,12 +28,15 @@ internal sealed class LocalVipAdmission : BackgroundService
         return observed.Status[id];
     }
     internal bool Allows(string? id) => Status(id) is "disabled" or "present-interface-up";
-    internal void Refresh(long started, LocalNetworkInventory.Snapshot snapshot)
+    internal void Refresh(long started, LocalNetworkInventory.Snapshot snapshot, IReadOnlyDictionary<string,bool>? confirmed = null)
     {
         var statuses = new Dictionary<string,string>(StringComparer.Ordinal);
         foreach (var (id, ip) in required)
             statuses.Add(id, snapshot.Truncated ? "incomplete-observation" :
                 NetworkObservation.ObserveVirtualAddress(id, ip, 0, "", snapshot).Status);
+        foreach(var id in authorities.Keys)
+            if(statuses[id]=="present-interface-up" && (confirmed is null || !confirmed.TryGetValue(id,out var allowed) || !allowed))
+                statuses[id]="quorum-ownership-unconfirmed";
         Volatile.Write(ref current, new Sample(started, statuses));
     }
     internal void Invalidate() => Volatile.Write(ref current, null);
@@ -44,8 +51,17 @@ internal sealed class LocalVipAdmission : BackgroundService
                 try
                 {
                     var snapshot = LocalNetworkInventory.Read();
+                    using var deadline = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
+                    deadline.CancelAfter(TimeSpan.FromSeconds(2));
+                    var results=await Task.WhenAll(authorities.Select(async item=>
+                    {
+                        try { return (item.Key, Allowed:await item.Value(deadline.Token)); }
+                        catch(Exception error) when(error is HttpRequestException or InvalidDataException or InvalidOperationException or
+                            System.Text.Json.JsonException or KeyNotFoundException or FormatException or OverflowException or OperationCanceledException)
+                        { return (item.Key,Allowed:false); }
+                    }));
                     if (stoppingToken.IsCancellationRequested) break;
-                    Refresh(started, snapshot);
+                    Refresh(started, snapshot, results.ToDictionary(x=>x.Key,x=>x.Allowed,StringComparer.Ordinal));
                 }
                 catch (Exception error) when (error is NetworkInformationException or SocketException or
                     InvalidOperationException or PlatformNotSupportedException)

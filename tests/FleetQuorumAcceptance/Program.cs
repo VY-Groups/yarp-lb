@@ -3,6 +3,11 @@ if(Environment.GetEnvironmentVariable("GITHUB_ACTIONS")!="true" || args.Length!=
    !long.TryParse(args[3],out var epoch))return 2;
 try
 {
+    if(args[0]=="vip-check")
+    {
+        using var vip=FleetQuorum.OpenVip(args[1],args[2]);
+        return await vip.IsVipOwner(epoch,CancellationToken.None)?0:1;
+    }
     using var quorum=FleetQuorum.Open(args[1],args[0]!="assert")??throw new InvalidOperationException();
     if(args[0]=="acquire")Console.WriteLine((await quorum.Acquire(args[2],epoch)).Epoch);
     else if(args[0]=="assert")await quorum.Assert(args[2],epoch);
