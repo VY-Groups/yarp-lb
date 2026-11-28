@@ -7,6 +7,7 @@
     <Compile Include="../../TrafficLifecycle.cs" Link="TrafficLifecycle.cs" />
     <Compile Include="../../LoadBalancingCore.cs" Link="LoadBalancingCore.cs" />
     <Compile Include="../../RecoveryTransition.cs" Link="RecoveryTransition.cs" />
+    <Compile Include="../../VipIpv6Readiness.cs" Link="VipIpv6Readiness.cs" />
     <PackageReference Include="Yarp.ReverseProxy" Version="2.3.0" />
     <Compile Include="../../VipDrainState.cs" Link="VipDrainState.cs" />
     <Compile Include="../../LocalVipAdmission.cs" Link="LocalVipAdmission.cs" />

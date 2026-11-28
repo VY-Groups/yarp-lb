@@ -67,7 +67,7 @@ internal static class VipHostAddressCommand
                 else await Withdraw();
             }
             var final=VipHostAddressPlatform.Inspect(args[3],ip,management);
-            Console.WriteLine(JsonSerializer.Serialize(new {scope,address=ip.ToString(),epoch,phase=log.Last?.Phase??"unmanaged",present=final.Present}));
+            Console.WriteLine(JsonSerializer.Serialize(new {scope,address=ip.ToString(),epoch,phase=log.Last?.Phase??"unmanaged",present=final.Present,ready=final.Ready}));
             return 0;
         }
         catch(Exception error) when(error is IOException or InvalidDataException or UnauthorizedAccessException or

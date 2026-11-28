@@ -30,7 +30,7 @@ jobs:
             export GITHUB_ACTIONS=true
             "$1" "$2" --isolated-linux-veth
           ' _ "$DOTNET_ROOT/dotnet" "$PWD/tests/VipHostAddress/bin/Release/net10.0/VipHostAddress.dll"
-      - name: Real disposable Windows IPv4 address lifecycle
+      - name: Real disposable Windows IPv4 and IPv6 address lifecycle
         if: runner.os == 'Windows'
         shell: pwsh
-        run: ./tests/VipHostAddress/Test-WindowsIPv4Lifecycle.ps1 -Dll "$PWD/tests/VipHostAddress/bin/Release/net10.0/VipHostAddress.dll"
+        run: ./tests/VipHostAddress/Test-WindowsAddressLifecycle.ps1 -Dll "$PWD/tests/VipHostAddress/bin/Release/net10.0/VipHostAddress.dll"

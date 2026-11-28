@@ -55,6 +55,18 @@ try
     Refused(()=>VipHostAddressPlatform.Parse("224.0.0.1"));
     Refused(()=>VipHostAddressPlatform.Parse("::1"));
     Must(VipHostAddressPlatform.Parse("192.0.2.10").ToString()=="192.0.2.10","canonical address contract");
+    Refused(()=>VipHostAddressPlatform.Parse("fe80::1"));
+    Refused(()=>VipHostAddressPlatform.Parse("ff02::1"));
+    Refused(()=>VipHostAddressPlatform.Parse("::ffff:192.0.2.10"));
+    Refused(()=>VipHostAddressPlatform.Parse("2001:db8::1%3"));
+    var v6=VipHostAddressPlatform.Parse("2001:db8::10");
+    Must(v6.ToString()=="2001:db8::10","canonical IPv6 contract");
+    var kernel="20010db8000000000000000000000010 02 80 00 ";
+    Must(VipIpv6Readiness.LinuxReady(kernel+"80 gc-vip0",v6,2,"gc-vip0"),"preferred IPv6");
+    foreach(var flags in new[]{"40","08","20","04"})
+        Must(!VipIpv6Readiness.LinuxReady(kernel+flags+" gc-vip0",v6,2,"gc-vip0"),"non-ready IPv6 flags "+flags);
+    Must(!VipIpv6Readiness.LinuxReady(null,v6,2,"gc-vip0"),"missing readiness denied");
+    Must(!VipIpv6Readiness.LinuxReady(kernel+"80 gc-vip0",v6,3,"gc-vip0"),"wrong index denied");
     if(args.Length==2 && args[0]=="--isolated-windows-adapter")
     {
         if(!OperatingSystem.IsWindows()||Environment.GetEnvironmentVariable("GITHUB_ACTIONS")!="true"||
@@ -62,11 +74,8 @@ try
             throw new InvalidOperationException("Disposable hosted Windows CI only.");
         var nic=NetworkInterface.GetAllNetworkInterfaces().Single(n=>Guid.TryParse(n.Id,out var id)&&id==guid);
         await ChangedManagement(nic.Id);
-        foreach(var ip in new[]{VipHostAddressPlatform.Parse("192.0.2.10")})
+        foreach(var ip in new[]{VipHostAddressPlatform.Parse("192.0.2.10"),v6})
         {
-            bool Ready()=>NetworkInterface.GetAllNetworkInterfaces().Single(n=>n.Id==nic.Id)
-                .GetIPProperties().UnicastAddresses.Any(entry=>entry.Address.Equals(ip)&&
-                    entry.DuplicateAddressDetectionState==DuplicateAddressDetectionState.Preferred);
             var before=VipHostAddressPlatform.Inspect(nic.Id,ip);
             Must(!before.Present,"exact disposable adapter starts without "+ip);
             try
@@ -74,9 +83,7 @@ try
                 using var deadline=new CancellationTokenSource(TimeSpan.FromSeconds(30));
                 await VipHostAddressPlatform.Change(before,ip,true,deadline.Token);
                 var assigned=VipHostAddressPlatform.Inspect(nic.Id,ip);
-                for(int attempt=0;attempt<20&&!Ready();attempt++)
-                    await Task.Delay(250,deadline.Token);
-                Must(assigned.Present&&Ready(),"real Windows exact-prefix address assigned and ready: "+ip);
+                Must(assigned.Present&&assigned.Ready,"real Windows exact-prefix address assigned and ready: "+ip);
                 // Bind the actual address and exchange data over a local TCP
                 // connection rather than treating inventory as traffic evidence.
                 using var listener=new System.Net.Sockets.TcpListener(ip,0);
@@ -91,7 +98,7 @@ try
                         e.SocketErrorCode==System.Net.Sockets.SocketError.AddressNotAvailable && attempt<19)
                     {
                         var retry=VipHostAddressPlatform.Inspect(nic.Id,ip);
-                        if(!Ready()||retry.Index!=assigned.Index||retry.Name!=assigned.Name)throw;
+                        if(!retry.Ready||retry.Index!=assigned.Index||retry.Name!=assigned.Name)throw;
                         await Task.Delay(250,deadline.Token);
                     }
                 }
@@ -134,6 +141,11 @@ try
         try {Must(VipHostAddressPlatform.Inspect(nic.Id,ip).Present,"real kernel /32 assigned");}
         finally {await VipHostAddressPlatform.Change(VipHostAddressPlatform.Inspect(nic.Id,ip),ip,false,deadline.Token);}
         Must(!VipHostAddressPlatform.Inspect(nic.Id,ip).Present,"real kernel /32 withdrawn");
+        using var ipv6Deadline=new CancellationTokenSource(TimeSpan.FromSeconds(20));
+        await VipHostAddressPlatform.Change(VipHostAddressPlatform.Inspect(nic.Id,v6),v6,true,ipv6Deadline.Token);
+        try {Must(VipHostAddressPlatform.Inspect(nic.Id,v6).Ready,"real kernel /128 assigned and DAD ready");}
+        finally {await VipHostAddressPlatform.Change(VipHostAddressPlatform.Inspect(nic.Id,v6),v6,false,ipv6Deadline.Token);}
+        Must(!VipHostAddressPlatform.Inspect(nic.Id,v6).Present,"real kernel /128 withdrawn");
     }
 }
 finally{dir.Delete(true);}

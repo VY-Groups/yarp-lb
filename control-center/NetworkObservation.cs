@@ -58,7 +58,10 @@ internal static class NetworkObservation
             IPAddress.TryParse(a.Address, out var observed) && IPAddress.TryParse(ip, out var configured) &&
             configured.Equals(observed))).ToArray();
         string status = matching.Length > 1 ? "multiple-local-interfaces"
-            : matching.Length == 1 ? (matching[0].Status == "Up" ? "present-interface-up" : "present-interface-not-up")
+            : matching.Length == 1 ? (matching[0].Status != "Up" ? "present-interface-not-up" :
+                matching[0].Addresses.Any(a=>IPAddress.TryParse(a.Address,out var observed) &&
+                    IPAddress.TryParse(ip,out var configured) && configured.Equals(observed) && !a.Ready)
+                    ? "address-not-ready" : "present-interface-up")
             : snapshot.Truncated ? "unknown-truncated" : "not-observed-locally";
         return new(id, ip, port, protocol, status, matching.Select(n => n.Name).ToArray());
     }
