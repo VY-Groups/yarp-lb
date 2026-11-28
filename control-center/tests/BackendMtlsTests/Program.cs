@@ -25,3 +25,4 @@ ServiceGroupCatalogTests.Run();
 SecureAffinityContractTests.Run();
 
 ExpiringAffinityTests.Run();
+NetworkObservationTests.Run();

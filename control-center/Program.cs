@@ -2145,7 +2145,15 @@ app.MapGet("/admin/api/inventory", () => Results.Ok(ReadInventory())).RequireAut
 app.MapGet("/admin/api/network/interfaces", (HttpContext ctx) =>
 {
     ctx.Response.Headers.CacheControl = "no-store";
-    try { return Results.Ok(LocalNetworkInventory.Read()); }
+    try
+    {
+        var snapshot = LocalNetworkInventory.Read();
+        var virtualAddresses = (isolatedListeners?.VirtualServices ?? Array.Empty<GatewayListenerIsolation.VirtualSocket>())
+            .Select(service => NetworkObservation.ObserveVirtualAddress(service.Id, service.Ip, service.Port, service.Protocol, snapshot))
+            .ToArray();
+        return Results.Ok(new { snapshot.Scope, snapshot.Platform, snapshot.ObservedUtc, snapshot.Interfaces,
+            snapshot.Truncated, vlans = NetworkObservation.ReadVlans(), virtualAddresses });
+    }
     catch (Exception error) when (error is System.Net.NetworkInformation.NetworkInformationException or
         InvalidOperationException or PlatformNotSupportedException or System.Net.Sockets.SocketException)
     { return Results.Json(new { error = "Local network inventory unavailable." }, statusCode: 503); }
