@@ -108,7 +108,15 @@ internal static class VipFenceContractTests
                 catch(InvalidOperationException){}
             }
             if(!beforeInspection.SequenceEqual(File.ReadAllBytes(path)))throw new Exception("Inspection changed journal bytes");
-            using(var journal=new VipAutomaticJournal(path,scope,oldPin,newPin))
+            var missing=Path.Combine(dir.FullName,"missing-recovery-journal");
+            try
+            {
+                using var absent=new VipAutomaticJournal(missing,scope,oldPin,newPin,existingOnly:true);
+                throw new Exception("Recovery created a missing journal");
+            }
+            catch(FileNotFoundException){}
+            if(File.Exists(missing))throw new Exception("Recovery created state");
+            using(var journal=new VipAutomaticJournal(path,scope,oldPin,newPin,existingOnly:true))
             {
                 if(journal.Pending!=intent)throw new Exception("pending transfer lost after restart");
                 journal.Complete(12);

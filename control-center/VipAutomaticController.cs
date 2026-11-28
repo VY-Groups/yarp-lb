@@ -26,7 +26,7 @@ internal sealed class VipAutomaticJournal : IDisposable
         var options=readOnly
             ?new FileStreamOptions{Mode=FileMode.Open,Access=FileAccess.Read,Share=FileShare.Read}
             :new FileStreamOptions{Mode=existingOnly?FileMode.Open:FileMode.OpenOrCreate,Access=FileAccess.ReadWrite,Share=FileShare.None,Options=FileOptions.WriteThrough};
-        if(!readOnly&&OperatingSystem.IsLinux())options.UnixCreateMode=UnixFileMode.UserRead|UnixFileMode.UserWrite;
+        if(!readOnly&&!existingOnly&&OperatingSystem.IsLinux())options.UnixCreateMode=UnixFileMode.UserRead|UnixFileMode.UserWrite;
         file=new FileStream(path,options);
         try
         {
