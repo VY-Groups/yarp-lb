@@ -10,7 +10,7 @@ internal sealed class VipAutomaticJournal : IDisposable
     internal Transition? Pending {get;private set;}
     internal long LastCompletedEpoch {get;private set;}
     internal long LastRearmAttemptEpoch {get;private set;}
-    internal VipAutomaticJournal(string path,string scope,string preferred,string other,bool readOnly=false)
+    internal VipAutomaticJournal(string path,string scope,string preferred,string other,bool readOnly=false,bool existingOnly=false)
     {
         VipFenceProvider.ValidatePair(scope,preferred,other);
         this.scope=scope;this.preferred=preferred;this.other=other;this.readOnly=readOnly;
@@ -25,7 +25,7 @@ internal sealed class VipAutomaticJournal : IDisposable
             throw new InvalidDataException("Linked controller journal refused.");
         var options=readOnly
             ?new FileStreamOptions{Mode=FileMode.Open,Access=FileAccess.Read,Share=FileShare.Read}
-            :new FileStreamOptions{Mode=FileMode.OpenOrCreate,Access=FileAccess.ReadWrite,Share=FileShare.None,Options=FileOptions.WriteThrough};
+            :new FileStreamOptions{Mode=existingOnly?FileMode.Open:FileMode.OpenOrCreate,Access=FileAccess.ReadWrite,Share=FileShare.None,Options=FileOptions.WriteThrough};
         if(!readOnly&&OperatingSystem.IsLinux())options.UnixCreateMode=UnixFileMode.UserRead|UnixFileMode.UserWrite;
         file=new FileStream(path,options);
         try
@@ -163,8 +163,11 @@ internal static class VipAutomaticController
     internal static async Task Run(string scope,string preferred,string other,string providerConfig,string journalPath,
         bool failback,bool recover,FleetQuorum authority,CancellationToken stop,VipPolicyDocument? settings=null)
     {
+        if(authority.VipReaderPin==preferred||authority.VipReaderPin==other)
+            throw new InvalidDataException("Writer must be independent from gateway identities.");
         using var provider=VipFenceProvider.Open(providerConfig,scope,preferred,other);
-        using var journal=new VipAutomaticJournal(journalPath,scope,preferred,other);
+        // Explicit recovery never creates a missing journal or invents an intent.
+        using var journal=new VipAutomaticJournal(journalPath,scope,preferred,other,existingOnly:recover);
         settings??=VipPolicyDocument.Default(scope,preferred,other,failback);
         settings.Validate(scope);
         Console.Error.WriteLine("VIP controller opened durable transition journal.");

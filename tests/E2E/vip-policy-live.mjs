@@ -55,6 +55,12 @@ try {
             'browser inventory must contain the exact journal-bound scope');
         assert.equal(await nav.getAttribute('aria-current'),'page','inventory navigation must remain selected');
         await page.getByRole('heading',{name:'Independent HA policy',exact:true}).waitFor({state:'visible'});
+        const recovery=page.locator('#ha-recovery-panel');
+        await recovery.getByRole('heading',{name:'Independent HA recovery handoff'}).waitFor({state:'visible'});
+        assert.match(await recovery.innerText(),/Independent controller — not verified here/);
+        assert.match(await recovery.innerText(),/Never reset the journal/);
+        assert.ok(inventory.virtualAddresses.some(item=>item.haPolicyScope===fixture.policy.scope &&
+            item.recoveryAuthority==='independent-controller' && item.recoveryVerified===false));
         const policy=fixture.policy;
         await page.locator('#ha-scope').selectOption(policy.scope);
         await page.locator('#ha-preferred').fill(policy.preferredPin);

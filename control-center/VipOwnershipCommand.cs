@@ -23,7 +23,7 @@ internal static class VipOwnershipCommand
                 Console.CancelKeyPress+=cancel;
                 try{await VipAutomaticController.Run(args[2],policy.PreferredPin,policy.OtherPin,args[5],args[6],
                     policy.FailbackEnabled,args[3]=="recover-policy",authority,stop.Token,policy);}
-                catch(OperationCanceledException) when(stop.IsCancellationRequested){}
+                catch(OperationCanceledException) when(stop.IsCancellationRequested&&args[3]!="recover-policy"){}
                 finally{Console.CancelKeyPress-=cancel;}
                 return 0;
             }
@@ -34,7 +34,7 @@ internal static class VipOwnershipCommand
                 Console.CancelKeyPress+=cancel;
                 try{await VipAutomaticController.Run(args[2],args[4],args[5],args[6],args[7],
                     args[8]=="failback-on",args[3]=="recover-automatic",authority,stop.Token);}
-                catch(OperationCanceledException) when(stop.IsCancellationRequested){}
+                catch(OperationCanceledException) when(stop.IsCancellationRequested&&args[3]!="recover-automatic"){}
                 finally{Console.CancelKeyPress-=cancel;}
                 return 0;
             }

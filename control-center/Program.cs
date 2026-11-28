@@ -2280,6 +2280,8 @@ app.MapGet("/admin/api/network/interfaces", (HttpContext ctx) =>
                     automaticDrain=localVipAdmission?.IsAutomaticDrain(service.Id)??false,
                     automaticDrainConfigured=vipMachineAddress==IPAddress.Parse(service.Ip).ToString(),
                     ownershipEpoch=vipEpochs.TryGetValue(service.Id,out var vipEpoch)?vipEpoch:(long?)null,
+                    recoveryAuthority=service.VipJournalDirectory is not null?"independent-controller":null,
+                    recoveryVerified=false,
                     drainEligible=vipDrainGroups.ContainsKey(IPAddress.Parse(service.Ip).ToString()) };
             })
             .ToArray();

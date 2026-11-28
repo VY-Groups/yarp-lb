@@ -322,6 +322,8 @@ def accept_live_policy(executable,scope,fleet,vip,reader,policy,expected_owner):
             rows=[r for r in inventory["virtualAddresses"] if r["id"]=="policy-vip"]
             if len(rows)!=1 or rows[0]["haPolicyScope"]!=scope or rows[0]["ownershipEpoch"]!=expected_owner[1]:
                 raise AssertionError("Inventory did not expose actual journal-bound scope and epoch")
+            if rows[0]["recoveryAuthority"]!="independent-controller" or rows[0]["recoveryVerified"] is not False:
+                raise AssertionError("Inventory incorrectly claims independent recovery verification")
             path="/admin/api/network/virtual-services/ha-policy"
             api("POST",path,policy,expected=403,with_csrf=False)
             api("POST",path,dict(policy,scope="0"*64),expected=400)
@@ -512,6 +514,8 @@ try:
     inspection=json.loads(writer("inspect-policy",policy,client,journal).stdout)
     if not inspection["validated"] or inspection["networkVerified"] or inspection["mutated"] or inspection["journalExists"] or journal.exists():
         raise AssertionError("Offline preflight created state or falsely claimed network readiness")
+    if writer("recover-policy",policy,client,journal,check=False).returncode!=78 or journal.exists():
+        raise AssertionError("Recovery without journal created state or reported success")
     invalid_policy=put(cdir,"invalid-policy.json",dict(json.loads(policy.read_text()),pollSeconds=1))
     own(cdir,wa)
     if writer("inspect-policy",invalid_policy,client,journal,check=False).returncode!=78 or journal.exists():
