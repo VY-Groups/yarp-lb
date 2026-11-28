@@ -18,7 +18,7 @@ internal static class VipHostAddressPlatform
             throw new InvalidDataException("Special-purpose IPv4 address refused.");
         return ip;
     }
-    internal sealed record Observation(string InterfaceId,string Name,int Index,bool Present);
+    internal sealed record Observation(string InterfaceId,string Name,int Index,bool Present,IPAddress? ManagementAddress=null);
     internal static Observation Inspect(string interfaceId,IPAddress address,IPAddress? management=null)
     {
         var snapshot=NetworkInterface.GetAllNetworkInterfaces();
@@ -43,11 +43,11 @@ internal static class VipHostAddressPlatform
         }
         if(matches.Count>1 || (matches.Count==1&&(matches[0].Id!=target.Id||matches[0].Prefix!=32)))
             throw new InvalidDataException("VIP is already assigned elsewhere or with a different prefix.");
-        return new(target.Id,target.Name,ipv4.Index,matches.Count==1);
+        return new(target.Id,target.Name,ipv4.Index,matches.Count==1,management);
     }
     internal static async Task Change(Observation observation,IPAddress address,bool add,CancellationToken token)
     {
-        var current=Inspect(observation.InterfaceId,address);
+        var current=Inspect(observation.InterfaceId,address,observation.ManagementAddress);
         if(current.Index!=observation.Index || current.Name!=observation.Name || current.Present==add)
             throw new InvalidDataException("Interface or address changed before mutation.");
         ProcessStartInfo start;
@@ -79,6 +79,9 @@ internal static class VipHostAddressPlatform
             $ProgressPreference='SilentlyContinue'
             $i=[int]$env:GC_VIP_INTERFACE_INDEX
             $a=[string]$env:GC_VIP_ADDRESS
+            $m=[string]$env:GC_VIP_MANAGEMENT_ADDRESS
+            if(@(Get-NetRoute -InterfaceIndex $i -PolicyStore ActiveStore | Where-Object {$_.DestinationPrefix -in @('0.0.0.0/0','::/0')}).Count){throw 'Default-route interface refused'}
+            if($m -and @(Get-NetIPAddress -InterfaceIndex $i -PolicyStore ActiveStore | Where-Object {$_.IPAddress -eq $m}).Count){throw 'Management interface refused'}
             $iface=Get-NetIPInterface -InterfaceIndex $i -AddressFamily IPv4 -PolicyStore ActiveStore
             if($iface.Dhcp -ne 'Disabled'){throw 'Dedicated static interface required'}
             $existing=@(Get-NetIPAddress -AddressFamily IPv4 -PolicyStore ActiveStore | Where-Object {$_.IPAddress -eq $a})
@@ -95,11 +98,16 @@ internal static class VipHostAddressPlatform
                 start.ArgumentList.Add(arg);
             start.Environment["GC_VIP_INTERFACE_INDEX"]=current.Index.ToString(CultureInfo.InvariantCulture);
             start.Environment["GC_VIP_ADDRESS"]=address.ToString();
+            start.Environment["GC_VIP_MANAGEMENT_ADDRESS"]=current.ManagementAddress?.ToString()??"";
             start.Environment["GC_VIP_ADD"]=add?"1":"0";
         }
         else throw new PlatformNotSupportedException("VIP address mutation supports Linux and Windows.");
         start.UseShellExecute=false;
         start.RedirectStandardOutput=true;start.RedirectStandardError=true;start.CreateNoWindow=true;
+        // Revalidate after preparing the command and before starting the privileged process.
+        var boundary=Inspect(current.InterfaceId,address,current.ManagementAddress);
+        if(boundary!=current)throw new InvalidDataException("Interface or address changed before mutation.");
+        token.ThrowIfCancellationRequested();
         using var process=Process.Start(start)??throw new InvalidOperationException("Address command did not start.");
         var output=process.StandardOutput.ReadToEndAsync();
         var error=process.StandardError.ReadToEndAsync();
@@ -115,7 +123,7 @@ internal static class VipHostAddressPlatform
         for(int attempt=0;attempt<20;attempt++)
         {
             token.ThrowIfCancellationRequested();
-            if(Inspect(current.InterfaceId,address).Present==add)return;
+            if(Inspect(current.InterfaceId,address,current.ManagementAddress).Present==add)return;
             await Task.Delay(250,token);
         }
         throw new InvalidOperationException("Operating system address state not confirmed.");
