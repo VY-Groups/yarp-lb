@@ -37,6 +37,8 @@ DP_REQUIRED = {
     "audit-collector-ci.yml": "Independent audit collector HTTPS acceptance",
     "test-server-install-smoke.yml": "GatewayCore test-server installer smoke",
     "codeql.yml": "CodeQL Advanced",
+    "adc-vip-fence-provider.yml": "ADC external VIP fencing provider contracts",
+    "adc-vip-host-address.yml": "ADC local VIP address and durable journal",
 }
 
 def audit(payload, sha, repo):

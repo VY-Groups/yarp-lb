@@ -1,5 +1,8 @@
 name: ADC local VIP address and durable journal
 on:
+  push:
+    branches: [main]
+    paths: ["control-center/**", "tests/VipHostAddress/**", ".github/workflows/adc-vip-host-address.yml"]
   pull_request:
     paths: ["control-center/**", "tests/VipHostAddress/**", ".github/workflows/adc-vip-host-address.yml"]
   workflow_dispatch:

@@ -47,6 +47,18 @@ class Issue48Evidence(unittest.TestCase):
             runs=self.full()+[run(DP_REQUIRED[path],path,run_attempt=2,
                                   status=status,conclusion=conclusion)]
             self.assertEqual(self.assess(runs)["ci_candidate"],wanted)
+    def test_adc_lifecycle_gates_require_exact_main_success(self):
+        for path in ("adc-vip-fence-provider.yml","adc-vip-host-address.yml"):
+            self.assertIn(path,DP_REQUIRED)
+            for change,wanted in (({"event":"pull_request"},"PENDING"),
+                                  ({"head_sha":"b"*40},"PENDING"),
+                                  ({"status":"completed","conclusion":"failure"},"NO-GO"),
+                                  ({"status":"completed","conclusion":"skipped"},"NO-GO")):
+                with self.subTest(path=path,change=change):
+                    runs=self.full()
+                    target=next(r for r in runs if r["path"]==".github/workflows/"+path)
+                    target.update(change)
+                    self.assertEqual(self.assess(runs)["ci_candidate"],wanted)
     def test_original_baseline_must_not_be_weakened(self):
         runs=[r for r in self.full() if r["name"]!=REQUIRED[0]]
         self.assertEqual(self.assess(runs)["ci_candidate"],"PENDING")
