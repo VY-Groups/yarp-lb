@@ -734,8 +734,10 @@ async Task ValidatePartialStartupFailure()
         throw new Exception("Partial listener startup hung: " + await output + await errors);
     }
     var log = await output;
-    Assert(child.ExitCode != 0 && log.Contains("L4_TCP_READY first-tcp") &&
-        !log.Contains("L4_ENGINE_READY"), "partial bind failure exits nonzero without advertising engine readiness");
+    Assert(child.ExitCode != 0 && !log.Contains("L4_TCP_READY", StringComparison.Ordinal) &&
+        !log.Contains("L4_UDP_READY", StringComparison.Ordinal) &&
+        !log.Contains("L4_ENGINE_READY", StringComparison.Ordinal),
+        "partial bind failure exits nonzero without advertising any listener or engine readiness");
     Assert((await errors).Contains("SocketException"), "bind failure retains socket diagnostic");
     using var rebound = new TcpListener(IPAddress.Loopback, 19052);
     rebound.Start();
