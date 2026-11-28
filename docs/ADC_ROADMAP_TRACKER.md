@@ -29,7 +29,7 @@ Every implementation item requires a reviewed PR, exact-head evidence, backend/A
 
 ## Phase 2 — active development (base a0e525f4)
 
-Phase 1 merged after independent approval at 560bf023031e3145ef1df05c82fa72d48b11576f (53/53); main a0e525f49dd9a930c5ca3114061871b965ecb040 (38/38 checks, 13/13 workflows). [Browser/API evidence](https://github.com/VY-Groups/yarp-lb/actions/runs/46137456705) and [full application evidence](https://github.com/VY-Groups/yarp-lb/actions/runs/46137456594).
+Phase 1 merged after independent approval at 560bf023031e3145ef1df05c82fa72d48b11576f (53/53); main a0e525f49dd9a930c5ca3114061871b965ecb040 (38/38 checks, 13/13 workflows). Browser/API Actions run `46137456705` and full application Actions run `46137456594`.
 
 | ID | Acceptance criterion | Implementation / evidence | Status |
 |---|---|---|---|
