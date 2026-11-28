@@ -996,6 +996,22 @@ def acceptance(base:str,https_base:str,origin_port:int):
     admin.request("GET","/admin/api/setup/version")
     initial=admin.request("GET","/admin/api/state")
     check("fixture" in initial["clusters"],"real proxy config inspection")
+    anonymous.request("GET","/admin/api/capabilities",expect=401)
+    for actor in (admin,operator,viewer):
+        coverage=actor.request("GET","/admin/api/capabilities")
+        features={item["id"]:item for item in coverage["adcCoverage"]}
+        check(len(features)==len(coverage["adcCoverage"]) and
+              {item["status"] for item in features.values()}=={"implemented","partial","unavailable"} and
+              features["http-services"]["status"]=="implemented" and
+              features["virtual-services"]["status"]=="partial" and
+              features["multi-tenancy"]["status"]=="unavailable" and
+              all(item["evidence"] and item["notes"] for item in features.values()),
+              "authenticated ADC coverage explicitly distinguishes bounded software from unavailable features")
+        observed=actor.request("GET","/admin/api/state")
+        check(all(observed[key]==initial[key] for key in ("routes","clusters","disabled","revision")),
+              "service-map roles see the same approved route/group/member revision")
+    check(admin.request("GET","/admin/api/state")["revision"]==initial["revision"],
+          "service-map and coverage inspection never change the approved revision")
     dns_draft = {"name":"firewall.example.test","soaContact":"hostmaster.example.test",
         "serial":1,"ttl":30,"policy":"Weighted","probeInterval":5,
         "failureThreshold":2,"successThreshold":2,

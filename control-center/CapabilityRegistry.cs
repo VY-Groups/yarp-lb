@@ -44,6 +44,28 @@ public static class CapabilityRegistry
         new("multi-tenant", "Multi-tenant isolation", "Control Plane", "planned", "Controller architecture", "Needs authorization boundaries at every API and data layer.")
     ];
 
+    // Coverage describes delivered software scope, not enabled infrastructure or physical certification.
+    public sealed record AdcFeature(string Id, string Name, string Status, string Notes, string Evidence);
+    public static readonly AdcFeature[] AdcCoverage =
+    [
+        new("http-services", "HTTP routing and approved service configuration", "implemented", "Routes, clusters, enabled/disabled destinations and reviewed configuration.", "Frozen L7 and browser/API acceptance; #573/#574"),
+        new("virtual-services", "Virtual services / ports", "partial", "Host-provisioned isolated HTTP(S) sockets and route binding exist. Unified editable L4/L7 virtual-server registry and cross-engine conflict lifecycle remain pending.", "#573, #589"),
+        new("reusable-objects", "Reusable server/group/monitor objects", "partial", "Reviewed templates and materialized snapshots exist; full shared identity and live reference lifecycle remain pending.", "#568–#572"),
+        new("balancing", "HTTP balancing algorithms", "implemented", "Round robin, weighted variants, least requests, source hash, primary/backup and local fastest-response policies. Local request/latency state only.", "#564, #589; frozen L7"),
+        new("persistence", "Advanced persistence profiles", "partial", "Secure expiring HTTPS affinity and scoped shared-key compatibility; broader protocol profiles and deployment custody remain pending.", "#570–#571"),
+        new("health", "Health monitors and application templates", "partial", "Active/passive and compound HTTP/TCP checks, profile registry and copied/linked snapshots; wider protocol/template catalog pending.", "#565–#569"),
+        new("l4", "Independent TCP/UDP engine", "implemented", "Separate runtime with real socket acceptance; not an HTTP route or unified lifecycle UI.", "Frozen L4 acceptance"),
+        new("dns", "Independent DNS/GSLB engine", "implemented", "Authoritative DNS TCP/UDP, DNSSEC/NSEC3 and source admission tested; real delegation and geography under #36.", "#578–#579; frozen GSLB"),
+        new("network", "Network management", "partial", "Local inventory, Linux VLAN observation and guarded VIP management; full interface/VLAN mutation, routing/NAT/SNAT pending.", "#580–#589"),
+        new("security", "Security and application access", "partial", "Reviewed CIDR/HTTPS access, WAF tooling and quotas; application SSO, advanced DDoS, and expanded policies pending.", "#574, #577; frozen security/WAF"),
+        new("acceleration", "Acceleration", "partial", "Opt-in public HTTP static compression and method policy; HTTP caching and expanded programmable policy pending.", "#576–#577"),
+        new("observability", "Observability, diagnostics CLI and SOP", "partial", "Local telemetry, audit, scoped diagnostics and operator SOP exist; unified advanced analytics, configuration CLI and training remain pending.", "#563, #575; frozen audit"),
+        new("multi-tenancy", "Multi-tenant partitions", "unavailable", "Single-tenant architecture; no isolation guarantee from metadata.", "Roadmap future architecture"),
+        new("routing-nat", "Managed routing, NAT and SNAT", "unavailable", "No authorized full host routing/NAT management UI or runtime contract.", "Roadmap network phase"),
+        new("app-sso", "Application identity-aware access", "unavailable", "Admin login is not application identity-aware proxy authorization.", "Roadmap security phase"),
+        new("hardware-ddos", "Hardware acceleration / volumetric DDoS absorption", "unavailable", "No appliance-level hardware or volumetric mitigation claim.", "Deployment-dependent"),
+    ];
+
     public static void MapCapabilityRegistry(this WebApplication app) =>
         app.MapGet("/admin/api/capabilities", () => Results.Ok(new
         {
@@ -51,6 +73,8 @@ public static class CapabilityRegistry
             policies = new[] { "RoundRobin", "PowerOfTwoChoices", "LeastRequests", "Random", "FirstAlphabetical", "WeightedRandom", "WeightedLeastRequests", "WeightedRoundRobin", "FastestResponse", "SourceIpHash", "PrimaryBackup" },
             backupMetadata = new { key = "TrafficRole", primary = "primary", backup = "backup", @default = "primary", requiresActiveHealth = true },
             weightedMetadata = new { key = "Weight", min = LoadBalancingCore.MinWeight, max = LoadBalancingCore.MaxWeight, @default = 1 },
+            adcCoverageScope = "Software feature coverage, not deployment, licensing or physical readiness",
+            adcCoverage = AdcCoverage,
             capabilities = Items
         })).RequireAuthorization();
 }
