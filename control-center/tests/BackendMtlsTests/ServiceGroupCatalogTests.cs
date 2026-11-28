@@ -30,5 +30,27 @@ internal static class ServiceGroupCatalogTests
         Check(ServiceGroupCatalog.Validate(new JsonObject { ["realServers"]=new JsonObject() },current) is not null,"reject referenced server deletion");
         Check(ServiceGroupCatalog.Validate(new JsonObject { ["monitorProfiles"]=new JsonObject() },current) is not null,"reject referenced monitor deletion");
         Check(ServiceGroupCatalog.Validate(new JsonObject { ["serviceGroups"]=new JsonObject(),["realServers"]=new JsonObject() },current) is null,"atomic removal allowed");
+        var linked = JsonNode.Parse("""
+        {"realServers":{"app":{"Address":"https://app.invalid/","Description":""}},
+         "serviceGroups":{"web":{"Policy":"RoundRobin","MonitorProfile":"","Members":{"app":{"Weight":"3","TrafficRole":"primary"}}}}}
+        """)!.AsObject();
+        var clusters = JsonNode.Parse("""
+        {"pool":{"LoadBalancingPolicy":"RoundRobin","Metadata":{"ADC.ServiceGroupTemplate":"web"},
+          "Destinations":{"app":{"Address":"https://app.invalid/","Metadata":{"Weight":"3","TrafficRole":"primary","TrafficState":"draining"}}}}}
+        """)!.AsObject();
+        var disabled = new JsonObject();
+        Check(ServiceGroupCatalog.ValidateLinked(clusters,disabled,linked,new()) is null,"linked snapshot matches catalog");
+        linked["realServers"]!["app"]!["Address"]="https://changed.invalid/";
+        Check(ServiceGroupCatalog.ValidateLinked(clusters,disabled,linked,new()) is not null,"reject stale linked origin");
+        clusters["pool"]!["Destinations"]!["app"]!["Address"]="https://changed.invalid/";
+        Check(ServiceGroupCatalog.ValidateLinked(clusters,disabled,linked,new()) is null,"explicit same-draft synchronization accepted");
+        disabled["pool::app"]=clusters["pool"]!["Destinations"]!["app"]!.DeepClone();
+        Check(ServiceGroupCatalog.ValidateLinked(clusters,disabled,linked,new()) is not null,"reject duplicate enabled and disabled member");
+        clusters["pool"]!["Destinations"]!.AsObject().Remove("app");
+        Check(ServiceGroupCatalog.ValidateLinked(clusters,disabled,linked,new()) is null,"disabled member retains catalog identity");
+        linked["serviceGroups"]=new JsonObject();
+        Check(ServiceGroupCatalog.ValidateLinked(clusters,disabled,linked,new()) is not null,"reject deletion of linked template");
+        clusters["pool"]!["Metadata"]!.AsObject().Remove(ServiceGroupCatalog.LinkKey);
+        Check(ServiceGroupCatalog.ValidateLinked(clusters,disabled,linked,new()) is null,"explicit unlink preserves independent materialization");
     }
 }

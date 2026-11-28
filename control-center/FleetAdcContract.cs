@@ -64,6 +64,7 @@ public static class FleetAdcContract
             // All nonempty objects must be in the signed snapshot; never resolve
             // template references against unsigned previous node state.
             if (ServiceGroupCatalog.Validate(payload, new JsonObject()) is { } groupError) return groupError;
+            if (ServiceGroupCatalog.ValidateLinked(clusters, payload["disabled"] as JsonObject ?? new JsonObject(), payload, new JsonObject()) is { } linkedError) return linkedError;
             if (SharedMonitorContract.Validate(clusters) is { } monitorError) return monitorError;
             if (SecureAffinityDraft.Validate(clusters) is { } affinityError) return affinityError;
             foreach (var (_, cluster) in clusters)

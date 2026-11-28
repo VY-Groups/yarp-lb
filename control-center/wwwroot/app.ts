@@ -500,6 +500,8 @@ function editServiceGroupMember(id: string) {
 function deleteServiceGroup(id: string) {
     if (currentRole === 'Viewer' || !Object.prototype.hasOwnProperty.call(data.serviceGroups || {}, id))
         return;
+    if (keys(data.clusters).some(key => data.clusters[key].Metadata?.['ADC.ServiceGroupTemplate'] === id))
+        return show('Unlink dependent runtime groups first.', true);
     if (!confirm('Delete service group template ' + id + '? Existing runtime groups remain unchanged.'))
         return;
     const templates = { ...data.serviceGroups };
@@ -511,7 +513,7 @@ function deployServiceGroup(id: string) {
     if (currentRole === 'Viewer' || !Object.prototype.hasOwnProperty.call(data.serviceGroups || {}, id))
         return;
     const template = data.serviceGroups?.[id];
-    modal('Create backend group from template', 'Creates a separate backend group in the draft. Attach a route and submit for independent approval. Existing groups cannot be overwritten.', [{ name: 'id', label: 'New backend group ID', value: id + '-pool' }], v => {
+    modal('Create backend group from template', 'Choose an independent snapshot or a persistent linked group. Linked groups must match the template at approval; synchronize changes explicitly. Attach a route and submit for independent approval.', [{ name: 'id', label: 'New backend group ID', value: id + '-pool' }, { name: 'linkMode', label: 'Template lifecycle', value: 'snapshot', options: ['snapshot', 'linked'] }], v => {
         if (!validId(v.id) || keys(data.clusters).some(key => key.toLowerCase() === v.id.toLowerCase()) || keys(data.clusters).length >= 100)
             throw Error('Choose a new backend group ID.');
         const destinations: Obj = {};
@@ -523,6 +525,8 @@ function deployServiceGroup(id: string) {
             Object.defineProperty(destinations, serverId, { value: { Address: server.Address, Metadata: { Weight: member.Weight, TrafficRole: member.TrafficRole, TrafficState: 'active' } }, enumerable: true, writable: true, configurable: true });
         }
         const group: Obj = { LoadBalancingPolicy: template.Policy, Destinations: destinations };
+        if (v.linkMode === 'linked')
+            group.Metadata = { 'ADC.ServiceGroupTemplate': id };
         if (template.MonitorProfile) {
             const profile = data.monitorProfiles?.[template.MonitorProfile];
             if (!profile)
@@ -532,6 +536,62 @@ function deployServiceGroup(id: string) {
         data.clusters = { ...data.clusters, [v.id]: group };
         edit();
     });
+}
+function syncLinkedGroup(id: string) {
+    if (currentRole === 'Viewer' || !Object.prototype.hasOwnProperty.call(data.clusters, id))
+        return;
+    const old = data.clusters[id];
+    const source = old.Metadata?.['ADC.ServiceGroupTemplate'];
+    if (!source || !Object.prototype.hasOwnProperty.call(data.serviceGroups || {}, source))
+        return show('Linked template not found; restore it or explicitly unlink.', true);
+    const template = data.serviceGroups?.[source];
+    if (!confirm('Synchronize ' + id + ' from ' + source + ' in the draft? Removed template members will be removed from this group. Existing drain/disabled state is preserved for retained members. Independent approval is required.'))
+        return;
+    const group: Obj = JSON.parse(JSON.stringify(old));
+    const destinations: Obj = {};
+    const disabled = { ...data.disabled };
+    for (const key of keys(disabled))
+        if (key.startsWith(id + '::'))
+            delete disabled[key];
+    for (const serverId of keys(template.Members)) {
+        const server = data.realServers?.[serverId];
+        if (!server || !validCatalogOrigin(server.Address))
+            return show('Missing or invalid real server: ' + serverId, true);
+        const member = template.Members[serverId];
+        const key = id + '::' + serverId;
+        const wasDisabled = Object.prototype.hasOwnProperty.call(data.disabled, key);
+        const previous = (wasDisabled ? data.disabled[key] : old.Destinations?.[serverId]) || {};
+        const value = { ...previous, Address: server.Address, Metadata: { ...(previous.Metadata || {}), Weight: member.Weight, TrafficRole: member.TrafficRole, TrafficState: previous.Metadata?.TrafficState || 'active' } };
+        Object.defineProperty(wasDisabled ? disabled : destinations, wasDisabled ? key : serverId, { value, enumerable: true, writable: true, configurable: true });
+    }
+    group.Destinations = destinations;
+    group.LoadBalancingPolicy = template.Policy;
+    group.Metadata = { ...(group.Metadata || {}) };
+    delete group.Metadata[monitorSourceKey];
+    if (template.MonitorProfile) {
+        const profile = data.monitorProfiles?.[template.MonitorProfile];
+        if (!profile)
+            return show('Referenced monitor profile is missing.', true);
+        applyMonitorSnapshot({ HealthCheck: { Active: profile.Active }, Metadata: profile.Metadata }, group);
+    }
+    else {
+        if (group.HealthCheck)
+            delete group.HealthCheck.Active;
+        for (const key of ['RiseFall.Rise', 'RiseFall.Fall', 'ConsecutiveFailuresHealthPolicy.Threshold', compoundModeKey, compoundPathKey])
+            delete group.Metadata[key];
+    }
+    data.clusters = { ...data.clusters, [id]: group };
+    data.disabled = disabled;
+    edit();
+}
+function unlinkServiceGroup(id: string) {
+    if (currentRole === 'Viewer' || !Object.prototype.hasOwnProperty.call(data.clusters, id))
+        return;
+    const group = data.clusters[id];
+    if (!group.Metadata?.['ADC.ServiceGroupTemplate'] || !confirm('Unlink ' + id + ' and retain its current materialized configuration in the draft?'))
+        return;
+    delete group.Metadata['ADC.ServiceGroupTemplate'];
+    edit();
 }
 function serviceGroupPanel() {
     const templates = data.serviceGroups || {};
@@ -574,7 +634,7 @@ function editSecurePersistence(id: string) {
         edit();
     });
 }
-function clusters(){const rows=keys(data.clusters).map(id=>{const c=data.clusters[id];const active=!!c.HealthCheck?.Active?.Enabled,passive=!!c.HealthCheck?.Passive?.Enabled;const health=active&&passive?'<span class="chip good">Active + passive</span>':active?'<span class="chip good">Active</span>':passive?'<span class="chip warn">Passive only</span>':'<span class="chip">Disabled</span>';return `<tr><td><b>${esc(id)}</b></td><td>${esc(c.LoadBalancingPolicy||'Default')}</td><td>${keys(c.Destinations||{}).length}</td><td>${health}${c.Metadata?.[monitorSourceKey]?`<div class="subtle">Linked to ${esc(c.Metadata[monitorSourceKey])}</div>`:""}</td><td>${actionBtn('Edit','cluster-edit',id)} ${currentRole==='Viewer'?'':actionBtn('Health monitor','monitor-edit',id)+' '+actionBtn('Reuse monitor','monitor-copy',id)+' '+actionBtn('Assign profile','profile-assign',id)+' '+actionBtn('Persistence','persistence-edit',id)+(c.Metadata?.[monitorSourceKey]?' '+actionBtn('Unlink monitor','monitor-unlink',id):'')} ${actionBtn('Advanced','cluster-advanced',id)} ${actionBtn('Delete','cluster-delete',id,'danger-btn mini')}</td></tr>`}).join('');return `<div class="toolbar"><div><h2>Backend groups (clusters)</h2><p class="subtle">A group contains the servers for one application and defines traffic distribution. Use the policy guide below.</p></div>${actionBtn('+ Add cluster','cluster-add','')}</div><div class="tablewrap"><table><thead><tr><th>Cluster</th><th>Policy</th><th>Active backends</th><th>Health checks</th><th>Actions</th></tr></thead><tbody>${rows||'<tr><td colspan="5" class="empty">No clusters configured</td></tr>'}</tbody></table></div>${policyReference()}${monitorRegistryPanel()}${serviceGroupPanel()}`}
+function clusters(){const rows=keys(data.clusters).map(id=>{const c=data.clusters[id];const active=!!c.HealthCheck?.Active?.Enabled,passive=!!c.HealthCheck?.Passive?.Enabled;const health=active&&passive?'<span class="chip good">Active + passive</span>':active?'<span class="chip good">Active</span>':passive?'<span class="chip warn">Passive only</span>':'<span class="chip">Disabled</span>';return `<tr><td><b>${esc(id)}</b></td><td>${esc(c.LoadBalancingPolicy||'Default')}</td><td>${keys(c.Destinations||{}).length}</td><td>${health}${c.Metadata?.[monitorSourceKey]?`<div class="subtle">Linked to ${esc(c.Metadata[monitorSourceKey])}</div>`:""}</td><td>${actionBtn('Edit','cluster-edit',id)} ${currentRole==='Viewer'?'':actionBtn('Health monitor','monitor-edit',id)+' '+actionBtn('Reuse monitor','monitor-copy',id)+' '+actionBtn('Assign profile','profile-assign',id)+' '+actionBtn('Persistence','persistence-edit',id)+(c.Metadata?.[monitorSourceKey]?' '+actionBtn('Unlink monitor','monitor-unlink',id):'')} ${c.Metadata?.['ADC.ServiceGroupTemplate']?`<div class="subtle">Linked template: ${esc(c.Metadata['ADC.ServiceGroupTemplate'])}</div>${currentRole==='Viewer'?'':actionBtn('Synchronize linked group','group-sync',id)+' '+actionBtn('Unlink group','group-unlink',id)}`:''} ${actionBtn('Advanced','cluster-advanced',id)} ${actionBtn('Delete','cluster-delete',id,'danger-btn mini')}</td></tr>`}).join('');return `<div class="toolbar"><div><h2>Backend groups (clusters)</h2><p class="subtle">A group contains the servers for one application and defines traffic distribution. Use the policy guide below.</p></div>${actionBtn('+ Add cluster','cluster-add','')}</div><div class="tablewrap"><table><thead><tr><th>Cluster</th><th>Policy</th><th>Active backends</th><th>Health checks</th><th>Actions</th></tr></thead><tbody>${rows||'<tr><td colspan="5" class="empty">No clusters configured</td></tr>'}</tbody></table></div>${policyReference()}${monitorRegistryPanel()}${serviceGroupPanel()}`}
 function validCatalogOrigin(value: string) {
     try {
         const uri = new URL(value);
@@ -1522,6 +1582,8 @@ function act(type:string,id:string){
     if (type === 'service-group-add' || type === 'service-group-edit') { editServiceGroup(type === 'service-group-edit' ? id : ''); return; }
     if (type === 'service-group-members') { editServiceGroupMember(id); return; }
     if (type === 'service-group-delete') { deleteServiceGroup(id); return; }
+    if (type === 'group-sync') { syncLinkedGroup(id); return; }
+    if (type === 'group-unlink') { unlinkServiceGroup(id); return; }
     if (type === 'service-group-deploy') { deployServiceGroup(id); return; }
     if (type === 'persistence-edit') { editSecurePersistence(id); return; }
     if (type === 'route-access') { editApplicationAccess(id); return; }

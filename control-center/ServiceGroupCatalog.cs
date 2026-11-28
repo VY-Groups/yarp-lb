@@ -55,4 +55,64 @@ public static class ServiceGroupCatalog
         }
         return null;
     }
+
+    // A linked group is still a materialized runtime cluster. The catalog never
+    // rewrites live traffic: every dependent snapshot must be in the same draft.
+    public const string LinkKey = "ADC.ServiceGroupTemplate";
+    private static readonly string[] MonitorKeys =
+        ["RiseFall.Rise", "RiseFall.Fall", "ConsecutiveFailuresHealthPolicy.Threshold",
+         "ADC.Health.CompoundMode", "ADC.Health.SecondaryPath"];
+
+    public static string? ValidateLinked(JsonObject clusters, JsonObject disabled,
+        JsonObject payload, JsonObject current)
+    {
+        var groups = (payload.ContainsKey(PayloadKey) ? payload[PayloadKey] : current[StorageKey]) as JsonObject;
+        var servers = (payload.ContainsKey(RealServerCatalog.PayloadKey) ? payload[RealServerCatalog.PayloadKey] :
+            current[RealServerCatalog.StorageKey]) as JsonObject;
+        var profiles = (payload.ContainsKey(MonitorProfileRegistry.PayloadKey) ? payload[MonitorProfileRegistry.PayloadKey] :
+            current[MonitorProfileRegistry.StorageKey]) as JsonObject;
+        foreach (var (clusterId, node) in clusters)
+        {
+            if (node is not JsonObject cluster || cluster["Metadata"] is not JsonObject metadata ||
+                !metadata.ContainsKey(LinkKey)) continue;
+            var error = "Linked service group " + clusterId + " must match its catalog template; synchronize or explicitly unlink in the reviewed draft.";
+            if (metadata[LinkKey] is not JsonValue link || !link.TryGetValue<string>(out var id) ||
+                id is null || groups?[id] is not JsonObject template ||
+                template["Members"] is not JsonObject members ||
+                cluster["Destinations"] is not JsonObject destinations ||
+                !JsonNode.DeepEquals(template["Policy"], cluster["LoadBalancingPolicy"]) ||
+                metadata.ContainsKey(SharedMonitorContract.SourceKey)) return error;
+            var observed = new Dictionary<string, JsonNode?>(StringComparer.Ordinal);
+            foreach (var (key, value) in destinations)
+                if (!observed.TryAdd(key, value)) return error;
+            var prefix = clusterId + "::";
+            foreach (var (key, value) in disabled)
+                if (key.StartsWith(prefix, StringComparison.Ordinal) &&
+                    !observed.TryAdd(key[prefix.Length..], value)) return error;
+            if (observed.Count != members.Count) return error;
+            foreach (var (serverId, member) in members)
+            {
+                if (!observed.TryGetValue(serverId, out var destination) ||
+                    destination is not JsonObject dest || servers?[serverId] is not JsonObject server ||
+                    member is not JsonObject spec || dest["Metadata"] is not JsonObject dm ||
+                    !JsonNode.DeepEquals(dest["Address"], server["Address"]) ||
+                    !JsonNode.DeepEquals(dm["Weight"], spec["Weight"]) ||
+                    !JsonNode.DeepEquals(dm["TrafficRole"], spec["TrafficRole"])) return error;
+            }
+            var profileId = template["MonitorProfile"]?.GetValue<string>();
+            var active = (cluster["HealthCheck"] as JsonObject)?["Active"];
+            if (string.IsNullOrEmpty(profileId))
+            {
+                if (active is not null || MonitorKeys.Any(metadata.ContainsKey)) return error;
+            }
+            else
+            {
+                if (profiles?[profileId] is not JsonObject profile ||
+                    !JsonNode.DeepEquals(active, profile["Active"]) ||
+                    MonitorKeys.Any(key => !JsonNode.DeepEquals(metadata[key], profile["Metadata"]?[key])))
+                    return error;
+            }
+        }
+        return null;
+    }
 }
