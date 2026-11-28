@@ -49,9 +49,11 @@ def extract(directory,out,sha=None,rid=None):
                 not (out/"SOURCE_COMMIT.txt").is_file() or
                 (out/"SOURCE_COMMIT.txt").read_text().strip()!=sha):
             raise ValueError("extracted candidate identity mismatch")
-        from stage_candidate_handoff import handoff_paths
+        from stage_candidate_handoff import handoff_paths, verify_links
         if any(not (out/name).is_file() for name in handoff_paths(rid)):
             raise ValueError("extracted candidate handoff incomplete")
+        links=verify_links(out,rid)
+        print(f"PASS: {links} local operator document links resolve in extracted {rid} package")
         print("PASS: extracted exact candidate source, platform apphost and offline handoff verified")
 
 if __name__=="__main__":

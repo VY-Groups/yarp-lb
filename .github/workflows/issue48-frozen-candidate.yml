@@ -3,6 +3,16 @@ on:
   pull_request:
     paths:
       - "ops/release/**"
+      - "control-center/docs/**"
+      - "control-center/GatewayAgent/ENGINE_STAGING.md"
+      - "ops/windows-installer/README.md"
+      - "ops/waf/REMOTE_FENCED_NODE.md"
+      - "engines/GslbDns/*.md"
+      - "ops/fleet/LINUX_DP_DISTRIBUTED_RUNTIME.md"
+      - "ops/ha/**"
+      - ".github/workflows/security-acceptance.yml"
+      - ".github/workflows/e2e-real-control-center.yml"
+      - ".github/workflows/smtp-starttls-e2e.yml"
       - ".github/workflows/issue48-frozen-candidate.yml"
   push:
     branches: [main]
@@ -90,7 +100,7 @@ jobs:
         run: |
           set -euo pipefail
           python ops/release/package_candidate.py --root candidate --rid "$RID" --sha "$EXACT_SHA" --out artifacts/candidate
-      - name: Verify checksum and extract into fresh directory
+      - name: Verify checksum, extract and resolve offline operator links
         shell: bash
         env:
           EXACT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}

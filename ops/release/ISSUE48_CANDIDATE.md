@@ -23,7 +23,7 @@ After ADC Priority 1 integration, frozen candidate evidence additionally require
 The candidate ZIP/tar.gz includes the approved documentation and the public,
 platform-specific VIP commissioning tool; it intentionally excludes secrets,
 live configuration, identity state, entitlement material and customer keys.
-The bundled operator references retain repository-relative paths. Read
+The bundled operator references retain repository-relative paths. Both archives include the complete local SOP link targets and their transitive public references, including the Windows guide for readers of the Linux package. Bundled CI YAML is reference material only; historical external URLs remain optional evidence, not offline installation prerequisites. Staging and extraction check local file-link resolution, including exact filename case, without a network or checkout. Read
 `control-center/docs/END_USER_SOP.md`,
 `control-center/docs/DATA_PROTECTION_PLATFORM_SUPPORT.md`,
 `ops/fleet/LINUX_DP_DISTRIBUTED_RUNTIME.md` (if applicable), and
