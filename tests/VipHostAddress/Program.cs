@@ -1,6 +1,36 @@
 using System.Net.NetworkInformation;
 static void Must(bool ok,string label){if(!ok)throw new Exception(label);Console.WriteLine("PASS: "+label);}
 static void Refused(Action work){try{work();}catch(InvalidDataException){return;}throw new Exception("Expected refusal");}
+// A previously safe observation must not authorize mutation after the
+// same interface acquires the protected management address.
+static async Task ChangedManagement(string id)
+{
+    var vip=VipHostAddressPlatform.Parse("192.0.2.10");
+    var management=VipHostAddressPlatform.Parse("192.0.2.11");
+    var before=VipHostAddressPlatform.Inspect(id,vip,management);
+    Must(!before.Present,"VIP absent before management-address change");
+    using var deadline=new CancellationTokenSource(TimeSpan.FromSeconds(30));
+    try
+    {
+        await VipHostAddressPlatform.Change(VipHostAddressPlatform.Inspect(id,management),management,true,deadline.Token);
+        try
+        {
+            await VipHostAddressPlatform.Change(before,vip,true,deadline.Token);
+            throw new Exception("Mutation accepted after management address appeared");
+        }
+        catch(InvalidDataException){}
+        Must(!VipHostAddressPlatform.Inspect(id,vip).Present,"changed management interface rejects privileged mutation without assigning VIP");
+    }
+    finally
+    {
+        using var cleanup=new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        foreach(var address in new[]{vip,management})
+        {
+            var current=VipHostAddressPlatform.Inspect(id,address);
+            if(current.Present)await VipHostAddressPlatform.Change(current,address,false,cleanup.Token);
+        }
+    }
+}
 var dir=Directory.CreateTempSubdirectory("gc-vip-journal-");
 try
 {
@@ -31,6 +61,7 @@ try
             Environment.GetEnvironmentVariable("RUNNER_ENVIRONMENT")!="github-hosted"||!Guid.TryParse(args[1],out var guid))
             throw new InvalidOperationException("Disposable hosted Windows CI only.");
         var nic=NetworkInterface.GetAllNetworkInterfaces().Single(n=>Guid.TryParse(n.Id,out var id)&&id==guid);
+        await ChangedManagement(nic.Id);
         foreach(var ip in new[]{VipHostAddressPlatform.Parse("192.0.2.10")})
         {
             bool Ready()=>NetworkInterface.GetAllNetworkInterfaces().Single(n=>n.Id==nic.Id)
@@ -94,6 +125,7 @@ try
         if(!OperatingSystem.IsLinux()||Environment.GetEnvironmentVariable("GITHUB_ACTIONS")!="true")
             throw new InvalidOperationException("Disposable CI only.");
         var nic=NetworkInterface.GetAllNetworkInterfaces().Single(n=>n.Name=="gc-vip0");
+        await ChangedManagement(nic.Id);
         var ip=VipHostAddressPlatform.Parse("192.0.2.10");
         var before=VipHostAddressPlatform.Inspect(nic.Id,ip);
         Must(!before.Present,"fixture starts without VIP");
