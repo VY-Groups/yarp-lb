@@ -192,6 +192,8 @@ test('browser: bootstrap, navigation, onboarding, websites, route edit, users an
     await expect(serviceMap).toContainText('not confirmed listener VIPs');
     await openNav('adcmap');
     await expect(page.locator('#page-title')).toHaveText('ADC service map');
+    await expect(page.locator('#context-help-text')).toContainText('submit for independent approval');
+    await expect(page.locator('#context-help-text')).toContainText('Inspect live health separately');
     await page.locator('#adc-map-search').fill('esign-browser-private-route');
     await expect(page.locator('#adc-service-map article:visible')).toHaveCount(1);
     const privateService=page.locator('#adc-service-map article:visible');

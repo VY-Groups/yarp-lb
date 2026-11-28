@@ -64,6 +64,11 @@ const ctx=vm.createContext({
   }
 });
 vm.runInContext(js.split("$('content').addEventListener('click'")[0],ctx);
+vm.runInContext("view='adcmap'; contextualHelp();",ctx);
+assert.match(node('context-help-text').textContent,/approved revision/);
+assert.match(node('context-help-text').textContent,/independent approval/);
+assert.match(node('context-help-text').textContent,/Viewer access is read-only/);
+assert.match(node('context-help-text').textContent,/live health separately/);
 vm.runInContext("view='peers';",ctx);
 await vm.runInContext('peerSyncPage()',ctx);
 const content=node('content').innerHTML;
