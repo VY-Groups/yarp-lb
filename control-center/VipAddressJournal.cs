@@ -6,12 +6,14 @@ internal sealed class VipAddressJournal : IDisposable
     internal sealed record Entry(string Scope,string InterfaceId,string Address,long Epoch,string Phase);
     private readonly FileStream stream;
     private readonly string scope,interfaceId,address;
+    private readonly bool readOnly;
     internal Entry? Last {get;private set;}
-    internal VipAddressJournal(string path,string scope,string interfaceId,string address)
+    internal VipAddressJournal(string path,string scope,string interfaceId,string address,bool readOnly=false)
     {
-        this.scope=scope;this.interfaceId=interfaceId;this.address=address;
-        var options=new FileStreamOptions{Mode=FileMode.OpenOrCreate,Access=FileAccess.ReadWrite,Share=FileShare.None,Options=FileOptions.WriteThrough};
-        if(OperatingSystem.IsLinux())options.UnixCreateMode=UnixFileMode.UserRead|UnixFileMode.UserWrite;
+        this.scope=scope;this.interfaceId=interfaceId;this.address=address;this.readOnly=readOnly;
+        var options=readOnly?new FileStreamOptions{Mode=FileMode.Open,Access=FileAccess.Read,Share=FileShare.Read}:
+            new FileStreamOptions{Mode=FileMode.OpenOrCreate,Access=FileAccess.ReadWrite,Share=FileShare.None,Options=FileOptions.WriteThrough};
+        if(!readOnly&&OperatingSystem.IsLinux())options.UnixCreateMode=UnixFileMode.UserRead|UnixFileMode.UserWrite;
         if(File.Exists(path)&&(File.GetAttributes(path)&FileAttributes.ReparsePoint)!=0)throw new InvalidDataException("Linked VIP journal refused.");
         stream=new FileStream(path,options);
         try
@@ -37,7 +39,11 @@ internal sealed class VipAddressJournal : IDisposable
         {
             (null,"assign-intent")=>true,
             ("withdrawn","assign-intent")=>item.Epoch>Last!.Epoch,
+            ("withdrawn","recover-intent")=>item.Epoch==Last!.Epoch,
+            ("recover-intent","assigned")=>item.Epoch==Last!.Epoch,
             ("assign-intent","assigned")=>item.Epoch==Last!.Epoch,
+            ("assigned","reassign-intent")=>item.Epoch==Last!.Epoch,
+            ("reassign-intent","assigned")=>item.Epoch==Last!.Epoch,
             ("assigned","withdraw-intent")=>item.Epoch==Last!.Epoch,
             ("withdraw-intent","withdrawn")=>item.Epoch==Last!.Epoch,
             _=>false
@@ -46,6 +52,7 @@ internal sealed class VipAddressJournal : IDisposable
     }
     internal void Append(long epoch,string phase)
     {
+        if(readOnly)throw new InvalidOperationException("Read-only VIP journal.");
         var item=new Entry(scope,interfaceId,address,epoch,phase);
         Validate(item);
         var bytes=Encoding.UTF8.GetBytes(JsonSerializer.Serialize(item)+"\n");

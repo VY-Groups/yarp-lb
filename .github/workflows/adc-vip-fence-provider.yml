@@ -1,0 +1,98 @@
+name: ADC external VIP fencing provider contracts
+on:
+  pull_request:
+    paths: ["control-center/**", "tests/FleetQuorumAcceptance/**", "ops/ha/**", "ops/release/**", ".github/workflows/adc-vip-fence-provider.yml"]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  contracts:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2022]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+      - run: dotnet run --project tests/FleetQuorumAcceptance/FleetQuorumAcceptance.csproj -c Release -- --vip-fence-contract
+      - name: Check Linux offline service installer syntax and plan
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          bash -n ops/ha/install-vip-service.sh
+          d=$(mktemp -d)
+          touch "$d/config.json"
+          bash ops/ha/install-vip-service.sh agent /usr/bin/true "$d/config.json" root | grep 'PLAN ONLY'
+      - name: Check Windows offline service installer syntax and plan
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $config = Join-Path $env:RUNNER_TEMP 'vip-agent-plan.json'
+          Set-Content -LiteralPath $config -Value '{}'
+          $plan = & ./ops/ha/Install-VipService.ps1 -Role agent -Executable "$env:SystemRoot\System32\whoami.exe" -Config $config
+          if ($plan.Name -ne 'GatewayCoreVipNodeAgent' -or $plan.Applied) { throw 'Unexpected offline installation plan' }
+      - name: Real disposable Linux systemd role registration
+        if: runner.os == 'Linux'
+        shell: bash
+        run: sudo -n env GITHUB_ACTIONS=true RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" bash ops/ha/test-vip-service-install.sh
+      - name: Real disposable Windows SCM role registration
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./ops/ha/Test-VipServiceInstall.ps1
+      - name: Build shipping node-agent executable
+        id: shipping-build
+        run: dotnet build control-center/GatewayCoreYarp.csproj -c Release
+      - name: Build and verify offline VIP commissioning package
+        id: offline-package
+        shell: bash
+        run: |
+          set -euo pipefail
+          rid=linux-x64
+          if [[ "$RUNNER_OS" == Windows ]]; then rid=win-x64; fi
+          sha=$(git rev-parse HEAD)
+          dotnet publish control-center/GatewayCoreYarp.csproj -c Release -r "$rid" --self-contained true -p:PublishReadyToRun=false -o vip-candidate/app
+          rm -f vip-candidate/app/appsettings.json
+          printf '%s\n' "$sha" > vip-candidate/SOURCE_COMMIT.txt
+          python ops/release/stage_vip_tools.py --root vip-candidate --rid "$rid"
+          python -m unittest discover -s ops/release/tests -p test_stage_vip_tools.py -v
+          python ops/release/package_candidate.py --root vip-candidate --rid "$rid" --sha "$sha" --out vip-archive
+          python ops/release/extract_candidate.py --archive-dir vip-archive --out vip-extracted
+      - name: Verify extracted Linux commissioning tool in plan-only mode
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          d=$(mktemp -d)
+          touch "$d/config.json"
+          bash vip-extracted/ops/ha/install-vip-service.sh agent "$PWD/vip-extracted/app/GatewayCoreYarp" "$d/config.json" root | grep 'PLAN ONLY'
+      - name: Verify extracted Windows commissioning tool in plan-only mode
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $config = Join-Path $env:RUNNER_TEMP 'vip-packaged-plan.json'
+          Set-Content -LiteralPath $config -Value '{}'
+          $plan = & ./vip-extracted/ops/ha/Install-VipService.ps1 -Role agent -Executable (Resolve-Path ./vip-extracted/app/GatewayCoreYarp.exe).Path -Config $config
+          if ($plan.Applied -or $plan.Name -ne 'GatewayCoreVipNodeAgent') { throw 'Packaged installer plan invalid' }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: adc-vip-offline-commissioning-${{ matrix.os }}-${{ github.sha }}
+          path: vip-archive/
+          if-no-files-found: error
+      - name: Installed Linux offline package agent runtime and protected credential acceptance
+        if: runner.os == 'Linux'
+        shell: bash
+        run: sudo -n env GITHUB_ACTIONS=true RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" DOTNET_ROOT="$DOTNET_ROOT" "$(command -v python3)" ops/ha/test-vip-agent-runtime.py "$PWD/vip-extracted"
+      - name: Installed Windows offline package agent runtime and protected credential acceptance
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: python ops/ha/test-vip-agent-runtime.py "$PWD/vip-extracted"
+      - name: Installed Linux offline package provider and controller runtime
+        if: ${{ !cancelled() && steps.offline-package.outcome == 'success' && runner.os == 'Linux' }}
+        shell: bash
+        run: sudo -n env GITHUB_ACTIONS=true RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" DOTNET_ROOT="$DOTNET_ROOT" "$(command -v python3)" ops/ha/test-vip-independent-runtime.py "$PWD/vip-extracted"
+      - name: Installed Windows offline package provider and controller runtime
+        if: ${{ !cancelled() && steps.offline-package.outcome == 'success' && runner.os == 'Windows' }}
+        shell: pwsh
+        run: python ops/ha/test-vip-independent-runtime.py "$PWD/vip-extracted"

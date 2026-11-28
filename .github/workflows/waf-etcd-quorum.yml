@@ -2,9 +2,9 @@ name: Live three-member etcd quorum fencing CI
 on:
   push:
     branches: [main, "feature/**"]
-    paths: ["ops/waf/etcd_quorum_fence.py", "ops/waf/test_etcd_quorum_fence.py", "tests/WafEtcd/**", "ops/fleet/linux_dp_wrap_delivery.py", "ops/fleet/test_linux_dp_wrap_delivery.py", "control-center/LinuxKeyProtection.cs", "control-center/LinuxDistributedKeyIssue.cs", "control-center/Program.cs", "control-center/tests/LinuxKeyProtectionTests/**", "ops/waf/mtls_fenced_node.py", "ops/waf/waf_node_service.py", "ops/waf/test_mtls_fenced_node.py", "ops/waf/two_node_transaction.py", "ops/waf/test_two_node_transaction.py", "ops/waf/etcd_cas_writer.py", "ops/waf/test_etcd_cas_writer.py", "ops/fleet/linux_dp_quorum_authority.py", "ops/fleet/test_linux_dp_quorum_authority.py", ".github/workflows/waf-etcd-quorum.yml"]
+    paths: ["ops/waf/etcd_quorum_fence.py", "ops/waf/test_etcd_quorum_fence.py", "tests/WafEtcd/**", "control-center/Vip*.cs", "control-center/FleetQuorum.cs", "ops/ha/**", "ops/fleet/linux_dp_wrap_delivery.py", "ops/fleet/test_linux_dp_wrap_delivery.py", "control-center/LinuxKeyProtection.cs", "control-center/LinuxDistributedKeyIssue.cs", "control-center/Program.cs", "control-center/tests/LinuxKeyProtectionTests/**", "ops/waf/mtls_fenced_node.py", "ops/waf/waf_node_service.py", "ops/waf/test_mtls_fenced_node.py", "ops/waf/two_node_transaction.py", "ops/waf/test_two_node_transaction.py", "ops/waf/etcd_cas_writer.py", "ops/waf/test_etcd_cas_writer.py", "ops/fleet/linux_dp_quorum_authority.py", "ops/fleet/test_linux_dp_quorum_authority.py", ".github/workflows/waf-etcd-quorum.yml"]
   pull_request:
-    paths: ["ops/waf/etcd_quorum_fence.py", "ops/waf/test_etcd_quorum_fence.py", "tests/WafEtcd/**", "ops/fleet/linux_dp_wrap_delivery.py", "ops/fleet/test_linux_dp_wrap_delivery.py", "control-center/LinuxKeyProtection.cs", "control-center/LinuxDistributedKeyIssue.cs", "control-center/Program.cs", "control-center/tests/LinuxKeyProtectionTests/**", "ops/waf/mtls_fenced_node.py", "ops/waf/waf_node_service.py", "ops/waf/test_mtls_fenced_node.py", "ops/waf/two_node_transaction.py", "ops/waf/test_two_node_transaction.py", "ops/waf/etcd_cas_writer.py", "ops/waf/test_etcd_cas_writer.py", "ops/fleet/linux_dp_quorum_authority.py", "ops/fleet/test_linux_dp_quorum_authority.py", ".github/workflows/waf-etcd-quorum.yml"]
+    paths: ["ops/waf/etcd_quorum_fence.py", "ops/waf/test_etcd_quorum_fence.py", "tests/WafEtcd/**", "control-center/Vip*.cs", "control-center/FleetQuorum.cs", "ops/ha/**", "ops/fleet/linux_dp_wrap_delivery.py", "ops/fleet/test_linux_dp_wrap_delivery.py", "control-center/LinuxKeyProtection.cs", "control-center/LinuxDistributedKeyIssue.cs", "control-center/Program.cs", "control-center/tests/LinuxKeyProtectionTests/**", "ops/waf/mtls_fenced_node.py", "ops/waf/waf_node_service.py", "ops/waf/test_mtls_fenced_node.py", "ops/waf/two_node_transaction.py", "ops/waf/test_two_node_transaction.py", "ops/waf/etcd_cas_writer.py", "ops/waf/test_etcd_cas_writer.py", "ops/fleet/linux_dp_quorum_authority.py", "ops/fleet/test_linux_dp_quorum_authority.py", ".github/workflows/waf-etcd-quorum.yml"]
   workflow_dispatch:
 permissions:
   contents: read
@@ -12,7 +12,7 @@ jobs:
   real-quorum:
     name: Actual three-member etcd Raft lease CAS/revoke/partition with pinned mTLS
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
@@ -30,6 +30,26 @@ jobs:
           selected="quay.io/coreos/etcd@sha256:a9c7cc12156f4b26ca41f0b57ba5b76c45037ff6c1e47ea3d68cb7908d48a965"
           docker pull "$selected"
           echo "ETCD_IMAGE=$selected" >> "$GITHUB_ENV"
+      - name: Verify actual HTTP fixed-length and chunked fixture framing
+        run: python3 tests/WafEtcd/test_vip_http_body.py
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install pinned browser for live HA policy acceptance
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install --prefix tests/E2E --no-package-lock --ignore-scripts
+          export PLAYWRIGHT_BROWSERS_PATH="$RUNNER_TEMP/gc-vip-chromium"
+          for attempt in 1 2 3; do
+            if (cd tests/E2E && timeout --kill-after=15s 120s npx --no-install playwright install chromium); then
+              echo "PLAYWRIGHT_BROWSERS_PATH=$PLAYWRIGHT_BROWSERS_PATH" >> "$GITHUB_ENV"
+              echo "VIP_BROWSER_NODE=$(command -v node)" >> "$GITHUB_ENV"
+              exit 0
+            fi
+            if [ "$attempt" -eq 3 ]; then exit 1; fi
+            sleep "$((attempt * 10))"
+          done
       - name: Run disposable real mTLS etcd consensus and failure acceptance
         shell: bash
         run: |

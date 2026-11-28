@@ -207,6 +207,16 @@ function Assert-InstalledService([string]$ExpectedExe) {
 }
 
 function Assert-InstalledPayload {
+    foreach ($relative in @('ops\ha\Install-VipService.ps1','ops\ha\ADC_DISTRIBUTED_VIP_ADMISSION.md')) {
+        $expected = Join-Path $PayloadPath $relative
+        $actual = Join-Path $target $relative
+        if (-not (Test-Path -LiteralPath $expected -PathType Leaf) -or
+            -not (Test-Path -LiteralPath $actual -PathType Leaf) -or
+            (Get-FileHash -LiteralPath $expected).Hash -ne (Get-FileHash -LiteralPath $actual).Hash) {
+            throw 'Installed offline VIP commissioning payload missing or changed.'
+        }
+    }
+
     $appRoot = Join-Path $target 'app'
     foreach ($file in @(Get-ChildItem -LiteralPath (Join-Path $PayloadPath 'app') -File -Recurse -Force)) {
         $relative = $file.FullName.Substring((Join-Path $PayloadPath 'app').Length + 1)

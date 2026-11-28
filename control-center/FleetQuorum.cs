@@ -33,11 +33,11 @@ internal sealed class FleetQuorum : IDisposable
     private static bool Hex(string? value)=>value is {Length:64} && value.All(c=>c is >= '0' and <= '9' or >= 'A' and <= 'F');
     private static bool Tx(string? value)=>value is not null && Regex.IsMatch(value,@"\Arollout_[A-F0-9]{24}\z",RegexOptions.CultureInvariant);
     private static string Base64(string text)=>Convert.ToBase64String(Encoding.ASCII.GetBytes(text));
-    private static string FilePath(string path,int max,bool secret=false)
+    internal static string FilePath(string path,int max,bool secret=false,bool allowEmpty=false)
     {
         if(!Path.IsPathFullyQualified(path))throw new InvalidDataException("Absolute quorum credential/config path required.");
         var info=new FileInfo(path);
-        if(!info.Exists || info.Length is <1 || info.Length>max || (info.Attributes&FileAttributes.ReparsePoint)!=0)
+        if(!info.Exists || (!allowEmpty && info.Length<1) || info.Length>max || (info.Attributes&FileAttributes.ReparsePoint)!=0)
             throw new InvalidDataException("Invalid quorum credential/config file.");
         if(secret && !OperatingSystem.IsWindows() &&
             (File.GetUnixFileMode(path)&(UnixFileMode.GroupRead|UnixFileMode.GroupWrite|UnixFileMode.GroupExecute|
@@ -232,6 +232,20 @@ internal sealed class FleetQuorum : IDisposable
         if(revision<=(expected?.Epoch??0)||state!=new Fence(next,revision))
             throw new InvalidOperationException("VIP transition not confirmed; inspect persistent state before any recovery.");
         return state!;
+    }
+    internal string VipReaderPin=>Convert.ToHexString(SHA256.HashData(credential.RawData));
+    internal async Task<Fence> ReadVipState(CancellationToken token)
+    {
+        if(writable||!namespaceKey.StartsWith("/gatewaycore/adc-vip/v1/",StringComparison.Ordinal))
+            throw new InvalidOperationException("Read-only VIP identity required.");
+        return (await Read(token)).State??throw new InvalidDataException("VIP owner record missing.");
+    }
+    internal async Task<(long Epoch,bool Own)> ObserveVipReader(CancellationToken token)
+    {
+        if(writable||!namespaceKey.StartsWith("/gatewaycore/adc-vip/v1/",StringComparison.Ordinal))
+            throw new InvalidOperationException("Read-only VIP identity required.");
+        var state=(await Read(token)).State??throw new InvalidDataException("VIP owner record missing.");
+        return (state.Epoch,state.Transaction=="vip_"+Convert.ToHexString(SHA256.HashData(credential.RawData)));
     }
     internal async Task<bool> IsVipOwner(long expectedEpoch,CancellationToken token)
     {

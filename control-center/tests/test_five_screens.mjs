@@ -3,6 +3,7 @@
 import fs from 'node:fs';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
+import {createHash,webcrypto} from 'node:crypto';
 const js=fs.readFileSync(new URL('../wwwroot/app.js',import.meta.url),'utf8');
 const html=fs.readFileSync(new URL('../wwwroot/index.html',import.meta.url),'utf8');
 const prefix=js.split("$('content').addEventListener('click'")[0];
@@ -84,3 +85,29 @@ assert.match(html,/id="modal-close"/);
 assert.match(html,/id="page-back"/);
 assert.match(html,/value="cancel"/);
 console.log('PASS: Setup Center, Architecture, Add Website, Edit Route and Reset Password smoke contracts');
+
+// HA policy export must verify server bytes and the actual reviewed proposal.
+const haProposal={version:1,scope:'A'.repeat(64),preferredPin:'B'.repeat(64),
+  otherPin:'C'.repeat(64),failbackEnabled:false,rearmEnabled:false,
+  pollSeconds:5,failureSamples:3,failureSeconds:10,failbackEligibleSeconds:120,minimumOwnerSeconds:300};
+const haReply=(document,applied=false)=>{
+  const json=JSON.stringify(document);
+  return {json,applied,sha256:createHash('sha256').update(json).digest('hex').toUpperCase()};
+};
+ctx.crypto=webcrypto;
+ctx.haProposal=haProposal;
+ctx.haReply=haReply(haProposal);
+assert.equal(await run('verifiedHaPolicyExport(haReply,haProposal)'),ctx.haReply.json);
+for(const [reply,pattern] of [
+  [{...haReply(haProposal),sha256:'0'.repeat(64)},/digest mismatch/],
+  [haReply(haProposal,true),/response is invalid/],
+  [haReply({...haProposal,preferredPin:'D'.repeat(64)}),/does not match/],
+  [haReply({...haProposal,unexpected:true}),/does not match/]
+]){
+  ctx.haReply=reply;
+  await assert.rejects(run('verifiedHaPolicyExport(haReply,haProposal)'),pattern);
+}
+ctx.haReply=haReply(haProposal);
+delete ctx.crypto;
+await assert.rejects(run('verifiedHaPolicyExport(haReply,haProposal)'),/Secure browser context/);
+console.log('PASS: HA policy byte digest, reviewed values, non-applied response and secure-context checks');

@@ -1,4 +1,9 @@
 // Actual separate processes against disposable real three-member Raft.
+if(args.Length==1&&args[0]=="--vip-fence-contract")
+{
+    await VipFenceContractTests.Run();
+    return 0;
+}
 if(Environment.GetEnvironmentVariable("GITHUB_ACTIONS")=="true" && args.Length>0 && args[0]=="--vip-owner")
     return await VipOwnershipCommand.Run(args);
 if(Environment.GetEnvironmentVariable("GITHUB_ACTIONS")!="true" || args.Length!=4 ||

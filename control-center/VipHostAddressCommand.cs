@@ -6,12 +6,12 @@ using GatewayCore.Gslb.Contracts;
 
 internal static class VipHostAddressCommand
 {
-    internal static async Task<int> Run(string[] args)
+    internal static async Task<int> Run(string[] args,long? exactEpoch=null,CancellationToken externalToken=default)
     {
         try
         {
-            if(args.Length!=5||args[4] is not ("status" or "assign" or "withdraw"))
-                throw new ArgumentException("Usage: --vip-address <private-journal-directory> <virtual-service-id> <interface-id> status|assign|withdraw");
+            if(args.Length!=5||args[4] is not ("status" or "assign" or "withdraw" or "reconcile"))
+                throw new ArgumentException("Usage: --vip-address <private-journal-directory> <virtual-service-id> <interface-id> status|assign|withdraw|reconcile");
             var dir=Path.GetFullPath(args[1]);
             if(!Path.IsPathFullyQualified(args[1])||!Directory.Exists(dir))throw new InvalidDataException("Existing private absolute journal directory required.");
             if(OperatingSystem.IsWindows())WindowsStateProtection.ValidateOfflineKeyRingDirectory(dir);
@@ -19,8 +19,14 @@ internal static class VipHostAddressCommand
             else throw new PlatformNotSupportedException();
             using var listeners=GatewayListenerIsolation.FromEnvironment()??throw new InvalidDataException("Reviewed isolated listeners required.");
             var service=listeners.VirtualServices.SingleOrDefault(s=>s.Id==args[2])??throw new InvalidDataException("Unknown virtual service.");
-            if(!service.RequireLocalAddressPresence||service.VipQuorumConfigPath is null||service.VipOwnershipEpoch is not >0)
+            bool journalBound=service.VipJournalDirectory is not null;
+            if(!service.RequireLocalAddressPresence||service.VipQuorumConfigPath is null||
+                (!journalBound&&service.VipOwnershipEpoch is not >0))
                 throw new InvalidDataException("Exact distributed VIP configuration required.");
+            if(journalBound && (!string.Equals(dir,Path.GetFullPath(service.VipJournalDirectory!),OperatingSystem.IsWindows()?StringComparison.OrdinalIgnoreCase:StringComparison.Ordinal)||
+                service.VipInterfaceId!=args[3]||args[4]=="assign"))
+                throw new InvalidDataException("Journal-bound VIP requires the configured directory/interface and reconcile instead of assign.");
+            if(!journalBound&&args[4]=="reconcile")throw new InvalidDataException("Reconcile requires journal-bound mode.");
             var ip=VipHostAddressPlatform.Parse(service.Ip);
             var management=IPAddress.Parse(listeners.Config.ManagementIp);
             if(ip.Equals(management)||ip.Equals(IPAddress.Parse(listeners.Config.TrafficIp)))
@@ -29,8 +35,12 @@ internal static class VipHostAddressCommand
             var file=Path.Combine(dir,Convert.ToHexString(SHA256.HashData(Encoding.ASCII.GetBytes(ip.ToString())))+".journal");
             using var log=new VipAddressJournal(file,scope,args[3],ip.ToString());
             var observed=VipHostAddressPlatform.Inspect(args[3],ip,management);
-            var epoch=service.VipOwnershipEpoch.Value;
-            using var deadline=new CancellationTokenSource(TimeSpan.FromSeconds(30));
+            long epoch=service.VipOwnershipEpoch??log.Last?.Epoch??0;
+            using var deadline=CancellationTokenSource.CreateLinkedTokenSource(externalToken);
+            deadline.CancelAfter(TimeSpan.FromSeconds(30));
+            if(exactEpoch is <1)throw new InvalidDataException("Positive exact epoch required.");
+            if(exactEpoch is long expected && args[4]=="withdraw" && log.Last?.Epoch!=expected)
+                throw new InvalidDataException("Delayed withdrawal does not match the journal owner epoch.");
             async Task Withdraw()
             {
                 // Compensation has an independent deadline even if the quorum check timed out.
@@ -42,7 +52,19 @@ internal static class VipHostAddressCommand
                 if(VipHostAddressPlatform.Inspect(args[3],ip,management).Present)throw new InvalidOperationException("Withdrawal unconfirmed.");
                 log.Append(log.Last.Epoch,"withdrawn");
             }
-            if(args[4]=="assign")
+            if(args[4]=="reconcile")
+            {
+                using var authority=FleetQuorum.OpenVip(service.VipQuorumConfigPath,scope);
+                var current=await authority.ObserveVipReader(deadline.Token);
+                epoch=current.Epoch;
+                if(exactEpoch is long required && (!current.Own||current.Epoch!=required))
+                    throw new InvalidDataException("Delayed reconciliation does not match exact current ownership.");
+                await VipLocalReconcile.Run(log,current.Epoch,current.Own,
+                    ()=>VipHostAddressPlatform.Inspect(args[3],ip,management),
+                    (observation,add,token)=>VipHostAddressPlatform.Change(observation,ip,add,token),
+                    authority.IsVipOwner,deadline.Token,exactRecovery:exactEpoch.HasValue);
+            }
+            else if(args[4]=="assign")
             {
                 if(log.Last?.Phase is not (null or "withdrawn") || observed.Present)
                     throw new InvalidDataException("Preexisting or unconfirmed assignment cannot be adopted.");
@@ -67,7 +89,7 @@ internal static class VipHostAddressCommand
                 else await Withdraw();
             }
             var final=VipHostAddressPlatform.Inspect(args[3],ip,management);
-            Console.WriteLine(JsonSerializer.Serialize(new {scope,address=ip.ToString(),epoch,phase=log.Last?.Phase??"unmanaged",present=final.Present,ready=final.Ready}));
+            Console.WriteLine(JsonSerializer.Serialize(new {scope,address=ip.ToString(),epoch,phase=log.Last?.Phase??"unmanaged",present=final.Present,ready=final.Ready,eligibleToStart=journalBound&&args[4]=="reconcile"&&log.Last?.Phase=="assigned"&&log.Last.Epoch==epoch&&final.Ready}));
             return 0;
         }
         catch(Exception error) when(error is IOException or InvalidDataException or UnauthorizedAccessException or

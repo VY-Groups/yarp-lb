@@ -19,6 +19,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import traceback
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "ops" / "waf"))
@@ -139,7 +140,7 @@ def main():
         root = Path(folder)
         root.chmod(0o700)
         STAGE = "disposable-ca"
-        ca, ids = certs(root / "certs")
+        ca, ids = certs(root / "certs", ("vip-node-a", "vip-node-b", "ci4", "ci5", "ci6", "ci7", "ci8"))
         ports = [open_port() for _ in range(3)]
         while len(set(ports)) != 3:
             ports = [open_port() for _ in range(3)]
@@ -563,6 +564,29 @@ def main():
             dp_runtime = real_dp_runtime.run(root, endpoints, cluster, ca, ids,
                                              addr, post, checked)
 
+            STAGE = "installed-vip-live-raft-recovery"
+            vip_input = root / "vip-runtime-input.json"
+            vip_input.write_text(json.dumps({
+                "ca":ca,"endpoints":endpoints,"cluster":str(cluster),"writer":ids["writer"],
+                "reader":ids["reader"],"nodeA":ids["vip-node-a"],"nodeB":ids["vip-node-b"],
+                "providerServer":ids["ci4"],"bmc0":ids["ci5"],"bmc1":ids["ci6"],
+                "agent0":ids["ci7"],"agent1":ids["ci8"],"containers":created
+            }),encoding="ascii")
+            vip_input.chmod(0o600)
+            subprocess.run(["sudo","-n","env","GITHUB_ACTIONS=true","RUNNER_ENVIRONMENT=github-hosted",
+                "DOTNET_ROOT="+os.environ["DOTNET_ROOT"],
+                "PLAYWRIGHT_BROWSERS_PATH="+os.environ["PLAYWRIGHT_BROWSERS_PATH"],
+                "VIP_BROWSER_NODE="+os.environ["VIP_BROWSER_NODE"],sys.executable,
+                str(ROOT/"tests/WafEtcd/real_vip_recovery.py"),str(vip_input),
+                os.environ["DP_RUNTIME_PRODUCT_DLL"]],check=True,timeout=1050)
+            STAGE = "two-shipping-vip-nodes-live-raft-recovery"
+            subprocess.run(["sudo","-n","env","GITHUB_ACTIONS=true","RUNNER_ENVIRONMENT=github-hosted",
+                "DOTNET_ROOT="+os.environ["DOTNET_ROOT"],
+                "PLAYWRIGHT_BROWSERS_PATH="+os.environ["PLAYWRIGHT_BROWSERS_PATH"],
+                "VIP_BROWSER_NODE="+os.environ["VIP_BROWSER_NODE"],sys.executable,
+                str(ROOT/"tests/WafEtcd/real_vip_recovery.py"),str(vip_input),
+                os.environ["DP_RUNTIME_PRODUCT_DLL"],"--real-nodes"],check=True,timeout=1050)
+
             # Lose 2/3 independent members: the surviving member cannot
             # authorize mutation. No automatic rescue via a local JSON lease.
             STAGE = "loss-of-real-etcd-majority"
@@ -591,7 +615,19 @@ if __name__ == "__main__":
     try:
         main()
     except (OSError, ValueError, KeyError, RuntimeError,
-            subprocess.SubprocessError, ssl.SSLError, http.client.HTTPException):
+            subprocess.SubprocessError, ssl.SSLError, http.client.HTTPException) as error:
         print("FAIL: real isolated three-member etcd quorum test at "+STAGE,
               file=sys.stderr)
-        raise SystemExit(1)
+        # Never print exception messages, command arguments, response bodies,
+        # child output or local variables: they may contain credentials.
+        # Repository-relative source locations and exception type are enough
+        # to distinguish failed assertions from subprocess/transport failures.
+        print("Failure type: "+type(error).__name__, file=sys.stderr)
+        for frame in traceback.extract_tb(error.__traceback__):
+            source = Path(frame.filename).resolve()
+            if source.is_relative_to(ROOT):
+                print("Failure location: "+source.relative_to(ROOT).as_posix()
+                      +":"+str(frame.lineno), file=sys.stderr)
+        if isinstance(error, subprocess.CalledProcessError):
+            print("Child exit status: "+str(error.returncode), file=sys.stderr)
+        raise SystemExit(1) from None

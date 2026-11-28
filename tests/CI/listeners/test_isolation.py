@@ -12,9 +12,9 @@ import tempfile
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from http.cookiejar import CookieJar
 from pathlib import Path
 from urllib.request import build_opener, ProxyHandler, HTTPSHandler, HTTPCookieProcessor, Request
+from http.cookiejar import CookieJar
 from urllib.error import HTTPError, URLError
 
 parser = argparse.ArgumentParser()
@@ -119,6 +119,9 @@ with tempfile.TemporaryDirectory(prefix='gateway-sockets-') as td:
             fixture['ReverseProxy']['Routes']['guarded-stream']={'ClusterId':'api',
                 'Match':{'Path':'/stream'},'Metadata':{'ADC.VirtualServer.Id':'vip-guarded'},
                 'Transforms':[{'PathSet':'/api/virtual-stream'}]}
+            fixture['ReverseProxy']['Routes']['guarded-second']={'ClusterId':'api',
+                'Match':{'Path':'/api/{**catch-all}'},'Metadata':{'ADC.VirtualServer.Id':'vip-guarded-second'},
+                'Transforms':[{'PathSet':'/api/virtual-http'}]}
             appconfig.write_text(json.dumps(fixture))
         chmod(appconfig)
         ca_key=root/'ca.key';ca_crt=root/'ca.crt'
@@ -138,7 +141,7 @@ with tempfile.TemporaryDirectory(prefix='gateway-sockets-') as td:
             '-addext','keyUsage=critical,keyEncipherment',
             '-keyout',str(dp_key),'-out',str(dp_crt))
         dp_pfx,dp_password=pfx(root,'dp',dp_key,dp_crt,ca_crt)
-        thumb=run('openssl','x509','-in',str(client_crt),'-fingerprint','-sha1','-noout').stdout.split('=',1)[1].strip().replace(':','')
+        thumb=run('openssl','x509','-in',str(client_crt),'-fingerprint','-sha256','-noout').stdout.split('=',1)[1].strip().replace(':','')
         ports=[available('127.0.0.2') for _ in range(2)]+[available('127.0.0.1') for _ in range(2)]
         while len(set(ports))!=4:ports=[available('127.0.0.2') for _ in range(2)]+[available('127.0.0.1') for _ in range(2)]
         settings={'trafficIp':'127.0.0.2','trafficHttpPort':ports[0],'trafficHttpsPort':ports[1],
@@ -159,6 +162,10 @@ with tempfile.TemporaryDirectory(prefix='gateway-sockets-') as td:
             guarded_port=available('127.0.0.4')
             settings['virtualServices'].append({'id':'vip-guarded','ip':'127.0.0.4',
                 'port':guarded_port,'protocol':'HTTP','requireLocalAddressPresence':True})
+            guarded_second_port=available('127.0.0.4')
+            while guarded_second_port==guarded_port:guarded_second_port=available('127.0.0.4')
+            settings['virtualServices'].append({'id':'vip-guarded-second','ip':'127.0.0.4',
+                'port':guarded_second_port,'protocol':'HTTP','requireLocalAddressPresence':True})
         config=root/'listeners.json'
         def write_config(payload):
             config.write_text(json.dumps(payload));chmod(config)
@@ -210,55 +217,88 @@ with tempfile.TemporaryDirectory(prefix='gateway-sockets-') as td:
                     try:
                         status,body=await_status(200)
                         check(status==200 and body==b'virtual-http','fresh assigned local VIP admits real proxy traffic')
-                        # Real mTLS administrator session and CSRF protection.
-                        management=f'https://127.0.0.1:{ports[2]}'
+                        # Exercise the real authenticated management workflow before emergency withdrawal.
+                        admin_base=f'https://127.0.0.1:{ports[2]}'
                         opener=build_opener(ProxyHandler({}),HTTPSHandler(context=client_context),HTTPCookieProcessor(CookieJar()))
                         csrf=None
-                        def admin_api(method,path,payload=None,expected=200,with_csrf=True):
+                        def admin(method,path,payload=None,expected=200,include_csrf=True):
                             headers={'Accept':'application/json'}
                             if payload is not None:headers['Content-Type']='application/json'
-                            if csrf and with_csrf:headers['X-CSRF-Token']=csrf
+                            if csrf and include_csrf:headers['X-CSRF-Token']=csrf
                             data=None if payload is None else json.dumps(payload).encode()
                             try:
-                                with opener.open(Request(management+path,data=data,method=method,headers=headers),timeout=5) as reply:
+                                with opener.open(Request(admin_base+path,data=data,method=method,headers=headers),timeout=5) as reply:
                                     code,raw=reply.status,reply.read()
                             except HTTPError as error:code,raw=error.code,error.read()
-                            check(code==expected,'administrator API '+method+' '+path,code)
-                            return json.loads(raw) if code==200 and raw else {}
-                        drain_path='/admin/api/network/virtual-services/vip-guarded/drain'
-                        proposal={'draining':True,'reason':'Disposable planned drain acceptance'}
-                        admin_api('POST',drain_path,proposal,expected=401)
-                        admin_api('POST','/admin/api/bootstrap',{'username':'vip-ci-admin','password':secrets.token_hex(24),'email':'vip-ci@example.invalid'})
-                        session=admin_api('GET','/admin/api/session')
+                            check(code==expected,'administrator '+method+' '+path+' status',code)
+                            return json.loads(raw) if code==200 else None
+                        admin('POST','/admin/api/network/virtual-services/vip-guarded/drain',
+                            {'draining':True,'reason':'Unauthenticated drain must be refused'},expected=401)
+                        admin('POST','/admin/api/bootstrap',{'username':'vip-ci-admin',
+                            'password':secrets.token_hex(24),'email':'vip-ci@example.invalid'})
+                        session=admin('GET','/admin/api/session')
                         csrf=session['csrf']
-                        check(session['role']=='Administrator' and bool(csrf),'real mTLS administrator authenticated')
                         if not session['privacyAccepted']:
-                            admin_api('POST','/admin/api/privacy/accept',{'version':session['privacyVersion']})
-                        def inventory():
-                            rows=admin_api('GET','/admin/api/network/interfaces')['virtualAddresses']
-                            return next(row for row in rows if row['id']=='vip-guarded')
-                        check(inventory()['drainEligible'] and not inventory()['plannedDrain'],'dedicated VIP eligible for planned drain')
-                        admin_api('POST',drain_path,proposal,expected=403,with_csrf=False)
-                        check(await_status(200)[0]==200,'CSRF refusal leaves traffic admitted')
-                        # Drain denies new traffic without aborting an admitted response.
-                        planned=http.client.HTTPConnection('127.0.0.4',guarded_port,timeout=7)
-                        try:
-                            planned.request('GET','/stream')
-                            stream=planned.getresponse()
-                            check(stream.status==200 and stream.read(5)==b'first','real request in flight before administrator drain')
-                            drained=admin_api('POST',drain_path,proposal)
-                            check(drained['plannedDrain'] and drained['activeGuardedRequests']>=1,'drain reports active request without abort')
-                            check(inventory()['plannedDrain'],'inventory reports committed administrator drain')
-                            check(await_status(503)[0]==503,'planned drain rejects new VIP traffic')
-                            Backend.release_stream.set()
-                            check(stream.read()==b'last!','planned drain lets admitted stream complete')
-                        finally:
-                            Backend.release_stream.set()
-                            planned.close()
-                        resumed=admin_api('POST',drain_path,{'draining':False,'reason':'Disposable planned resume acceptance'})
-                        check(not resumed['plannedDrain'] and not inventory()['plannedDrain'],'administrator resume clears committed drain')
-                        check(await_status(200)[0]==200,'resumed VIP admits real proxy traffic')
+                            admin('POST','/admin/api/privacy/accept',{'version':session['privacyVersion']})
+                        check(session['role']=='Administrator' and bool(csrf),'real mTLS administrator session')
+                        policy_path='/admin/api/network/virtual-services/ha-policy'
+                        policy={'version':1,'scope':'A'*64,'preferredPin':'B'*64,'otherPin':'C'*64,
+                                'failbackEnabled':False,'rearmEnabled':False,'pollSeconds':5,
+                                'failureSamples':3,'failureSeconds':10,'failbackEligibleSeconds':120,
+                                'minimumOwnerSeconds':300}
+                        # A local-only VIP cannot export a distributed HA policy;
+                        # valid administrator credentials do not bypass scope checks.
+                        admin('POST',policy_path,policy,expected=403,include_csrf=False)
+                        admin('POST',policy_path,policy,expected=400)
+                        drain_path='/admin/api/network/virtual-services/vip-guarded/drain'
+                        drain={'draining':True,'reason':'Disposable planned drain acceptance'}
+                        second_url=f'http://127.0.0.4:{guarded_second_port}/api/identity'
+                        check(req(second_url)[0]==200,'second socket shares same active VIP')
+                        admin('POST',drain_path,drain,expected=403,include_csrf=False)
+                        check(req(guarded_url)[0]==200 and req(second_url)[0]==200,'CSRF refusal leaves both sockets admitted')
+                        connection.request('GET','/stream')
+                        response=connection.getresponse()
+                        check(response.status==200 and response.read(5)==b'first','real stream active before planned drain')
+                        result=admin('POST',drain_path,drain)
+                        check(result['plannedDrain'] and result['activeGuardedRequests']>=1,
+                              'drain preserves already-admitted stream')
+                        check(req(guarded_url)[0]==503 and req(second_url)[0]==503,
+                              'planned drain denies both sockets on the same address')
+                        Backend.release_stream.set()
+                        check(response.read()==b'last!','planned drain allows healthy stream to complete')
+                        connection.close()
+                        deadline=time.monotonic()+5
+                        while True:
+                            rows=admin('GET','/admin/api/network/interfaces')['virtualAddresses']
+                            group=[row for row in rows if row['ip']=='127.0.0.4']
+                            if len(group)==2 and all(row['plannedDrain'] and row['activeGuardedRequests']==0 for row in group):break
+                            if time.monotonic()>=deadline:raise AssertionError('drain counts did not converge')
+                            time.sleep(.1)
+                        check(True,'both drained sockets report zero tracked requests')
+                        # A durable drain survives an actual service restart.
+                        proc.terminate()
+                        proc.communicate(timeout=8)
+                        proc=subprocess.Popen(['dotnet',str(args.dll.resolve())],env=env,
+                            cwd=str(Path(__file__).resolve().parents[3] / 'control-center'),stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+                        deadline=time.monotonic()+25
+                        while True:
+                            try:
+                                if req(ready_url)[0]==200:break
+                            except (URLError,TimeoutError,ConnectionError,OSError):pass
+                            if proc.poll() is not None or time.monotonic()>=deadline:raise AssertionError('drained service restart failed')
+                            time.sleep(.2)
+                        check(req(guarded_url)[0]==503 and req(second_url)[0]==503,'persistent drain survives real service restart')
+                        deadline=time.monotonic()+10
+                        while True:
+                            rows=admin('GET','/admin/api/network/interfaces')['virtualAddresses']
+                            group=[row for row in rows if row['ip']=='127.0.0.4']
+                            if len(group)==2 and all(row['admission']=='present-interface-up' for row in group):break
+                            if time.monotonic()>=deadline:raise AssertionError('fresh ownership observation unavailable')
+                            time.sleep(.2)
+                        admin('POST',drain_path,{'draining':False,'reason':'Disposable planned resume acceptance'})
+                        check(req(guarded_url)[0]==200 and req(second_url)[0]==200,'explicit resume opens both sockets')
                         Backend.release_stream.clear()
+                        connection=http.client.HTTPConnection('127.0.0.4',guarded_port,timeout=7)
                         connection.request('GET','/stream')
                         response=connection.getresponse()
                         check(response.status==200 and response.read(5)==b'first','real guarded stream is in flight')

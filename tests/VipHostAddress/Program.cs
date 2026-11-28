@@ -1,6 +1,40 @@
 using System.Net.NetworkInformation;
 static void Must(bool ok,string label){if(!ok)throw new Exception(label);Console.WriteLine("PASS: "+label);}
 static void Refused(Action work){try{work();}catch(InvalidDataException){return;}throw new Exception("Expected refusal");}
+var steps=new List<string>();
+Task Step(string name,CancellationToken token){steps.Add(name);return Task.CompletedTask;}
+Task<bool> Owned(long epoch,CancellationToken token){steps.Add("owner");return Task.FromResult(epoch==5);}
+Task<bool> Health(CancellationToken token){steps.Add("health");return Task.FromResult(true);}
+await VipNodeLifecycle.Activate(5,Owned,t=>Step("reconcile",t),t=>Step("start",t),Health,
+    t=>Step("stop",t),t=>Step("withdraw",t),default);
+Must(steps.SequenceEqual(new[]{"owner","reconcile","owner","start","owner","health","owner"}),
+    "node startup checks exact ownership around every activation stage");
+steps.Clear();
+try
+{
+    await VipNodeLifecycle.Activate(4,Owned,t=>Step("reconcile",t),t=>Step("start",t),Health,
+        t=>Step("stop",t),t=>Step("withdraw",t),default);
+    throw new Exception("Stale activation accepted");
+}
+catch(InvalidDataException){}
+Must(steps.SequenceEqual(new[]{"owner"}),"stale activation causes no service or address mutation");
+steps.Clear();
+try
+{
+    await VipNodeLifecycle.Activate(5,Owned,t=>Step("reconcile",t),t=>Step("start",t),_=>Task.FromResult(false),
+        t=>Step("stop",t),t=>Step("withdraw",t),default);
+    throw new Exception("Failed application health accepted");
+}
+catch(InvalidOperationException){}
+Must(steps.TakeLast(2).SequenceEqual(new[]{"stop","withdraw"}),"failed real health compensates service then address");
+steps.Clear();
+try
+{
+    await VipNodeLifecycle.StopAndWithdraw(_=>throw new InvalidOperationException("stop failed"),t=>Step("withdraw",t),default);
+    throw new Exception("Unconfirmed stop accepted");
+}
+catch(InvalidOperationException){}
+Must(steps.SequenceEqual(new[]{"withdraw"}),"withdrawal still attempted after failed service stop");
 // A previously safe observation must not authorize mutation after the
 // same interface acquires the protected management address.
 static async Task ChangedManagement(string id)
@@ -49,6 +83,63 @@ try
         j.Append(2,"assign-intent");j.Append(2,"assigned");
     }
     Refused(()=>{using var j=new VipAddressJournal(path,"scope","other","192.0.2.10");});
+    using(var reader=new VipAddressJournal(path,"scope","nic","192.0.2.10",readOnly:true))
+        Must(reader.Last?.Epoch==2&&reader.Last.Phase=="assigned","read-only runtime journal binding");
+    var recoveryPath=Path.Combine(dir.FullName,"recovery");
+    using(var j=new VipAddressJournal(recoveryPath,"scope","nic","192.0.2.10"))
+    {
+        bool present=false,owner=true;long observedEpoch=10;
+        VipHostAddressPlatform.Observation Inspect()=>new("nic","eth0",2,present,present);
+        Task Change(VipHostAddressPlatform.Observation before,bool add,CancellationToken t)
+        {if(before.Present==add)throw new Exception("unexpected mutation");present=add;return Task.CompletedTask;}
+        Task<bool> Owner(long e,CancellationToken t)=>Task.FromResult(owner&&e==observedEpoch);
+        await VipLocalReconcile.Run(j,10,true,Inspect,Change,Owner,default);
+        Must(present&&j.Last?.Epoch==10&&j.Last.Phase=="assigned","new owner reconciles address");
+        await VipLocalReconcile.Run(j,10,true,Inspect,Change,Owner,default);
+        present=false;
+        await VipLocalReconcile.Run(j,10,true,Inspect,Change,Owner,default);
+        Must(present&&j.Last?.Phase=="assigned","same owner recovers absent address after restart");
+        owner=false;observedEpoch=11;
+        await VipLocalReconcile.Run(j,11,false,Inspect,Change,Owner,default);
+        Must(!present&&j.Last?.Phase=="withdrawn","revoked owner withdraws");
+        owner=true;observedEpoch=12;
+        await VipLocalReconcile.Run(j,12,true,Inspect,Change,Owner,default);
+        Must(present&&j.Last?.Epoch==12,"newer failback epoch reconciles");
+        // Failed application startup has stopped the service and withdrawn
+        // the exact local address, but independent Raft still owns epoch 12.
+        j.Append(12,"withdraw-intent");present=false;j.Append(12,"withdrawn");
+        try{await VipLocalReconcile.Run(j,12,true,Inspect,Change,Owner,default);throw new Exception("Ordinary same-epoch recovery accepted");}
+        catch(InvalidDataException){}
+        Must(!present&&j.Last?.Phase=="withdrawn","ordinary reconciliation cannot reopen withdrawn epoch");
+        owner=false;
+        try{await VipLocalReconcile.Run(j,12,true,Inspect,Change,Owner,default,exactRecovery:true);throw new Exception("Unowned recovery accepted");}
+        catch(InvalidOperationException){}
+        Must(!present&&j.Last?.Phase=="withdrawn","exact recovery still requires fresh quorum ownership");
+        owner=true;
+        await VipLocalReconcile.Run(j,12,true,Inspect,Change,Owner,default,exactRecovery:true);
+        Must(present&&j.Last?.Epoch==12&&j.Last.Phase=="assigned","compensated activation recovers exact authorized epoch without owner transfer");
+        try{await VipLocalReconcile.Run(j,10,true,Inspect,Change,Owner,default);throw new Exception("stale revision accepted");}
+        catch(InvalidDataException){}
+        Must(present&&j.Last?.Epoch==12,"stale revision leaves current address intact");
+    }
+    var interruptedPath=Path.Combine(dir.FullName,"interrupted-recovery");
+    using(var j=new VipAddressJournal(interruptedPath,"scope","nic","192.0.2.10"))
+    {
+        j.Append(7,"assign-intent");j.Append(7,"assigned");j.Append(7,"withdraw-intent");j.Append(7,"withdrawn");
+        Refused(()=>j.Append(6,"recover-intent"));
+        j.Append(7,"recover-intent");
+    }
+    using(var j=new VipAddressJournal(interruptedPath,"scope","nic","192.0.2.10"))
+    {
+        Must(j.Last?.Phase=="recover-intent","uncertain recovery intent survives restart");
+        try
+        {
+            await VipLocalReconcile.Run(j,7,true,()=>new("nic","eth0",2,false,false),
+                (_,_,_)=>throw new Exception("uncertain recovery mutated address"),(_,_)=>Task.FromResult(true),default,exactRecovery:true);
+            throw new Exception("Uncertain recovery reopened");
+        }
+        catch(InvalidDataException){}
+    }
     File.AppendAllText(path,"partial");
     Refused(()=>{using var j=new VipAddressJournal(path,"scope","nic","192.0.2.10");});
     Refused(()=>VipHostAddressPlatform.Parse("127.0.0.1"));

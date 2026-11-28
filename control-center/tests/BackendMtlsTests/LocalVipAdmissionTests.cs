@@ -41,6 +41,17 @@ internal static class LocalVipAdmissionTests
         Must(!gate.Allows("guarded"),"failed observation closes admission");
         using var quorumGate=new LocalVipAdmission([("guarded","192.0.2.10")],clock,
             new(){{"guarded",_=>Task.FromResult(true)}});
+        var confirmed=new Dictionary<string,bool>{{"guarded",true}};
+        quorumGate.Refresh(clock.Now,snapshot,confirmed);
+        Must(!quorumGate.Allows("guarded"),"quorum cannot authorize an incorrect host prefix");
+        row=row with{Addresses=[new("192.0.2.10",32)]};
+        snapshot=snapshot with{Interfaces=[row]};
+        quorumGate.Refresh(clock.Now,snapshot with{Interfaces=[row with{DefaultGateways=["192.0.2.1"]}]},confirmed);
+        Must(!quorumGate.Allows("guarded"),"quorum cannot authorize a default-route interface");
+        quorumGate.Refresh(clock.Now,snapshot with{Interfaces=[row with{Type="Loopback"}]},confirmed);
+        Must(!quorumGate.Allows("guarded"),"quorum cannot authorize a loopback interface");
+        quorumGate.Refresh(clock.Now,snapshot with{Interfaces=[row with{Addresses=[new("192.0.2.10",32),new("192.0.2.10",32)]}]},confirmed);
+        Must(!quorumGate.Allows("guarded"),"quorum cannot authorize duplicate address records");
         quorumGate.Refresh(clock.Now,snapshot);
         Must(!quorumGate.Allows("guarded"),"local address alone cannot authorize distributed VIP");
         quorumGate.Refresh(clock.Now,snapshot,new Dictionary<string,bool>{{"guarded",true}});
@@ -104,6 +115,30 @@ internal static class LocalVipAdmissionTests
             try{_=VipDrainState.Parse(System.Text.Encoding.UTF8.GetBytes(bad),["192.0.2.10"]);throw new Exception("invalid drain state accepted");}
             catch(InvalidDataException){}
         }
+        int sharedCalls=0,separateCalls=0;
+        Func<CancellationToken,Task<bool>> shared=_=>{sharedCalls++;return Task.FromResult(true);};
+        Func<CancellationToken,Task<bool>> separate=_=>{separateCalls++;return Task.FromResult(false);};
+        using var grouped=new LocalVipAdmission([("a","192.0.2.10"),("b","192.0.2.10"),("c","192.0.2.11"),("d","192.0.2.10")],clock,
+            new(){{"a",shared},{"b",shared},{"c",shared},{"d",separate}});
+        var results=grouped.PollAuthorities(default).GetAwaiter().GetResult();
+        Must(sharedCalls==2&&separateCalls==1&&results["a"]&&results["b"]&&results["c"]&&!results["d"],
+            "one authority poll per exact address and probe, no cross-address or cross-probe reuse");
+        using(var canceled=new CancellationTokenSource())
+        {
+            canceled.Cancel();
+            results=grouped.PollAuthorities(canceled.Token).GetAwaiter().GetResult();
+            Must(results.Values.All(x=>!x),"canceled sample never authorizes traffic");
+        }
+        grouped.SetPlannedDrains(["a"]);
+        grouped.SetAutomaticDrains(["a","b"]);
+        Must(grouped.IsManualDrain("a")&&grouped.IsAutomaticDrain("a")&&grouped.IsDraining("b"),"manual and automatic drains independent");
+        grouped.SetPlannedDrains([]);
+        Must(grouped.IsDraining("a"),"manual resume cannot remove automatic drain");
+        grouped.SetAutomaticDrains([]);
+        Must(!grouped.IsDraining("a"),"new epoch can clear automatic drain without touching manual state");
+        Must(VipMachineDrainState.Parse(new("scope",5),"scope",5),"same epoch drain persists");
+        Must(!VipMachineDrainState.Parse(new("scope",5),"scope",6),"new epoch does not inherit automatic drain");
+        try{VipMachineDrainState.Parse(new("scope",6),"scope",5);throw new Exception("future drain accepted");}catch(InvalidDataException){}
         static void MustQuiet(bool ok){if(!ok)throw new Exception("VIP request tracking refused early");}
     }
 }

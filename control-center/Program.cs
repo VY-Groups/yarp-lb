@@ -51,7 +51,39 @@ catch (Exception ex) when (ex is IOException or CryptographicException or
 // Independent local VIP authority administration, not a gateway service action.
 if(args.Length>0 && args[0]=="--vip-owner")
 {
-    Environment.ExitCode=await VipOwnershipCommand.Run(args);
+    if(args.Length is (7 or 8)&&args[3]=="inspect-policy")
+    {
+        Environment.ExitCode=VipServiceSecurity.InspectController(args);
+        return;
+    }
+    if(args.Length is (7 or 8)&&args[3]=="recover-policy")
+    {
+        try{VipServiceSecurity.Controller(args);}
+        catch(Exception e) when(e is IOException or InvalidDataException or InvalidOperationException or UnauthorizedAccessException or ArgumentException or JsonException)
+        {Console.Error.WriteLine("VIP recovery configuration refused: "+e.GetType().Name);Environment.ExitCode=78;return;}
+    }
+    Environment.ExitCode=args.Length is (7 or 8)&&args[3]=="automatic-policy"
+        ?await VipControllerService.Run(args):await VipOwnershipCommand.Run(args);
+    return;
+}
+
+// Independent hardware fencing authority, not the gateway management plane.
+if(args.Length>0 && args[0]=="--vip-redfish-provider")
+{
+    Environment.ExitCode=await VipRedfishProvider.Run(args);
+    return;
+}
+
+if(args.Length>0 && args[0]=="--vip-node-agent")
+{
+    Environment.ExitCode=await VipNodeAgent.Run(args);
+    return;
+}
+
+// Privileged independent node lifecycle; not callable from traffic listeners.
+if(args.Length>0 && args[0]=="--vip-node")
+{
+    Environment.ExitCode=await VipNodeSupervisor.Run(args);
     return;
 }
 
@@ -205,10 +237,25 @@ var guardedVirtualServices = isolatedListeners?.VirtualServices.Where(s => s.Req
 // Readers have no write or lease capability; the node identity is its pinned client certificate.
 using var vipAuthorityReaders = new VipAuthorityReaders();
 var vipAuthorityChecks = new Dictionary<string,Func<CancellationToken,Task<bool>>>(StringComparer.Ordinal);
+var vipEpochs=new Dictionary<string,long>(StringComparer.Ordinal);
 if(guardedVirtualServices is not null)
-    foreach(var service in guardedVirtualServices.Where(s=>s.VipQuorumConfigPath is not null))
-        vipAuthorityChecks.Add(service.Id,vipAuthorityReaders.For(service.VipQuorumConfigPath!,
-            FleetQuorum.VipScope(service.VipFleetId!,service.Ip),service.VipOwnershipEpoch!.Value));
+    foreach(var group in guardedVirtualServices.Where(s=>s.VipQuorumConfigPath is not null)
+        .GroupBy(s=>s.Ip,StringComparer.Ordinal))
+    {
+        // GatewayListenerIsolation validates that every socket on the same IP
+        // uses identical authority, epoch and journal binding. Share only that
+        // exact probe, and only inside the current bounded observation cycle.
+        var service=group.First();
+        var binding=service.VipJournalDirectory is null?null:new VipJournalBinding(service,IPAddress.Parse(isolatedListeners!.Config.ManagementIp));
+        Func<bool>? localCheck=binding is null?null:binding.Current;
+        var probe=vipAuthorityReaders.For(service.VipQuorumConfigPath!,
+            FleetQuorum.VipScope(service.VipFleetId!,service.Ip),binding?.Epoch??service.VipOwnershipEpoch!.Value,localCheck);
+        foreach(var socket in group)
+        {
+            vipAuthorityChecks.Add(socket.Id,probe);
+            vipEpochs.Add(socket.Id,binding?.Epoch??service.VipOwnershipEpoch!.Value);
+        }
+    }
 LocalVipAdmission? localVipAdmission = guardedVirtualServices is { Length: > 0 }
     ? new LocalVipAdmission(guardedVirtualServices.Select(s => (s.Id, s.Ip)), TimeProvider.System,vipAuthorityChecks) : null;
 // Planned drain is address-wide and excludes any shared primary/unguarded socket.
@@ -220,9 +267,30 @@ var vipDrainGroups=(isolatedListeners?.VirtualServices??Array.Empty<GatewayListe
         !IPAddress.Parse(group.Key).Equals(IPAddress.Parse(isolatedListeners.Config.ManagementIp)))
     .ToDictionary(group=>group.Key,group=>group.Select(s=>s.Id).ToArray(),StringComparer.Ordinal);
 var persistedVipDrains=VipDrainState.Read(vipDrainPath,vipDrainGroups.Keys);
+// Dedicated machine identity, never a cookie administrator or general API principal.
+var vipMachinePin=Environment.GetEnvironmentVariable("GATEWAYCORE_VIP_DRAIN_CLIENT_SHA256");
+var vipMachineScope=Environment.GetEnvironmentVariable("GATEWAYCORE_VIP_DRAIN_SCOPE");
+var vipMachineService=guardedVirtualServices?.FirstOrDefault(s=>s.VipJournalDirectory is not null &&
+    FleetQuorum.VipScope(s.VipFleetId!,s.Ip)==vipMachineScope);
+if((vipMachinePin is not null||vipMachineScope is not null)&&
+    (!VipFenceProvider.Pin(vipMachinePin)||!VipFenceProvider.Pin(vipMachineScope)||vipMachineService is null))
+    throw new InvalidDataException("Automatic drain requires an exact independent client pin and journal-bound VIP scope.");
+var vipMachineEpoch=vipMachineService is null?0:vipEpochs[vipMachineService.Id];
+var vipMachineAddress=vipMachineService is null?null:IPAddress.Parse(vipMachineService.Ip).ToString();
+var vipMachinePath=vipMachineService is null?null:Path.Combine(privateDir,"vip-auto-drain-"+vipMachineScope+".json");
+var activeAutomaticDrains=new HashSet<string>(StringComparer.Ordinal);
+foreach(var service in (guardedVirtualServices??[]).Where(s=>s.VipJournalDirectory is not null))
+{
+    var scope=FleetQuorum.VipScope(service.VipFleetId!,service.Ip);
+    var path=Path.Combine(privateDir,"vip-auto-drain-"+scope+".json");
+    if(VipMachineDrainState.Read(path,scope,vipEpochs[service.Id]))activeAutomaticDrains.Add(service.Id);
+}
+var vipMachineDrained=vipMachineService is not null&&activeAutomaticDrains.Contains(vipMachineService.Id);
+var vipMachineAuthKey=new object();
 if (localVipAdmission is not null)
 {
     localVipAdmission.SetPlannedDrains(persistedVipDrains.SelectMany(ip=>vipDrainGroups[ip]));
+    localVipAdmission.SetAutomaticDrains(activeAutomaticDrains);
     builder.Services.AddHostedService<LocalVipAdmission>(_ => localVipAdmission);
 }
 var acmeChallengeSetting = Environment.GetEnvironmentVariable("YARP_ACME_HTTP01_PUBLIC_ENTRYPOINT");
@@ -1148,7 +1216,8 @@ app.Use(async (ctx, next) =>
     await next();
 });
 
-string Actor(HttpContext context) => context.User.Identity?.Name ?? "unknown";
+string Actor(HttpContext context) => context.Items.ContainsKey(vipMachineAuthKey) ?
+    "vip-machine:"+vipMachinePin : context.User.Identity?.Name ?? "unknown";
 List<AdminUser> ReadUsers() => File.Exists(usersPath)
     ? (JsonSerializer.Deserialize<List<AdminUser>>(File.ReadAllText(usersPath), jsonOptions) ?? new())
     : new();
@@ -1226,6 +1295,8 @@ async Task<(IResult? Error, string? IntentId)> ConfirmAccountMutation(HttpContex
 byte[] AuditStateBytes(string path) => File.Exists(path) ? File.ReadAllBytes(path) : [];
 async Task<bool> AuditActorCurrent(HttpContext ctx, bool administratorOnly)
 {
+    if(ctx.Items.TryGetValue(vipMachineAuthKey,out var machine)&&machine is Func<Task<bool>> authorized)
+        return ctx.Request.Path=="/admin/vip-machine/drain" && await authorized();
     var active = ReadUsers().SingleOrDefault(x => x.Username.Equals(Actor(ctx), StringComparison.OrdinalIgnoreCase));
     if (active is null || !active.Enabled || active.SecurityStamp != ctx.User.FindFirst("stamp")?.Value ||
         active.Role != ctx.User.FindFirst(ClaimTypes.Role)?.Value ||
@@ -1282,6 +1353,8 @@ async Task<IResult?> ConfirmAndWriteResourceMutation(HttpContext ctx, string pat
 {
     if (externalAuditIntent is null && oidcPolicy is null)
     {
+        if(ctx.Items.ContainsKey(vipMachineAuthKey)&&(!await AuditActorCurrent(ctx,true)||ctx.RequestAborted.IsCancellationRequested))
+            return Results.StatusCode(403);
         WriteAuditedState(path, proposed);
         return null;
     }
@@ -2201,7 +2274,14 @@ app.MapGet("/admin/api/network/interfaces", (HttpContext ctx) =>
                 var observed = NetworkObservation.ObserveVirtualAddress(service.Id, service.Ip, service.Port, service.Protocol, snapshot);
                 return new { observed.Id, observed.Ip, observed.Port, observed.Protocol, observed.Status,
                     observed.Interfaces, service.RequireLocalAddressPresence, distributedOwnershipRequired = service.VipQuorumConfigPath is not null, admission = localVipAdmission?.Status(service.Id) ?? "disabled", activeGuardedRequests = localVipAdmission?.Active(service.Id) ?? 0,
-                    plannedDrain=localVipAdmission?.IsDraining(service.Id)??false,
+                    ownershipMode=service.VipJournalDirectory is not null?"journal-bound":service.VipOwnershipEpoch is not null?"fixed-epoch":"local-only",
+                    haPolicyScope=service.VipJournalDirectory is not null?FleetQuorum.VipScope(service.VipFleetId!,service.Ip):null,
+                    plannedDrain=localVipAdmission?.IsManualDrain(service.Id)??false,
+                    automaticDrain=localVipAdmission?.IsAutomaticDrain(service.Id)??false,
+                    automaticDrainConfigured=vipMachineAddress==IPAddress.Parse(service.Ip).ToString(),
+                    ownershipEpoch=vipEpochs.TryGetValue(service.Id,out var vipEpoch)?vipEpoch:(long?)null,
+                    recoveryAuthority=service.VipJournalDirectory is not null?"independent-controller":null,
+                    recoveryVerified=false,
                     drainEligible=vipDrainGroups.ContainsKey(IPAddress.Parse(service.Ip).ToString()) };
             })
             .ToArray();
@@ -2212,6 +2292,75 @@ app.MapGet("/admin/api/network/interfaces", (HttpContext ctx) =>
         InvalidOperationException or PlatformNotSupportedException or System.Net.Sockets.SocketException)
     { return Results.Json(new { error = "Local network inventory unavailable." }, statusCode: 503); }
 }).RequireAuthorization(policy => policy.RequireRole("Administrator", "Operator"));
+// Nonsecret policy proposal only: never mutates the independent controller.
+app.MapPost("/admin/api/network/virtual-services/ha-policy",async (HttpContext ctx,VipPolicyDocument proposal)=>
+{
+    ctx.Response.Headers.CacheControl = "no-store";
+    if(!await AuditActorCurrent(ctx,true))return Results.StatusCode(403);
+    var configured=(guardedVirtualServices??[]).Any(s=>s.VipJournalDirectory is not null&&
+        FleetQuorum.VipScope(s.VipFleetId!,s.Ip)==proposal.Scope);
+    if(!configured)return Results.BadRequest(new{error="Choose an existing journal-bound VIP."});
+    try{proposal.Validate(proposal.Scope);}
+    catch(InvalidDataException){return Results.BadRequest(new{error="Invalid HA policy: verify exact scope, two distinct pins and safety bounds."});}
+    var json=JsonSerializer.Serialize(proposal,VipPolicyDocument.Json);
+    var digest=Convert.ToHexString(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(json)));
+    await Audit(Actor(ctx),"VIP_HA_POLICY_EXPORTED",new{scope=proposal.Scope,sha256=digest});
+    return Results.Ok(new{json,sha256=digest,applied=false});
+}).RequireAuthorization(policy=>policy.RequireRole("Administrator"));
+// Machine-only endpoint is isolated on the mTLS administration socket.
+// It cannot authenticate as a user, clear manual drains, or change routes.
+app.MapPost("/admin/vip-machine/drain",async (HttpContext ctx,VipMachineDrainInput input)=>
+{
+    if(vipMachineService is null||vipMachinePath is null||localVipAdmission is null||
+        isolatedListeners is null||vipMachineAddress is null||input.Scope!=vipMachineScope||
+        input.Epoch!=vipMachineEpoch||!VipFenceProvider.Pin(input.Nonce)||
+        !isolatedListeners.OnAdmin(ctx)||ctx.Connection.ClientCertificate is not { } cert||
+        !CryptographicOperations.FixedTimeEquals(SHA256.HashData(cert.RawData),Convert.FromHexString(vipMachinePin!)))
+        return Results.StatusCode(403);
+#if GATEWAYCORE_COMMERCIAL
+    if(!commercialLicense.Permits("/admin/api/network/virtual-services"))return Results.StatusCode(402);
+#endif
+    var group=vipDrainGroups[vipMachineAddress];
+    async Task<bool> Authorized()
+    {
+        if(ctx.RequestAborted.IsCancellationRequested||SetupCenter.ReadFreeze(privateDir).Frozen||
+            group.Any(id=>!localVipAdmission.Allows(id)))return false;
+#if GATEWAYCORE_COMMERCIAL
+        if(!commercialLicense.Permits("/admin/api/network/virtual-services"))return false;
+#endif
+        try
+        {
+            using var timeout=CancellationTokenSource.CreateLinkedTokenSource(ctx.RequestAborted);
+            timeout.CancelAfter(TimeSpan.FromSeconds(2));
+            return await vipAuthorityChecks[vipMachineService.Id](timeout.Token)&&!timeout.IsCancellationRequested;
+        }
+        catch(Exception error) when(error is HttpRequestException or IOException or InvalidOperationException or
+            JsonException or OperationCanceledException or FormatException or UnauthorizedAccessException or KeyNotFoundException)
+        {return false;}
+    }
+    await gate.WaitAsync(ctx.RequestAborted);
+    try
+    {
+        if(!await Authorized())return Results.StatusCode(403);
+        if(input.Drain&&!vipMachineDrained)
+        {
+            ctx.Items[vipMachineAuthKey]=(Func<Task<bool>>)Authorized;
+            var before=AuditStateBytes(vipMachinePath);
+            var proposed=VipMachineDrainState.Encode(vipMachineScope!,vipMachineEpoch);
+            await Audit(Actor(ctx),"VIP_AUTOMATIC_DRAIN_REQUESTED",new{scope=input.Scope,epoch=input.Epoch});
+            var denied=await ConfirmAndWriteResourceMutation(ctx,vipMachinePath,before,proposed,"VIP_AUTOMATIC_DRAIN_INTENT",true);
+            if(denied is not null)return denied;
+            vipMachineDrained=true;
+            activeAutomaticDrains.UnionWith(group);
+            localVipAdmission.SetAutomaticDrains(activeAutomaticDrains);
+            await Audit(Actor(ctx),"VIP_AUTOMATIC_DRAIN_COMMITTED",new{scope=input.Scope,epoch=input.Epoch});
+        }
+        return Results.Ok(new{scope=input.Scope,epoch=input.Epoch,nonce=input.Nonce,
+            draining=vipMachineDrained,manualDrain=group.Any(localVipAdmission.IsManualDrain),
+            active=group.Sum(localVipAdmission.Active)});
+    }
+    finally{ctx.Items.Remove(vipMachineAuthKey);gate.Release();}
+});
 app.MapPost("/admin/api/network/virtual-services/{id}/drain",async (HttpContext ctx,string id,VipDrainInput input)=>
 {
     if(input.Draining is null || string.IsNullOrWhiteSpace(input.Reason) ||
@@ -2227,7 +2376,7 @@ app.MapPost("/admin/api/network/virtual-services/{id}/drain",async (HttpContext 
     {
         var before=AuditStateBytes(vipDrainPath);
         var current=VipDrainState.Read(vipDrainPath,vipDrainGroups.Keys);
-        if(vipDrainGroups.Any(pair=>pair.Value.Any(socket=>localVipAdmission.IsDraining(socket)!=current.Contains(pair.Key))))
+        if(vipDrainGroups.Any(pair=>pair.Value.Any(socket=>localVipAdmission.IsManualDrain(socket)!=current.Contains(pair.Key))))
             return Results.Conflict(new {error="Persistent and live drain states differ. Independently reconcile before changing traffic."});
         if(!input.Draining.Value && group.Any(socket=>!localVipAdmission.Allows(socket)))
             return Results.Conflict(new {error="Fresh local and required quorum authorization must be confirmed before resuming."});
@@ -4059,6 +4208,7 @@ record PasswordInput(string Password);
 record ChangeDecision(string Decision, string? Reason);
 record InventoryInput(string Id, string Name, string Type, string Address, string Notes);
 record VipDrainInput(bool? Draining,string? Reason);
+record VipMachineDrainInput(string Scope,long Epoch,string Nonce,bool Drain);
 record AdminUser(string Username, string Role, string Salt, string Hash, string? Email = null, bool Enabled = true, string SecurityStamp = "", string Provider = "Local", string DistinguishedName = "", long OidcRevokedBefore = 0, long OidcLogoutAuditThrough = 0);
 
 record FleetGateway(string Id, string Url, string ClientCertificateThumbprint);
