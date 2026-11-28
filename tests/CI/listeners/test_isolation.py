@@ -12,8 +12,9 @@ import tempfile
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.cookiejar import CookieJar
 from pathlib import Path
-from urllib.request import build_opener, ProxyHandler, HTTPSHandler, Request
+from urllib.request import build_opener, ProxyHandler, HTTPSHandler, HTTPCookieProcessor, Request
 from urllib.error import HTTPError, URLError
 
 parser = argparse.ArgumentParser()
@@ -209,6 +210,55 @@ with tempfile.TemporaryDirectory(prefix='gateway-sockets-') as td:
                     try:
                         status,body=await_status(200)
                         check(status==200 and body==b'virtual-http','fresh assigned local VIP admits real proxy traffic')
+                        # Real mTLS administrator session and CSRF protection.
+                        management=f'https://127.0.0.1:{ports[2]}'
+                        opener=build_opener(ProxyHandler({}),HTTPSHandler(context=client_context),HTTPCookieProcessor(CookieJar()))
+                        csrf=None
+                        def admin_api(method,path,payload=None,expected=200,with_csrf=True):
+                            headers={'Accept':'application/json'}
+                            if payload is not None:headers['Content-Type']='application/json'
+                            if csrf and with_csrf:headers['X-CSRF-Token']=csrf
+                            data=None if payload is None else json.dumps(payload).encode()
+                            try:
+                                with opener.open(Request(management+path,data=data,method=method,headers=headers),timeout=5) as reply:
+                                    code,raw=reply.status,reply.read()
+                            except HTTPError as error:code,raw=error.code,error.read()
+                            check(code==expected,'administrator API '+method+' '+path,code)
+                            return json.loads(raw) if code==200 and raw else {}
+                        drain_path='/admin/api/network/virtual-services/vip-guarded/drain'
+                        proposal={'draining':True,'reason':'Disposable planned drain acceptance'}
+                        admin_api('POST',drain_path,proposal,expected=401)
+                        admin_api('POST','/admin/api/bootstrap',{'username':'vip-ci-admin','password':secrets.token_hex(24),'email':'vip-ci@example.invalid'})
+                        session=admin_api('GET','/admin/api/session')
+                        csrf=session['csrf']
+                        check(session['role']=='Administrator' and bool(csrf),'real mTLS administrator authenticated')
+                        if not session['privacyAccepted']:
+                            admin_api('POST','/admin/api/privacy/accept',{'version':session['privacyVersion']})
+                        def inventory():
+                            rows=admin_api('GET','/admin/api/network/interfaces')['virtualAddresses']
+                            return next(row for row in rows if row['id']=='vip-guarded')
+                        check(inventory()['drainEligible'] and not inventory()['plannedDrain'],'dedicated VIP eligible for planned drain')
+                        admin_api('POST',drain_path,proposal,expected=403,with_csrf=False)
+                        check(await_status(200)[0]==200,'CSRF refusal leaves traffic admitted')
+                        # Drain denies new traffic without aborting an admitted response.
+                        planned=http.client.HTTPConnection('127.0.0.4',guarded_port,timeout=7)
+                        try:
+                            planned.request('GET','/stream')
+                            stream=planned.getresponse()
+                            check(stream.status==200 and stream.read(5)==b'first','real request in flight before administrator drain')
+                            drained=admin_api('POST',drain_path,proposal)
+                            check(drained['plannedDrain'] and drained['activeGuardedRequests']>=1,'drain reports active request without abort')
+                            check(inventory()['plannedDrain'],'inventory reports committed administrator drain')
+                            check(await_status(503)[0]==503,'planned drain rejects new VIP traffic')
+                            Backend.release_stream.set()
+                            check(stream.read()==b'last!','planned drain lets admitted stream complete')
+                        finally:
+                            Backend.release_stream.set()
+                            planned.close()
+                        resumed=admin_api('POST',drain_path,{'draining':False,'reason':'Disposable planned resume acceptance'})
+                        check(not resumed['plannedDrain'] and not inventory()['plannedDrain'],'administrator resume clears committed drain')
+                        check(await_status(200)[0]==200,'resumed VIP admits real proxy traffic')
+                        Backend.release_stream.clear()
                         connection.request('GET','/stream')
                         response=connection.getresponse()
                         check(response.status==200 and response.read(5)==b'first','real guarded stream is in flight')
