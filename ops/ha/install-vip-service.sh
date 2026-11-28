@@ -50,6 +50,15 @@ if [[ "$role" == agent ]]; then
   [[ $(systemctl show -p LoadState --value "$gateway") == loaded && $(systemctl show -p ActiveState --value "$gateway") == inactive && $(systemctl is-enabled "$gateway" 2>/dev/null || true) == disabled ]] || { echo 'Dedicated gateway must be installed, stopped and disabled' >&2; exit 1; }
 fi
 (umask 022; set -o noclobber; printf '%s\n' "$unit" > "$target")
+# Capture exact registration identity. A changed/replaced file, unit alias or
+# drop-in is not ours to remove or certify as the intended service.
+created_identity=$(stat -c '%d:%i' -- "$target")
+registration_matches(){
+  [[ -f "$target" && ! -L "$target" ]] &&
+  [[ $(stat -c '%d:%i' -- "$target") == "$created_identity" ]] &&
+  cmp -s -- "$target" <(printf '%s\n' "$unit")
+}
+
 # Own only the newly created unit. An unsuccessful reload/enable must not
 # leave a privileged agent silently registered for the next boot.
 rollback_registration(){
@@ -58,12 +67,28 @@ rollback_registration(){
   if ((rc == 0)); then return; fi
   set +e
   local cleanup_failed=0
-  if systemctl is-active --quiet "$name.service"; then
-    echo 'Unexpected active unit; independent reconciliation required' >&2
+  if ! registration_matches; then
+    echo 'Unexpected changed unit; independent reconciliation required; registration preserved' >&2
+    exit "$rc"
+  fi
+  # A failed/unknown systemctl read is not proof the service is stopped.
+  local active_state
+  active_state=$(systemctl show -p ActiveState --value "$name.service" 2>/dev/null) || active_state=
+  if [[ "$active_state" != inactive && "$active_state" != failed ]]; then
+    echo 'Unexpected or unknown unit state; independent reconciliation required' >&2
+    exit "$rc"
+  fi
+  if ! registration_matches; then
+    echo 'Unexpected changed unit; independent reconciliation required; registration preserved' >&2
     exit "$rc"
   fi
   if "$boot"; then systemctl disable "$name.service" >/dev/null 2>&1 || cleanup_failed=1; fi
-  rm -f -- "$target" || cleanup_failed=1
+  if registration_matches; then
+    rm -f -- "$target" || cleanup_failed=1
+  else
+    echo 'Unexpected changed unit; independent reconciliation required; registration preserved' >&2
+    exit "$rc"
+  fi
   systemctl daemon-reload || cleanup_failed=1
   if ((cleanup_failed)); then
     echo 'Registration rollback unconfirmed; inspect the exact unit and enablement before retrying' >&2
@@ -77,10 +102,13 @@ systemctl daemon-reload
 if "$boot"; then systemctl enable "$name.service"; fi
 expected_state=disabled
 if "$boot"; then expected_state=enabled; fi
-[[ $(systemctl show -p LoadState --value "$name.service") == loaded &&
+if ! registration_matches || ! [[ $(systemctl show -p FragmentPath --value "$name.service") == "$target" &&
+   -z $(systemctl show -p DropInPaths --value "$name.service") &&
+   $(systemctl show -p LoadState --value "$name.service") == loaded &&
    $(systemctl show -p ActiveState --value "$name.service") == inactive &&
    $(systemctl show -p User --value "$name.service") == "$account" &&
-   $(systemctl is-enabled "$name.service" 2>/dev/null || true) == "$expected_state" ]] ||
-  { echo 'Installed service state not confirmed' >&2; exit 1; }
+   $(systemctl is-enabled "$name.service" 2>/dev/null || true) == "$expected_state" ]]; then
+  echo 'Installed service state not confirmed' >&2; exit 1
+fi
 trap - EXIT
 echo 'Installed; not started. Verify protected credentials and approved topology before starting.'

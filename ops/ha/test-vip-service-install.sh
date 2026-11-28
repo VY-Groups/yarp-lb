@@ -55,6 +55,30 @@ grep -q 'Registration failed; newly created unit rolled back' <<<"$output"
 ! systemctl cat gatewaycore-vip-node-agent.service >/dev/null 2>&1
 [[ $(systemctl show -p LoadState --value gatewaycore-vip-ci-gateway.service) == loaded ]]
 echo 'PASS: failed real systemd enablement rolled back without modifying the gateway fixture'
+
+# If another administrator replaces the registration while enablement fails,
+# the installer must preserve the changed unit and report manual reconciliation.
+systemctl(){
+  if [[ "${1:-}" == enable && "${2:-}" == gatewaycore-vip-node-agent.service ]]; then
+    command systemctl "$@" || return
+    printf '\n# independently changed fixture\n' >> /etc/systemd/system/gatewaycore-vip-node-agent.service
+    return 97
+  fi
+  command systemctl "$@"
+}
+export -f systemctl
+if output=$(bash "$here/install-vip-service.sh" agent /usr/bin/true "$d/config.json" root --apply 2>&1); then
+  echo 'Changed registration reported success' >&2; exit 1
+fi
+unset -f systemctl
+grep -q 'registration preserved' <<<"$output"
+grep -Fx '# independently changed fixture' /etc/systemd/system/gatewaycore-vip-node-agent.service
+# Only the disposable fixture owns this synthetic change.
+systemctl disable gatewaycore-vip-node-agent.service
+rm /etc/systemd/system/gatewaycore-vip-node-agent.service
+systemctl daemon-reload
+echo 'PASS: changed stopped registration preserved and manual reconciliation required'
+
 for role in agent provider controller; do
   case "$role" in
     agent) name=gatewaycore-vip-node-agent; account=root; enabled=enabled; args=();;
