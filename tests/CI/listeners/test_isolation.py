@@ -232,6 +232,8 @@ with tempfile.TemporaryDirectory(prefix='gateway-sockets-') as td:
                             except HTTPError as error:code,raw=error.code,error.read()
                             check(code==expected,'administrator '+method+' '+path+' status',code)
                             return json.loads(raw) if code==200 else None
+                        admin('POST','/admin/api/network/virtual-services/vip-guarded/drain',
+                            {'draining':True,'reason':'Unauthenticated drain must be refused'},expected=401)
                         admin('POST','/admin/api/bootstrap',{'username':'vip-ci-admin',
                             'password':secrets.token_hex(24),'email':'vip-ci@example.invalid'})
                         session=admin('GET','/admin/api/session')
@@ -253,6 +255,7 @@ with tempfile.TemporaryDirectory(prefix='gateway-sockets-') as td:
                         second_url=f'http://127.0.0.4:{guarded_second_port}/api/identity'
                         check(req(second_url)[0]==200,'second socket shares same active VIP')
                         admin('POST',drain_path,drain,expected=403,include_csrf=False)
+                        check(req(guarded_url)[0]==200 and req(second_url)[0]==200,'CSRF refusal leaves both sockets admitted')
                         connection.request('GET','/stream')
                         response=connection.getresponse()
                         check(response.status==200 and response.read(5)==b'first','real stream active before planned drain')
