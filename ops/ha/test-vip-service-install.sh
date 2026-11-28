@@ -83,12 +83,21 @@ for role in agent provider controller; do
   case "$role" in
     agent) name=gatewaycore-vip-node-agent; account=root; enabled=enabled; args=();;
     provider) name=gatewaycore-vip-fence-provider; account=nobody; enabled=disabled; args=();;
-    controller) name=gatewaycore-vip-controller; account=nobody; enabled=disabled
+    controller) name=gatewaycore-vip-controller; account=daemon; enabled=disabled
       scope=$(printf '%064d' 0 | tr 0 A)
       args=("$scope" "$d/policy.json" "$d/provider.json" "$d/journal.json");;
   esac
   bash "$here/install-vip-service.sh" "$role" /usr/bin/true "$d/config.json" "$account" "${args[@]}" | grep -q 'PLAN ONLY'
   [[ ! -e "/etc/systemd/system/$name.service" ]]
+  if [[ "$role" == controller ]]; then
+    if output=$(bash "$here/install-vip-service.sh" controller /usr/bin/true "$d/config.json" nobody "${args[@]}" --apply 2>&1); then
+      echo 'Shared provider/controller UID admitted' >&2; exit 1
+    fi
+    grep -q 'distinct non-root UIDs' <<<"$output"
+    [[ ! -e "/etc/systemd/system/$name.service" ]]
+    [[ $(systemctl show -p User --value gatewaycore-vip-fence-provider.service) == nobody ]]
+    echo 'PASS: shared authority UID refused without changing provider or registering controller'
+  fi
   bash "$here/install-vip-service.sh" "$role" /usr/bin/true "$d/config.json" "$account" "${args[@]}" --apply
   [[ $(systemctl show -p LoadState --value "$name.service") == loaded ]]
   [[ $(systemctl show -p ActiveState --value "$name.service") == inactive ]]

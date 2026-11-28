@@ -43,6 +43,25 @@ id "$account" >/dev/null
 target="/etc/systemd/system/$name.service"
 [[ ! -e "$target" && ! -L "$target" ]] || { echo 'Existing service; refuse overwrite' >&2; exit 1; }
 if systemctl cat "$name.service" >/dev/null 2>&1; then echo 'Existing unit; refuse overwrite' >&2; exit 1; fi
+# Independent writer and provider must not share an effective OS identity.
+# Check UID rather than account spelling, including UID-zero aliases.
+if [[ "$role" != agent ]]; then
+  uid=$(id -u "$account")
+  [[ "$uid" =~ ^[0-9]+$ && "$uid" != 0 ]] || { echo 'Independent VIP role requires a non-root UID' >&2; exit 1; }
+  peer=gatewaycore-vip-controller.service
+  if [[ "$role" == controller ]]; then peer=gatewaycore-vip-fence-provider.service; fi
+  peer_load=$(systemctl show -p LoadState --value "$peer") || { echo 'Cannot inspect independent peer registration' >&2; exit 1; }
+  case "$peer_load" in
+    not-found) ;;
+    loaded)
+      peer_user=$(systemctl show -p User --value "$peer")
+      [[ -n "$peer_user" ]] || { echo 'Independent peer identity missing' >&2; exit 1; }
+      peer_uid=$(id -u "$peer_user") || { echo 'Independent peer identity unresolved' >&2; exit 1; }
+      [[ "$peer_uid" =~ ^[0-9]+$ && "$peer_uid" != 0 && "$peer_uid" != "$uid" ]] || { echo 'Independent VIP roles require distinct non-root UIDs' >&2; exit 1; }
+      ;;
+    *) echo 'Unexpected independent peer registration state' >&2; exit 1;;
+  esac
+fi
 if [[ "$role" == agent ]]; then
   # Require independently configured gateway service to be stopped and disabled.
   gateway=$(python3 -c 'import json,sys; s=json.load(open(sys.argv[1])); p=s["supervisorConfig"]; print(json.load(open(p))["serviceName"])' "$config")
