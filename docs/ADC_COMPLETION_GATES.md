@@ -69,3 +69,7 @@ The existing Windows/Linux production mTLS recovery harness now prepares complet
 - Actual host-provisioned L7 virtual services: optional isolated HTTP/HTTPS sockets (up to 32), exact receiving IP/port route matching, default/virtual route isolation before endpoint selection, management IP and duplicate socket protection, authenticated inventory API and guided route assignment. Existing TLS policy is retained. OS IP assignment, VRRP, cross-engine L4 conflict preflight, dynamic bind/rollback and physical HA are not implemented here. Real disposable loopback socket tests added; fresh CI required.
 
 - Application access: opt-in route HTTPS and bounded source CIDR allowlist based on real socket peer/scheme; reviewed and signed receiver validation, immutable route-generation policy cache, guided editor and real-socket spoofing regressions. This is network/transport authorization, not application user authentication. CI and independent review pending.
+
+## Resumed roadmap after the frozen software candidate (961b4385)
+
+The frozen release is a completed baseline, not whole-roadmap parity. Phase order and explicit remaining criteria are in [ADC roadmap requirements tracker](ADC_ROADMAP_TRACKER.md). Do not advance a phase until the current implementation, its actual browser/API or traffic acceptance, required exact-head CI and independent review pass. Physical and production acceptance remains #36.
