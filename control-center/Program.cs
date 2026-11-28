@@ -2577,6 +2577,8 @@ app.MapGet("/admin/api/virtual-servers", () => Results.Ok(new {
     services = (isolatedListeners?.VirtualServices ?? Array.Empty<GatewayListenerIsolation.VirtualSocket>())
         .Select(service=>new { service.Id,service.Ip,service.Port,service.Protocol,
             service.RequireLocalAddressPresence, distributedOwnershipRequired=service.VipQuorumConfigPath is not null }),
+    unifiedPlan = isolatedListeners?.UnifiedPlan?.Entries,
+    unifiedPlanScope = "Host-provisioned configuration only; L4 runtime readiness and OS ownership not asserted",
     scope = "Locally provisioned data-plane sockets; operating-system VIP ownership is external"
 })).RequireAuthorization();
 

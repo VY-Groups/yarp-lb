@@ -2,9 +2,9 @@ name: L4 experimental engine socket acceptance
 on:
   push:
     branches: [main, "feature/**"]
-    paths: ["engines/L4/**", "tests/L4Acceptance/**", ".github/workflows/l4-acceptance.yml"]
+    paths: ["engines/L4/**", "control-center/AdcListenerPlan.cs", "tests/L4Acceptance/**", ".github/workflows/l4-acceptance.yml"]
   pull_request:
-    paths: ["engines/L4/**", "tests/L4Acceptance/**", ".github/workflows/l4-acceptance.yml"]
+    paths: ["engines/L4/**", "control-center/AdcListenerPlan.cs", "tests/L4Acceptance/**", ".github/workflows/l4-acceptance.yml"]
   workflow_dispatch:
 permissions:
   contents: read

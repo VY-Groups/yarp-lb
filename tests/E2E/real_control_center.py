@@ -996,6 +996,11 @@ def acceptance(base:str,https_base:str,origin_port:int):
     admin.request("GET","/admin/api/setup/version")
     initial=admin.request("GET","/admin/api/state")
     check("fixture" in initial["clusters"],"real proxy config inspection")
+    for actor in (admin,operator,viewer):
+        listeners=actor.request("GET","/admin/api/virtual-servers")
+        check(listeners["unifiedPlan"] is None and "not asserted" in listeners["unifiedPlanScope"],
+              "legacy deployment does not invent unified plan or L4 readiness")
+    anonymous.request("GET","/admin/api/virtual-servers",expect=401)
     anonymous.request("GET","/admin/api/capabilities",expect=401)
     for actor in (admin,operator,viewer):
         coverage=actor.request("GET","/admin/api/capabilities")

@@ -100,6 +100,42 @@ File.WriteAllText(configFile, JsonSerializer.Serialize(new {
 var info=new ProcessStartInfo("dotnet") { WorkingDirectory=Path.GetDirectoryName(dll)!, UseShellExecute=false,
     RedirectStandardOutput=true, RedirectStandardError=true };
 info.ArgumentList.Add(dll); info.ArgumentList.Add(configFile);
+// The real forwarding suite runs with the opt-in unified host plan.
+using (var configDoc=JsonDocument.Parse(File.ReadAllBytes(configFile)))
+{
+    var planRows=new List<object>
+    {
+        new { Id="gateway-http", Ip="127.0.0.1", Port=18080, Protocol="HTTP" },
+        new { Id="gateway-https", Ip="127.0.0.1", Port=18443, Protocol="HTTPS3" },
+        new { Id="gateway-admin", Ip="127.0.0.2", Port=19443, Protocol="ADMIN" },
+        new { Id="gateway-metrics", Ip="127.0.0.2", Port=19444, Protocol="METRICS" }
+    };
+    foreach(var section in new[] {"Tcp","Udp"})
+        foreach(var row in configDoc.RootElement.GetProperty(section).EnumerateArray())
+            planRows.Add(new { Id=row.GetProperty("Name").GetString(), Ip=row.GetProperty("ListenHost").GetString(),
+                Port=row.GetProperty("ListenPort").GetInt32(), Protocol=section.ToUpperInvariant() });
+    var planFile=Path.Combine(scratch,"adc-listener-plan.json");
+    File.WriteAllText(planFile,JsonSerializer.Serialize(new { Version=1,Listeners=planRows }));
+    info.Environment["GATEWAYCORE_ADC_LISTENER_PLAN_FILE"]=planFile;
+    // Corrupt the plan with a genuine cross-engine conflict and require the
+    // shipping engine to exit before binding any socket or reporting readiness.
+    var invalidFile=Path.Combine(scratch,"invalid-adc-listener-plan.json");
+    File.WriteAllText(invalidFile,JsonSerializer.Serialize(new {Version=1,Listeners=planRows.Append(
+        new {Id="quic-conflict",Ip="127.0.0.1",Port=18443,Protocol="UDP"})}));
+    var badInfo=new ProcessStartInfo("dotnet") {WorkingDirectory=Path.GetDirectoryName(dll)!,
+        UseShellExecute=false,RedirectStandardOutput=true,RedirectStandardError=true};
+    badInfo.ArgumentList.Add(dll); badInfo.ArgumentList.Add(configFile);
+    badInfo.Environment["GATEWAYCORE_ADC_LISTENER_PLAN_FILE"]=invalidFile;
+    using var bad=Process.Start(badInfo) ?? throw new Exception("Unable to start negative L4 fixture");
+    var badOut=bad.StandardOutput.ReadToEndAsync(); var badErr=bad.StandardError.ReadToEndAsync();
+    using var deadline=new CancellationTokenSource(TimeSpan.FromSeconds(15));
+    try { await bad.WaitForExitAsync(deadline.Token); }
+    catch { if(!bad.HasExited)bad.Kill(true); throw; }
+    if(bad.ExitCode==0 || (await badOut).Contains("L4_ENGINE_READY") ||
+        !(await badErr).Contains("ADC listener transport conflict"))
+        throw new Exception("Unified listener conflict was not rejected before engine readiness");
+    Console.WriteLine("PASS: actual L4 engine refuses conflicting HTTP3 UDP plan before readiness");
+}
 using var proxy=Process.Start(info) ?? throw new Exception("Unable to start L4 process");
 var udpReady = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 var idleRetired = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);

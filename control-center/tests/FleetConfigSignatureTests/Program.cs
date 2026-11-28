@@ -7,6 +7,7 @@ static void Must(bool result, string label)
     if (!result) throw new Exception("FAIL: " + label);
     Console.WriteLine("PASS: " + label);
 }
+AdcListenerPlanTests.Run();
 using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
 var privatePem = key.ExportPkcs8PrivateKeyPem();
 var publicPem = key.ExportSubjectPublicKeyInfoPem();

@@ -533,6 +533,8 @@ app.MapPost("/agent/v1/engines/{engineId}/config/prepare", async (string engineI
     await revisionLock.WaitAsync();
     try
     {
+        if (engineId == "l4" && !AdcListenerPlan.AllowsL4(Encoding.UTF8.GetBytes(candidate.ToJsonString())))
+            return Results.BadRequest(new {error="L4 config conflicts with host ADC listener plan"});
         var original=await File.ReadAllBytesAsync(configPath);
         var revision=Sha(original);
         if (!revision.Equals(input.ExpectedRevision,StringComparison.OrdinalIgnoreCase))
@@ -596,6 +598,8 @@ app.MapPost("/agent/v1/engines/{engineId}/config/activate", async (string engine
         var original=await File.ReadAllBytesAsync(originalPath);
         if (Sha(await File.ReadAllBytesAsync(configPath)) != Sha(original))
             return Results.Conflict(new {error="Engine config changed after prepare"});
+        if (engineId == "l4" && !AdcListenerPlan.AllowsL4(proposed))
+            return Results.Conflict(new {error="Host ADC listener plan changed; activation refused"});
         await File.WriteAllBytesAsync(configPath+".next",proposed);
 #if GATEWAYCORE_COMMERCIAL
         if (!await VerifyFleetFence(input.TransactionId,sequence))
@@ -636,6 +640,8 @@ app.MapPost("/agent/v1/engines/{engineId}/config/rollback", async (string engine
 #if GATEWAYCORE_COMMERCIAL
         if (!await VerifyFleetFence(input.TransactionId,sequence,rollback:true)) return Results.StatusCode(409);
 #endif
+        if (engineId == "l4" && !AdcListenerPlan.AllowsL4(original))
+            return Results.Conflict(new {error="Restore compatible host ADC listener plan before L4 rollback"});
         // Persist the fence before restoring bytes. Even rollback of a merely
         // prepared transaction must prohibit a delayed activation after restart.
         EngineConfigContract.MarkRollback(tx);
