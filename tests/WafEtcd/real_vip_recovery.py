@@ -441,6 +441,19 @@ try:
     inflight={first:0,second:0}
     systemids={p:str(uuid.uuid4()) for p in node_pins}
     events=[]; failure={"activate":True}
+    power_pending={}; power_errors=[]; power_workers=[]
+    def transition_power(node,action):
+        # A simulated BMC accepts the request before slow service shutdown or
+        # boot. Off/On is reported only after the actual fixture state changes.
+        try:
+            if action=="ForceOff":real_nodes.power_off(node)
+            else:real_nodes.power_on(node)
+            with lock:
+                power[node]=action=="On"
+                events.append((action,node))
+                power_pending.pop(node,None)
+        except Exception as error:
+            with lock:power_errors.append((action,type(error).__name__))
     def is_serving(node):
         return real_nodes.probe(node) if real_mode else serving[node]
     def bmc_handler(node):
@@ -450,7 +463,7 @@ try:
                 if self.headers.get("Authorization")!=expected_basic or self.path!=path:return self.response(403)
                 with lock:
                     obj={"@odata.id":path,"UUID":systemids[node],"PowerRestorePolicy":"AlwaysOff",
-                         "PowerState":"On" if power[node] else "Off",
+                         "PowerState":power_pending.get(node, "On" if power[node] else "Off"),
                          "Actions":{"#ComputerSystem.Reset":{"target":path+"/Actions/ComputerSystem.Reset",
                          "ResetType@Redfish.AllowableValues":["ForceOff","On"]}}}
                 self.response(200,obj)
@@ -459,13 +472,15 @@ try:
                 try:action=self.body().get("ResetType")
                 except (ValueError,OSError):return self.response(400)
                 with lock:
-                    if action=="ForceOff":
-                        if real_mode:real_nodes.power_off(node)
-                        power[node]=False;serving[node]=False
-                    elif action=="On":
-                        if real_mode:real_nodes.power_on(node)
-                        power[node]=True;serving[node]=False;draining[node]=False
-                    else:return self.response(400)
+                    if action not in ("ForceOff","On"):return self.response(400)
+                    if real_mode:
+                        if node in power_pending or power_errors:return self.response(409)
+                        power_pending[node]="PoweringOff" if action=="ForceOff" else "PoweringOn"
+                        worker=threading.Thread(target=transition_power,args=(node,action),daemon=True)
+                        power_workers.append(worker);worker.start()
+                        return self.response(202)
+                    if action=="ForceOff":power[node]=False;serving[node]=False
+                    else:power[node]=True;serving[node]=False;draining[node]=False
                     events.append((action,node))
                 self.response(200)
         return Bmc
@@ -669,6 +684,7 @@ try:
     if is_serving(second) or events.count(("ForceOff",second))!=1:
         raise AssertionError("Failback did not hard-fence former owner exactly once")
     if real_mode:
+        if power_errors:raise AssertionError("Simulated BMC fixture action failed: "+str(power_errors))
         if not real_nodes.present(first) or real_nodes.present(second):
             raise AssertionError("Actual final kernel ownership mismatch")
         drain_file=real_nodes.nodes[second]["state"]/("vip-auto-drain-"+scope+".json")
@@ -693,6 +709,10 @@ finally:
             (Path("/etc/systemd/system")/(name+".service")).unlink(missing_ok=True)
     run("systemctl","daemon-reload")
     for s in servers:s.shutdown();s.server_close()
-    if real_nodes is not None:real_nodes.close()
+    if real_nodes is not None:
+        for worker in globals().get("power_workers",[]):
+            worker.join(timeout=40)
+            if worker.is_alive():raise AssertionError("Unfinished simulated BMC fixture action")
+        real_nodes.close()
     for u in reversed(users):run("userdel",u)
     shutil.rmtree(root)

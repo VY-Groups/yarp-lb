@@ -205,7 +205,7 @@ class RealVipNodes:
         cfg=state/"config";cfg.mkdir(mode=0o700)
         node=self.manifest["nodeA" if i==0 else "nodeB"]
         other=self.manifest["nodeB" if i==0 else "nodeA"]
-        ra,_,provider_pin=self.manifest["reader"]
+        _,_,provider_pin=self.manifest["reader"]
         server_cert,server_key,server_pin=self.manifest["agent"+str(i)]
         ca=self.copy(certdir,"quorum-ca.pem",self.manifest["ca"])
         node_cert=self.copy(certdir,"node.pem",node[0])
