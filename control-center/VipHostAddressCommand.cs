@@ -62,7 +62,7 @@ internal static class VipHostAddressCommand
                 await VipLocalReconcile.Run(log,current.Epoch,current.Own,
                     ()=>VipHostAddressPlatform.Inspect(args[3],ip,management),
                     (observation,add,token)=>VipHostAddressPlatform.Change(observation,ip,add,token),
-                    authority.IsVipOwner,deadline.Token);
+                    authority.IsVipOwner,deadline.Token,exactRecovery:exactEpoch.HasValue);
             }
             else if(args[4]=="assign")
             {

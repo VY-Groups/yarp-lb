@@ -158,7 +158,7 @@ internal static class VipNodeSupervisor
                 if(File.Exists(journalFile))
                 {
                     using var journal=new VipAddressJournal(journalFile,s.Scope,service.VipInterfaceId,address.ToString(),readOnly:true);
-                    if(journal.Last?.Phase is "assign-intent" or "reassign-intent" || (journal.Last?.Epoch??0)>=epoch)return 1;
+                    if(journal.Last?.Phase is "assign-intent" or "reassign-intent" or "recover-intent" || (journal.Last?.Epoch??0)>=epoch)return 1;
                 }
                 await Service(s.ServiceName,false,deadline.Token,checkOnly:true);
                 return 0;

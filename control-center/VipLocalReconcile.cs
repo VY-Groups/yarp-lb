@@ -5,10 +5,10 @@ internal static class VipLocalReconcile
     internal static async Task Run(VipAddressJournal log,long epoch,bool own,
         Func<VipHostAddressPlatform.Observation> inspect,
         Func<VipHostAddressPlatform.Observation,bool,CancellationToken,Task> change,
-        Func<long,CancellationToken,Task<bool>> isOwner,CancellationToken token)
+        Func<long,CancellationToken,Task<bool>> isOwner,CancellationToken token,bool exactRecovery=false)
     {
         if(epoch<1||epoch<(log.Last?.Epoch??0))throw new InvalidDataException("Stale VIP ownership revision.");
-        if(log.Last?.Phase is "assign-intent" or "reassign-intent")
+        if(log.Last?.Phase is "assign-intent" or "reassign-intent" or "recover-intent")
             throw new InvalidDataException("Uncertain assignment; independent recovery required.");
         var observed=inspect();
         if(observed.Present&&log.Last?.Phase is not ("assigned" or "withdraw-intent"))
@@ -32,7 +32,12 @@ internal static class VipLocalReconcile
         if(log.Last?.Phase=="assigned"&&log.Last.Epoch==epoch&&observed.Ready)return;
         if(observed.Present)throw new InvalidDataException("Non-ready existing address cannot be adopted.");
         bool reassign=log.Last?.Phase=="assigned"&&log.Last.Epoch==epoch;
-        log.Append(epoch,reassign?"reassign-intent":"assign-intent");
+        bool recover=log.Last?.Phase=="withdrawn"&&log.Last.Epoch==epoch;
+        // Only an exact, freshly authorized node activation may retry a
+        // fully compensated withdrawal at its existing ownership epoch.
+        // Ordinary reconciliation still requires a newer owner revision.
+        if(recover&&!exactRecovery)throw new InvalidDataException("Exact fenced recovery required for a withdrawn epoch.");
+        log.Append(epoch,recover?"recover-intent":reassign?"reassign-intent":"assign-intent");
         await change(observed,true,token);
         if(!inspect().Ready)throw new InvalidOperationException("VIP readiness unconfirmed.");
         log.Append(epoch,"assigned");

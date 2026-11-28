@@ -39,6 +39,8 @@ internal sealed class VipAddressJournal : IDisposable
         {
             (null,"assign-intent")=>true,
             ("withdrawn","assign-intent")=>item.Epoch>Last!.Epoch,
+            ("withdrawn","recover-intent")=>item.Epoch==Last!.Epoch,
+            ("recover-intent","assigned")=>item.Epoch==Last!.Epoch,
             ("assign-intent","assigned")=>item.Epoch==Last!.Epoch,
             ("assigned","reassign-intent")=>item.Epoch==Last!.Epoch,
             ("reassign-intent","assigned")=>item.Epoch==Last!.Epoch,
