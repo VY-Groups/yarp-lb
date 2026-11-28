@@ -69,6 +69,39 @@ internal static class TrafficHttp3Acceptance
             $"Could not reserve a loopback TCP+UDP port after {maxAttempts} attempts.", lastFailure);
     }
 
+    internal static int GetAvailableDualTransportPort()
+    {
+        static (int Port, IDisposable Reservation) ReserveCandidate(
+            SocketType socketType, ProtocolType protocol)
+        {
+            var socket = new Socket(AddressFamily.InterNetwork, socketType, protocol);
+            try
+            {
+                socket.Bind(new IPEndPoint(IPAddress.Loopback, 0));
+                return (((IPEndPoint)socket.LocalEndPoint!).Port, socket);
+            }
+            catch { socket.Dispose(); throw; }
+        }
+
+        static IDisposable ReserveAtPort(
+            SocketType socketType, ProtocolType protocol, int port)
+        {
+            var socket = new Socket(AddressFamily.InterNetwork, socketType, protocol);
+            try
+            {
+                socket.Bind(new IPEndPoint(IPAddress.Loopback, port));
+                return socket;
+            }
+            catch { socket.Dispose(); throw; }
+        }
+
+        return SelectDualTransportPort(
+            reserveTcp: () => ReserveCandidate(SocketType.Stream, ProtocolType.Tcp),
+            reserveUdp: port => ReserveAtPort(SocketType.Dgram, ProtocolType.Udp, port),
+            reserveUdpCandidate: () => ReserveCandidate(SocketType.Dgram, ProtocolType.Udp),
+            reserveTcpAtPort: port => ReserveAtPort(SocketType.Stream, ProtocolType.Tcp, port));
+    }
+
     private sealed class TestCertificate : IDisposable
     {
         public X509Certificate2 Certificate { get; }
@@ -127,39 +160,6 @@ internal static class TrafficHttp3Acceptance
         {
             Console.WriteLine("SKIP: real QUIC protocol requests require MsQuic, which is unavailable on this runner; H1/H2/H3 configuration parser checks passed");
             return;
-        }
-
-        int GetAvailableDualTransportPort()
-        {
-            static (int Port, IDisposable Reservation) ReserveCandidate(
-                SocketType socketType, ProtocolType protocol)
-            {
-                var socket = new Socket(AddressFamily.InterNetwork, socketType, protocol);
-                try
-                {
-                    socket.Bind(new IPEndPoint(IPAddress.Loopback, 0));
-                    return (((IPEndPoint)socket.LocalEndPoint!).Port, socket);
-                }
-                catch { socket.Dispose(); throw; }
-            }
-
-            static IDisposable ReserveAtPort(
-                SocketType socketType, ProtocolType protocol, int port)
-            {
-                var socket = new Socket(AddressFamily.InterNetwork, socketType, protocol);
-                try
-                {
-                    socket.Bind(new IPEndPoint(IPAddress.Loopback, port));
-                    return socket;
-                }
-                catch { socket.Dispose(); throw; }
-            }
-
-            return SelectDualTransportPort(
-                reserveTcp: () => ReserveCandidate(SocketType.Stream, ProtocolType.Tcp),
-                reserveUdp: port => ReserveAtPort(SocketType.Dgram, ProtocolType.Udp, port),
-                reserveUdpCandidate: () => ReserveCandidate(SocketType.Dgram, ProtocolType.Udp),
-                reserveTcpAtPort: port => ReserveAtPort(SocketType.Stream, ProtocolType.Tcp, port));
         }
 
         var key = OperatingSystem.IsWindows()

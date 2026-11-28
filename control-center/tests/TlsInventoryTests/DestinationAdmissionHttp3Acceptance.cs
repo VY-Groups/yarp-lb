@@ -594,25 +594,7 @@ internal static class DestinationAdmissionHttp3Acceptance
             return ((IPEndPoint)socket.LocalEndPoint!).Port;
         }
 
-        static int GetDualTransportPort() => TrafficHttp3Acceptance.SelectDualTransportPort(() =>
-        {
-            var tcp = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
-            try
-            {
-                tcp.Bind(new IPEndPoint(IPAddress.Loopback, 0));
-                return (((IPEndPoint)tcp.LocalEndPoint!).Port, tcp);
-            }
-            catch { tcp.Dispose(); throw; }
-        }, port =>
-        {
-            var udp = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
-            try
-            {
-                udp.Bind(new IPEndPoint(IPAddress.Loopback, port));
-                return udp;
-            }
-            catch { udp.Dispose(); throw; }
-        });
+        static int GetDualTransportPort() => TrafficHttp3Acceptance.GetAvailableDualTransportPort();
 
     }
 
