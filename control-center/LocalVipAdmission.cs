@@ -10,11 +10,71 @@ internal sealed class LocalVipAdmission : BackgroundService
     private readonly Dictionary<string, Func<CancellationToken,Task<bool>>> authorities;
     private sealed record Sample(long Started, Dictionary<string,string> Status);
     private Sample? current;
+    private readonly object lifecycle=new();
+    private readonly Dictionary<string,HashSet<RequestLease>> inFlight=new(StringComparer.Ordinal);
+    private const int MaximumRequestsPerSocket=4096;
+
+    private sealed class RequestLease(LocalVipAdmission owner,string id,Action abort):IDisposable
+    {
+        private readonly object sync=new();
+        private bool done,aborted;
+        internal void Abort()
+        {
+            lock(sync)
+            {
+                if(done||aborted)return;
+                aborted=true;
+                // Kestrel's abort is thread-safe. Do not hold the admission
+                // lock while invoking transport callbacks.
+                try {abort();}
+                catch(Exception error) when(error is InvalidOperationException or IOException) { }
+            }
+        }
+        public void Dispose()
+        {
+            lock(sync){if(done)return;done=true;}
+            lock(owner.lifecycle)owner.inFlight[id].Remove(this);
+        }
+    }
+
+    internal int Active(string id)
+    {
+        lock(lifecycle)return inFlight.TryGetValue(id,out var entries)?entries.Count:0;
+    }
+
+    internal bool TryEnter(string? id,Action abort,out IDisposable? lease)
+    {
+        lease=null;
+        if(id is null||!required.ContainsKey(id))return true;
+        lock(lifecycle)
+        {
+            if(!Allows(id)||inFlight[id].Count>=MaximumRequestsPerSocket)return false;
+            var active=new RequestLease(this,id,abort);
+            inFlight[id].Add(active);lease=active;
+            return true;
+        }
+    }
+
+    private RequestLease[] CollectInvalid()=>inFlight.Where(x=>!Allows(x.Key))
+        .SelectMany(x=>x.Value).ToArray();
+    internal void Sweep()
+    {
+        RequestLease[] invalid;
+        lock(lifecycle)invalid=CollectInvalid();
+        foreach(var lease in invalid)lease.Abort();
+    }
+    private async Task Watch(CancellationToken token)
+    {
+        using var timer=new PeriodicTimer(TimeSpan.FromMilliseconds(250));
+        try {while(await timer.WaitForNextTickAsync(token))Sweep();}
+        catch(OperationCanceledException) when(token.IsCancellationRequested){}
+    }
     internal LocalVipAdmission(IEnumerable<(string Id,string Ip)> targets, TimeProvider clock,
         Dictionary<string,Func<CancellationToken,Task<bool>>>? authorities = null)
     {
         required = targets.ToDictionary(x => x.Id, x => x.Ip, StringComparer.Ordinal);
         this.clock = clock;
+        foreach(var id in required.Keys)inFlight.Add(id,new());
         this.authorities = authorities is null ? new(StringComparer.Ordinal) : new(authorities,StringComparer.Ordinal);
         if(this.authorities.Keys.Any(id=>!required.ContainsKey(id)))throw new InvalidOperationException("Unknown VIP authority target.");
     }
@@ -37,11 +97,27 @@ internal sealed class LocalVipAdmission : BackgroundService
         foreach(var id in authorities.Keys)
             if(statuses[id]=="present-interface-up" && (confirmed is null || !confirmed.TryGetValue(id,out var allowed) || !allowed))
                 statuses[id]="quorum-ownership-unconfirmed";
-        Volatile.Write(ref current, new Sample(started, statuses));
+        RequestLease[] invalid;
+        lock(lifecycle)
+        {
+            // Capture requests whose earlier authority had already expired,
+            // even if the independent watchdog has not yet swept that gap.
+            var expired=CollectInvalid();
+            Volatile.Write(ref current,new Sample(started,statuses));
+            invalid=expired.Concat(CollectInvalid()).Distinct().ToArray();
+        }
+        foreach(var lease in invalid)lease.Abort();
     }
-    internal void Invalidate() => Volatile.Write(ref current, null);
+    internal void Invalidate()
+    {
+        RequestLease[] invalid;
+        lock(lifecycle){Volatile.Write(ref current,null);invalid=CollectInvalid();}
+        foreach(var lease in invalid)lease.Abort();
+    }
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        using var watchStop=CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
+        var watchdog=Watch(watchStop.Token);
         try
         {
             using var timer = new PeriodicTimer(TimeSpan.FromSeconds(1));
@@ -69,6 +145,6 @@ internal sealed class LocalVipAdmission : BackgroundService
             } while (await timer.WaitForNextTickAsync(stoppingToken));
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { }
-        finally { Invalidate(); }
+        finally { Invalidate();watchStop.Cancel();await watchdog; }
     }
 }

@@ -634,12 +634,14 @@ app.Use(async (ctx, next) =>
     {
         ctx.Response.StatusCode = 403; return;
     }
-    if (localVipAdmission is not null && !localVipAdmission.Allows(isolatedListeners?.VirtualServiceId(ctx)))
+    IDisposable? vipRequest=null;
+    if (localVipAdmission is not null && !localVipAdmission.TryEnter(isolatedListeners?.VirtualServiceId(ctx),ctx.Abort,out vipRequest))
     {
         ctx.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
         ctx.Response.Headers.CacheControl = "no-store";
         return;
     }
+    using var vipRequestLifetime=vipRequest;
     if (adminPath)
     {
         if (oidcPolicy is not null && !oidcPolicy.MatchesOrigin(ctx.Request.Scheme, ctx.Request.Host.Value))
@@ -2185,7 +2187,7 @@ app.MapGet("/admin/api/network/interfaces", (HttpContext ctx) =>
             {
                 var observed = NetworkObservation.ObserveVirtualAddress(service.Id, service.Ip, service.Port, service.Protocol, snapshot);
                 return new { observed.Id, observed.Ip, observed.Port, observed.Protocol, observed.Status,
-                    observed.Interfaces, service.RequireLocalAddressPresence, distributedOwnershipRequired = service.VipQuorumConfigPath is not null, admission = localVipAdmission?.Status(service.Id) ?? "disabled" };
+                    observed.Interfaces, service.RequireLocalAddressPresence, distributedOwnershipRequired = service.VipQuorumConfigPath is not null, admission = localVipAdmission?.Status(service.Id) ?? "disabled", activeGuardedRequests = localVipAdmission?.Active(service.Id) ?? 0 };
             })
             .ToArray();
         return Results.Ok(new { snapshot.Scope, snapshot.Platform, snapshot.ObservedUtc, snapshot.Interfaces,
